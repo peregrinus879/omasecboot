@@ -58,7 +58,7 @@ sbctl, jq, gum (interactive only). Omarchy provides the rest (`limine-update`, `
 - Windows uses `protocol: efi_boot_entry` so firmware BootNext launches `bootmgfw.efi` without measuring mutable `limine_x64.efi` in the Windows boot chain. Detect Windows by loader path, not firmware label. `windows bootnext` only arms BootNext; `windows reboot` arms it and reboots.
 - Keep enrollment and signing in interactive `add_windows_boot_entry()` so `windows setup` completes the full mutation cycle in one invocation.
 - `status` may identify Quattro's native `protocol: efi` Windows chainloads but never removes them automatically. Prefer minimal repo-owned automation over replacing mkinitcpio, limine-entry-tool, or limine-snapper-sync behavior.
-- `omarchy/omarchy-menu.jsonc` is a user-owned menu fragment. Its guard stays unprivileged; its visible-terminal action runs privileged `windows bootnext` before user-context `omarchy system reboot`. Never execute that action during automated or deployment verification.
+- `omarchy/omarchy-menu.jsonc` is a user-owned menu fragment. Its guard runs inside Quattro's batched guard shell, so it stays unprivileged, non-interactive, and `command -v`-based (package-presence checks cannot see a `make`-installed binary); its visible-terminal action runs privileged `windows bootnext` before user-context `omarchy system reboot`. Never execute that action during automated or deployment verification.
 - Treat Windows disk-check prompts separately from BitLocker recovery; troubleshoot the Windows dirty bit, interrupted shutdown/update, Fast Startup or hibernation, duplicate firmware entries, and NTFS mounts before changing Secure Boot flow.
 
 ## Post-Change Verification

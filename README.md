@@ -225,6 +225,8 @@ Current `limine-update` and `limine-snapper-sync` update the existing configurat
 
 The tracked `omarchy/omarchy-menu.jsonc` fragment adds `Reboot to Windows` under Quattro's System menu. Merge its `system.windows` object into the user-owned `~/.config/omarchy/extensions/omarchy-menu.jsonc`; do not modify `/usr/share/omarchy`. Quattro watches the user file, and `omarchy menu refresh` requests an immediate refresh.
 
+Keep the user file valid JSONC. Quattro strips only whole-line `//` comments, and a parse failure silently drops every user entry while the shipped menu keeps working. `omarchy refresh config omarchy/extensions/omarchy-menu.jsonc` replaces the file with the shipped sample and keeps a `.bak.<epoch>` copy; `omarchy reinstall configs` (also run by `omarchy reinstall`) overwrites it from `/etc/skel` without a backup. Merge the fragment again after either.
+
 Run `sudo omasecboot windows setup` before using the menu action. The action opens a visible terminal, runs `sudo omasecboot windows bootnext`, then returns to user context for `omarchy system reboot` so Quattro can close application windows. If the reboot step is cancelled after BootNext is armed, the next boot still enters Windows once.
 
 ### After Setup
@@ -354,6 +356,18 @@ This can happen after a template reset such as `omarchy refresh limine`, config 
 ```bash
 sudo omasecboot sign
 ```
+
+### `Reboot to Windows` is missing from the System menu
+
+Quattro hides the row when its guard fails, and it drops every user entry when the extension file fails to parse. Check, as the desktop user:
+
+```bash
+command -v omasecboot && omasecboot windows available
+grep -n '"system.windows"' ~/.config/omarchy/extensions/omarchy-menu.jsonc
+sed '/^[[:space:]]*\/\//d' ~/.config/omarchy/extensions/omarchy-menu.jsonc | jq . >/dev/null
+```
+
+The guard needs `omasecboot` on the user's `PATH` (`/usr/local/bin` by default) and a Windows Boot Manager entry in firmware. The `jq` check is stricter than Quattro's parser (it rejects trailing commas) but catches the inline comments and syntax errors that make Quattro drop the user entries. A config refresh or reinstall replaces the file with the shipped sample; merge the fragment again and run `omarchy menu refresh`.
 
 ### `status` warns about a Windows EFI chainload entry
 
