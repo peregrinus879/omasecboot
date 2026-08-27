@@ -8,7 +8,8 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 
 - `README.md` carries user-facing setup, commands, design, recovery, and troubleshooting guidance.
 - `docs/maintenance.md` is the on-demand ledger for primary sources, versioned compatibility findings, workaround removal triggers, and deferred work. Read it before changing Secure Boot flow, sbctl tracking, Limine configuration semantics, pacman hooks, UKI handling, Windows dual-boot behavior, or a deferred item; re-fetch changeable facts at change time.
-- Reference checkouts live under `~/Projects/quarry/`; their exact paths and purposes are recorded in the maintenance ledger.
+- `docs/implementation-contract.md` is the package-first implementation contract for lifecycle, firmware, Windows, packaging, Omarchy integration, public claims, and atomic delivery.
+- Reference repository purposes and upstream sources are recorded in the maintenance ledger; do not assume a contributor's local checkout layout.
 
 ## Key Files
 
@@ -22,6 +23,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
 - `omarchy/omarchy-menu.jsonc` - Quattro user-menu fragment for graceful reboot-to-Windows handoff
+- `docs/implementation-contract.md` - Remaining implementation and release-gate contract
 - `docs/maintenance.md` - On-demand sources, compatibility findings, removal triggers, and deferred work
 - `Makefile` - Install/uninstall targets
 
@@ -40,31 +42,43 @@ Single dispatcher sources lib modules. Each lib file owns one concern:
 
 sbctl, jq, gum (interactive only). Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
 
-## Operational Invariants
+## Approved Implementation Contracts
+
+The current branch predates these contracts. They are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
+- Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults.
+- Hook suppression is valid only for an owned transition whose token, boot ID, owner PID and process start time, ancestry, and root-owned manifest agree. An environment boolean is not ownership proof.
 - `setup` and `sign` maintain signed EFI binaries plus enrolled `limine.conf` checksums with `ENABLE_VERIFICATION=no` and `ENABLE_ENROLL_LIMINE_CONFIG=yes`. Keep `ensure_limine_secure_boot_settings` in the sign path and keep its Quattro write target at `/etc/default/limine`, outside package-owned drop-ins.
 - Do not reintroduce Limine `path: ...#hash` management while Omarchy boots UKIs through `protocol: efi`. Warn on incompatible non-EFI paths instead of mutating them automatically.
 - limine-snapper-sync snapshot filenames can end in `.efi_sha256_<hash>`, `.efi_sha1_*`, `.efi_b3_*`, or `.efi_xxh_*`; that suffix belongs to the filename and is not a Limine path hash.
 - Limine strips leading whitespace and generated sub-entries are indented. Entry-boundary parsers in `status.sh` must match trimmed lines rather than column-zero markers.
-- `with_limine_lock` uses `/run/lock/boot-partition.lock`, the mutex shared with limine-entry-tool and limine-snapper-sync. A different path does not serialize boot mutations.
+- `with_limine_lock` uses `/run/lock/boot-partition.lock`, the mutex shared with limine-entry-tool and limine-snapper-sync. Validate inherited descriptor ownership and the current pathname's device and inode, then call `flock` on inherited FD 200 before entering the critical section. A different pathname, an unchecked inherited FD, or validation without locking does not serialize boot mutations.
+- A Limine pre-hook rejects external hook-aware mutation during an OmaSecBoot transition. A post-hook validates and locks inherited FD 200 or acquires the shared lock itself before repair. ALPM PreTransaction guards block boot-mutating package transactions during `transition` and `recovery-required`, and block package removal until state is verified `disabled` or pristine.
+- Pausing `limine-snapper-sync.service` is auxiliary quiescing, not the concurrency boundary. Snapper plugins, transient units, cleanup, and full restore are separate producers. Full `limine-snapper-restore` has no parent shared lock on the audited release; allow it only in stable state, serialize post-repair, and reject it during `transition` and `recovery-required`.
 - `cmd_setup()` is the provisioning path and may regenerate Limine-managed boot state. `cmd_sign()` is the lightweight repair path and must not call `limine-update` or rebuild UKIs.
 - `cmd_setup()` and `cmd_sign()` run `sign_all_efi()` as their final mutation. Config repair and checksum re-enrollment happen before signing.
 - Keep `sign_all_efi()` in `cmd_sign()` so new snapshot UKIs are discovered and registered; `zz-sbctl.hook` re-signs only files already known to sbctl.
-- Keep `reenroll_limine_config_if_changed()` in `cmd_sign()` so repo-restored `limine.conf` changes are enrolled without duplicating upstream enrollment.
+- Keep current-config enrollment in `cmd_sign()`. Do not rely only on change-since-start detection or upstream exit status. Enroll and directly verify the current checksum in both `/EFI/limine/limine_x64.efi` and `/EFI/BOOT/BOOTX64.EFI` before final signing.
+- Enrollment or Secure Boot enablement instructions require a read-only proof after final signing that every discovered non-Microsoft EFI artifact has the local signature and sbctl tracking state.
 - Prefer `sbctl list-files` as the tracked-file source of truth. Direct database reads are fallback and cleanup/compatibility paths; prefer `files.db` over `files.json`.
 - Retain `save_sbctl_file_entry()` while Arch ships the affected sbctl release; its evidence and removal trigger live in `docs/maintenance.md`.
 - Pacman PostTransaction ordering must remain `zz-omasecboot-cleanup` before `zz-sbctl` before `zzz-omasecboot`. The cleanup hook mirrors `zz-sbctl.hook` path triggers; other hooks may sort between them. Package repair and the Limine post-hook cover different mutation sources and are not redundant.
-- Windows uses `protocol: efi_boot_entry` so firmware BootNext launches `bootmgfw.efi` without measuring mutable `limine_x64.efi` in the Windows boot chain. Detect Windows by loader path, not firmware label. `windows bootnext` only arms BootNext; `windows reboot` arms it and reboots.
+- Windows uses `protocol: efi_boot_entry` so the managed path requests a direct firmware handoff instead of chainloading Windows through Limine. BootNext is a one-boot request; do not claim successful Windows boot, PCR7 binding, stable measurements, or absence of BitLocker recovery.
+- Safe Windows targeting parses BootOrder and the exact `File(\EFI\Microsoft\Boot\bootmgfw.efi)` device path, maps the GPT HD node to one FAT ESP, validates the loader read-only, requires one active target and a case-insensitively unique Limine label, and proves numeric and Limine resolution agree. Reject ambiguity and never create or relabel firmware entries automatically.
 - Keep enrollment and signing in interactive `add_windows_boot_entry()` so `windows setup` completes the full mutation cycle in one invocation.
 - `status` may identify Quattro's native `protocol: efi` Windows chainloads but never removes them automatically. Prefer minimal repo-owned automation over replacing mkinitcpio, limine-entry-tool, or limine-snapper-sync behavior.
-- `omarchy/omarchy-menu.jsonc` is a user-owned menu fragment. Its guard runs inside Quattro's batched guard shell, so it stays unprivileged, non-interactive, and `command -v`-based (package-presence checks cannot see a `make`-installed binary); its visible-terminal action runs privileged `windows bootnext` before user-context `omarchy system reboot`. Never execute that action during automated or deployment verification.
-- Treat Windows disk-check prompts separately from BitLocker recovery; troubleshoot the Windows dirty bit, interrupted shutdown/update, Fast Startup or hibernation, duplicate firmware entries, and NTFS mounts before changing Secure Boot flow.
+- `omarchy/omarchy-menu.jsonc` is a user-owned menu fragment. Its guard runs inside Quattro's batched guard shell, stays unprivileged and non-interactive, and requires the packaged command plus durable Windows opt-in. Its visible-terminal action runs privileged `/usr/bin/omasecboot windows bootnext` before user-context `omarchy system reboot`. Never execute that action during automated or deployment verification.
+- Treat Windows disk-check prompts separately from BitLocker recovery. OmaSecBoot never mounts or modifies NTFS and never infers hibernation from a failed mount.
+- Windows Home follows Microsoft's documented Device Encryption decryption workflow; do not offer undocumented Home suspension. Pro, Enterprise, and Education may use documented BitLocker suspension. Managed devices require administrator approval.
+- Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof.
+- Before any Setup Mode instruction, back up raw PK, KEK, db, and dbx data, attributes, hashes, absence records, and machine identity. Unknown or unsupported trust entries that the planned `-m -f` set would lose block v1 enrollment; never preserve by subject name or repair with `--append`.
+- Keep software `unconfigure`, PK reset, raw-key recovery, and firmware factory restoration distinct. Package removal is permitted from verified `disabled` or pristine state, preserves lifecycle, transactions, firmware backups, durable Windows opt-in, local sbctl keys, and the stable lock pathname, and removes only `omasecboot`.
 
 ## Post-Change Verification
 
 - Run `make test` after code, hook, install, or menu changes.
-- Run `bash -n bin/omasecboot lib/*.sh limine-hooks/zzz-omasecboot-sign tests/*.sh` and `shellcheck` over the same shell files.
+- Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck` over the same shell files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 
 ## Conventions

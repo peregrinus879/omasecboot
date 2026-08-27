@@ -4,6 +4,9 @@
 
 Creates signing keys, configures Limine for Omarchy's current Secure Boot model, signs EFI files, enrolls keys into firmware, and adds Windows to the Limine boot menu via firmware BootNext handoff. After setup, a cleanup hook (`zz-omasecboot-cleanup.hook`) removes stale sbctl entries before sbctl's pacman hook (`zz-sbctl.hook`) re-signs known files, a repair hook (`zzz-omasecboot.hook`) discovers new EFI files after relevant package transactions, and a Limine post-hook (`zzz-omasecboot-sign`) repairs state after upstream Limine tools finish changing boot files.
 
+> [!CAUTION]
+> **Development status, 2026-08-27:** the current implementation predates the lifecycle and firmware-safety contract. Its mutation commands do not yet provide durable interrupted-transaction recovery, validated hook ownership, complete raw firmware-key backup, exact Windows target proof, or verified rollback. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, or remove an existing Secure Boot setup on a production machine. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md); commands below describe the current development branch, not released safety guarantees.
+
 ## Why This Tool
 
 [Omarchy Quattro](https://github.com/basecamp/omarchy/releases/tag/v4.0.0) supports installation into free space alongside Windows, and its [dual-boot guide](https://omarchy.org/manual/dual-boot-install/) documents `limine-scan` for adding Windows to Limine. The current scanner creates a generic `protocol: efi` chainload entry. OmaSecBoot builds on that native dual-boot foundation with a firmware BootNext path designed for Secure Boot and BitLocker-sensitive systems.
@@ -14,14 +17,15 @@ Omarchy uses Limine with Unified Kernel Images (UKIs) and Snapper snapshots. Tha
 - **shim/MOK** is designed for the GRUB and systemd-boot chains. Limine uses direct UEFI Secure Boot verification with custom keys enrolled via sbctl.
 - **systemd-boot** is not Omarchy's bootloader. This tool is specific to the Limine + UKI + Snapper stack that Omarchy ships.
 
-This tool fills those gaps: it automates Limine config enrollment, discovers and signs snapshot UKIs, replaces Windows chainloading with firmware BootNext, restores the managed entry after config resets, and keeps everything consistent through pacman hooks plus a Limine post-hook.
+The target release is intended to fill those gaps with verified Limine enrollment, snapshot UKI discovery, a fail-closed Windows firmware handoff, durable recovery, and guarded package and Limine repair.
 
 ## Table of Contents
 
 - [Why This Tool](#why-this-tool)
+- [Development Status](#development-status)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Quick Start](#quick-start)
+- [Planned Release Workflow](#planned-release-workflow)
 - [Commands](#commands)
 - [How It Works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -44,6 +48,12 @@ This tool fills those gaps: it automates Limine config enrollment, discovers and
 
 </details>
 
+## Development Status
+
+The next release is package-first and implements five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. It must write root-owned transaction manifests and backups before mutation, commit stable state last, reject concurrent Limine and package mutations, and preserve recovery state across package removal.
+
+The release gate also requires direct read-back proof of the current Limine config checksum in both bootable Limine executables, final EFI signing and tracking verification, raw PK/KEK/db/dbx backup before Setup Mode, fail-closed Windows firmware targeting, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
+
 ## Prerequisites
 
 - **[Omarchy](https://omarchy.com)** with Limine bootloader, UKI, and btrfs/Snapper
@@ -58,69 +68,49 @@ This tool fills those gaps: it automates Limine config enrollment, discovers and
 sudo pacman -S --needed sbctl jq gum
 ```
 
-### Before You Begin (Dual-Boot with Windows)
+### Planned Dual-Boot Gate
 
-If your Windows installation uses BitLocker drive encryption:
+The audited release will require these Windows preparations before any firmware mutation. Do not change Windows solely for the current development branch.
 
-1. **Back up your BitLocker recovery key** before starting. Find it at [aka.ms/myrecoverykey](https://aka.ms/myrecoverykey) or in its existing USB, print, Active Directory, or Microsoft Entra ID backup.
-2. In Windows, run `manage-bde.exe -protectors -get C:` as an administrator. If it reports `Uses Secure Boot for integrity validation`, suspend BitLocker before enrolling custom Secure Boot keys. [Microsoft recommends suspension](https://learn.microsoft.com/en-us/windows/security/operating-system-security/data-protection/bitlocker/faq#do-i-have-to-suspend-bitlocker-protection-to-download-and-install-system-updates-and-upgrades) for manual or non-Microsoft Secure Boot database changes.
-3. After successful key enrollment and a verified Windows boot, resume BitLocker so its protectors reseal to the new measured values.
-4. Keep the recovery key available. Firmware policy, protector configuration, and other boot changes determine whether recovery is requested; OmaSecBoot does not guarantee a single recovery event.
+If Windows uses BitLocker or Device Encryption:
+
+1. **Back up and verify the recovery key** before starting. Find it at [aka.ms/myrecoverykey](https://aka.ms/myrecoverykey) or in its existing USB, print, Active Directory, or Microsoft Entra ID backup.
+2. On Windows Home, use Microsoft's documented [Device Encryption Settings](https://support.microsoft.com/en-us/windows/device-encryption-in-windows-cf7e2b6f-3e70-4882-9532-18633605b7df) to turn Device Encryption off and wait for decryption to finish. Microsoft does not document Home suspension, so OmaSecBoot must not improvise one.
+3. On Pro, Enterprise, or Education, inspect protection in an administrator PowerShell and use Microsoft's documented BitLocker suspension workflow when appropriate. Managed-device users must obtain administrator approval.
+4. Boot Windows directly after enrollment, verify Secure Boot and protection state, then resume protection if it was suspended.
+5. Keep the recovery key available. Secure Boot changes can trigger recovery; BootNext and direct firmware handoff do not guarantee a quiet boot or stable PCR measurements.
+
+OmaSecBoot does not mount or modify NTFS and does not diagnose Windows hibernation from a failed Linux mount.
 
 ## Installation
 
 `OmaSecBoot` is the product name; `omasecboot` is the command, repository slug, and machine-facing namespace.
 
-```bash
-git clone https://github.com/peregrinus879/omasecboot.git ~/Projects/eyrie/omasecboot
-cd ~/Projects/eyrie/omasecboot
-sudo make install
-```
+There is no supported installation from the current branch. In particular, do not run `make install`: it activates ALPM and Limine hooks whose lifecycle and lock ownership are not yet guarded.
 
-Installs to:
-- `/usr/local/bin/omasecboot`
-- `/usr/local/lib/omasecboot/`
-- `/etc/pacman.d/hooks/zz-omasecboot-cleanup.hook`
-- `/etc/pacman.d/hooks/zzz-omasecboot.hook`
-- `/etc/boot/hooks/post.d/zzz-omasecboot-sign`
-- `/var/lib/omasecboot/`
-
-To uninstall: `sudo make uninstall`
-
-## Quick Start
-
-**Step 1** - Create keys and sign EFI files:
+For source review only:
 
 ```bash
-sudo omasecboot setup
+git clone https://github.com/peregrinus879/omasecboot.git
+cd omasecboot
 ```
 
-**Step 2** - Reboot into BIOS/UEFI, clear Secure Boot keys (enter Setup Mode), save and exit.
+The first supported installation will be the tagged package from the Omarchy Package Repository, installed through the planned Omarchy setup wrapper after all read-only prechecks pass.
 
-> [!WARNING]
-> **Dual-boot with BitLocker?** Have your recovery key ready before Step 3.
-> Enrolling custom Secure Boot keys can trigger BitLocker recovery if protection
-> is not suspended. See [Before You Begin](#before-you-begin-dual-boot-with-windows).
+## Planned Release Workflow
 
-**Step 3** - Enroll keys into firmware:
+The audited workflow, which is not implemented yet, is:
 
-```bash
-sudo omasecboot enroll
-```
-
-**Step 4** - Reboot into BIOS/UEFI, enable Secure Boot, save and exit.
-
-**Step 5** *(dual-boot only)* - Add Windows to Limine boot menu:
-
-```bash
-sudo omasecboot windows setup
-```
-
-This adds Windows to the Limine menu using the `efi_boot_entry` protocol (firmware BootNext). Use `sudo omasecboot windows reboot` for an immediate Windows handoff, or select Windows from the Limine boot menu. The pacman hooks handle package-triggered maintenance, and the Limine post-hook handles boot drift created by `limine-update` or `limine-snapper-sync`.
-
-For Omarchy Quattro, `omarchy/omarchy-menu.jsonc` contains a `system.windows` entry for the user-owned `~/.config/omarchy/extensions/omarchy-menu.jsonc`. It arms BootNext in a visible terminal, then calls `omarchy system reboot` so Quattro closes application windows before rebooting.
+1. Classify durable lifecycle state and require explicit adoption of an existing unrecorded configuration.
+2. Complete Windows edition, recovery-key, management, firmware inventory, and raw PK/KEK/db/dbx backup gates before printing any Setup Mode instruction.
+3. Provision keys and boot state in a durable transaction, enroll and directly verify the current Limine config checksum in both bootable executables, sign last, and verify signatures plus sbctl tracking.
+4. Enter Setup Mode only after the planned trust set has been compared with the recorded firmware trust; enroll and compare the resulting PK, KEK, db, and dbx state.
+5. Enable Secure Boot only after the final read-only proof passes. Verify Linux directly, then request one direct Windows firmware handoff and complete Windows-side Secure Boot and protection checks.
+6. Use guarded repair for later package, Limine, and snapshot mutations. A failed rollback enters `recovery-required` and blocks other mutation producers.
 
 ## Commands
+
+The command descriptions below document the pre-contract implementation for code review. Until the audited release lands, use only read-only diagnosis; do not invoke `setup`, `enroll`, `sign`, `cleanup`, `windows setup`, `windows bootnext`, or `windows reboot` on a production machine.
 
 ### `setup`
 
@@ -129,19 +119,21 @@ Creates signing keys (or skips if they exist), enforces `ENABLE_VERIFICATION=no`
 ### `enroll`
 
 Checks that firmware is in Setup Mode, then enrolls signing keys with:
-- `-m` Microsoft keys (required for Windows dual-boot and Option ROMs)
-- `-f` firmware-builtin keys (safety net for vendor components)
+- `-m` sbctl's bundled Microsoft certificates, subject to exact planned-trust review
+- `-f` firmware-builtin certificates that sbctl supports
+
+The current command does not back up and semantically verify raw PK, KEK, db, and dbx or reject every unsupported trust entry. The audited release must do so before instructing the user to enter Setup Mode; `-m -f` is not by itself a preservation guarantee.
 
 ### `windows`
 
 Provides explicit Windows firmware handoff operations:
 
-- `windows available` checks silently, without root, for a Windows Boot Manager firmware entry.
+- `windows available` checks silently, without root, for a Windows Boot Manager candidate. It does not prove a safe target.
 - `windows setup` adds the Limine `efi_boot_entry`, enrolls the config checksum, and signs EFI files. It does not reboot.
 - `windows bootnext` sets firmware BootNext without rebooting.
 - `windows reboot` sets BootNext and reboots immediately.
 
-Detection matches the `bootmgfw.efi` loader path rather than the firmware label. Selecting Windows from the Limine boot menu triggers the same firmware BootNext handoff. Requires `efibootmgr`.
+The current branch matches `bootmgfw.efi` text and can select the wrong entry when firmware data is ambiguous. The audited release must parse BootOrder and the exact UEFI device path, map the GPT HD node to one FAT ESP, validate the loader read-only, require one active target and a unique Limine label, and prove numeric and label resolution agree. Selecting Windows from the Limine boot menu requests a one-boot firmware handoff; it does not prove that Windows booted successfully. Requires `efibootmgr`.
 
 ### `status`
 
@@ -167,7 +159,7 @@ Finds all `.efi`/`.EFI` files under `/boot`, plus snapshot UKIs with hash suffix
 
 | Pattern | Reason |
 |---|---|
-| `*/Microsoft/*` | Signed by Microsoft; trusted via `-m` enrollment flag |
+| `*/Microsoft/*` | Excluded from local signing; the path alone does not prove signer identity, db acceptance, or dbx status |
 | `BOOTIA32.EFI` | 32-bit bootloader; irrelevant on x86_64 |
 | `*.bak` | Backup files; not loaded by firmware |
 
@@ -199,13 +191,15 @@ Package-triggered repair uses pacman hooks. Limine-originated repair uses Limine
 
 Pacman hook ordering relies on filename sort: `zz-omasecboot-cleanup` < `zz-sbctl` < `zzz-omasecboot`. The cleanup hook mirrors `zz-sbctl.hook`'s `Type = Path` triggers so it fires in the same transactions, refuses to run unless `/boot` is the mounted FAT32 ESP, and removes stale tracked entries before sbctl runs. The repair hook uses `Type = Package` triggers for `linux*`, `limine*`, and `snapper*`. The Limine post-hook is named `zzz-omasecboot-sign` so it runs after Limine's packaged `90-limine-enroll-config` post-hook.
 
+This current hook chain is not a concurrency boundary. Its environment boolean does not prove transition ownership, package hooks do not guard every mutation producer, and stopping `limine-snapper-sync.service` does not quiesce Snapper plugins or transient units. The audited release adds durable transition state, validated inherited FD 200 ownership and lock inode checks, a rejecting Limine pre-hook, a serialized post-hook, and ALPM PreTransaction guards.
+
 **Why this matters:** The current Omarchy stack works with three separate pieces:
 
 - UEFI firmware verifies EFI binaries, so Omarchy UKIs, Limine EFI binaries, and the fallback loader must be signed.
 - Limine config enrollment embeds the current `limine.conf` checksum into the Limine EFI binary.
 - Limine path-hash generation is kept disabled with `ENABLE_VERIFICATION=no` for Omarchy's current UKI flow. Limine 12 and newer can still enforce BLAKE2B path hashes when Secure Boot and config checksum enrollment are both active; `status` reports this without changing current Omarchy behavior.
 
-**Why config enrollment is required:** Limine protects Secure Boot systems by embedding the checksum of `limine.conf` into the Limine EFI binary. Any time `limine.conf` changes, the checksum must be re-enrolled with `limine-enroll-config`. This enrollment mutates `limine_x64.efi`, which is why Windows must boot via firmware BootNext (not chainload) to avoid TPM PCR measurement drift.
+**Why config enrollment is required:** Limine protects Secure Boot systems by embedding the checksum of `limine.conf` into the Limine EFI binary. Any time `limine.conf` changes, the checksum must be re-enrolled with `limine-enroll-config`. The audited release verifies the current checksum directly in both `/EFI/limine/limine_x64.efi` and `/EFI/BOOT/BOOTX64.EFI` before final signing. Windows uses firmware BootNext rather than a managed Limine chainload, but this choice does not guarantee PCR7 binding or prevent BitLocker recovery.
 
 **Why path hashes are not managed here:** Limine also supports `path: ...#<blake2b>` suffixes, but Omarchy's current working state uses `ENABLE_VERIFICATION=no` and boots UKIs through EFI paths, which Limine 12 exempts from path-hash enforcement. Snapshot filenames such as `omarchy_linux.efi_sha256_<hex>` come from `limine-snapper-sync`; that SHA256 is part of the filename, not a Limine `path:` hash suffix. If future Omarchy entries load non-EFI paths under Limine 12 Secure Boot enforcement, `status` flags the missing BLAKE2B suffixes.
 
@@ -215,23 +209,21 @@ Pacman hook ordering relies on filename sort: `zz-omasecboot-cleanup` < `zz-sbct
 
 Quattro's documented `limine-scan` path adds Windows through `protocol: efi`, which chainloads `bootmgfw.efi` from Limine. OmaSecBoot instead uses Limine's `efi_boot_entry` protocol. When you select Windows from the Limine menu, Limine sets the firmware BootNext variable and triggers a reboot. On that reboot, firmware loads `bootmgfw.efi` directly, bypassing `limine_x64.efi` entirely.
 
-This keeps Limine out of the Windows boot measurement chain, avoiding one source of TPM PCR drift that can trigger BitLocker recovery. `limine-snapper-sync` re-enrolls `limine_x64.efi` as snapshot state changes, mutating the binary. With chainloading (`protocol: efi`), Windows boot measurements include that binary. With `efi_boot_entry`, TPM PCRs reset on the firmware reboot and firmware loads Windows directly.
+This requests a direct firmware handoff instead of a Limine-managed chainload. `limine-snapper-sync` can mutate `limine_x64.efi` as snapshot state changes. The design avoids relying on that mutable binary as the Windows launcher, but no collected evidence proves stable PCR measurements, successful Windows boot, or absence of BitLocker recovery.
 
-The `windows reboot` command provides a direct reboot-to-Windows path from Linux via `efibootmgr -n` (same firmware handoff, skips the Limine menu).
+The current `windows reboot` command writes numeric BootNext through `efibootmgr -n` and invokes reboot. Do not use it until exact target validation lands.
 
 Current `limine-update` and `limine-snapper-sync` update the existing configuration tree. Template-reset paths such as `omarchy refresh limine`, config reinstall, factory reset, or owner provisioning can replace `limine.conf` and remove the Windows entry. OmaSecBoot's repair paths restore an opted-in managed entry with the correct `efi_boot_entry` protocol. `status` also warns about Windows EFI chainload entries (`protocol: efi`, `efi_chainload`, or `uefi`) that may still need manual cleanup.
 
 ### Quattro Menu Integration
 
-The tracked `omarchy/omarchy-menu.jsonc` fragment adds `Reboot to Windows` under Quattro's System menu. Merge its `system.windows` object into the user-owned `~/.config/omarchy/extensions/omarchy-menu.jsonc`; do not modify `/usr/share/omarchy`. Quattro watches the user file, and `omarchy menu refresh` requests an immediate refresh.
+The tracked `omarchy/omarchy-menu.jsonc` fragment is a pre-contract reference for `Reboot to Windows`; do not merge it into the user-owned `~/.config/omarchy/extensions/omarchy-menu.jsonc`. The audited Omarchy integration will ship a package-aware guard and durable opt-in contract. Quattro's user file remains relevant evidence because its parser strips only whole-line `//` comments and silently drops every user entry on parse failure.
 
-Keep the user file valid JSONC. Quattro strips only whole-line `//` comments, and a parse failure silently drops every user entry while the shipped menu keeps working. `omarchy refresh config omarchy/extensions/omarchy-menu.jsonc` replaces the file with the shipped sample and keeps a `.bak.<epoch>` copy; `omarchy reinstall configs` (also run by `omarchy reinstall`) overwrites it from `/etc/skel` without a backup. Merge the fragment again after either.
+Do not install or invoke the current menu fragment. The audited action first revalidates the recorded target, requests BootNext in a visible terminal, then returns to user context for `omarchy system reboot`. If reboot is cancelled after BootNext is armed, firmware retains a one-attempt request; that does not guarantee the target will boot successfully.
 
-Run `sudo omasecboot windows setup` before using the menu action. The action opens a visible terminal, runs `sudo omasecboot windows bootnext`, then returns to user context for `omarchy system reboot` so Quattro can close application windows. If the reboot step is cancelled after BootNext is armed, the next boot still enters Windows once.
+### Current Pre-Contract Hook Flow
 
-### After Setup
-
-The package-triggered maintenance chain:
+The current development branch wires this flow, but it is not approved for installation until transition guards and lock validation land:
 
 ```
 Kernel update
@@ -265,167 +257,21 @@ Single dispatcher (`bin/omasecboot`) sources modular libraries:
 - `windows.sh` -- Windows firmware BootNext handoff and Limine `efi_boot_entry` management
 - `status.sh` -- status display and file verification
 
-Maintainer-facing reference sources, versioned compatibility findings, workaround removal triggers, and deferred work live in [docs/maintenance.md](docs/maintenance.md). Current operational constraints remain in `AGENTS.md`.
+Maintainer-facing reference sources, versioned compatibility findings, workaround removal triggers, and deferred work live in [docs/maintenance.md](docs/maintenance.md). Remaining implementation and release gates live in [docs/implementation-contract.md](docs/implementation-contract.md), with operational invariants in `AGENTS.md`.
 
 ## Troubleshooting
 
-### Key creation or enrollment fails
+The current branch has no supported mutation-based troubleshooting procedure. Do not clear firmware keys, reinstall hooks, edit `limine.conf`, run enrollment or signing repair, arm BootNext, remove a Windows entry, or re-enable Secure Boot based on the current status checks.
 
-sbctl may store keys under `/usr/share/secureboot/keys/` or `/var/lib/sbctl/keys/`. Check both locations if troubleshooting key issues:
+Read-only observations remain useful for an expert-led recovery:
 
-```bash
-ls /usr/share/secureboot/keys/db/db.key 2>/dev/null || ls /var/lib/sbctl/keys/db/db.key
-```
+- `omasecboot status` reports the current branch's view but does not implement the approved release proof.
+- `sbctl status`, `sbctl list-files`, and `sbctl verify` report local state; they do not prove complete firmware trust or dbx acceptance.
+- `efibootmgr -v` is diagnostic input. Do not select a target by the first label or `bootmgfw.efi` text match.
+- `findmnt` can show whether Windows filesystems are mounted. OmaSecBoot does not mount or modify them.
+- Windows disk-check prompts and BitLocker recovery are separate. Diagnose Windows volume state from Windows, not from a failed Linux mount.
 
-### `enroll` says firmware is not in Setup Mode
-
-Clear/reset the Secure Boot keys in your BIOS first. The exact menu location varies by manufacturer. Look under Security, Boot, or Authentication for "Clear Secure Boot keys", "Reset to Setup Mode", or similar.
-
-### `sbctl verify` shows Microsoft files as unsigned
-
-Normal. Microsoft files are signed with Microsoft's own keys, not yours. The firmware trusts them because you enrolled Microsoft's keys with the `-m` flag.
-
-### Windows not found during `windows` setup
-
-Ensure the Windows disk is connected and visible in BIOS. Check with `efibootmgr -v`. The command looks for a boot entry whose loader path contains `bootmgfw.efi`.
-
-### Secure Boot enabled but system won't boot
-
-Boot into BIOS, temporarily disable Secure Boot, boot into Linux, then:
-
-```bash
-sudo omasecboot status    # Check what's unsigned or misconfigured
-sudo omasecboot sign      # Repair config drift and sign EFI files
-```
-
-Re-enable Secure Boot after confirming all files verify.
-
-### Snapshot fails to boot after kernel update
-
-Run `sudo omasecboot sign` to discover and sign new snapshot UKIs if you need an immediate manual repair. The pacman hooks and Limine post-hook normally cover package-triggered and Limine-originated boot drift automatically.
-
-### Limine panics about config checksum enrollment
-
-This means Limine's Secure Boot config enrollment drifted out of sync after an update. Boot once with Secure Boot disabled, then run:
-
-```bash
-sudo limine-enroll-config
-sudo omasecboot sign
-```
-
-This re-enrolls the current config checksum, restores the required `/etc/default/limine` settings, repairs repo-managed config drift, and signs EFI files. The pacman hooks and Limine post-hook do this automatically in normal operation.
-
-### `status` warns that `limine-snapper-sync.service` is not active
-
-This warning is informational. It refers to Omarchy's upstream snapshot service, not this repo's core commands.
-
-- Package-triggered repair still works through `zz-omasecboot-cleanup.hook` and `zzz-omasecboot.hook`.
-- Limine-originated repair still works through `/etc/boot/hooks/post.d/zzz-omasecboot-sign`.
-- Manual repair still works through `sudo omasecboot sign`.
-
-### `status` reports untracked snapshot UKIs
-
-This means new EFI files exist under `/boot` but are not yet in sbctl's database. Register and sign them with:
-
-```bash
-sudo omasecboot sign
-```
-
-This is most common after snapshot activity that happened before the Limine post-hook repaired the new files, or after boot drift introduced multiple changes at once.
-
-If this still appears immediately after a successful `sign`, check `sudo sbctl list-files` and verify the repo version is current. This repo includes a compatibility workaround for Arch `sbctl` 0.18, where `sbctl sign -s` may refuse to save an already-signed file.
-
-### `status` reports stale sbctl tracked files
-
-This means sbctl still tracks an EFI file that no longer exists, commonly an old snapshot UKI removed by `limine-snapper-sync`. Clean the stale entries before the next package transaction so `zz-sbctl.hook` does not fail trying to sign deleted files:
-
-```bash
-sudo omasecboot cleanup
-```
-
-If cleanup cannot remove an entry, inspect `sudo sbctl list-files` and run `sudo omasecboot status` again. The cleanup path checks that `/boot` is mounted as the FAT32 ESP before it removes any entries.
-
-### `status` warns about Omarchy Direct Boot
-
-Omarchy's Direct Boot toggle creates a firmware entry named `Omarchy` that boots `/boot/EFI/Linux/omarchy*.efi` directly. This is compatible with Secure Boot as long as the UKI is signed, but it bypasses the Limine menu, so snapshot entries and the repo-managed Windows BootNext menu entry will not appear on normal boot. Disable Direct Boot from Omarchy's toggle if you want Limine to be the default boot path.
-
-### Windows disappeared from Limine boot menu
-
-This can happen after a template reset such as `omarchy refresh limine`, config reinstall, factory reset, or owner provisioning. Ordinary current `limine-update` and `limine-snapper-sync` runs update the existing configuration tree. OmaSecBoot restores the opted-in entry automatically with the correct `efi_boot_entry` protocol. To restore immediately:
-
-```bash
-sudo omasecboot sign
-```
-
-### `Reboot to Windows` is missing from the System menu
-
-Quattro hides the row when its guard fails, and it drops every user entry when the extension file fails to parse. Check, as the desktop user:
-
-```bash
-command -v omasecboot && omasecboot windows available
-grep -n '"system.windows"' ~/.config/omarchy/extensions/omarchy-menu.jsonc
-sed '/^[[:space:]]*\/\//d' ~/.config/omarchy/extensions/omarchy-menu.jsonc | jq . >/dev/null
-```
-
-The guard needs `omasecboot` on the user's `PATH` (`/usr/local/bin` by default) and a Windows Boot Manager entry in firmware. The `jq` check is stricter than Quattro's parser (it rejects trailing commas) but catches the inline comments and syntax errors that make Quattro drop the user entries. A config refresh or reinstall replaces the file with the shipped sample; merge the fragment again and run `omarchy menu refresh`.
-
-### `status` warns about a Windows EFI chainload entry
-
-For repo-managed Windows entries, run `sudo omasecboot sign` to restore the `protocol: efi_boot_entry` block. The managed entry uses firmware BootNext, which keeps `limine_x64.efi` out of the Windows boot measurement chain and removes that source of PCR drift.
-
-If `status` reports a Windows EFI chainload entry, add the managed BootNext entry with `sudo omasecboot windows setup`, then remove any duplicate chainload entry manually if `limine-scan` created one.
-
-### `status` warns about Limine 12 path hashes
-
-Limine 12 enforces BLAKE2B hashes on non-EFI loaded paths when Secure Boot is active and a config checksum is enrolled. Omarchy's current UKI entries use EFI paths, which Limine 12 exempts because firmware Secure Boot verifies those EFI binaries. If future entries use non-EFI path values such as `path:`, `module_path:`, `kernel_path:`, `image_path:`, `dtb_path:`, or `global_dtb:` without `#<blake2b>`, `status` flags them before they can cause a Secure Boot panic.
-
-### `status` warns about Limine 12 colors
-
-Limine 12 changed interface color options from 0-7 color indexes to `RRGGBB` hex values. If `status` flags an old value such as:
-
-```text
-interface_branding_color: 2
-```
-
-Replace it in `/boot/limine.conf` with a hex color, then re-enroll and sign:
-
-```bash
-sudo cp -a /boot/limine.conf "/boot/limine.conf.bak.$(date +%Y%m%d-%H%M%S)"
-sudo sed -i 's/^interface_branding_color: 2$/interface_branding_color: 9ece6a/' /boot/limine.conf
-sudo limine-enroll-config
-sudo omasecboot sign
-```
-
-`9ece6a` matches Omarchy's Tokyo Night green accent. Current Quattro templates already use six-digit color values.
-
-### Windows runs a disk check on boot
-
-Windows `Scanning and repairing drive` or `chkdsk` is separate from BitLocker recovery. This repo uses firmware BootNext for Windows and does not mount or modify Windows NTFS volumes, so repeated disk checks usually mean Windows has set the NTFS dirty bit, had an interrupted shutdown/update, or saw a Fast Startup/hibernation state.
-
-From Linux, check for duplicate or unmanaged Windows boot paths and whether Windows partitions are mounted:
-
-```bash
-sudo omasecboot status
-sudo efibootmgr -v | grep -i 'bootmgfw\.efi'
-findmnt -t ntfs3,ntfs,fuseblk
-grep -nA4 -B2 'omasecboot:windows\|protocol: efi\|protocol: efi_chainload\|protocol: uefi\|bootmgfw' /boot/limine.conf
-```
-
-From Windows Admin PowerShell or Command Prompt, check the dirty bit and recent disk-check logs:
-
-```powershell
-fsutil dirty query C:
-chkntfs C:
-chkdsk C: /scan
-Get-WinEvent -FilterHashtable @{LogName="Application"; ProviderName="Wininit"} -MaxEvents 5 | Format-List TimeCreated,Message
-Get-WinEvent -FilterHashtable @{LogName="Application"; ProviderName="Chkdsk"} -MaxEvents 5 | Format-List TimeCreated,Message
-```
-
-If Windows reports the volume is dirty, repair it from Windows with `chkdsk C: /f` and let it run at the next Windows boot. Avoid mounting Windows NTFS partitions read-write from Linux. If the issue repeats and you do not need Windows hibernation, disable Fast Startup/hibernation from Windows with `powercfg /h off`.
-
-### `windows setup` says Windows Boot Manager not found
-
-Ensure the Windows disk is connected and visible in BIOS. Check with `efibootmgr -v`. The command looks for a boot entry whose loader path contains `bootmgfw.efi`.
+Record the exact state and seek machine-specific recovery review before any write. The audited release will replace this section with tested lifecycle-state recovery procedures.
 
 ## Recovery / Rollback
 
@@ -437,36 +283,28 @@ If the system will not boot with Secure Boot enabled:
 2. Disable Secure Boot temporarily
 3. Boot into Linux normally
 4. Diagnose with `sudo omasecboot status`
-5. Repair with `sudo omasecboot sign`
-6. Re-enable Secure Boot in BIOS after confirming all files verify
+5. Keep Secure Boot disabled and avoid current mutation commands until the state and available backups have been reviewed
+
+Do not re-enable Secure Boot from the current branch's status result alone. The approved gate requires direct Limine checksum proof in both binaries plus final signature and tracking verification.
 
 ### Full rollback
 
-To remove Secure Boot entirely and return to an unsigned boot state:
+The current branch has no verified full rollback. `make uninstall` removes installed files and repository state; it does not restore prior Limine defaults, firmware keys, dbx, or factory state, and deleting state can destroy recovery evidence. Do not use uninstall as unconfiguration.
 
-1. Disable Secure Boot in BIOS/UEFI firmware settings
-2. Optionally reset Secure Boot keys to factory defaults (re-enrolls Microsoft-only keys)
-3. Run `sudo make uninstall` from the repo to remove the tool, pacman hooks, Limine post-hook, and repo state directory
+The audited release provides a separate `unconfigure` transaction. It requires Secure Boot off, restores only settings whose current values still match OmaSecBoot's recorded values, removes the managed Windows block, resets config enrollment, rebuilds and verifies stock boot state, and commits `disabled` last. Package removal is allowed only from verified `disabled` or pristine state; it removes package trigger hooks and only the `omasecboot` package while preserving lifecycle, transaction, recovery, firmware-backup, Windows-opt-in, lock-path, and local-key state.
 
-Existing EFI signatures are harmless with Secure Boot disabled. No need to re-sign or strip signatures.
+Software unconfiguration, PK reset, recovery from raw pre-change variables, and firmware factory restoration are distinct procedures. A pre-change backup is not necessarily a factory-key set.
 
 ### Re-enrollment after key reset
 
-If BIOS keys are cleared (factory reset, accidental clear, or hardware change):
-
-1. The local signing keys from `sbctl create-keys` are still on disk. No need to recreate them.
-2. Enter Setup Mode in BIOS (clear/reset Secure Boot keys)
-3. Run `sudo omasecboot enroll` to re-enroll your keys
-4. Enable Secure Boot in BIOS
-
-If you need to verify your keys still exist: `sbctl status`
+Do not equate clearing keys, entering Setup Mode, resetting the PK, or restoring firmware factory keys. Recovery instructions must start from the recorded raw-variable backup and current firmware state. Local sbctl keys can be inspected with `sbctl status`, but their presence alone does not prove that re-enrollment preserves the machine's required trust.
 
 ## Design Philosophy
 
-This tool handles the parts of Secure Boot that Omarchy does not fully automate for this exact dual-boot flow:
+The approved design handles the parts of Secure Boot that Omarchy does not fully automate for this exact dual-boot flow:
 
 - **One-time setup**: Key creation, Limine verification/enrollment settings, initial signing, key enrollment, Windows boot entry via `efi_boot_entry` protocol
-- **Ongoing repair**: Re-enrolling changed Limine configs, signing new EFI files (especially snapshots), and restoring the Windows boot entry. Windows boots via firmware BootNext for TPM/BitLocker compatibility
+- **Ongoing repair**: Enrolling and verifying the current Limine config, signing new EFI files (especially snapshots), and restoring the Windows entry. Windows uses a direct firmware handoff while recovery remains possible
 
 It deliberately delegates everything else:
 
@@ -477,7 +315,7 @@ It deliberately delegates everything else:
 
 Don't automate what's already automated. Fill the gaps that aren't.
 
-This repo owns pacman-triggered maintenance and Limine-originated boot-drift repair through Limine's post-hook mechanism.
+The approved package owns guarded pacman-triggered maintenance and Limine-originated repair through validated pre-hook and post-hook mechanisms.
 
 `zz-sbctl.hook` works on Omarchy because UKIs use `CUSTOM_UKI_NAME="omarchy"` and live at `/boot/EFI/Linux/omarchy_linux.efi`.
 
