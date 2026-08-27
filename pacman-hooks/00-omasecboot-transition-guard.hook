@@ -1,6 +1,4 @@
-# OmaSecBoot: checkpoint lifecycle state before sbctl's package repair.
-# Runs before zz-sbctl.hook so an external package mutation is durable first.
-# Mirrors zz-sbctl.hook's Path triggers to fire in the same transactions.
+# OmaSecBoot: block package producers unless lifecycle permits boot mutation.
 
 [Trigger]
 Type = Path
@@ -25,6 +23,7 @@ Target = snapper*
 Target = mkinitcpio*
 
 [Action]
-Description = Secure Boot: record package mutation before sbctl
-When = PostTransaction
-Exec = @BINDIR@/omasecboot --quiet hook package-cleanup
+Description = Secure Boot: validate lifecycle before boot mutation
+When = PreTransaction
+Exec = @BINDIR@/omasecboot --quiet guard transaction
+AbortOnFail

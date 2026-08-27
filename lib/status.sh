@@ -226,28 +226,46 @@ show_status() {
 
   # Hook status
   echo
+  if [[ -f /etc/pacman.d/hooks/00-omasecboot-transition-guard.hook ]]; then
+    pass "00-omasecboot-transition-guard.hook present (transaction guard)"
+  else
+    warn "00-omasecboot-transition-guard.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
+  fi
+
   if [[ -f /etc/pacman.d/hooks/zz-omasecboot-cleanup.hook ]]; then
-    pass "zz-omasecboot-cleanup.hook present (stale entry cleanup)"
+    pass "zz-omasecboot-cleanup.hook present (pre-sbctl lifecycle checkpoint)"
   else
     warn "zz-omasecboot-cleanup.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -f /usr/share/libalpm/hooks/zz-sbctl.hook ]]; then
     pass "zz-sbctl.hook present (re-signing)"
   else
     warn "zz-sbctl.hook missing. Run: ${BOLD}sudo pacman -S sbctl${NC}"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -f /etc/pacman.d/hooks/zzz-omasecboot.hook ]]; then
-    pass "zzz-omasecboot.hook present (package repair)"
+    pass "zzz-omasecboot.hook present (post-sbctl lifecycle checkpoint)"
   else
     warn "zzz-omasecboot.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
+  fi
+
+  if [[ -x /etc/boot/hooks/pre.d/000-omasecboot-guard ]]; then
+    pass "000-omasecboot-guard present (Limine pre-mutation guard)"
+  else
+    warn "000-omasecboot-guard missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -x /etc/boot/hooks/post.d/zzz-omasecboot-sign ]]; then
-    pass "zzz-omasecboot-sign present (Limine post-repair)"
+    pass "zzz-omasecboot-sign present (Limine post-mutation checkpoint)"
   else
     warn "zzz-omasecboot-sign missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
@@ -324,7 +342,7 @@ show_status() {
       pass "Limine enrollment hooks present"
       if limine_default_has_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll" \
         || limine_default_has_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"; then
-        warn "deprecated COMMANDS_* enrollment entries remain; run ${BOLD}sudo omasecboot sign${NC} to clean them"
+        warn "deprecated COMMANDS_* enrollment entries remain; automatic cleanup is blocked until complete artifact repair is available"
       fi
     else
       warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
@@ -431,7 +449,7 @@ show_status() {
       pass "Windows boot entry in limine.conf (firmware BootNext)"
     else
       warn "Managed Windows entry in limine.conf needs repair"
-      echo -e "  ${DIM}Run ${BOLD}sudo omasecboot sign${NC}${DIM} to upgrade it${NC}"
+      echo -e "  ${DIM}Windows entry mutation is blocked until firmware target identity can be proven${NC}"
     fi
   else
     if [[ -f "${STATE_DIR}/windows-enabled" ]]; then
@@ -530,7 +548,7 @@ show_status() {
           echo -e "    ${YELLOW}!${NC} $file"
         done
         if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
-          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. The Limine post-hook should repair this after upstream boot updates; run ${BOLD}sudo omasecboot sign${NC}${DIM} if you need an immediate manual repair.${NC}"
+          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Repair is blocked until complete artifact proof is available; do not reboot with unresolved files.${NC}"
         fi
         all_ok=false
         files_ok=false
@@ -544,7 +562,7 @@ show_status() {
       for stale_file in "${missing_tracked[@]}"; do
         echo -e "    ${YELLOW}!${NC} $stale_file"
       done
-      echo -e "  ${DIM}Run ${BOLD}sudo omasecboot cleanup${NC}${DIM} or ${BOLD}sudo omasecboot sign${NC}${DIM} before the next package transaction.${NC}"
+      echo -e "  ${DIM}Tracking repair is blocked; boot-mutating package transactions remain unavailable.${NC}"
       all_ok=false
       files_ok=false
     fi
@@ -554,7 +572,7 @@ show_status() {
       if $files_ok; then
         pass "All tracked files signed and all discovered EFI files enrolled"
       else
-        warn "Some files failed. Run: ${BOLD}sudo omasecboot sign${NC}"
+        warn "Some files failed. Repair is blocked until complete artifact proof is available"
       fi
     fi
   else

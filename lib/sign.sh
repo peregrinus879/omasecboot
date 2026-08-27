@@ -3,6 +3,19 @@
 
 readonly LIMINE_DEFAULT_CONF="/etc/default/limine"
 
+list_limine_default_entries() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    BEGIN { pattern = "^[[:space:]]*" key "[[:space:]]*=" }
+    $0 ~ pattern {
+      line = $0
+      sub(pattern, "", line)
+      sub(/^[[:space:]]*/, "", line)
+      print key "=" line
+    }
+  ' "$file" 2>/dev/null
+}
+
 load_limine_default_entry() {
   local key="$1" line raw=""
   _limine_default_raw=""
@@ -11,18 +24,25 @@ load_limine_default_entry() {
   while IFS= read -r line; do
     _limine_default_count=$((_limine_default_count + 1))
     raw=${line#*=}
-  done < <(grep "^${key}=" "$LIMINE_DEFAULT_CONF" 2>/dev/null || true)
+  done < <(list_limine_default_entries "$LIMINE_DEFAULT_CONF" "$key" || true)
 
   _limine_default_raw="$raw"
 }
 
 replace_limine_default_entry() {
-  local key="$1" desired="${2:-}" tmp
-  tmp=$(mktemp "${LIMINE_DEFAULT_CONF}.XXXXXX") || return 2
+  replace_limine_default_entry_in_file "$LIMINE_DEFAULT_CONF" "$@"
+}
+
+replace_limine_default_entry_in_file() {
+  local file="$1" key="$2" desired="${3:-}" tmp
+  tmp=$(mktemp "${file}.XXXXXX") || return 2
 
   if ! awk -v key="$key" -v desired="$desired" '
-    BEGIN { written = 0 }
-    index($0, key "=") == 1 {
+    BEGIN {
+      written = 0
+      pattern = "^[[:space:]]*" key "[[:space:]]*="
+    }
+    $0 ~ pattern {
       if (desired != "" && !written) {
         print desired
         written = 1
@@ -35,13 +55,13 @@ replace_limine_default_entry() {
         print desired
       }
     }
-  ' "$LIMINE_DEFAULT_CONF" > "$tmp"; then
+  ' "$file" > "$tmp"; then
     rm -f "$tmp"
     return 2
   fi
 
-  chmod --reference="$LIMINE_DEFAULT_CONF" "$tmp" 2>/dev/null || true
-  mv "$tmp" "$LIMINE_DEFAULT_CONF" || {
+  chmod --reference="$file" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file" || {
     rm -f "$tmp"
     return 2
   }

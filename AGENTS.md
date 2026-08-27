@@ -2,7 +2,7 @@
 
 OmaSecBoot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff for Omarchy.
 
-Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the sole user command and machine-facing namespace. The command, library, state, hooks, Windows marker, and Limine-hook sentinel use the canonical namespace.
+Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the sole user command and machine-facing namespace. The command, library, state, hooks, Windows marker, and Limine hook protocol use the canonical namespace.
 
 ## Load Map
 
@@ -15,10 +15,13 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 
 - `README.md` - User documentation, design philosophy, troubleshooting
 - `bin/omasecboot` - Entry point and command dispatcher
-- `lib/*.sh` - Modular function libraries (common, checks, discover, sign, enroll, windows, status)
-- `pacman-hooks/zz-omasecboot-cleanup.hook` - Pacman hook that removes stale sbctl entries before `zz-sbctl.hook` runs
-- `pacman-hooks/zzz-omasecboot.hook` - Pacman hook that runs `sign` after kernel, bootloader, or snapshot-related package updates
-- `limine-hooks/zzz-omasecboot-sign` - Limine post-hook that runs `sign` after upstream Limine tools mutate boot files
+- `lib/*.sh` - Modular function libraries (common, lifecycle, checks, discover, sign, enroll, windows, status)
+- `pacman-hooks/00-omasecboot-transition-guard.hook` - PreTransaction guard for boot paths and producer packages
+- `pacman-hooks/zz-omasecboot-cleanup.hook` - Pre-sbctl lifecycle checkpoint, ordered before `zz-sbctl.hook`
+- `pacman-hooks/zzz-omasecboot.hook` - Post-sbctl lifecycle checkpoint for boot paths and producer packages
+- `limine-hooks/000-omasecboot-guard` - Limine pre-hook for lifecycle and FD 200 ownership validation
+- `limine-hooks/zzz-omasecboot-sign` - Limine post-hook for owned suppression or serialized recovery recording
+- `tests/lifecycle.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle boundary and failure-injection checks
 - `tests/install.sh` - Staged install, upgrade, hook-target, and uninstall contract checks
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
@@ -31,6 +34,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 
 Single dispatcher sources lib modules. Each lib file owns one concern:
 - `common.sh` - constants, colors, output helpers, quiet mode
+- `lifecycle.sh` - versioned state, durable manifests, transaction handling, hook ownership, and guards
 - `checks.sh` - root, deps, EFI mount, gum validation
 - `discover.sh` - EFI file discovery, sbctl tracked-file discovery, sbctl database fallback helpers
 - `sign.sh` - key creation, signing, sbctl compatibility registration, stale entry cleanup, Limine verification/enrollment helpers
@@ -44,7 +48,7 @@ sbctl, jq, gum (interactive only). Omarchy provides the rest (`limine-update`, `
 
 ## Approved Implementation Contracts
 
-The current branch predates these contracts. They are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary but deliberately reports repair capability unavailable. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked until their later atomic units provide the required proof and rollback. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults.

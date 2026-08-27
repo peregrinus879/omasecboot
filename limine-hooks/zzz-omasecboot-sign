@@ -1,8 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Limine post-hook: run after limine-entry-tool or limine-snapper-sync has
-# finished updating boot files. The parent Limine tool owns its global lock.
-export OMASECBOOT_IN_LIMINE_HOOK=true
-
-exec @BINDIR@/omasecboot --quiet sign
+# The dispatcher validates lifecycle ownership and either retains the parent's
+# FD 200 lock or acquires the shared lock before recording required repair.
+exec @BINDIR@/omasecboot --quiet hook post

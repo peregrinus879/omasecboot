@@ -1,18 +1,29 @@
-# OmaSecBoot: repair config drift, enroll it if needed, and sign EFI files.
+# OmaSecBoot: checkpoint package-driven boot mutation after sbctl runs.
 # Runs after zz-sbctl.hook and Limine-related package updates.
-# zz-sbctl.hook re-signs known files; this hook repairs pacman-triggered drift and catches new EFI files.
 
 [Trigger]
 Operation = Install
 Operation = Upgrade
+Operation = Remove
 Type = Package
 Target = linux*
 Target = limine*
 Target = snapper*
+Target = mkinitcpio*
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = boot/*
+Target = efi/*
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/modules/*/extramodules/*
+Target = usr/lib/**/efi/*.efi*
+Target = usr/share/**/*.efi*
 
 [Action]
-Description = Secure Boot: repair config drift and sign EFI files
+Description = Secure Boot: record package mutation after sbctl
 When = PostTransaction
-Exec = @BINDIR@/omasecboot --quiet sign
-Depends = sbctl
-Depends = jq
+Exec = @BINDIR@/omasecboot --quiet hook package-sign

@@ -92,10 +92,7 @@ grep -Fxq 'bootnext:0007' "$CALL_LOG" || fail_test "reboot path did not set Boot
 grep -Fxq 'systemctl:reboot' "$CALL_LOG" || fail_test "reboot path did not reboot"
 
 check_root() {
-  printf 'root:%s\n' "$1" >> "$CALL_LOG"
-}
-windows_entry_is_configured() {
-  return 0
+  printf 'forbidden:root:%s\n' "$1" >> "$CALL_LOG"
 }
 check_deps() {
   printf 'forbidden:deps\n' >> "$CALL_LOG"
@@ -111,30 +108,19 @@ add_windows_boot_entry() {
 }
 
 : > "$CALL_LOG"
-cmd_windows setup > /dev/null
-grep -Fxq 'root:windows setup' "$CALL_LOG" || fail_test "setup skipped its root check"
+for mutation in setup bootnext reboot; do
+  if cmd_windows "$mutation" > "${TEST_DIR}/${mutation}.out" 2>&1; then
+    fail_test "unsafe Windows ${mutation} mutation succeeded"
+  fi
+done
 if grep -Fq 'forbidden:' "$CALL_LOG"; then
-  fail_test "configured setup ran interactive or mutating steps"
+  fail_test "blocked Windows command reached a legacy mutation path"
 fi
-
-windows_entry_is_configured() {
-  return 1
-}
-check_deps() {
-  printf 'setup:deps\n' >> "$CALL_LOG"
-}
-require_gum() {
-  printf 'setup:gum\n' >> "$CALL_LOG"
-}
-add_windows_boot_entry() {
-  printf 'setup:add\n' >> "$CALL_LOG"
-}
-
-: > "$CALL_LOG"
-cmd_windows setup > /dev/null
-grep -Fxq 'setup:deps' "$CALL_LOG" || fail_test "setup skipped dependency checks"
-grep -Fxq 'setup:gum' "$CALL_LOG" || fail_test "setup skipped its prompt dependency"
-grep -Fxq 'setup:add' "$CALL_LOG" || fail_test "setup skipped entry creation"
+grep -Fq 'firmware target identity can be proven' "${TEST_DIR}/setup.out" \
+  || fail_test "blocked Windows setup omitted its safety reason"
+grep -Fq 'persisted Windows firmware target can be revalidated' \
+  "${TEST_DIR}/bootnext.out" \
+  || fail_test "blocked BootNext omitted its safety reason"
 
 if cmd_windows > "${TEST_DIR}/windows-help.out" 2>&1; then
   fail_test "bare windows command succeeded"

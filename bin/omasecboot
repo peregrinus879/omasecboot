@@ -1,9 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# OmaSecBoot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.
-# Ongoing maintenance handled by zz-omasecboot-cleanup.hook, zz-sbctl.hook,
-# zzz-omasecboot.hook, and the Limine post-hook zzz-omasecboot-sign.
+# OmaSecBoot: lifecycle boundary for Secure Boot state and boot mutation hooks.
 
 # Resolve lib directory (handles symlinks from /usr/local/bin -> /usr/local/lib)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -11,7 +9,7 @@ LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
 # Fallback for development (running from repo checkout)
 [[ -d "$LIB_DIR" ]] || LIB_DIR="${SCRIPT_DIR}/../lib"
 
-for lib in common checks discover sign enroll windows status; do
+for lib in common lifecycle checks discover sign enroll windows status; do
   # shellcheck source=/dev/null
   source "${LIB_DIR}/${lib}.sh"
 done
@@ -20,45 +18,154 @@ done
 
 cmd_setup() {
   header "Secure Boot Setup"
-  check_deps
-  check_efi_mode
-  check_root "setup"
-  require_gum
-
-  create_keys
-  ensure_limine_secure_boot_settings || die "Could not update Limine Secure Boot settings"
-  refresh_limine_config || die "Could not regenerate Limine config"
-
-  with_boot_repair_lock
-  snapshot_limine_conf_hash
-  ensure_windows_boot_entry || true
-  reenroll_limine_config_if_changed || die "Could not enroll Limine config checksum"
-
-  clean_stale_entries
-
-  echo
-  echo -e "  ${BOLD}Signing EFI files${NC}"
-  local sign_rc=0
-  sign_all_efi || sign_rc=$?
-
-  echo
-  echo -e "  ${BOLD}Next steps${NC}"
-  echo "    1. Reboot into BIOS/UEFI firmware settings"
-  echo "    2. Enable Setup Mode (clear/reset Secure Boot keys)"
-  echo "    3. Save and exit BIOS"
-  echo -e "    4. Run ${BOLD}sudo omasecboot enroll${NC}"
-  echo
-
-  return $sign_rc
+  fail "Setup is blocked until state-aware firmware backup and enrollment proof are available"
+  return 1
 }
 
 cmd_enroll() {
   header "Key Enrollment"
-  check_deps
-  check_efi_mode
-  check_root "enroll"
-  require_gum
-  enroll_keys
+  fail "Enrollment is blocked until state-aware firmware backup and trust-set proof are available"
+  return 1
+}
+
+observed_limine_setting() {
+  local key="$1" value
+  [[ -f "$LIMINE_DEFAULT_CONF" ]] || return 1
+  load_limine_default_entry "$key" || return 1
+  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
+  if [[ ${_limine_default_count:-0} -eq 0 ]]; then
+    printf 'unset\n'
+    return 0
+  fi
+  value=${_limine_default_raw:-}
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value=${value:1:${#value}-2}
+  fi
+  printf '%s\n' "$value"
+}
+
+observed_limine_token() {
+  local key="$1" token="$2" value
+  [[ -f "$LIMINE_DEFAULT_CONF" ]] || return 1
+  load_limine_default_entry "$key" || return 1
+  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
+  value=${_limine_default_raw:-}
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value=${value:1:${#value}-2}
+  fi
+  if [[ " $value " == *" $token "* ]]; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+verify_adoption_observations() {
+  local expected_verification="$1" expected_enrollment="$3"
+  local expected_before_save="$5" expected_after_save="$7"
+  [[ "$(observed_limine_setting "ENABLE_VERIFICATION")" == \
+    "$expected_verification" ]] || return 1
+  [[ "$(observed_limine_setting "ENABLE_ENROLL_LIMINE_CONFIG")" == \
+    "$expected_enrollment" ]] || return 1
+  [[ "$(observed_limine_token "COMMANDS_BEFORE_SAVE" "limine-reset-enroll")" == \
+    "$expected_before_save" ]] || return 1
+  [[ "$(observed_limine_token "COMMANDS_AFTER_SAVE" "limine-enroll-config")" == \
+    "$expected_after_save" ]] || return 1
+}
+
+cmd_adopt() {
+  local original_verification="" original_enrollment=""
+  local original_before_save="" original_after_save=""
+  local observed_verification observed_enrollment
+  local observed_before_save observed_after_save
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --verification-original)
+        [[ $# -ge 2 ]] || die "Missing value for --verification-original"
+        original_verification="$2"
+        shift 2
+        ;;
+      --enrollment-original)
+        [[ $# -ge 2 ]] || die "Missing value for --enrollment-original"
+        original_enrollment="$2"
+        shift 2
+        ;;
+      --before-save-original)
+        [[ $# -ge 2 ]] || die "Missing value for --before-save-original"
+        original_before_save="$2"
+        shift 2
+        ;;
+      --after-save-original)
+        [[ $# -ge 2 ]] || die "Missing value for --after-save-original"
+        original_after_save="$2"
+        shift 2
+        ;;
+      *)
+        die "Unknown adoption option: $1"
+        ;;
+    esac
+  done
+
+  header "Adopt Existing Configuration"
+  check_root "adopt"
+  command -v jq >/dev/null 2>&1 || die "jq not installed. Run: ${BOLD}sudo pacman -S jq${NC}"
+  command -v flock >/dev/null 2>&1 \
+    || die "flock not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
+  read_lifecycle || die "Lifecycle state is invalid or unsafe"
+  # shellcheck disable=SC2154 # Set by read_lifecycle from the sourced module.
+  [[ "$_lifecycle_state" == unmanaged ]] \
+    || die "Adoption requires unmanaged state; current state is ${_lifecycle_state}"
+
+  observed_verification=$(observed_limine_setting "ENABLE_VERIFICATION") \
+    || die "Could not read a unique ENABLE_VERIFICATION value from ${LIMINE_DEFAULT_CONF}"
+  observed_enrollment=$(observed_limine_setting "ENABLE_ENROLL_LIMINE_CONFIG") \
+    || die "Could not read a unique ENABLE_ENROLL_LIMINE_CONFIG value from ${LIMINE_DEFAULT_CONF}"
+  observed_before_save=$(observed_limine_token \
+    "COMMANDS_BEFORE_SAVE" "limine-reset-enroll") \
+    || die "Could not read a unique COMMANDS_BEFORE_SAVE value from ${LIMINE_DEFAULT_CONF}"
+  observed_after_save=$(observed_limine_token \
+    "COMMANDS_AFTER_SAVE" "limine-enroll-config") \
+    || die "Could not read a unique COMMANDS_AFTER_SAVE value from ${LIMINE_DEFAULT_CONF}"
+
+  echo "  Existing managed settings:"
+  echo "    ENABLE_VERIFICATION=${observed_verification}"
+  echo "    ENABLE_ENROLL_LIMINE_CONFIG=${observed_enrollment}"
+  echo "    COMMANDS_BEFORE_SAVE contains limine-reset-enroll: ${observed_before_save}"
+  echo "    COMMANDS_AFTER_SAVE contains limine-enroll-config: ${observed_after_save}"
+  echo
+  warn "Choose unknown when the value before OmaSecBoot cannot be confirmed"
+
+  if [[ -z "$original_verification" || -z "$original_enrollment" \
+    || -z "$original_before_save" || -z "$original_after_save" ]]; then
+    require_gum
+  fi
+  if [[ -z "$original_verification" ]]; then
+    original_verification=$(gum choose --header \
+      "Original ENABLE_VERIFICATION value" yes no unset unknown) || return 1
+  fi
+  if [[ -z "$original_enrollment" ]]; then
+    original_enrollment=$(gum choose --header \
+      "Original ENABLE_ENROLL_LIMINE_CONFIG value" yes no unset unknown) || return 1
+  fi
+  if [[ -z "$original_before_save" ]]; then
+    original_before_save=$(gum choose --header \
+      "Was limine-reset-enroll originally in COMMANDS_BEFORE_SAVE?" \
+      present absent unknown) || return 1
+  fi
+  if [[ -z "$original_after_save" ]]; then
+    original_after_save=$(gum choose --header \
+      "Was limine-enroll-config originally in COMMANDS_AFTER_SAVE?" \
+      present absent unknown) || return 1
+  fi
+
+  adopt_lifecycle verify_adoption_observations \
+    "$observed_verification" "$original_verification" \
+    "$observed_enrollment" "$original_enrollment" \
+    "$observed_before_save" "$original_before_save" \
+    "$observed_after_save" "$original_after_save" \
+    || die "Could not commit the adoption record"
+  pass "Existing configuration adopted; boot producers remain blocked until complete repair is available"
 }
 
 cmd_windows_help() {
@@ -67,9 +174,9 @@ cmd_windows_help() {
   echo
   echo -e "  ${BOLD}Commands${NC}"
   echo "    available   Check for Windows Boot Manager without root or output"
-  echo "    setup       Add the firmware BootNext entry to the Limine menu"
-  echo "    bootnext    Set firmware BootNext without rebooting"
-  echo "    reboot      Set firmware BootNext and reboot immediately"
+  echo "    setup       Blocked until firmware target identity can be proven"
+  echo "    bootnext    Blocked until the persisted target can be revalidated"
+  echo "    reboot      Blocked until the persisted target can be revalidated"
   echo
 }
 
@@ -85,25 +192,16 @@ cmd_windows() {
       find_windows_boot_entry >/dev/null
       ;;
     setup)
-      check_root "windows setup"
-      if windows_entry_is_configured; then
-        header "Windows Dual-Boot"
-        pass "Windows boot entry already in limine.conf"
-        return 0
-      fi
-      check_deps
-      require_gum
-      add_windows_boot_entry
+      fail "Windows setup is blocked until firmware target identity can be proven"
+      return 1
       ;;
     bootnext)
-      check_root "windows bootnext"
-      header "Boot to Windows"
-      set_windows_bootnext
+      fail "BootNext is blocked until the persisted Windows firmware target can be revalidated"
+      return 1
       ;;
     reboot)
-      check_root "windows reboot"
-      header "Boot to Windows"
-      reboot_to_windows
+      fail "Windows reboot is blocked until the persisted firmware target can be revalidated"
+      return 1
       ;;
     help|--help|-h)
       cmd_windows_help
@@ -121,60 +219,87 @@ cmd_windows() {
 }
 
 cmd_cleanup() {
-  check_core_deps
-  check_root "cleanup"
-  check_esp_mount
-  with_repair_lock
-  clean_stale_entries
+  fail "Cleanup is blocked until sbctl database backup and rollback are available"
+  return 1
 }
 
 cmd_sign() {
-  check_deps
-  check_root "sign"
-  with_boot_repair_lock
-  qheader "Signing EFI Files"
-  ensure_limine_secure_boot_settings || die "Could not update Limine Secure Boot settings"
-  snapshot_limine_conf_hash
-  ensure_windows_boot_entry || true
-  reenroll_limine_config_if_changed || die "Could not enroll Limine config checksum"
-  clean_stale_entries
-  local sign_rc=0
-  sign_all_efi || sign_rc=$?
-  return $sign_rc
+  fail "Signing is blocked until two-binary enrollment and final artifact proof are available"
+  return 1
 }
 
 cmd_status() {
+  local lifecycle_rc=0 status_rc=0
   check_core_deps
-  show_status
+  show_lifecycle_status || lifecycle_rc=$?
+  show_status || status_rc=$?
+  [[ $lifecycle_rc -eq 0 && $status_rc -eq 0 ]]
+}
+
+cmd_version() {
+  printf 'omasecboot %s\n' "$OMASECBOOT_VERSION"
+}
+
+external_mutation_requires_repair() {
+  transaction_phase_start "repair-required" || return 1
+  return 1
+}
+
+record_external_mutation() {
+  local operation="$1"
+  run_lifecycle_transaction "$operation" "active" "active" \
+    external_mutation_requires_repair
+}
+
+record_limine_external_mutation() {
+  record_external_mutation "limine-post-repair"
+}
+
+cmd_hook_external_mutation() {
+  local operation="$1" rc=0
+  lifecycle_automation_is_active || rc=$?
+  case "$rc" in
+    0) record_external_mutation "$operation" ;;
+    1) return 0 ;;
+    *) return "$rc" ;;
+  esac
+}
+
+cmd_hook() {
+  [[ $# -eq 1 ]] || return 2
+  case "$1" in
+    pre) lifecycle_hook_pre ;;
+    post) lifecycle_hook_post record_limine_external_mutation ;;
+    package-cleanup) cmd_hook_external_mutation "package-cleanup-repair" ;;
+    package-sign) cmd_hook_external_mutation "package-sign-repair" ;;
+    *) return 2 ;;
+  esac
+}
+
+cmd_guard() {
+  [[ $# -eq 1 && $1 == transaction ]] || return 2
+  guard_boot_transaction
 }
 
 cmd_help() {
   header "Command Help"
   echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
-  echo -e "  After setup, ${DIM}zz-omasecboot-cleanup.hook${NC}, ${DIM}zz-sbctl.hook${NC}, ${DIM}zzz-omasecboot.hook${NC},"
-  echo -e "  and Limine post-hook ${DIM}zzz-omasecboot-sign${NC} keep Secure Boot state repaired."
+  echo "  Lifecycle guards are active; boot mutation remains blocked until audited proof paths are available."
   echo
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
   echo
   echo -e "  ${BOLD}Commands${NC}"
-  echo "    setup       Set Limine verification/enrollment state and sign EFI files"
-  echo "    enroll      Enroll keys into firmware (requires Setup Mode)"
-  echo "    windows     Set up or hand off to Windows through firmware BootNext"
+  echo "    setup       Blocked until state-aware firmware proof is available"
+  echo "    adopt       Explicitly adopt an existing OmaSecBoot configuration"
+  echo "    enroll      Blocked until firmware backup and trust-set proof are available"
+  echo "    windows     Probe Windows; mutation commands remain blocked"
   echo "    status      Show Secure Boot status and file verification"
-  echo "    sign        Reassert Limine settings, repair config drift, and sign EFI files"
-  echo "    cleanup     Remove stale sbctl tracked-file entries"
+  echo "    sign        Blocked until final artifact proof is available"
+  echo "    cleanup     Blocked until sbctl rollback is available"
+  echo "    version     Show the installed OmaSecBoot version"
   echo "    help        Show this help"
   echo
-  echo -e "  ${DIM}Note:${NC} This tool keeps ${BOLD}ENABLE_VERIFICATION=no${NC} for Omarchy's EFI UKI flow while using Limine config enrollment."
-  echo -e "        ${BOLD}status${NC} warns if Limine 12 Secure Boot path-hash enforcement would affect non-EFI paths."
-  echo -e "        Limine-originated boot drift is repaired by the Limine post-hook after upstream writes finish."
-  echo
-  echo -e "  ${BOLD}Workflow${NC}"
-  echo "    1. sudo omasecboot setup"
-  echo "    2. Reboot -> BIOS -> enable Setup Mode (clear keys)"
-  echo "    3. sudo omasecboot enroll"
-  echo "    4. Reboot -> BIOS -> enable Secure Boot"
-  echo "    5. sudo omasecboot windows setup"
+  echo -e "  ${DIM}Safety:${NC} Do not change firmware keys from this implementation state."
   echo
 }
 
@@ -191,11 +316,15 @@ main() {
 
   case "${1:-}" in
     setup)    cmd_setup ;;
+    adopt)    shift; cmd_adopt "$@" ;;
     enroll)   cmd_enroll ;;
     windows)  shift; cmd_windows "$@" ;;
     cleanup)  cmd_cleanup ;;
     sign)     cmd_sign ;;
     status)   cmd_status ;;
+    version|--version|-v) cmd_version ;;
+    hook)     shift; cmd_hook "$@" ;;
+    guard)    shift; cmd_guard "$@" ;;
     help|--help|-h)  cmd_help ;;
     *)
       cmd_help
