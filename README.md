@@ -2,10 +2,10 @@
 
 **[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides only the durable lifecycle and concurrency boundary; mutation and repair remain blocked.
+The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary and a tested artifact-proof transaction; public mutation and automatic repair remain blocked until interrupted recovery is available.
 
 > [!CAUTION]
-> **Development status, 2026-08-27:** lifecycle manifests, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, and explicit adoption are implemented. Complete artifact repair, firmware-key backup, exact Windows target proof, rollback, unconfiguration, and safe removal are not. Their mutation commands and active producer automation fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-08-28:** lifecycle manifests, file rollback, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, explicit adoption, and hermetic Limine/EFI proof are implemented. Interrupted recovery, firmware-key backup, exact Windows target proof, unconfiguration, and safe removal are not. Public mutation commands and active producer automation fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
 
 ## Why This Tool
 
@@ -50,9 +50,9 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 
 ## Development Status
 
-The package-first release uses five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle unit writes root-owned transaction manifests and backups before its state mutation, commits stable state last, validates owned nested hooks, and rejects unsafe Limine and package producers. Safe package removal remains blocked.
+The package-first release uses five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before its mutation, commits stable state last, validates owned nested hooks, and rejects unsafe Limine and package producers. The artifact transaction proves both Limine checksums, local signatures, and sbctl tracking in hermetic fixtures. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
 
-The release gate also requires direct read-back proof of the current Limine config checksum in both bootable Limine executables, final EFI signing and tracking verification, raw PK/KEK/db/dbx backup before Setup Mode, fail-closed Windows firmware targeting, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
+The remaining release gate requires raw PK/KEK/db/dbx backup before Setup Mode, fail-closed Windows firmware targeting, interrupted recovery, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
 
 ## Prerequisites
 
@@ -86,7 +86,7 @@ OmaSecBoot does not mount or modify NTFS and does not diagnose Windows hibernati
 
 `OmaSecBoot` is the product name; `omasecboot` is the command, repository slug, and machine-facing namespace.
 
-There is no supported installation from the current branch. Do not run `make install`: the guards are intentionally fail-closed and complete boot repair is not yet available.
+There is no supported installation from the current branch. Do not run `make install`: the guards are intentionally fail-closed and interrupted recovery is not yet available.
 
 For source review only:
 
@@ -110,11 +110,11 @@ The audited workflow, which is not implemented yet, is:
 
 ## Commands
 
-The current lifecycle unit exposes `version`, read-only status and Windows discovery, and explicit adoption. All boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until their audited proof and rollback units land. Do not adopt a production configuration yet: `active` deliberately blocks boot-mutating package, Limine, and snapshot producers while complete repair is unavailable.
+The current implementation exposes `version`, read-only status and Windows discovery, and explicit adoption. Boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until interrupted recovery and their remaining audited units land. Do not adopt a production configuration yet: `active` deliberately blocks boot-mutating package, Limine, and snapshot producers.
 
 ### `setup`
 
-Blocked until state-aware firmware backup, trust-set comparison, enrollment proof, and final artifact proof are available.
+Blocked until state-aware firmware backup, trust-set comparison, enrollment proof, and interrupted recovery are available.
 
 ### `enroll`
 
@@ -122,7 +122,7 @@ Blocked until raw PK, KEK, db, and dbx backup plus exact planned-trust compariso
 
 ### `adopt`
 
-Records an existing untracked configuration as an `active` lifecycle after displaying managed Limine settings and collecting confirmed original values or `unknown`. It revalidates the observations under the shared boot lock and lifecycle lock before committing. Adoption does not claim firmware enrollment or complete repair capability.
+Records an existing untracked configuration as an `active` lifecycle after displaying managed Limine settings and collecting confirmed original values or `unknown`. It revalidates the observations under the shared boot lock and lifecycle lock before committing. Adoption does not claim firmware enrollment or activate producer repair.
 
 ### `windows`
 
@@ -135,15 +135,15 @@ The dormant pre-contract parser matches `bootmgfw.efi` text and can select the w
 
 ### `status`
 
-Shows Secure Boot state, ESP mount state, hook status, Limine 12 readiness diagnostics for path hashes and interface colors, Windows entry, Omarchy Direct Boot firmware entries, stale sbctl tracking entries, and enrolled file verification. Works without root for basic info; stale tracking diagnostics and file verification require root.
+Shows Secure Boot state, ESP mount state, hook status, direct current-checksum proof in both Limine binaries, Limine 12 readiness diagnostics, Windows entry, Omarchy Direct Boot firmware entries, stale sbctl tracking entries, and enrolled file verification. Works without root for basic info; stale tracking diagnostics and file verification require root.
 
 ### `sign`
 
-Blocked until current-config enrollment in both Limine executables and final signature/tracking proof are available.
+Blocked until interrupted recovery can safely resume or unwind the implemented artifact transaction.
 
 ### `cleanup`
 
-Blocked until the sbctl database has durable backup and rollback coverage.
+Blocked until interrupted recovery is available.
 
 ### `version`
 
@@ -167,7 +167,7 @@ Finds all `.efi`/`.EFI` files under `/boot`, plus snapshot UKIs with hash suffix
 
 ### Signing and Database Registration
 
-The signing helpers remain reviewable library code, but the dispatcher keeps them unreachable until the complete proof transaction lands.
+The artifact transaction remains unreachable from public mutation commands until interrupted recovery is available.
 
 This repo treats **signature state** and **tracking state** as separate concerns:
 
@@ -176,19 +176,21 @@ This repo treats **signature state** and **tracking state** as separate concerns
 
 For normal unsigned files, `sbctl sign -s` both signs and tracks the file.
 
+Each Limine target is rebuilt from the package's unsigned executable in a same-directory staging file. OmaSecBoot enrolls the current config checksum, signs and verifies the staged executable, then atomically replaces the target. A repair never durably publishes an unsigned Limine target. Proof also rejects higher-priority `limine.conf` candidates on the ESP that could shadow `/boot/limine.conf` at boot.
+
 For already-signed files, Arch's current `sbctl` (0.18) has an upstream bug where `--save` may be ignored. Snapshot UKIs can hit exactly that case, because limine-snapper-sync may copy already-signed EFI files into snapshot history. When that happens, this repo writes the expected sbctl file entry directly so the file becomes truly tracked and future `zz-sbctl.hook` runs include it.
 
 This is why `sign` may report a snapshot UKI as `registered` instead of `signed`.
 
-Tracking reads use `sbctl list-files` first, then fall back to the on-disk sbctl file database only when needed. Stale-entry cleanup also merges in readable database entries so deleted snapshot UKIs do not remain hidden from cleanup if sbctl's CLI view is incomplete. If a fallback is required, this repo prefers `files.db` over `files.json`.
+Tracking reads use `sbctl list-files` first, then fall back to the on-disk sbctl file database only when needed. Stale-entry cleanup also merges in readable database entries so deleted snapshot UKIs do not remain hidden from cleanup if sbctl's CLI view is incomplete. The database path comes from one explicit plain top-level `files_db` scalar in `/etc/sbctl/sbctl.conf`; without that file, resolution follows sbctl 0.18's legacy-directory or default-path selection and rejects unsupported config syntax rather than guessing.
 
 ### Lifecycle Guards
 
-Package and Limine hooks currently enforce the lifecycle boundary rather than repairing boot artifacts:
+Package and Limine hooks currently enforce the lifecycle boundary rather than running the dormant artifact transaction:
 
 | Trigger | Scope | Purpose |
 |---|---|---|
-| `00-omasecboot-transition-guard.hook` (ours) | Boot paths and producer packages | Aborts before boot mutation during unsafe lifecycle states or while complete repair is unavailable |
+| `00-omasecboot-transition-guard.hook` (ours) | Boot paths and producer packages | Aborts before boot mutation during unsafe lifecycle states or while interrupted recovery is unavailable |
 | `zz-omasecboot-cleanup.hook` (ours) | Boot paths and producer packages | Records a bypassed external mutation before sbctl runs |
 | `zz-sbctl.hook` (sbctl built-in) | Boot/EFI path changes | Re-signs files already in sbctl's database |
 | `zzz-omasecboot.hook` (ours) | Boot paths and producer packages | Records a bypassed external mutation after sbctl runs |
@@ -231,12 +233,12 @@ Do not install or invoke the current menu fragment. The audited action first rev
 Boot-mutating package transaction
   -> 00-omasecboot-transition-guard checks lifecycle before mutation
   -> unmanaged or disabled: automation remains inactive
-  -> active: transaction aborts while complete repair is unavailable
+  -> active: transaction aborts while interrupted recovery is unavailable
   -> transition or recovery-required: transaction aborts
 
 Hook-aware Limine or snapshot mutation
   -> 000-omasecboot-guard validates stable state or owned transition plus FD 200
-  -> active: mutation aborts while complete repair is unavailable
+  -> active: mutation aborts while interrupted recovery is unavailable
   -> owned nested transition: mutation may proceed and nested post-repair is suppressed
   -> external transition or recovery-required: mutation aborts fatally
 ```

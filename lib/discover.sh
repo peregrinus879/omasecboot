@@ -4,50 +4,93 @@
 # Find all signable EFI files under the ESP.
 # Excludes Microsoft files (trusted via -m enrollment), 32-bit bootloader, backups.
 discover_efi_files() {
-  find "${ESP}" -type f \( \
-    -name "*.efi" -o \
-    -name "*.EFI" -o \
-    -name "*.efi_sha1_*" -o \
-    -name "*.efi_sha256_*" -o \
-    -name "*.efi_b3_*" -o \
-    -name "*.efi_blake3_*" -o \
-    -name "*.efi_xxh_*" -o \
-    -name "*.efi_xxhash_*" \
+  local root="${1:-$(esp_path)}" discovered
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  discovered=$(find "$root" -xdev -type f \( \
+    -iname "*.efi" -o \
+    -iname "*.efi_sha1_*" -o \
+    -iname "*.efi_sha256_*" -o \
+    -iname "*.efi_b3_*" -o \
+    -iname "*.efi_blake3_*" -o \
+    -iname "*.efi_xxh_*" -o \
+    -iname "*.efi_xxhash_*" \
   \) \
-    ! -path "*/Microsoft/*" \
-    ! -name "BOOTIA32.EFI" \
-    ! -name "*.bak" \
-    2>/dev/null | sort
+    ! -ipath "*/Microsoft/*" \
+    ! -iname "BOOTIA32.EFI" \
+    ! -iname "*.bak" \
+    -print 2>/dev/null) || return 1
+  [[ -z "$discovered" ]] || printf '%s\n' "$discovered" | LC_ALL=C sort
 }
 
-# Resolve the sbctl file database path, honoring local overrides.
+sbctl_config_path() {
+  printf '%s\n' /etc/sbctl/sbctl.conf
+}
+
+sbctl_config_files_db_path() {
+  local config="$1" line trimmed key last_top_key="" value="" candidate count=0
+  local document_marker_seen=false content_seen=false
+  validate_control_file "$config" || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+    if [[ "$line" == --- ]]; then
+      [[ "$document_marker_seen" == false && "$content_seen" == false ]] || return 1
+      document_marker_seen=true
+      continue
+    fi
+    [[ "$line" != ... ]] || return 1
+
+    if [[ "$line" != [[:space:]]* ]]; then
+      [[ "$line" =~ ^([a-z_][a-z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]] \
+        || return 1
+      key=${BASH_REMATCH[1]}
+      last_top_key=$key
+      content_seen=true
+      [[ "$key" == files_db ]] || continue
+      count=$((count + 1))
+      [[ $count -eq 1 ]] || return 1
+      candidate=${BASH_REMATCH[2]}
+      candidate=${candidate#"${candidate%%[![:space:]]*}"}
+      candidate=${candidate%"${candidate##*[![:space:]]}"}
+
+      if [[ "$candidate" =~ ^\"([^\"\\]*)\"([[:space:]]+#.*)?$ ]]; then
+        value=${BASH_REMATCH[1]}
+      elif [[ "$candidate" =~ ^\'([^\']*)\'([[:space:]]+#.*)?$ ]]; then
+        value=${BASH_REMATCH[1]}
+      elif [[ "$candidate" =~ ^(/[^[:space:]#]*)([[:space:]]+#.*)?$ ]]; then
+        value=${BASH_REMATCH[1]}
+      else
+        return 1
+      fi
+      continue
+    fi
+    [[ "$last_top_key" != files_db ]] || return 1
+    content_seen=true
+  done < "$config"
+
+  [[ $count -eq 1 ]] || return 1
+  [[ "$value" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+# Resolve the sbctl file database path using the same configured field as
+# sbctl. Unsupported YAML scalar forms fail closed instead of guessing.
 resolve_sbctl_files_db_path() {
-  local config="/etc/sbctl/sbctl.conf"
-  local files_db=""
+  local config files_db=""
+  config=$(sbctl_config_path) || return 1
 
-  if [[ -f "$config" ]]; then
-    files_db=$(awk -F': ' '/^[[:space:]]*files_db:[[:space:]]*/ {print $2; exit}' "$config" 2>/dev/null)
-  fi
-
-  if [[ -n "$files_db" ]]; then
+  if [[ -e "$config" || -L "$config" ]]; then
+    files_db=$(sbctl_config_files_db_path "$config") || return 1
     printf '%s\n' "$files_db"
     return 0
   fi
 
-  local candidate
-  for candidate in \
-    /var/lib/sbctl/files.db \
-    /var/lib/sbctl/files.json \
-    /usr/share/secureboot/files.db \
-    /usr/share/secureboot/files.json; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  printf '%s\n' "/var/lib/sbctl/files.db"
-  return 0
+  if [[ -d /usr/share/secureboot ]]; then
+    printf '%s\n' /usr/share/secureboot/files.db
+  else
+    printf '%s\n' /var/lib/sbctl/files.json
+  fi
 }
 
 resolve_sbctl_files_db() {
@@ -57,16 +100,34 @@ resolve_sbctl_files_db() {
   printf '%s\n' "$files_db"
 }
 
+sbctl_database_candidate_paths() {
+  local resolved candidate
+  resolved=$(resolve_sbctl_files_db_path) || return 1
+  printf '%s\n' "$resolved"
+  for candidate in \
+    /var/lib/sbctl/files.db \
+    /var/lib/sbctl/files.json \
+    /usr/share/secureboot/files.db \
+    /usr/share/secureboot/files.json; do
+    [[ "$candidate" != "$resolved" && -d "$(dirname "$candidate")" ]] \
+      || continue
+    printf '%s\n' "$candidate"
+  done | LC_ALL=C sort -u
+}
+
 # Query tracked files through sbctl's public CLI.
 # Returns 0 on success (including empty), 1 on lookup failure.
 list_enrolled_entries_from_cli() {
   command -v sbctl >/dev/null 2>&1 || return 1
 
-  local json
+  local files_db json
+  files_db=$(resolve_sbctl_files_db_path) || return 1
+  [[ -e "$files_db" || -L "$files_db" ]] || return 0
+  validate_control_file "$files_db" || return 1
   json=$(sbctl list-files --json 2>/dev/null) || return 1
-  [[ -n "$json" && "$json" != "null" ]] || return 1
+  [[ -n "$json" && "$json" != "null" ]] || return 0
 
-  echo "$json" | jq -r '
+  printf '%s\n' "$json" | jq -r '
     def row($file; $output):
       select(($file // "") != "")
       | [($file), ($output // $file)]

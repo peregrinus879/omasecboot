@@ -35,6 +35,7 @@ uninstall:
 
 test:
 	bash tests/lifecycle.sh
+	bash tests/artifacts.sh
 	bash tests/hooks.sh
 	bash tests/guards.sh
 	bash tests/dispatcher.sh

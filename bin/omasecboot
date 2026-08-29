@@ -165,7 +165,7 @@ cmd_adopt() {
     "$observed_before_save" "$original_before_save" \
     "$observed_after_save" "$original_after_save" \
     || die "Could not commit the adoption record"
-  pass "Existing configuration adopted; boot producers remain blocked until complete repair is available"
+  pass "Existing configuration adopted; boot producers remain blocked until recovery is available"
 }
 
 cmd_windows_help() {
@@ -219,12 +219,12 @@ cmd_windows() {
 }
 
 cmd_cleanup() {
-  fail "Cleanup is blocked until sbctl database backup and rollback are available"
+  fail "Cleanup is blocked until interrupted recovery is available"
   return 1
 }
 
 cmd_sign() {
-  fail "Signing is blocked until two-binary enrollment and final artifact proof are available"
+  fail "Signing is blocked until interrupted recovery is available"
   return 1
 }
 
@@ -284,7 +284,7 @@ cmd_guard() {
 cmd_help() {
   header "Command Help"
   echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
-  echo "  Lifecycle guards are active; boot mutation remains blocked until audited proof paths are available."
+  echo "  Artifact proof is implemented; mutation remains blocked until recovery is available."
   echo
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
   echo
@@ -294,8 +294,8 @@ cmd_help() {
   echo "    enroll      Blocked until firmware backup and trust-set proof are available"
   echo "    windows     Probe Windows; mutation commands remain blocked"
   echo "    status      Show Secure Boot status and file verification"
-  echo "    sign        Blocked until final artifact proof is available"
-  echo "    cleanup     Blocked until sbctl rollback is available"
+  echo "    sign        Blocked until interrupted recovery is available"
+  echo "    cleanup     Blocked until interrupted recovery is available"
   echo "    version     Show the installed OmaSecBoot version"
   echo "    help        Show this help"
   echo

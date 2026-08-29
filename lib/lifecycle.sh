@@ -300,7 +300,9 @@ read_lifecycle() {
 
 read_transaction_manifest() {
   local transaction_id="$1" manifest transaction_dir prior_state
-  local backup_kind backup_path backup_hash
+  local backup_entry backup_kind backup_path backup_hash backup_target backup_mode
+  local backup_uid backup_gid
+  local -A backup_targets=()
   manifest=$(lifecycle_manifest_path "$transaction_id") || return 1
   transaction_dir=$(dirname "$manifest")
   validate_private_control_directory "$transaction_dir" || return 1
@@ -325,17 +327,38 @@ read_transaction_manifest() {
     .owner.uid == $owner_uid and
     (.prior_state == "unmanaged" or .prior_state == "disabled" or .prior_state == "active") and
     (.completed_phases | type == "array" and all(.[]; type == "string")) and
-    (.backups | type == "array" and length == 1) and
+    (.backups | type == "array" and length >= 1) and
     (all(.backups[];
       type == "object" and
-      (.kind == "absent-lifecycle" or .kind == "prior-lifecycle") and
-      ((.path == null and .sha256 == null) or
-        ((.path | type == "string") and
-          (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
+      if .kind == "absent-lifecycle" then
+        .path == null and .sha256 == null and .target == null
+      elif .kind == "prior-lifecycle" then
+        (.path | type == "string") and
+        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        .target == null
+      elif .kind == "file" then
+        (.path | type == "string") and
+        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.target | type == "string" and startswith("/")) and
+        (.mode | type == "string" and test("^[0-7]{3,4}$")) and
+        (.uid | type == "number" and . >= 0 and floor == .) and
+        (.gid | type == "number" and . >= 0 and floor == .)
+      elif .kind == "absent-file" then
+        .path == null and .sha256 == null and
+        (.target | type == "string" and startswith("/")) and
+        .mode == null and .uid == null and .gid == null
+      else false end
     )) and
     (.service_state | type == "object") and
     (.current_phase == null or (.current_phase | type == "string")) and
-    (.failure == null or (.failure | type == "object"))
+    (.failure == null or (.failure | type == "object")) and
+    (.rollback == null or (
+      (.rollback | type == "object") and
+      (.rollback.status == "completed" or .rollback.status == "failed") and
+      (.rollback.attempted_at | type == "string") and
+      ((.rollback.failures | type) == "array") and
+      (.rollback.failures | all(.[]; type == "string"))
+    ))
   ' "$manifest" >/dev/null || return 1
   _manifest_json=$(jq -c . "$manifest") || return 1
   prior_state=$(jq -r '.prior_state' <<< "$_manifest_json") || return 1
@@ -352,6 +375,33 @@ read_transaction_manifest() {
     validate_private_control_file "$backup_path" || return 1
     [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
   fi
+
+  while IFS= read -r backup_entry; do
+    [[ -n "$backup_entry" ]] || continue
+    backup_kind=$(jq -r '.kind' <<< "$backup_entry") || return 1
+    backup_path=$(jq -r '.path // ""' <<< "$backup_entry") || return 1
+    backup_hash=$(jq -r '.sha256 // ""' <<< "$backup_entry") || return 1
+    backup_target=$(jq -r '.target' <<< "$backup_entry") || return 1
+    backup_mode=$(jq -r '.mode // ""' <<< "$backup_entry") || return 1
+    backup_uid=$(jq -r '.uid // ""' <<< "$backup_entry") || return 1
+    backup_gid=$(jq -r '.gid // ""' <<< "$backup_entry") || return 1
+    [[ "$backup_target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+    path_has_no_symlink_components "$backup_target" || return 1
+    [[ -z "${backup_targets[$backup_target]:-}" ]] || return 1
+    backup_targets["$backup_target"]=1
+    if [[ "$backup_kind" == file ]]; then
+      [[ "$(dirname "$backup_path")" == "$transaction_dir" \
+        && "$(basename "$backup_path")" =~ ^file-[1-9][0-9]*\.backup$ ]] \
+        || return 1
+      [[ "$backup_mode" =~ ^[0-7]{3,4}$ \
+        && "$backup_uid" =~ ^[0-9]+$ && "$backup_gid" =~ ^[0-9]+$ ]] || return 1
+      [[ "$backup_uid" == "$(control_owner_uid)" ]] || return 1
+      mode_is_control_safe "$backup_mode" || return 1
+      validate_private_control_file "$backup_path" || return 1
+      [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
+    fi
+  done < <(jq -c '.backups[] |
+    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json")
 }
 
 manifest_owner_is_alive() {
@@ -428,6 +478,9 @@ begin_lifecycle_transaction() {
   token_hash=$(sha256_text "$token") || return 1
   boot_id=$(boot_id_value) || return 1
   owner_pid=$BASHPID
+  [[ "$(process_effective_uid "$owner_pid")" == "$(control_owner_uid)" ]] \
+    || return 1
+  process_has_ancestor "$owner_pid" "$BASHPID" || return 1
   owner_start=$(process_start_time "$owner_pid") || return 1
   timestamp=$(utc_timestamp) || return 1
   service_state=$(capture_service_state) || return 1
@@ -436,9 +489,10 @@ begin_lifecycle_transaction() {
 
   install -d -m 700 "$transaction_dir" || return 1
   validate_control_directory "$transaction_dir" || return 1
+  durable_sync "$(transactions_dir_path)" || return 1
 
   if [[ "$_lifecycle_state" == unmanaged ]]; then
-    backups='[{"path":null,"sha256":null,"kind":"absent-lifecycle"}]'
+    backups='[{"path":null,"sha256":null,"kind":"absent-lifecycle","target":null}]'
   else
     prior_backup="${transaction_dir}/prior-lifecycle.json"
     cp -p "$(lifecycle_file_path)" "$prior_backup" || return 1
@@ -447,7 +501,7 @@ begin_lifecycle_transaction() {
     durable_sync "$prior_backup" || return 1
     prior_hash=$(sha256_file "$prior_backup") || return 1
     backups=$(jq -cn --arg path "$prior_backup" --arg hash "$prior_hash" \
-      '[{path: $path, sha256: $hash, kind: "prior-lifecycle"}]') || return 1
+      '[{path: $path, sha256: $hash, kind: "prior-lifecycle", target: null}]') || return 1
   fi
 
   manifest_document=$(jq -cn \
@@ -484,7 +538,8 @@ begin_lifecycle_transaction() {
       completed_phases: [],
       backups: $backups,
       service_state: $service_state,
-      failure: null
+      failure: null,
+      rollback: null
     }') || return 1
   printf '%s\n' "$manifest_document" | atomic_write_control_file "$manifest" 600 \
     || return 1
@@ -506,6 +561,196 @@ write_transaction_manifest_json() {
   local document="$1" manifest
   manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
   printf '%s\n' "$document" | atomic_write_control_file "$manifest" 600
+}
+
+transaction_backup_file() {
+  local target="$1" allow_absent="${2:-false}"
+  local transaction_dir backup_path backup_hash target_hash mode uid gid document index
+  local device inode current_device current_inode
+  [[ "$allow_absent" == true || "$allow_absent" == false ]] || return 1
+  [[ "$_transaction_active" == true && "$target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  [[ $(jq -r '.status' <<< "$_manifest_json") == transition ]] || return 1
+  if jq -e --arg target "$target" \
+    '.backups[] | select(.target == $target)' <<< "$_manifest_json" >/dev/null; then
+    return 0
+  fi
+
+  validate_control_directory "$(dirname "$target")" || return 1
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
+    [[ "$allow_absent" == true ]] || return 1
+    document=$(jq -c --arg target "$target" '
+      .backups += [{
+        kind: "absent-file",
+        target: $target,
+        path: null,
+        sha256: null,
+        mode: null,
+        uid: null,
+        gid: null
+      }]
+    ' <<< "$_manifest_json") || return 1
+    write_transaction_manifest_json "$document"
+    return
+  fi
+
+  validate_control_file "$target" || return 1
+  read -r uid gid mode device inode \
+    < <(stat -Lc '%u %g %a %d %i' "$target" 2>/dev/null) || return 1
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ ]] \
+    || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  index=$(jq -r '.backups | length' <<< "$_manifest_json") || return 1
+  backup_path="${transaction_dir}/file-${index}.backup"
+  [[ ! -e "$backup_path" && ! -L "$backup_path" ]] || return 1
+  cp -p "$target" "$backup_path" || return 1
+  chmod 600 "$backup_path" || {
+    rm -f "$backup_path"
+    return 1
+  }
+  validate_private_control_file "$backup_path" || {
+    rm -f "$backup_path"
+    return 1
+  }
+  durable_sync "$backup_path" || {
+    rm -f "$backup_path"
+    return 1
+  }
+  backup_hash=$(sha256_file "$backup_path") || {
+    rm -f "$backup_path"
+    return 1
+  }
+  read -r current_device current_inode \
+    < <(stat -Lc '%d %i' "$target" 2>/dev/null) || {
+    rm -f "$backup_path"
+    return 1
+  }
+  target_hash=$(sha256_file "$target") || {
+    rm -f "$backup_path"
+    return 1
+  }
+  [[ "$current_device" == "$device" && "$current_inode" == "$inode" \
+    && "$target_hash" == "$backup_hash" ]] || {
+    rm -f "$backup_path"
+    return 1
+  }
+  document=$(jq -c \
+    --arg target "$target" \
+    --arg path "$backup_path" \
+    --arg hash "$backup_hash" \
+    --arg mode "$mode" \
+    --argjson uid "$uid" \
+    --argjson gid "$gid" '
+      .backups += [{
+        kind: "file",
+        target: $target,
+        path: $path,
+        sha256: $hash,
+        mode: $mode,
+        uid: $uid,
+        gid: $gid
+      }]
+    ' <<< "$_manifest_json") || {
+    rm -f "$backup_path"
+    return 1
+  }
+  if ! write_transaction_manifest_json "$document"; then
+    if read_transaction_manifest "$_transaction_id" \
+      && jq -e --arg path "$backup_path" \
+        '.backups[] | select(.path == $path)' <<< "$_manifest_json" >/dev/null; then
+      return 1
+    fi
+    rm -f "$backup_path"
+    return 1
+  fi
+}
+
+restore_transaction_backup_entry() {
+  local entry="$1" kind target backup_path backup_hash mode uid gid
+  local parent temporary old_umask
+  kind=$(jq -r '.kind' <<< "$entry") || return 1
+  target=$(jq -r '.target' <<< "$entry") || return 1
+  [[ "$target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+  parent=$(dirname "$target")
+  validate_control_directory "$parent" || return 1
+
+  if [[ "$kind" == absent-file ]]; then
+    if [[ -e "$target" || -L "$target" ]]; then
+      validate_control_file "$target" || return 1
+      rm -f "$target" || return 1
+    fi
+    durable_sync "$parent" || return 1
+    [[ ! -e "$target" && ! -L "$target" ]]
+    return
+  fi
+  [[ "$kind" == file ]] || return 1
+  backup_path=$(jq -r '.path' <<< "$entry") || return 1
+  backup_hash=$(jq -r '.sha256' <<< "$entry") || return 1
+  mode=$(jq -r '.mode' <<< "$entry") || return 1
+  uid=$(jq -r '.uid' <<< "$entry") || return 1
+  gid=$(jq -r '.gid' <<< "$entry") || return 1
+  validate_private_control_file "$backup_path" || return 1
+  [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
+  if [[ -e "$target" || -L "$target" ]]; then
+    validate_control_file "$target" || return 1
+  fi
+
+  old_umask=$(umask)
+  umask 077
+  temporary=$(mktemp "${parent}/.omasecboot-restore.XXXXXX") || {
+    umask "$old_umask"
+    return 1
+  }
+  umask "$old_umask"
+  if ! cp "$backup_path" "$temporary" \
+    || ! chown "${uid}:${gid}" "$temporary" \
+    || ! chmod "$mode" "$temporary" \
+    || ! durable_sync "$temporary" \
+    || ! mv -f "$temporary" "$target" \
+    || ! durable_sync "$parent"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  validate_control_file "$target" || return 1
+  [[ "$(sha256_file "$target")" == "$backup_hash" ]]
+}
+
+rollback_transaction_files() {
+  local entry timestamp status=completed document
+  local -a entries failures=()
+  [[ "$_transaction_active" == true ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  mapfile -t entries < <(jq -c '.backups | reverse[] |
+    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json")
+  for entry in "${entries[@]}"; do
+    if ! restore_transaction_backup_entry "$entry"; then
+      failures+=("$(jq -r '.target' <<< "$entry")")
+    fi
+  done
+  [[ ${#failures[@]} -eq 0 ]] || status=failed
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -c \
+    --arg status "$status" \
+    --arg timestamp "$timestamp" \
+    --argjson failures "$(printf '%s\n' "${failures[@]}" | jq -Rsc '
+      split("\n") | map(select(length > 0))')" '
+      .rollback = {
+        status: $status,
+        attempted_at: $timestamp,
+        failures: $failures
+      }
+    ' <<< "$_manifest_json") || return 1
+  write_transaction_manifest_json "$document" || return 1
+  [[ "$status" == completed ]]
+}
+
+rollback_and_mark_recovery() {
+  local exit_code="$1" reason="$2" status="${3:-failed}" rollback_rc=0
+  rollback_transaction_files || rollback_rc=$?
+  if [[ $rollback_rc -ne 0 ]]; then
+    reason="${reason}; file rollback failed"
+  fi
+  ensure_lifecycle_recovery "$exit_code" "$reason" "$status"
 }
 
 transaction_phase_start() {
@@ -649,11 +894,23 @@ commit_lifecycle_transaction() {
 mark_lifecycle_recovery() {
   local exit_code="$1" reason="$2" status="${3:-failed}"
   local manifest_document state_document timestamp current_phase
+  local manifest operation lifecycle_owns_transaction=false
   [[ "$_transaction_active" == true ]] || return 1
   [[ "$status" == failed || "$status" == stale ]] || return 1
   read_lifecycle || return 1
-  [[ "$_lifecycle_state" == transition \
-    && "$_lifecycle_transaction_id" == "$_transaction_id" ]] || return 1
+  if [[ "$_lifecycle_state" == transition \
+    && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
+    manifest=$(jq -r '.transaction.manifest' <<< "$_lifecycle_json") || return 1
+    operation=$(jq -r '.transaction.operation' <<< "$_lifecycle_json") || return 1
+    lifecycle_owns_transaction=true
+  elif [[ "$_lifecycle_state" == "$_transaction_target_state" \
+    && $(jq -r '.last_transaction.id // ""' <<< "$_lifecycle_json") == "$_transaction_id" ]]; then
+    manifest=$(jq -r '.last_transaction.manifest' <<< "$_lifecycle_json") || return 1
+    operation=$(jq -r '.last_transaction.operation' <<< "$_lifecycle_json") || return 1
+    lifecycle_owns_transaction=true
+  fi
+  [[ "$lifecycle_owns_transaction" == true \
+    && "$manifest" == "$(lifecycle_manifest_path "$_transaction_id")" ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   timestamp=$(utc_timestamp) || return 1
   current_phase=$(jq -r '.current_phase // empty' <<< "$_manifest_json") || return 1
@@ -678,15 +935,23 @@ mark_lifecycle_recovery() {
   state_document=$(jq -c \
     --arg version "$OMASECBOOT_VERSION" \
     --arg timestamp "$timestamp" \
+    --arg id "$_transaction_id" \
+    --arg operation "$operation" \
+    --arg manifest "$manifest" \
     --arg reason "$reason" \
     --argjson exit_code "$exit_code" '
       .writer_version = $version |
       .generation += 1 |
       .state = "recovery-required" |
-      .transaction.failure = {
-        exit_code: $exit_code,
-        reason: $reason,
-        recorded_at: $timestamp
+      .transaction = {
+        id: $id,
+        operation: $operation,
+        manifest: $manifest,
+        failure: {
+          exit_code: $exit_code,
+          reason: $reason,
+          recorded_at: $timestamp
+        }
       } |
       .updated_at = $timestamp
     ' <<< "$_lifecycle_json") || return 1
@@ -724,7 +989,7 @@ transaction_exit_handler() {
   trap - EXIT INT TERM HUP
   if [[ "$_transaction_active" == true ]]; then
     [[ $exit_code -ne 0 ]] || exit_code=1
-    ensure_lifecycle_recovery "$exit_code" "command exited before transaction commit" failed \
+    rollback_and_mark_recovery "$exit_code" "command exited before transaction commit" failed \
       || true
   fi
   release_boot_repair_lock
@@ -734,13 +999,13 @@ transaction_exit_handler() {
 
 transaction_signal_handler() {
   local signal="$1" exit_code="$2"
-  trap - EXIT INT TERM HUP
   if [[ "$_transaction_active" == true ]]; then
-    ensure_lifecycle_recovery "$exit_code" "transaction interrupted by ${signal}" failed \
+    rollback_and_mark_recovery "$exit_code" "transaction interrupted by ${signal}" failed \
       || true
   fi
   release_boot_repair_lock
-  run_previous_exit_trap
+  restore_transaction_traps
+  kill -s "$signal" "$BASHPID"
   exit "$exit_code"
 }
 
@@ -763,6 +1028,17 @@ restore_transaction_traps() {
   _transaction_previous_int=""
   _transaction_previous_term=""
   _transaction_previous_hup=""
+}
+
+arm_transaction_traps() {
+  _transaction_previous_exit=$(trap -p EXIT || true)
+  _transaction_previous_int=$(trap -p INT || true)
+  _transaction_previous_term=$(trap -p TERM || true)
+  _transaction_previous_hup=$(trap -p HUP || true)
+  trap transaction_exit_handler EXIT
+  trap 'transaction_signal_handler INT 130' INT
+  trap 'transaction_signal_handler TERM 143' TERM
+  trap 'transaction_signal_handler HUP 129' HUP
 }
 
 run_lifecycle_transaction_with_preflight() {
@@ -802,14 +1078,7 @@ run_lifecycle_transaction_with_preflight() {
     return 1
   }
 
-  _transaction_previous_exit=$(trap -p EXIT || true)
-  _transaction_previous_int=$(trap -p INT || true)
-  _transaction_previous_term=$(trap -p TERM || true)
-  _transaction_previous_hup=$(trap -p HUP || true)
-  trap transaction_exit_handler EXIT
-  trap 'transaction_signal_handler INT 130' INT
-  trap 'transaction_signal_handler TERM 143' TERM
-  trap 'transaction_signal_handler HUP 129' HUP
+  arm_transaction_traps
 
   begin_lifecycle_transaction "$operation" "$target_state" || begin_rc=$?
   if [[ $begin_rc -ne 0 ]]; then
@@ -832,11 +1101,11 @@ run_lifecycle_transaction_with_preflight() {
   if [[ $callback_rc -eq 0 ]]; then
     commit_lifecycle_transaction || commit_rc=$?
     if [[ $commit_rc -ne 0 ]]; then
-      ensure_lifecycle_recovery "$commit_rc" "stable lifecycle commit failed" failed || true
+      rollback_and_mark_recovery "$commit_rc" "stable lifecycle commit failed" failed || true
       callback_rc=$commit_rc
     fi
   else
-    ensure_lifecycle_recovery "$callback_rc" "operation ${operation} failed" failed || true
+    rollback_and_mark_recovery "$callback_rc" "operation ${operation} failed" failed || true
   fi
 
   restore_transaction_traps
@@ -1120,7 +1389,7 @@ show_lifecycle_status() {
       if lifecycle_repair_is_available; then
         pass "Lifecycle: active"
       else
-        warn "Lifecycle: active (boot producers blocked until complete repair is available)"
+        warn "Lifecycle: active (boot producers blocked until interrupted recovery is available)"
         return 1
       fi
       ;;

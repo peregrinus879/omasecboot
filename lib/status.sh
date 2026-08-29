@@ -342,7 +342,7 @@ show_status() {
       pass "Limine enrollment hooks present"
       if limine_default_has_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll" \
         || limine_default_has_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"; then
-        warn "deprecated COMMANDS_* enrollment entries remain; automatic cleanup is blocked until complete artifact repair is available"
+        warn "deprecated COMMANDS_* enrollment entries remain; automatic cleanup is blocked until recovery is available"
       fi
     else
       warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
@@ -407,16 +407,24 @@ show_status() {
     all_ok=false
   fi
 
-  local shadow_config
-  for shadow_config in \
-    "${ESP}/EFI/limine/limine.conf" \
-    "${ESP}/EFI/BOOT/limine.conf" \
-    "${ESP}/EFI/arch-limine/limine.conf" \
-    "${ESP}/limine/limine.conf"; do
-    if [[ -f "$shadow_config" ]]; then
-      warn "Possible Limine config shadowing file: ${shadow_config}"
+  local shadow_config shadow_config_found=false current_config_checksum
+  while IFS= read -r shadow_config; do
+    if [[ -e "$shadow_config" || -L "$shadow_config" ]]; then
+      fail "Possible Limine config shadowing file: ${shadow_config}"
+      shadow_config_found=true
+      all_ok=false
     fi
-  done
+  done < <(limine_shadow_config_paths)
+
+  if [[ "$shadow_config_found" == false ]] \
+    && current_config_checksum=$(current_limine_config_checksum) \
+    && verify_limine_config_targets "$current_config_checksum"; then
+    pass "Current Limine config checksum enrolled in both boot binaries"
+  else
+    [[ "$shadow_config_found" == true ]] \
+      || fail "Current Limine config checksum is not proved in both boot binaries"
+    all_ok=false
+  fi
 
   local direct_boot_entries
   direct_boot_entries=$(list_omarchy_direct_boot_entries)
@@ -453,7 +461,7 @@ show_status() {
     fi
   else
     if [[ -f "${STATE_DIR}/windows-enabled" ]]; then
-      echo -e "  ${DIM}Windows boot entry missing from limine.conf (will be restored by sign)${NC}"
+      echo -e "  ${DIM}Managed Windows entry is missing; repair awaits validated firmware target identity${NC}"
     else
       echo -e "  ${DIM}No Windows entry (run ${BOLD}sudo omasecboot windows setup${NC}${DIM} to add)${NC}"
     fi
@@ -548,7 +556,7 @@ show_status() {
           echo -e "    ${YELLOW}!${NC} $file"
         done
         if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
-          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Repair is blocked until complete artifact proof is available; do not reboot with unresolved files.${NC}"
+          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Repair is blocked until recovery is available; do not reboot with unresolved files.${NC}"
         fi
         all_ok=false
         files_ok=false
@@ -562,7 +570,7 @@ show_status() {
       for stale_file in "${missing_tracked[@]}"; do
         echo -e "    ${YELLOW}!${NC} $stale_file"
       done
-      echo -e "  ${DIM}Tracking repair is blocked; boot-mutating package transactions remain unavailable.${NC}"
+      echo -e "  ${DIM}Tracking repair is blocked until recovery is available; boot-mutating package transactions remain unavailable.${NC}"
       all_ok=false
       files_ok=false
     fi
@@ -572,7 +580,7 @@ show_status() {
       if $files_ok; then
         pass "All tracked files signed and all discovered EFI files enrolled"
       else
-        warn "Some files failed. Repair is blocked until complete artifact proof is available"
+        warn "Some files failed. Repair is blocked until recovery is available"
       fi
     fi
   else

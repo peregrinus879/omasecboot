@@ -21,7 +21,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `pacman-hooks/zzz-omasecboot.hook` - Post-sbctl lifecycle checkpoint for boot paths and producer packages
 - `limine-hooks/000-omasecboot-guard` - Limine pre-hook for lifecycle and FD 200 ownership validation
 - `limine-hooks/zzz-omasecboot-sign` - Limine post-hook for owned suppression or serialized recovery recording
-- `tests/lifecycle.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle boundary and failure-injection checks
+- `tests/lifecycle.sh`, `tests/artifacts.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, artifact-proof, and failure-injection checks
 - `tests/install.sh` - Staged install, upgrade, hook-target, and uninstall contract checks
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
@@ -48,7 +48,7 @@ sbctl, jq, gum (interactive only). Omarchy provides the rest (`limine-update`, `
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary but deliberately reports repair capability unavailable. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked until their later atomic units provide the required proof and rollback. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary and tested artifact-proof transaction but deliberately reports repair capability unavailable until interrupted recovery lands. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults.
@@ -59,13 +59,16 @@ The current implementation provides the lifecycle boundary but deliberately repo
 - Limine strips leading whitespace and generated sub-entries are indented. Entry-boundary parsers in `status.sh` must match trimmed lines rather than column-zero markers.
 - `with_limine_lock` uses `/run/lock/boot-partition.lock`, the mutex shared with limine-entry-tool and limine-snapper-sync. Validate inherited descriptor ownership and the current pathname's device and inode, then call `flock` on inherited FD 200 before entering the critical section. A different pathname, an unchecked inherited FD, or validation without locking does not serialize boot mutations.
 - A Limine pre-hook rejects external hook-aware mutation during an OmaSecBoot transition. A post-hook validates and locks inherited FD 200 or acquires the shared lock itself before repair. ALPM PreTransaction guards block boot-mutating package transactions during `transition` and `recovery-required`, and block package removal until state is verified `disabled` or pristine.
+- Keep repair capability unavailable until interrupted recovery can handle stale manual, Limine, snapshot, and package mutations. Artifact proof alone does not authorize producer automation, and a PostTransaction backup cannot represent a package artifact's pre-transaction state.
 - Pausing `limine-snapper-sync.service` is auxiliary quiescing, not the concurrency boundary. Snapper plugins, transient units, cleanup, and full restore are separate producers. Full `limine-snapper-restore` has no parent shared lock on the audited release; allow it only in stable state, serialize post-repair, and reject it during `transition` and `recovery-required`.
 - `cmd_setup()` is the provisioning path and may regenerate Limine-managed boot state. `cmd_sign()` is the lightweight repair path and must not call `limine-update` or rebuild UKIs.
 - `cmd_setup()` and `cmd_sign()` run `sign_all_efi()` as their final mutation. Config repair and checksum re-enrollment happen before signing.
 - Keep `sign_all_efi()` in `cmd_sign()` so new snapshot UKIs are discovered and registered; `zz-sbctl.hook` re-signs only files already known to sbctl.
 - Keep current-config enrollment in `cmd_sign()`. Do not rely only on change-since-start detection or upstream exit status. Enroll and directly verify the current checksum in both `/EFI/limine/limine_x64.efi` and `/EFI/BOOT/BOOTX64.EFI` before final signing.
+- Build each enrolled Limine target from the unsigned package executable in a same-directory staging file. Enroll, locally sign, directly verify, and sync the staging file before atomically replacing the target; never durably publish an unsigned boot target.
+- Reject higher-priority Limine config candidates on the ESP before proving `/boot/limine.conf`; a signed binary containing the wrong config checksum is not a successful proof.
 - Enrollment or Secure Boot enablement instructions require a read-only proof after final signing that every discovered non-Microsoft EFI artifact has the local signature and sbctl tracking state.
-- Prefer `sbctl list-files` as the tracked-file source of truth. Direct database reads are fallback and cleanup/compatibility paths; prefer `files.db` over `files.json`.
+- Prefer `sbctl list-files` as the tracked-file source of truth. Resolve `files_db` from one explicit plain top-level scalar in `/etc/sbctl/sbctl.conf`; without that file, match sbctl 0.18's legacy `/usr/share/secureboot/files.db` selection or `/var/lib/sbctl/files.json` default. Unsupported config syntax fails closed. Direct database reads are fallback and cleanup/compatibility paths.
 - Retain `save_sbctl_file_entry()` while Arch ships the affected sbctl release; its evidence and removal trigger live in `docs/maintenance.md`.
 - Pacman PostTransaction ordering must remain `zz-omasecboot-cleanup` before `zz-sbctl` before `zzz-omasecboot`. The cleanup hook mirrors `zz-sbctl.hook` path triggers; other hooks may sort between them. Package repair and the Limine post-hook cover different mutation sources and are not redundant.
 - Windows uses `protocol: efi_boot_entry` so the managed path requests a direct firmware handoff instead of chainloading Windows through Limine. BootNext is a one-boot request; do not claim successful Windows boot, PCR7 binding, stable measurements, or absence of BitLocker recovery.

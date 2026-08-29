@@ -140,8 +140,7 @@ add_windows_boot_entry() {
 
   with_boot_repair_lock
   update_windows_boot_entry "$entry_name" || return 1
-  enroll_limine_config || return 1
-  sign_all_efi || warn "Some EFI files could not be re-signed"
+  run_artifact_repair "windows-entry-repair" || return 1
   mkdir -p "$STATE_DIR"
   touch "${STATE_DIR}/windows-enabled"
   pass "Windows boot entry added to limine.conf"

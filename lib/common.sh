@@ -46,6 +46,14 @@ state_dir_path() {
   printf '%s\n' "$STATE_DIR"
 }
 
+esp_path() {
+  printf '%s\n' "$ESP"
+}
+
+limine_config_path() {
+  printf '%s/limine.conf\n' "$(esp_path)"
+}
+
 limine_lock_path() {
   printf '%s\n' "$LIMINE_LOCK_FILE"
 }
@@ -67,8 +75,16 @@ mode_is_control_safe() {
   (( (8#$mode & 0022) == 0 ))
 }
 
+path_has_no_symlink_components() {
+  local path="$1" resolved
+  [[ "$path" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+  resolved=$(readlink -m -- "$path" 2>/dev/null) || return 1
+  [[ "$resolved" == "$path" ]]
+}
+
 validate_control_directory() {
   local path="$1" uid mode
+  path_has_no_symlink_components "$path" || return 1
   [[ -d "$path" && ! -L "$path" ]] || return 1
   read -r uid mode < <(stat -Lc '%u %a' "$path" 2>/dev/null) || return 1
   [[ "$uid" == "$(control_owner_uid)" ]] || return 1
@@ -77,6 +93,7 @@ validate_control_directory() {
 
 validate_control_file() {
   local path="$1" uid mode links
+  path_has_no_symlink_components "$path" || return 1
   [[ -f "$path" && ! -L "$path" ]] || return 1
   read -r uid mode links < <(stat -Lc '%u %a %h' "$path" 2>/dev/null) || return 1
   [[ "$uid" == "$(control_owner_uid)" && "$links" == 1 ]] || return 1
