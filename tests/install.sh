@@ -18,6 +18,7 @@ fail() {
 canonical="${STAGE_DIR}${PREFIX}/bin/omasecboot"
 canonical_lib="${STAGE_DIR}${PREFIX}/lib/omasecboot"
 canonical_state="${STAGE_DIR}/var/lib/omasecboot"
+windows_state_file="${canonical_state}/windows-enabled"
 cleanup_hook_name=zz-omasecboot-cleanup.hook
 sbctl_hook_name=zz-sbctl.hook
 repair_hook_name=zzz-omasecboot.hook
@@ -68,13 +69,26 @@ grep -Fq "$STAGE_DIR" "$guard_hook" "$cleanup_hook" "$repair_hook" \
 [[ "$sbctl_hook_name" < "$repair_hook_name" ]] \
   || fail "repair hook no longer sorts after sbctl"
 
-printf 'canonical\n' > "${canonical_state}/windows-enabled"
+jq -n '{
+  schema_version: 1,
+  writer_version: "1.0.0",
+  enabled: true,
+  boot_number: "0007",
+  label: "Windows Boot Manager",
+  partuuid: "11111111-2222-3333-4444-555555555555",
+  loader_path: "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"
+}' > "$windows_state_file"
+windows_state_checksum=$(sha256sum "$windows_state_file")
+windows_state_identity=$(stat -Lc '%d:%i:%u:%g:%a:%h' "$windows_state_file")
 mkdir -p "${canonical_state}/transactions/fixture" "${canonical_state}/firmware-backup"
 printf '{}\n' > "${canonical_state}/lifecycle.json"
 printf '{}\n' > "${canonical_state}/transactions/fixture/manifest.json"
 printf 'raw\n' > "${canonical_state}/firmware-backup/dbx.bin"
 make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
-grep -Fxq 'canonical' "${canonical_state}/windows-enabled" \
+[[ -f "$windows_state_file" && ! -L "$windows_state_file" \
+  && "$(sha256sum "$windows_state_file")" == "$windows_state_checksum" \
+  && "$(stat -Lc '%d:%i:%u:%g:%a:%h' "$windows_state_file")" == \
+    "$windows_state_identity" ]] \
   || fail "idempotent install replaced canonical Windows opt-in state"
 
 if make -s -C "$ROOT_DIR" uninstall DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
@@ -89,7 +103,10 @@ grep -Fq 'Refusing uninstall until lifecycle removal verification is available' 
 [[ -f "$guard_hook" && -f "$cleanup_hook" && -f "$repair_hook" \
   && -x "$limine_pre_hook" && -x "$limine_post_hook" ]] \
   || fail "blocked uninstall removed a lifecycle guard or repair hook"
-grep -Fxq canonical "${canonical_state}/windows-enabled" \
+[[ -f "$windows_state_file" && ! -L "$windows_state_file" \
+  && "$(sha256sum "$windows_state_file")" == "$windows_state_checksum" \
+  && "$(stat -Lc '%d:%i:%u:%g:%a:%h' "$windows_state_file")" == \
+    "$windows_state_identity" ]] \
   || fail "uninstall removed durable Windows opt-in state"
 [[ -f "${canonical_state}/lifecycle.json" \
   && -f "${canonical_state}/transactions/fixture/manifest.json" \

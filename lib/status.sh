@@ -437,34 +437,66 @@ show_status() {
   fi
 
   # Windows boot path
-  local windows_boot_entries windows_boot_count
+  local windows_boot_entries windows_boot_count windows_target windows_target_rc=0
+  windows_target=$(find_windows_boot_entry 2>/dev/null) || windows_target_rc=$?
   windows_boot_entries=$(list_windows_firmware_entries)
   windows_boot_count=$(count_nonempty_lines "$windows_boot_entries")
-  if [[ $windows_boot_count -gt 0 ]]; then
-    pass "Windows Boot Manager in firmware boot entries"
-    if [[ $windows_boot_count -gt 1 ]]; then
-      warn "Multiple Windows Boot Manager firmware entries found"
-      while IFS= read -r line; do
-        echo -e "    ${YELLOW}!${NC} ${line}"
-      done <<< "$windows_boot_entries"
-    fi
+  if [[ $windows_target_rc -eq 0 && -n "$windows_target" ]]; then
+    pass "Unique active Windows firmware handoff target"
+  elif [[ $windows_boot_count -gt 0 ]]; then
+    warn "Windows firmware entries do not resolve to one safe handoff target"
+    while IFS= read -r line; do
+      echo -e "    ${YELLOW}!${NC} ${line}"
+    done <<< "$windows_boot_entries"
+    all_ok=false
   else
     echo -e "  ${DIM}No Windows Boot Manager found (check BIOS boot settings)${NC}"
   fi
 
-  if grep -Fq "$WINDOWS_ENTRY_MARKER" "$LIMINE_CONF" 2>/dev/null; then
-    if grep -F -A4 "$WINDOWS_ENTRY_MARKER" "$LIMINE_CONF" | grep -q "protocol: efi_boot_entry"; then
-      pass "Windows boot entry in limine.conf (firmware BootNext)"
+  local windows_state_file
+  local _windows_error _windows_block_state _windows_state_kind
+  local _windows_block_start _windows_block_count
+  local _windows_state_boot_number _windows_state_label
+  local _windows_state_partuuid _windows_state_loader_path
+  windows_state_file=$(windows_target_state_path)
+  if read_windows_target_state; then
+    pass "Durable Windows firmware target identity recorded"
+    if windows_managed_block_state "$_windows_state_label"; then
+      case "$_windows_block_state" in
+        canonical)
+          pass "Windows boot entry in limine.conf (firmware BootNext)"
+          ;;
+        legacy)
+          warn "Managed Windows entry uses the legacy unbounded marker"
+          all_ok=false
+          ;;
+        absent)
+          warn "Durable Windows opt-in is recorded but its managed entry is suppressed"
+          all_ok=false
+          ;;
+        *)
+          fail "Managed Windows entry state is invalid"
+          all_ok=false
+          ;;
+      esac
     else
-      warn "Managed Windows entry in limine.conf needs repair"
-      echo -e "  ${DIM}Windows entry mutation is blocked until firmware target identity can be proven${NC}"
+      warn "Managed Windows entry in limine.conf is malformed or mismatched"
+      all_ok=false
     fi
+  elif [[ -e "$windows_state_file" || -L "$windows_state_file" ]]; then
+    if windows_classify_target_state && [[ "$_windows_state_kind" == legacy-empty ]]; then
+      warn "Legacy Windows opt-in marker needs explicit target migration"
+    else
+      fail "Durable Windows target state is invalid or unsafe"
+    fi
+    all_ok=false
+  elif grep -Fq "$WINDOWS_ENTRY_MARKER" "$LIMINE_CONF" 2>/dev/null \
+    || grep -Fq "$WINDOWS_ENTRY_END_MARKER" "$LIMINE_CONF" 2>/dev/null \
+    || grep -Fq "$WINDOWS_LEGACY_ENTRY_MARKER" "$LIMINE_CONF" 2>/dev/null; then
+    warn "Managed Windows entry has no durable target identity"
+    all_ok=false
   else
-    if [[ -f "${STATE_DIR}/windows-enabled" ]]; then
-      echo -e "  ${DIM}Managed Windows entry is missing; repair awaits validated firmware target identity${NC}"
-    else
-      echo -e "  ${DIM}No Windows entry (run ${BOLD}sudo omasecboot windows setup${NC}${DIM} to add)${NC}"
-    fi
+    echo -e "  ${DIM}No managed Windows firmware handoff configured${NC}"
   fi
 
   local unmanaged_windows_chainloads
@@ -476,7 +508,7 @@ show_status() {
     done <<< "$unmanaged_windows_chainloads"
     echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
-    echo -e "  ${DIM}Run ${BOLD}sudo omasecboot windows setup${NC}${DIM}, then remove any duplicate chainload entry if needed.${NC}"
+    echo -e "  ${DIM}Managed Windows setup remains blocked until interrupted recovery is available.${NC}"
   fi
 
   # Tracked files (root only)
