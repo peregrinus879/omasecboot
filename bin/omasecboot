@@ -174,10 +174,17 @@ cmd_windows_help() {
   echo
   echo -e "  ${BOLD}Commands${NC}"
   echo "    available   Check for Windows Boot Manager without root or output"
+  echo "    preflight   Run the read-only Windows encryption preparation gate"
   echo "    setup       Blocked until interrupted recovery is available"
   echo "    bootnext    Blocked until prior BootNext state can be recovered"
   echo "    reboot      Blocked until prior BootNext state can be recovered"
   echo
+}
+
+cmd_windows_preflight() {
+  header "Windows Encryption Preflight"
+  check_root "windows preflight"
+  windows_encryption_gate
 }
 
 cmd_windows() {
@@ -190,6 +197,9 @@ cmd_windows() {
   case "${1:-}" in
     available)
       find_windows_boot_entry >/dev/null
+      ;;
+    preflight)
+      cmd_windows_preflight
       ;;
     setup)
       fail "Windows setup is blocked until interrupted recovery is available"
@@ -292,7 +302,7 @@ cmd_help() {
   echo "    setup       Blocked until state-aware firmware proof is available"
   echo "    adopt       Explicitly adopt an existing OmaSecBoot configuration"
   echo "    enroll      Blocked until firmware backup and trust-set proof are available"
-  echo "    windows     Probe Windows; mutation commands remain blocked"
+  echo "    windows     Probe Windows or run its read-only encryption preflight"
   echo "    status      Show Secure Boot status and file verification"
   echo "    sign        Blocked until interrupted recovery is available"
   echo "    cleanup     Blocked until interrupted recovery is available"

@@ -2,10 +2,10 @@
 
 **[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, and validated Windows firmware target identity; public mutation and automatic repair remain blocked until interrupted recovery is available.
+The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, validated Windows firmware target identity, and a read-only Windows encryption preflight; public mutation and automatic repair remain blocked until interrupted recovery is available.
 
 > [!CAUTION]
-> **Development status, 2026-08-29:** lifecycle manifests, file rollback, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, explicit adoption, hermetic Limine/EFI proof, and validated Windows target identity are implemented. Interrupted recovery, firmware-key backup, unconfiguration, and safe removal remain release gates. Public mutation commands and active producer automation fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-08-30:** lifecycle manifests, file rollback, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, explicit adoption, hermetic Limine/EFI proof, validated Windows target identity, and the read-only Windows encryption preflight are implemented. Interrupted recovery, firmware-key backup, unconfiguration, and safe removal remain release gates. Public mutation commands and active producer automation fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
 
 ## Why This Tool
 
@@ -50,27 +50,33 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 
 ## Development Status
 
-The package-first release uses five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before its mutation, commits stable state last, validates owned nested hooks, and rejects unsafe Limine and package producers. Hermetic transactions prove both Limine checksums, local signatures, sbctl tracking, and a validated Windows firmware target identity. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
+The package-first release uses five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before its mutation, commits stable state last, validates owned nested hooks, and rejects unsafe Limine and package producers. Hermetic transactions prove both Limine checksums, local signatures, sbctl tracking, and a validated Windows firmware target identity. The read-only Windows preflight detects firmware, BitLocker-format, and ESP-loader signals without mounting Windows volumes. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
 
-The remaining release gate requires raw PK/KEK/db/dbx backup before Setup Mode, the Windows encryption preflight, interrupted recovery, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
+The remaining release gate requires raw PK/KEK/db/dbx backup before Setup Mode, interrupted recovery, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
 
 ## Prerequisites
 
 - **[Omarchy](https://omarchy.com)** with Limine bootloader, UKI, and btrfs/Snapper
 - [sbctl](https://github.com/Foxboron/sbctl) - Secure Boot key manager
 - [jq](https://jqlang.github.io/jq/) - JSON parser
-- [gum](https://github.com/charmbracelet/gum) - interactive prompts (currently adoption; target release setup, enrollment, and Windows workflows)
+- [gum](https://github.com/charmbracelet/gum) - interactive adoption and Windows preflight prompts
+- [efibootmgr](https://github.com/rhboot/efibootmgr) and util-linux - firmware, block-device, filesystem, lock, mount, and privilege-drop inspection
+- [sbsigntools](https://git.kernel.org/pub/scm/linux/kernel/git/jejb/sbsigntools.git/) - advisory Windows boot-manager signer metadata
 - UEFI firmware with Secure Boot support
 - EFI System Partition mounted at `/boot`
 - For dual-boot: Windows Boot Manager present in the firmware boot entries
 
 ```bash
-sudo pacman -S --needed sbctl jq gum
+sudo pacman -S --needed sbctl jq gum efibootmgr sbsigntools util-linux
 ```
 
-### Planned Dual-Boot Gate
+### Windows Preflight
 
-The audited release will require these Windows preparations before any firmware mutation. Do not change Windows solely for the current development branch.
+`sudo omasecboot windows preflight` is the implemented read-only preparation gate. It independently inspects Windows firmware options, direct BitLocker filesystem signatures, and Microsoft boot-manager files on internal GPT ESPs. It never mounts a Windows volume. It may temporarily mount an internal FAT ESP read-only under a private runtime path, request `O_NOATIME` while copying the boot manager, and inspect the copy as the unprivileged `nobody` identity.
+
+A complete three-detector negative returns success only as a bounded observation; it is not proof that Windows is absent and is not firmware clearance. Any positive or unknown signal requires confirmation that the Windows encryption state was checked and every available recovery key was backed up. A user decline returns 1. Missing tools, ambiguous probes, external ESPs, unsafe mounts, or unknown signer metadata print the applicable preparation guidance and return 2 without an override. Recognized signer names are embedded metadata only, not proof of firmware db/dbx acceptance or bootability.
+
+These preparations remain required before any future firmware mutation. Do not change Windows solely for the current development branch.
 
 If Windows uses BitLocker or Device Encryption:
 
@@ -110,7 +116,7 @@ The audited workflow, which is not implemented yet, is:
 
 ## Commands
 
-The current implementation exposes `version`, read-only status and Windows discovery, and explicit adoption. Boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until interrupted recovery and their remaining audited units land. Do not adopt a production configuration yet: `active` deliberately blocks boot-mutating package, Limine, and snapshot producers.
+The current implementation exposes `version`, read-only status, Windows discovery and encryption preflight, and explicit adoption. Boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until interrupted recovery and their remaining audited units land. Do not adopt a production configuration yet: `active` deliberately blocks boot-mutating package, Limine, and snapshot producers.
 
 ### `setup`
 
@@ -129,6 +135,7 @@ Records an existing untracked configuration as an `active` lifecycle after displ
 Provides explicit Windows firmware handoff operations:
 
 - `windows available` silently parses BootOrder and raw EFI device-path nodes without root. It requires one active, structurally unambiguous Windows target and Limine-equivalent label resolution, but does not inspect the block-device mapping or loader file.
+- `windows preflight` requires root and runs the read-only three-signal encryption preparation gate. It prints edition-specific Home decryption or Pro/Enterprise/Education suspension and resume guidance, requires administrator approval for managed devices, and fails closed on technical uncertainty.
 - `windows setup`, `windows bootnext`, and `windows reboot` are blocked until interrupted recovery can resume or unwind their mutations.
 
 The dormant setup transaction parses BootOrder and raw UEFI device-path nodes, maps the GPT HD node by PARTUUID and geometry to one FAT ESP, validates the exact loader read-only, persists strict target identity, and composes the managed Limine block with artifact repair in one lifecycle transaction. Standard HD short-form paths rely on point-in-time uniqueness across the current Linux block inventory, and every dormant write revalidates that mapping. A reusable ESP mount must be unique, identity-matched, free of same-device subroot aliases, and reached through a controlled path. One controlled root mount may be reused without writing even when writable; the descriptor-bound loader read applies `O_NOATIME` and fails closed if that flag cannot be set. An uncontrolled read-only root mount is not read directly, and the mapped ESP is instead mounted `ro,noatime` under the owned runtime path. Uncontrolled writable, multiple, and subroot mounts fail closed. The opened loader descriptor must remain on the selected kernel mount ID and mapped filesystem before and after its `MZ` header is read. The transaction also rejects efibootmgr diagnostics, malformed paths, duplicate installations or labels, unsupported localized labels, missing BootOrder records, and geometry or loader changes. Selecting Windows from the Limine boot menu requests a one-boot firmware handoff; it does not prove that Windows booted successfully. Requires `efibootmgr`, `jq`, GNU coreutils, and util-linux.
@@ -253,7 +260,7 @@ Single dispatcher (`bin/omasecboot`) sources modular libraries:
 - `discover.sh` -- EFI file discovery and sbctl database queries
 - `sign.sh` -- key creation, signing, Limine config management
 - `enroll.sh` -- firmware key enrollment
-- `windows.sh` -- Windows firmware BootNext handoff and Limine `efi_boot_entry` management
+- `windows.sh` -- Windows encryption preflight, firmware BootNext handoff, and Limine `efi_boot_entry` management
 - `status.sh` -- status display and file verification
 
 Maintainer-facing reference sources, versioned compatibility findings, workaround removal triggers, and deferred work live in [docs/maintenance.md](docs/maintenance.md). Remaining implementation and release gates live in [docs/implementation-contract.md](docs/implementation-contract.md), with operational invariants in `AGENTS.md`.
@@ -267,6 +274,7 @@ Read-only observations remain useful for an expert-led recovery:
 - `omasecboot status` reports the current branch's view but does not implement the approved release proof.
 - `sbctl status`, `sbctl list-files`, and `sbctl verify` report local state; they do not prove complete firmware trust or dbx acceptance.
 - `efibootmgr -v` is diagnostic input. Do not select a target by the first label or `bootmgfw.efi` text match.
+- `sudo omasecboot windows preflight` reports its bounded Windows and BitLocker observations without authorizing firmware changes. Exit 2 means a technical uncertainty must be resolved rather than overridden.
 - `findmnt` can show whether Windows volumes or ESPs are mounted. Dormant target proof can reuse a controlled `ro` or `rw` ESP mount, applying `O_NOATIME` for a writable-mount loader read, or create an owned `ro,noatime` mount; OmaSecBoot never mounts or modifies NTFS.
 - Windows disk-check prompts and BitLocker recovery are separate. Diagnose Windows volume state from Windows, not from a failed Linux mount.
 

@@ -24,6 +24,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `tests/lifecycle.sh`, `tests/artifacts.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, artifact-proof, and failure-injection checks
 - `tests/install.sh` - Staged install, upgrade, hook-target, and uninstall contract checks
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
+- `tests/windows-preflight.sh` - Hermetic Windows signal, encryption guidance, advisory signer, privilege-drop, and no-NTFS checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
 - `omarchy/omarchy-menu.jsonc` - Quattro user-menu fragment for graceful reboot-to-Windows handoff
 - `docs/implementation-contract.md` - Remaining implementation and release-gate contract
@@ -44,11 +45,11 @@ Single dispatcher sources lib modules. Each lib file owns one concern:
 
 ## Dependencies
 
-sbctl, jq, gum (interactive only). Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
+sbctl, jq, gum (interactive only), efibootmgr, util-linux, and sbsigntools. Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary and tested artifact-proof transaction but deliberately reports repair capability unavailable until interrupted recovery lands. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary, tested artifact-proof transaction, validated Windows target identity, and read-only Windows encryption preflight, but deliberately reports repair capability unavailable until interrupted recovery lands. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults.
@@ -78,7 +79,9 @@ The current implementation provides the lifecycle boundary and tested artifact-p
 - `omarchy/omarchy-menu.jsonc` is a user-owned menu fragment. Its guard runs inside Quattro's batched guard shell, stays unprivileged and non-interactive, and requires the packaged command plus durable Windows opt-in. Its visible-terminal action runs privileged `/usr/bin/omasecboot windows bootnext` before user-context `omarchy system reboot`. Never execute that action during automated or deployment verification.
 - Treat Windows disk-check prompts separately from BitLocker recovery. OmaSecBoot never mounts or modifies NTFS and never infers hibernation from a failed mount.
 - Windows Home follows Microsoft's documented Device Encryption decryption workflow; do not offer undocumented Home suspension. Pro, Enterprise, and Education may use documented BitLocker suspension. Managed devices require administrator approval.
-- Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof.
+- The Windows preflight evaluates firmware options, direct BitLocker signatures, and Microsoft loaders on internal GPT ESPs independently as `present`, `absent`, or `unknown`. A complete negative is a bounded observation, not firmware clearance. Every positive or unknown run requires an encryption-state check and recovery-key preparation acknowledgment. Any technical unknown prints preparation guidance, returns nonzero, and has no override that a firmware-mutating command may consume.
+- External ESPs are not mounted or PE-parsed. Internal boot managers are copied under the boot and repair locks, then inspected through inherited FD 3 by `sbverify --list` after `setpriv` drops to `nobody`, clears groups and capabilities, resets the environment, and sets `no_new_privs`. Signer output is untrusted input and recognized issuer metadata never relaxes the preparation checklist.
+- Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof. Keep util-linux and sbsigntools in the T-7 package dependencies; recheck current Microsoft sources before recognizing a new issuer.
 - Before any Setup Mode instruction, back up raw PK, KEK, db, and dbx data, attributes, hashes, absence records, and machine identity. Unknown or unsupported trust entries that the planned `-m -f` set would lose block v1 enrollment; never preserve by subject name or repair with `--append`.
 - Keep software `unconfigure`, PK reset, raw-key recovery, and firmware factory restoration distinct. Package removal is permitted from verified `disabled` or pristine state, preserves lifecycle, transactions, firmware backups, durable Windows opt-in, local sbctl keys, and the stable lock pathname, and removes only `omasecboot`.
 

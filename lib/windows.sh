@@ -33,6 +33,19 @@ _windows_reusable_mount_id=""
 _windows_reusable_mount_access=""
 _windows_target_mount_id=""
 _windows_descriptor_mount_id=""
+_windows_runtime_mount_override=""
+_windows_inspection_file=""
+_windows_preflight_result=""
+_windows_preflight_firmware_state=absent
+_windows_preflight_bitlocker_state=absent
+_windows_preflight_loader_state=absent
+_windows_preflight_firmware_seen=false
+_windows_preflight_firmware_unknown=false
+_windows_preflight_bitlocker_seen=false
+_windows_preflight_bitlocker_unknown=false
+_windows_preflight_loader_seen=false
+_windows_preflight_loader_unknown=false
+_windows_preflight_gum=""
 
 declare -ag _windows_order=()
 declare -Ag _windows_inventory_label=()
@@ -43,6 +56,10 @@ declare -Ag _windows_inventory_partuuid=()
 declare -Ag _windows_inventory_partition=()
 declare -Ag _windows_inventory_start=()
 declare -Ag _windows_inventory_size=()
+declare -ag _windows_preflight_bitlocker_devices=()
+declare -ag _windows_preflight_esp_candidates=()
+declare -ag _windows_preflight_signer_records=()
+declare -ag _windows_preflight_unknown_reasons=()
 
 windows_reject() {
   _windows_error="$1"
@@ -66,7 +83,11 @@ windows_runtime_dir_path() {
 }
 
 windows_runtime_mount_path() {
-  printf '%s/windows-esp\n' "$(windows_runtime_dir_path)"
+  if [[ -n "$_windows_runtime_mount_override" ]]; then
+    printf '%s\n' "$_windows_runtime_mount_override"
+  else
+    printf '%s/windows-esp\n' "$(windows_runtime_dir_path)"
+  fi
 }
 
 windows_label_is_safe() {
@@ -820,14 +841,19 @@ windows_path_has_controlled_ancestors() {
   done
 }
 
-windows_prepare_runtime_mountpoint() {
-  local runtime mount_path
+windows_prepare_runtime_directory() {
+  local runtime
   runtime=$(windows_runtime_dir_path) || return 1
-  mount_path=$(windows_runtime_mount_path) || return 1
   if [[ ! -e "$runtime" && ! -L "$runtime" ]]; then
     install -d -m 700 "$runtime" || return 1
   fi
   validate_private_control_directory "$runtime" || return 1
+}
+
+windows_prepare_runtime_mountpoint() {
+  local mount_path
+  windows_prepare_runtime_directory || return 1
+  mount_path=$(windows_runtime_mount_path) || return 1
   [[ ! -e "$mount_path" && ! -L "$mount_path" ]] || return 1
   install -d -m 700 "$mount_path" || return 1
   validate_private_control_directory "$mount_path"
@@ -887,8 +913,18 @@ windows_loader_descriptor_mount_is_valid() {
 }
 
 windows_loader_mount_cleanup() {
-  local rc="$1" cleanup_rc=0
+  local rc="$1" cleanup_rc=0 runtime
   trap - EXIT INT TERM HUP
+  if [[ -n "$_windows_inspection_file" ]]; then
+    runtime=$(windows_runtime_dir_path) || cleanup_rc=1
+    case "$_windows_inspection_file" in
+      "${runtime}"/bootmgfw.*)
+        rm -f -- "$_windows_inspection_file" || cleanup_rc=1
+        ;;
+      *) cleanup_rc=1 ;;
+    esac
+    _windows_inspection_file=""
+  fi
   if [[ "$_windows_owned_mount_active" == true ]]; then
     if LC_ALL=C findmnt --mountpoint "$_windows_owned_mount_path" >/dev/null 2>&1; then
       umount -- "$_windows_owned_mount_path" || cleanup_rc=1
@@ -942,11 +978,14 @@ windows_verify_loader_file() {
     && "$identity_before" == "$path_identity_after" ]]
 }
 
-windows_verify_target_loader() {
-  if ! (
-    local mount_path expected_mount_id="" expected_mount_access=ro
+windows_with_target_mount() {
+  local callback="$1" mount_override="${2:-}"
+  (
+    local mount_path expected_mount_id="" expected_mount_access=ro callback_rc=0
+    _windows_runtime_mount_override="$mount_override"
     _windows_owned_mount_active=false
     _windows_owned_mount_path=""
+    _windows_inspection_file=""
     trap 'windows_loader_mount_cleanup $?' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -969,10 +1008,21 @@ windows_verify_target_loader() {
     fi
     windows_target_mount_is_valid \
       "$mount_path" "$expected_mount_id" "$expected_mount_access" || exit 1
-    windows_verify_loader_file "$mount_path" "$_windows_target_mount_id" || exit 1
+    "$callback" "$mount_path" "$_windows_target_mount_id" || callback_rc=$?
+    case "$callback_rc" in
+      0|2) ;;
+      *) exit "$callback_rc" ;;
+    esac
     windows_target_mount_is_valid \
       "$mount_path" "$_windows_target_mount_id" "$expected_mount_access" || exit 1
-  ); then
+    exit "$callback_rc"
+  )
+}
+
+windows_verify_target_loader() {
+  local rc=0
+  windows_with_target_mount windows_verify_loader_file || rc=$?
+  if [[ $rc -ne 0 ]]; then
     windows_reject "Windows boot manager failed the read-only target proof"
     return 1
   fi
@@ -991,6 +1041,718 @@ resolve_windows_target() {
   windows_select_firmware_target || return 1
   windows_map_target_esp || return 1
   windows_verify_target_loader || return 1
+}
+
+windows_preflight_reset() {
+  _windows_preflight_result=""
+  _windows_preflight_firmware_state=absent
+  _windows_preflight_bitlocker_state=absent
+  _windows_preflight_loader_state=absent
+  _windows_preflight_firmware_seen=false
+  _windows_preflight_firmware_unknown=false
+  _windows_preflight_bitlocker_seen=false
+  _windows_preflight_bitlocker_unknown=false
+  _windows_preflight_loader_seen=false
+  _windows_preflight_loader_unknown=false
+  _windows_preflight_gum=""
+  _windows_preflight_bitlocker_devices=()
+  _windows_preflight_esp_candidates=()
+  _windows_preflight_signer_records=()
+  _windows_preflight_unknown_reasons=()
+}
+
+windows_preflight_mark_unknown() {
+  local detector="$1" reason="$2"
+  case "$detector" in
+    firmware) _windows_preflight_firmware_unknown=true ;;
+    bitlocker) _windows_preflight_bitlocker_unknown=true ;;
+    loader) _windows_preflight_loader_unknown=true ;;
+    *) return 1 ;;
+  esac
+  _windows_preflight_unknown_reasons+=("$reason")
+}
+
+windows_preflight_finalize_states() {
+  local detector seen unknown state
+  for detector in firmware bitlocker loader; do
+    case "$detector" in
+      firmware)
+        seen=$_windows_preflight_firmware_seen
+        unknown=$_windows_preflight_firmware_unknown
+        ;;
+      bitlocker)
+        seen=$_windows_preflight_bitlocker_seen
+        unknown=$_windows_preflight_bitlocker_unknown
+        ;;
+      loader)
+        seen=$_windows_preflight_loader_seen
+        unknown=$_windows_preflight_loader_unknown
+        ;;
+    esac
+    if [[ "$unknown" == true ]]; then
+      state=unknown
+    elif [[ "$seen" == true ]]; then
+      state=present
+    else
+      state=absent
+    fi
+    case "$detector" in
+      firmware) _windows_preflight_firmware_state=$state ;;
+      bitlocker) _windows_preflight_bitlocker_state=$state ;;
+      loader) _windows_preflight_loader_state=$state ;;
+    esac
+  done
+}
+
+windows_preflight_detect_firmware() {
+  local boot_number label
+  if ! windows_parse_firmware_inventory; then
+    windows_preflight_mark_unknown firmware \
+      "Firmware Windows detection is inconclusive: ${_windows_error:-EFI inventory failed validation}"
+    return 0
+  fi
+  for boot_number in "${!_windows_inventory_label[@]}"; do
+    label=${_windows_inventory_label[$boot_number]}
+    if [[ "${_windows_inventory_exact[$boot_number]:-false}" == true \
+      || "${label,,}" == "windows boot manager" ]]; then
+      _windows_preflight_firmware_seen=true
+    fi
+  done
+}
+
+windows_preflight_probe_type() {
+  local path="$1" expected="$2" output rc=0
+  output=$(LC_ALL=C blkid --probe --match-types "$expected" \
+    --output value --match-tag TYPE -- "$path" 2>/dev/null) || rc=$?
+  if [[ $rc -eq 0 && "$output" == "$expected" ]]; then
+    return 0
+  fi
+  if [[ $rc -eq 2 && -z "$output" ]]; then
+    return 2
+  fi
+  return 1
+}
+
+windows_preflight_device_is_external() {
+  local removable="$1" transport="${2,,}" subsystems="${3,,}"
+  [[ "$removable" == true ]] && return 0
+  case "$transport" in
+    usb|ieee1394) return 0 ;;
+  esac
+  case ":${subsystems}:" in
+    *:usb:*|*:thunderbolt:*|*:firewire:*) return 0 ;;
+  esac
+  return 1
+}
+
+windows_preflight_read_block_inventory() {
+  local json rows row path maj_min parttype removable transport subsystems rc
+  local -a partitions=()
+  local -A seen_paths=() seen_devices=()
+
+  if ! command -v lsblk >/dev/null 2>&1 \
+    || ! command -v blkid >/dev/null 2>&1 \
+    || ! command -v jq >/dev/null 2>&1; then
+    windows_preflight_mark_unknown bitlocker \
+      "BitLocker detection requires util-linux and jq"
+    windows_preflight_mark_unknown loader \
+      "ESP loader detection requires util-linux and jq"
+    return 0
+  fi
+  if ! json=$(LC_ALL=C lsblk --json --paths --list \
+    --output PATH,MAJ:MIN,TYPE,PARTTYPE,RM,TRAN,SUBSYSTEMS 2>/dev/null); then
+    windows_preflight_mark_unknown bitlocker \
+      "Could not read the block-device inventory"
+    windows_preflight_mark_unknown loader \
+      "Could not read the ESP inventory"
+    return 0
+  fi
+  if ! jq -e '
+    (.blockdevices | type) == "array" and
+    all(.blockdevices[];
+      type == "object" and
+      (keys == ["maj:min", "parttype", "path", "rm", "subsystems", "tran", "type"]) and
+      (.path | type) == "string" and
+      (."maj:min" | type) == "string" and
+      (.type | type) == "string" and
+      (.parttype == null or (.parttype | type) == "string") and
+      (.rm | type) == "boolean" and
+      (.tran == null or (.tran | type) == "string") and
+      (.subsystems == null or (.subsystems | type) == "string"))
+  ' <<< "$json" >/dev/null 2>&1; then
+    windows_preflight_mark_unknown bitlocker \
+      "Block-device inventory has an unsupported JSON shape"
+    windows_preflight_mark_unknown loader \
+      "ESP inventory has an unsupported JSON shape"
+    return 0
+  fi
+  rows=$(jq -c '.blockdevices[] | select(.type == "part")' <<< "$json") \
+    || return 1
+  [[ -z "$rows" ]] || mapfile -t partitions <<< "$rows"
+
+  for row in "${partitions[@]}"; do
+    path=$(jq -r '.path' <<< "$row") || return 1
+    maj_min=$(jq -r '."maj:min"' <<< "$row") || return 1
+    parttype=$(jq -r '.parttype // ""' <<< "$row") || return 1
+    removable=$(jq -r '.rm' <<< "$row") || return 1
+    transport=$(jq -r '.tran // ""' <<< "$row") || return 1
+    subsystems=$(jq -r '.subsystems // ""' <<< "$row") || return 1
+    if [[ ! "$path" =~ ^/dev/[A-Za-z0-9._/+:-]+$ \
+      || ! "$maj_min" =~ ^[0-9]+:[0-9]+$ \
+      || -n "${seen_paths[$path]:-}" \
+      || -n "${seen_devices[$maj_min]:-}" ]] \
+      || ! windows_block_device_matches "$path" "$maj_min"; then
+      windows_preflight_mark_unknown bitlocker \
+        "A partition identity changed during BitLocker detection"
+      if [[ "${parttype,,}" == "$WINDOWS_ESP_PARTTYPE" ]]; then
+        windows_preflight_mark_unknown loader \
+          "An ESP identity changed during loader detection"
+      fi
+      continue
+    fi
+    seen_paths["$path"]=1
+    seen_devices["$maj_min"]=1
+
+    rc=0
+    windows_preflight_probe_type "$path" BitLocker || rc=$?
+    case "$rc" in
+      0)
+        _windows_preflight_bitlocker_seen=true
+        _windows_preflight_bitlocker_devices+=("$path")
+        ;;
+      2) ;;
+      *)
+        windows_preflight_mark_unknown bitlocker \
+          "BitLocker signature probing is inconclusive for ${path}"
+        ;;
+    esac
+
+    [[ "${parttype,,}" == "$WINDOWS_ESP_PARTTYPE" ]] || continue
+    if windows_preflight_device_is_external \
+      "$removable" "$transport" "$subsystems"; then
+      windows_preflight_mark_unknown loader \
+        "External ESP ${path} was not mounted; disconnect external boot media and retry"
+      continue
+    fi
+    rc=0
+    windows_preflight_probe_type "$path" vfat || rc=$?
+    case "$rc" in
+      0) _windows_preflight_esp_candidates+=("${path}"$'\t'"${maj_min}") ;;
+      2)
+        windows_preflight_mark_unknown loader \
+          "Internal ESP ${path} is not a directly identified FAT filesystem"
+        ;;
+      *)
+        windows_preflight_mark_unknown loader \
+          "FAT signature probing is inconclusive for ESP ${path}"
+        ;;
+    esac
+  done
+}
+
+windows_preflight_mount_path() {
+  local maj_min="$1"
+  [[ "$maj_min" =~ ^([0-9]+):([0-9]+)$ ]] || return 1
+  printf '%s/windows-preflight-%s-%s\n' \
+    "$(windows_runtime_dir_path)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+windows_copy_loader_for_inspection() {
+  local mount_path="$1" mount_id="$2" loader loader_fd fd_path runtime
+  local maj_min inode size identity_before identity_after path_before path_after
+  local copy_size magic old_umask
+  loader="${mount_path}${WINDOWS_LOADER_POSIX}"
+  [[ -f "$loader" && ! -L "$loader" ]] || return 1
+  exec {loader_fd}< "$loader" || return 1
+  fd_path="/proc/${BASHPID}/fd/${loader_fd}"
+  if ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
+    || [[ ! -f "$fd_path" ]] \
+    || ! read -r maj_min inode size \
+      < <(stat -Lc '%Hd:%Ld %i %s' "$fd_path" 2>/dev/null) \
+    || [[ "$maj_min" != "$_windows_maj_min" ]] \
+    || ! windows_decimal_fits_int64 "$size" \
+    || (( size < 64 || size > 67108864 )); then
+    exec {loader_fd}<&-
+    return 1
+  fi
+  identity_before="${maj_min}:${inode}:${size}"
+  if ! path_before=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null) \
+    || [[ "$identity_before" != "$path_before" ]] \
+    || ! windows_prepare_runtime_directory; then
+    exec {loader_fd}<&-
+    return 1
+  fi
+  runtime=$(windows_runtime_dir_path) || {
+    exec {loader_fd}<&-
+    return 1
+  }
+  old_umask=$(umask) || {
+    exec {loader_fd}<&-
+    return 1
+  }
+  umask 077
+  _windows_inspection_file=$(mktemp "${runtime}/bootmgfw.XXXXXX" 2>/dev/null) || {
+    umask "$old_umask"
+    exec {loader_fd}<&-
+    return 1
+  }
+  umask "$old_umask"
+  if ! dd bs=1M iflag=fullblock,noatime status=none \
+    <&"$loader_fd" > "$_windows_inspection_file" 2>/dev/null \
+    || ! copy_size=$(stat -Lc '%s' "$_windows_inspection_file" 2>/dev/null) \
+    || [[ "$copy_size" != "$size" ]] \
+    || ! magic=$(od -An -N2 -tx1 "$_windows_inspection_file" 2>/dev/null \
+      | tr -d '[:space:]') \
+    || [[ "$magic" != 4d5a ]] \
+    || ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
+    || ! identity_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$fd_path" 2>/dev/null) \
+    || [[ -L "$loader" ]] \
+    || ! path_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null); then
+    exec {loader_fd}<&-
+    return 1
+  fi
+  exec {loader_fd}<&-
+  [[ "$identity_before" == "$identity_after" \
+    && "$identity_before" == "$path_after" ]]
+}
+
+windows_preflight_setpriv_path() {
+  printf '/usr/bin/setpriv\n'
+}
+
+windows_preflight_sbverify_path() {
+  printf '/usr/bin/sbverify\n'
+}
+
+windows_preflight_prepare_inspection_owner() {
+  local file="$1" uid gid actual_uid actual_gid mode links
+  uid=$(/usr/bin/id -u nobody 2>/dev/null) || return 1
+  gid=$(/usr/bin/id -g nobody 2>/dev/null) || return 1
+  [[ "$uid" =~ ^[1-9][0-9]*$ && "$gid" =~ ^[1-9][0-9]*$ ]] || return 1
+  chown "${uid}:${gid}" -- "$file" || return 1
+  chmod 400 -- "$file" || return 1
+  read -r actual_uid actual_gid mode links \
+    < <(stat -Lc '%u %g %a %h' "$file" 2>/dev/null) || return 1
+  [[ "$actual_uid" == "$uid" && "$actual_gid" == "$gid" \
+    && "$mode" == 400 && "$links" == 1 && -f "$file" && ! -L "$file" ]]
+}
+
+windows_preflight_run_sbverify() {
+  local file="$1" setpriv_path sbverify_path
+  setpriv_path=$(windows_preflight_setpriv_path) || return 1
+  sbverify_path=$(windows_preflight_sbverify_path) || return 1
+  [[ "$setpriv_path" == /* && -x "$setpriv_path" \
+    && "$sbverify_path" == /* && -x "$sbverify_path" ]] || return 1
+  windows_preflight_prepare_inspection_owner "$file" || return 1
+  "$setpriv_path" --reuid=nobody --regid=nobody --clear-groups \
+    --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+    --no-new-privs --reset-env -- /usr/bin/env -i LC_ALL=C \
+    PATH=/usr/bin:/bin "$sbverify_path" --list /proc/self/fd/3 \
+    3< "$file" 2>/dev/null
+}
+
+windows_preflight_parse_signers() {
+  local output="$1" line normalized issuer joined="" classification
+  local in_issuers=false seen_issuer_header=false seen_certificate_header=false
+  local seen_2011=false seen_2023=false seen_unknown=false
+  local -a issuers=()
+  local LC_ALL=C
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ ! "$line" =~ [[:cntrl:]] ]] || return 1
+    normalized=${line#"${line%%[! ]*}"}
+    case "$normalized" in
+      'image signature issuers:')
+        in_issuers=true
+        seen_issuer_header=true
+        ;;
+      'image signature certificates:')
+        in_issuers=false
+        seen_certificate_header=true
+        ;;
+      '- '*)
+        [[ "$in_issuers" == true ]] || continue
+        issuer=${normalized#'- '}
+        [[ -n "$issuer" && ${#issuer} -le 512 \
+          && ${#issuers[@]} -lt 64 ]] || return 1
+        issuers+=("$issuer")
+        case "$issuer" in
+          *'/CN=Microsoft Windows Production PCA 2011'*) seen_2011=true ;;
+          *'/CN=Windows UEFI CA 2023'*) seen_2023=true ;;
+          *) seen_unknown=true ;;
+        esac
+        ;;
+    esac
+  done <<< "$output"
+  [[ "$seen_issuer_header" == true && "$seen_certificate_header" == true ]] \
+    && (( ${#issuers[@]} > 0 )) || return 1
+  for issuer in "${issuers[@]}"; do
+    [[ -z "$joined" ]] || joined+=' | '
+    joined+="$issuer"
+  done
+  if [[ "$seen_unknown" == true ]]; then
+    classification="unknown-issuer"
+  elif [[ "$seen_2011" == true && "$seen_2023" == true ]]; then
+    classification=known-both
+  elif [[ "$seen_2011" == true ]]; then
+    classification=known-2011
+  elif [[ "$seen_2023" == true ]]; then
+    classification=known-2023
+  else
+    classification="unknown-issuer"
+  fi
+  printf '%s\t%s\n' "$classification" "$joined"
+}
+
+windows_preflight_inspect_loader() {
+  local mount_path="$1" mount_id="$2" loader output setpriv_path sbverify_path
+  loader="${mount_path}${WINDOWS_LOADER_POSIX}"
+  if [[ ! -e "$loader" && ! -L "$loader" ]]; then
+    return 2
+  fi
+  setpriv_path=$(windows_preflight_setpriv_path) || return 1
+  sbverify_path=$(windows_preflight_sbverify_path) || return 1
+  if [[ ! -x "$sbverify_path" ]]; then
+    printf 'unknown-missing-sbverify\t\n'
+    return 0
+  fi
+  if [[ ! -x "$setpriv_path" ]]; then
+    printf 'unknown-missing-setpriv\t\n'
+    return 0
+  fi
+  if ! /usr/bin/id -u nobody >/dev/null 2>&1 \
+    || ! /usr/bin/id -g nobody >/dev/null 2>&1; then
+    printf 'unknown-missing-nobody\t\n'
+    return 0
+  fi
+  windows_copy_loader_for_inspection "$mount_path" "$mount_id" || return 1
+  if ! output=$(windows_preflight_run_sbverify "$_windows_inspection_file"); then
+    printf 'unknown-sbverify\t\n'
+    return 0
+  fi
+  if ! windows_preflight_parse_signers "$output"; then
+    printf 'unknown-sbverify-output\t\n'
+  fi
+}
+
+windows_preflight_record_inspection() {
+  local device="$1" inspection="$2" classification issuers
+  [[ "$inspection" == *$'\t'* && "$inspection" != *$'\n'* ]] || return 1
+  classification=${inspection%%$'\t'*}
+  issuers=${inspection#*$'\t'}
+  case "$classification" in
+    known-2011|known-2023|known-both)
+      _windows_preflight_loader_seen=true
+      ;;
+    unknown-missing-sbverify)
+      _windows_preflight_loader_seen=true
+      windows_preflight_mark_unknown loader \
+        "Signer inspection requires sbsigntools (/usr/bin/sbverify)"
+      ;;
+    unknown-missing-setpriv)
+      _windows_preflight_loader_seen=true
+      windows_preflight_mark_unknown loader \
+        "Signer inspection requires util-linux (/usr/bin/setpriv)"
+      ;;
+    unknown-missing-nobody)
+      _windows_preflight_loader_seen=true
+      windows_preflight_mark_unknown loader \
+        "Signer inspection requires the system nobody identity"
+      ;;
+    unknown-sbverify|unknown-sbverify-output)
+      _windows_preflight_loader_seen=true
+      windows_preflight_mark_unknown loader \
+        "Boot manager signer metadata could not be inspected on ${device}"
+      ;;
+    unknown-issuer)
+      _windows_preflight_loader_seen=true
+      windows_preflight_mark_unknown loader \
+        "Boot manager ${device} has unrecognized signer issuer metadata; maintainer review is required"
+      ;;
+    *) return 1 ;;
+  esac
+  _windows_preflight_signer_records+=(
+    "${device}"$'\t'"${classification}"$'\t'"${issuers}"
+  )
+}
+
+windows_preflight_scan_esps() {
+  local prior_limine="$_OMASECBOOT_LIMINE_LOCK_OWNED"
+  local prior_repair="$_OMASECBOOT_REPAIR_LOCK_OWNED"
+  local acquired_limine=false acquired_repair=false candidate device maj_min
+  local mount_path inspection rc=0 scan_rc=0
+  (( ${#_windows_preflight_esp_candidates[@]} > 0 )) || return 0
+
+  if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false ]]; then
+    if ! with_limine_lock; then
+      windows_preflight_mark_unknown loader \
+        "Could not acquire the shared ESP lock; retry after boot maintenance completes"
+      return 0
+    fi
+    acquired_limine=true
+  fi
+  if [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" != true ]]; then
+    if ! with_repair_lock; then
+      windows_preflight_mark_unknown loader \
+        "Could not acquire the repair lock; retry after OmaSecBoot maintenance completes"
+      if [[ "$acquired_limine" == true ]]; then
+        release_limine_lock
+      fi
+      return 0
+    fi
+    acquired_repair=true
+  fi
+
+  for candidate in "${_windows_preflight_esp_candidates[@]}"; do
+    IFS=$'\t' read -r device maj_min <<< "$candidate"
+    mount_path=$(windows_preflight_mount_path "$maj_min") || {
+      windows_preflight_mark_unknown loader \
+        "Could not derive a private mount path for ESP ${device}"
+      continue
+    }
+    _windows_device_path="$device"
+    _windows_maj_min="$maj_min"
+    if ! windows_block_device_matches "$device" "$maj_min"; then
+      windows_preflight_mark_unknown loader \
+        "ESP ${device} changed identity before loader inspection"
+      continue
+    fi
+    rc=0
+    inspection=$(windows_with_target_mount \
+      windows_preflight_inspect_loader "$mount_path") || rc=$?
+    if ! windows_block_device_matches "$device" "$maj_min"; then
+      windows_preflight_mark_unknown loader \
+        "ESP ${device} changed identity during loader inspection"
+      continue
+    fi
+    case "$rc" in
+      0)
+        if ! windows_preflight_record_inspection "$device" "$inspection"; then
+          windows_preflight_mark_unknown loader \
+            "ESP ${device} returned malformed signer inspection data"
+        fi
+        ;;
+      2) ;;
+      129|130|143)
+        scan_rc=$rc
+        break
+        ;;
+      *)
+        windows_preflight_mark_unknown loader \
+          "Microsoft loader inspection failed safely on ESP ${device}"
+        ;;
+    esac
+  done
+
+  if [[ "$acquired_repair" == true ]]; then
+    release_repair_lock
+  fi
+  if [[ "$acquired_limine" == true ]]; then
+    release_limine_lock
+  fi
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == "$prior_limine" \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == "$prior_repair" ]] || return 1
+  [[ $scan_rc -eq 0 ]] || return "$scan_rc"
+}
+
+windows_collect_encryption_preflight() {
+  local rc=0
+  windows_preflight_reset
+  windows_preflight_detect_firmware
+  if ! windows_preflight_read_block_inventory; then
+    windows_preflight_mark_unknown bitlocker \
+      "Block-device inventory processing failed safely"
+    windows_preflight_mark_unknown loader \
+      "ESP inventory processing failed safely"
+  fi
+  windows_preflight_scan_esps || rc=$?
+  [[ $rc -eq 0 ]] || return "$rc"
+  windows_preflight_finalize_states
+}
+
+windows_preflight_print_summary() {
+  local device record classification issuers
+  printf '  Detection summary:\n'
+  printf '    Firmware option: %s\n' "$_windows_preflight_firmware_state"
+  printf '    BitLocker signature: %s\n' "$_windows_preflight_bitlocker_state"
+  printf '    Microsoft loader on ESP: %s\n' "$_windows_preflight_loader_state"
+  for device in "${_windows_preflight_bitlocker_devices[@]}"; do
+    printf '    BitLocker-format volume: %s\n' "$device"
+  done
+  for record in "${_windows_preflight_signer_records[@]}"; do
+    IFS=$'\t' read -r device classification issuers <<< "$record"
+    printf '    Boot manager: %s (%s)\n' "$device" "$classification"
+    [[ -z "$issuers" ]] || printf '      Embedded issuer metadata: %s\n' "$issuers"
+  done
+  echo
+  warn "Boot-manager signer metadata is advisory and does not evaluate firmware db, dbx, revocation, or bootability"
+}
+
+windows_preflight_print_home_guidance() {
+  echo -e "  ${BOLD}Windows Home${NC}"
+  echo "    1. Back up and verify the recovery key if Device Encryption is active."
+  echo "    2. Open Settings > Privacy & security > Device encryption."
+  echo "    3. Turn Device Encryption off and wait for decryption to finish."
+  echo "    4. After the final direct Windows boot, run Confirm-SecureBootUEFI and verify Device Encryption state."
+  echo "    Microsoft documents Settings decryption for Home; use this workflow only."
+  echo
+}
+
+windows_preflight_print_pro_guidance() {
+  echo -e "  ${BOLD}Windows Pro, Enterprise, or Education${NC}"
+  echo "    1. Back up and verify every recovery key."
+  echo "    2. In administrator PowerShell, inspect: manage-bde -status \$env:SystemDrive"
+  echo "    3. Suspend: Suspend-BitLocker -MountPoint \$env:SystemDrive -RebootCount 0"
+  echo "    4. Confirm protection is suspended before any Secure Boot setting changes."
+  echo "    5. On the first direct Windows boot, run Confirm-SecureBootUEFI."
+  echo "    6. Resume: Resume-BitLocker -MountPoint \$env:SystemDrive"
+  echo "    7. Verify with manage-bde -status and manage-bde -protectors -get \$env:SystemDrive."
+  echo
+}
+
+windows_preflight_print_common_guidance() {
+  warn "Secure Boot changes can trigger BitLocker recovery"
+  warn "Direct firmware handoff does not guarantee Windows boot, PCR7 binding, stable measurements, or no recovery prompt"
+}
+
+windows_preflight_print_unknown_reasons() {
+  local reason
+  (( ${#_windows_preflight_unknown_reasons[@]} > 0 )) || return 0
+  echo -e "  ${BOLD}Technical blockers${NC}"
+  for reason in "${_windows_preflight_unknown_reasons[@]}"; do
+    fail "$reason"
+  done
+  echo
+}
+
+windows_preflight_gum_path() {
+  command -v gum
+}
+
+windows_preflight_confirm() {
+  local prompt="$1"
+  "$_windows_preflight_gum" confirm "$prompt"
+}
+
+windows_encryption_gate() {
+  local collection_rc=0 edition management
+  windows_collect_encryption_preflight || collection_rc=$?
+  case "$collection_rc" in
+    0) ;;
+    129|130|143)
+      _windows_preflight_result=declined
+      return "$collection_rc"
+      ;;
+    *)
+      windows_preflight_mark_unknown loader \
+        "Windows preflight collection failed safely"
+      windows_preflight_finalize_states
+      windows_preflight_print_summary
+      windows_preflight_print_common_guidance
+      windows_preflight_print_home_guidance
+      windows_preflight_print_pro_guidance
+      windows_preflight_print_unknown_reasons
+      fail "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
+      _windows_preflight_result=technical-unknown
+      return 2
+      ;;
+  esac
+
+  windows_preflight_print_summary
+  if [[ "$_windows_preflight_firmware_state" == absent \
+    && "$_windows_preflight_bitlocker_state" == absent \
+    && "$_windows_preflight_loader_state" == absent ]]; then
+    pass "No Windows signal was observed in the current firmware and visible block inventory"
+    warn "This bounded observation does not prove Windows is absent and is not firmware clearance"
+    warn "If Windows exists outside this inventory, Secure Boot changes can still trigger BitLocker recovery"
+    _windows_preflight_result=negative
+    return 0
+  fi
+
+  if ! _windows_preflight_gum=$(windows_preflight_gum_path); then
+    windows_preflight_print_common_guidance
+    windows_preflight_print_home_guidance
+    windows_preflight_print_pro_guidance
+    windows_preflight_print_unknown_reasons
+    fail "gum is required to collect edition, management, and preparation acknowledgments"
+    _windows_preflight_result=technical-unknown
+    return 2
+  fi
+  edition=$("$_windows_preflight_gum" choose --header "Windows edition" \
+    Home Pro Enterprise Education) || {
+    warn "Windows preflight declined"
+    _windows_preflight_result=declined
+    return 1
+  }
+  case "$edition" in
+    Home|Pro|Enterprise|Education) ;;
+    *)
+      fail "Windows edition selection was not recognized"
+      _windows_preflight_result=technical-unknown
+      return 2
+      ;;
+  esac
+  management=$("$_windows_preflight_gum" choose --header "Windows management" \
+    "Personal device" "Managed by an organization") || {
+    warn "Windows preflight declined"
+    _windows_preflight_result=declined
+    return 1
+  }
+  case "$management" in
+    "Personal device"|"Managed by an organization") ;;
+    *)
+      fail "Windows management selection was not recognized"
+      _windows_preflight_result=technical-unknown
+      return 2
+      ;;
+  esac
+
+  windows_preflight_print_common_guidance
+  if [[ "$edition" == Home ]]; then
+    windows_preflight_print_home_guidance
+  else
+    windows_preflight_print_pro_guidance
+  fi
+  windows_preflight_print_unknown_reasons
+  if [[ "$management" == "Managed by an organization" ]]; then
+    warn "Organization-managed devices require administrator approval before firmware keys are replaced"
+    if ! windows_preflight_confirm \
+      "Has the organization's administrator approved replacing the firmware Secure Boot keys?"; then
+      fail "Administrator approval is required for a managed Windows device"
+      _windows_preflight_result=declined
+      return 1
+    fi
+  fi
+  if ! windows_preflight_confirm \
+    "Have you checked Windows encryption state and backed up every available recovery key?"; then
+    fail "Windows encryption-state review and recovery-key preparation are required"
+    _windows_preflight_result=declined
+    return 1
+  fi
+  if [[ "$_windows_preflight_bitlocker_state" != absent ]]; then
+    if [[ "$edition" == Home ]]; then
+      if ! windows_preflight_confirm \
+        "Is Device Encryption off with decryption fully complete?"; then
+        fail "Windows Home must finish Device Encryption decryption"
+        _windows_preflight_result=declined
+        return 1
+      fi
+    elif ! windows_preflight_confirm \
+      "Is BitLocker protection suspended on every protected Windows volume?"; then
+      fail "BitLocker protection must be suspended before Secure Boot changes"
+      _windows_preflight_result=declined
+      return 1
+    fi
+  fi
+
+  if [[ "$_windows_preflight_firmware_state" == unknown \
+    || "$_windows_preflight_bitlocker_state" == unknown \
+    || "$_windows_preflight_loader_state" == unknown ]]; then
+    fail "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
+    _windows_preflight_result=technical-unknown
+    return 2
+  fi
+  pass "Windows encryption preparation acknowledged"
+  _windows_preflight_result=prepared
 }
 
 windows_classify_target_state() {

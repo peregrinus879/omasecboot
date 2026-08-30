@@ -43,6 +43,18 @@ durable_sync() {
   :
 }
 
+PREFLIGHT_ROOT_CHECKED=false
+PREFLIGHT_CALLED=false
+check_root() {
+  [[ "$1" == "windows preflight" ]] || return 1
+  PREFLIGHT_ROOT_CHECKED=true
+}
+
+windows_encryption_gate() {
+  PREFLIGHT_CALLED=true
+  _windows_preflight_result=prepared
+}
+
 capture_service_state() {
   printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
 }
@@ -74,6 +86,21 @@ grep -Fxq 'UNRELATED=value' "$settings_fixture" \
 for command in setup enroll sign cleanup; do
   if "cmd_${command}" > "${TEST_DIR}/${command}.out" 2>&1; then
     fail_test "blocked ${command} command succeeded"
+  fi
+done
+main windows preflight > "${TEST_DIR}/windows-preflight.out" \
+  || fail_test "public Windows preflight route failed"
+[[ "$PREFLIGHT_ROOT_CHECKED" == true && "$PREFLIGHT_CALLED" == true \
+  && "$_windows_preflight_result" == prepared ]] \
+  || fail_test "public Windows preflight route was not a thin caller-visible gate"
+grep -Fq 'Windows Encryption Preflight' "${TEST_DIR}/windows-preflight.out" \
+  || fail_test "public Windows preflight route omitted its heading"
+if cmd_windows preflight unexpected >/dev/null 2>&1; then
+  fail_test "Windows preflight accepted an extra argument"
+fi
+for command in setup bootnext reboot; do
+  if cmd_windows "$command" > "${TEST_DIR}/windows-${command}.out" 2>&1; then
+    fail_test "blocked Windows ${command} command succeeded"
   fi
 done
 [[ ! -e "$(lifecycle_file_path)" ]] \

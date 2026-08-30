@@ -41,4 +41,5 @@ test:
 	bash tests/dispatcher.sh
 	bash tests/install.sh
 	bash tests/windows.sh
+	bash tests/windows-preflight.sh
 	bash tests/windows-entry.sh
