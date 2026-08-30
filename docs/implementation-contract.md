@@ -8,7 +8,7 @@ Labels: FACT is directly verified; JUDGMENT is the engineering decision applied 
 
 - JUDGMENT: Keep Secure Boot mechanics in OmaSecBoot, package a tagged release in omarchy-pkgs, and add thin setup, removal, menu, test, and manual integration to basecamp/omarchy.
 - JUDGMENT: Deliver in this order: OmaSecBoot T-1 through T-9, the `v1.0.0` tag, omarchy-pkgs P-1, then Omarchy O-1 through O-3.
-- JUDGMENT: Install only `omasecboot` from the Omarchy Package Repository. Its package dependency supplies `sbctl>=0.17`; removal drops only `omasecboot`.
+- JUDGMENT: Install only `omasecboot` from the Omarchy Package Repository. Its package dependency supplies the audited `sbctl=0.18` line; removal drops only `omasecboot`.
 - JUDGMENT: Base Omarchy integration on `upstream/quattro` and keep tags, pushes, pull requests, and branch deletion maintainer-owned.
 - FACT (verified 2026-08-26): The audited Omarchy ISO is not Secure Boot bootable. No ISO implementation belongs in these pull requests.
 - JUDGMENT: A shipped menu default requires a fresh local ISO and graphical acceptance run unless Omarchy maintainers explicitly approve a deviation.
@@ -25,7 +25,7 @@ The product lifecycle is separate from the firmware and key-enrollment state use
 | `transition` | A durable transaction is configuring, repairing, enrolling, resetting, recovering, or unconfiguring. |
 | `recovery-required` | A mutation or rollback failed. Normal mutation and package removal are blocked. |
 
-JUDGMENT: Every top-level mutation writes a root-owned transaction manifest before changing persistent state. The manifest records its ID, boot ID, owner PID and process start time, prior stable state, operation, completed phases, backup paths and hashes, and service state. Stable lifecycle state is committed last.
+JUDGMENT: Every top-level mutation writes a root-owned transaction manifest before changing persistent state. The manifest records its ID, boot ID, owner PID and process start time, prior stable state, operation, completed phases, backup paths and hashes, captured service state, and quiesce/restore outcomes. Stable lifecycle state is committed last.
 
 JUDGMENT: A stale transition becomes `recovery-required`. Normal commands stop and identify the recovery command and transaction. A failed rollback never reports success.
 
@@ -48,7 +48,7 @@ JUDGMENT: Replace the environment-only hook bypass with a pre-hook and post-hook
 
 JUDGMENT: Add ALPM PreTransaction hooks with `AbortOnFail` to block boot-mutating package transactions during `transition` or `recovery-required`, and to block removal unless state is verified `disabled` or pristine.
 
-JUDGMENT: Stopping `limine-snapper-sync.service` is an auxiliary quiescing step. It is not the concurrency boundary because Snapper plugins and cleanup can launch independent syncs.
+JUDGMENT: Enforcing the captured active or inactive state of `limine-snapper-sync.service` after transition publication and restoring that state before stable commit is an auxiliary quiescing step. Indeterminate pre-transaction service state aborts before publication. Quiescing is not the concurrency boundary because Snapper plugins and cleanup can launch independent syncs.
 
 JUDGMENT: Permit full snapshot restore only in stable state, serialize its post-repair, reject it during OmaSecBoot transitions, and document that upstream's mutation window itself is not serialized until upstream removes the `--no-mutex` path.
 
@@ -72,15 +72,15 @@ JUDGMENT: Preserve `ENABLE_VERIFICATION=no` and `ENABLE_ENROLL_LIMINE_CONFIG=yes
 
 ## 5. Firmware Backup And Enrollment
 
-FACT: `sbctl export-enrolled-keys` excludes dbx, normally cannot export PK in Setup Mode, requires a fresh destination, and DER output cannot represent every EFI signature-list type. `sbctl reset` removes the PK and enters Setup Mode; it is not a factory-key restoration.
+FACT: `sbctl export-enrolled-keys` excludes dbx, normally cannot export PK in Setup Mode, requires a fresh destination, and DER output cannot represent every EFI signature-list type. `sbctl enroll-keys -m -f --export esl` plans PK, KEK, and db but no dbx; bare `-f` adds the default firmware KEK and db, not the current or default PK. `sbctl reset` removes the PK and enters Setup Mode; it is not a factory-key restoration.
 
-JUDGMENT: Before any instruction that may clear keys, save the raw PK, KEK, db, and dbx efivar payloads plus attributes, hashes, absence records, and machine identity in a root-only backup. Call this the pre-change firmware set, not factory keys.
+JUDGMENT: Before any instruction that may change firmware trust, save the raw PK, KEK, db, and dbx efivar payloads plus attributes, hashes, absence records, the raw one-byte SetupMode, AuditMode, DeployedMode, and SecureBoot values, and a valid DMI product UUID in a root-only backup. Call this the pre-change firmware set, not factory keys.
 
 JUDGMENT: Refuse enrollment when firmware is already in Setup Mode and no validated pre-change backup exists.
 
-JUDGMENT: Generate the planned PK, KEK, and db set with `sbctl enroll-keys -m -f --export esl`, then compare exact EFI signature-list entries. Unknown organizational certificates, unsupported entry types, or any current entry the planned set would lose block v1 enrollment. Do not silently discard them, preserve them by subject name, or use `--append` as repair.
+JUDGMENT: Generate the planned PK, KEK, and db set with `sbctl enroll-keys -m -f --export esl`, then compare exact EFI signature-list entries. A conforming current single-entry X.509 OEM PK may be intentionally replaced by the planned single local PK only after raw backup, exact fingerprint display, and explicit confirmation. Every supported current KEK and db entry must occur byte-for-byte in the plan with at least the same multiplicity. Unknown organizational certificates, unsupported entry types or headers, malformed lists, duplicate planned entries, or any current KEK/db entry the plan would lose block v1 enrollment. Do not preserve trust by subject name or use `--append` as repair.
 
-JUDGMENT: If firmware key clearing removed dbx, restore the exact validated dbx backup before PK enrollment or abort. After enrollment, compare actual PK, KEK, db, and dbx with the recorded and user-confirmed planned result.
+JUDGMENT: V1 has no dbx writer. Before a Setup Mode instruction, require present one-byte AuditMode and DeployedMode values equal to zero and explicit confirmation that firmware offers a PK-only delete or custom-mode operation. Absence is unknown, never inferred as zero. After the firmware operation, require PK absent, formal Setup Mode, and raw KEK, db, and dbx state unchanged from the confirmed backup. Clear-all-only firmware, missing mode variables, or any KEK/db/dbx change is unsupported and aborts before enrollment. After enrollment, compare actual PK, KEK, and db with the confirmed plan and require dbx still equals the confirmed backup.
 
 JUDGMENT: Keep three distinct recovery procedures: software `unconfigure`, `sbctl reset` with a verified Setup Mode postcondition, and firmware factory-key restoration. Do not call the combined workflow automatically reversible.
 
@@ -90,13 +90,17 @@ The setup state is derived from local-key presence, direct enrollment comparison
 
 | State | Predicate | Required outcome |
 | --- | --- | --- |
-| 1 | No local sbctl keys | Run the Windows gate, record the pre-change firmware set, create local keys, build and compare the planned trust set, obtain explicit confirmation, configure and prove boot artifacts, then print the Setup Mode instruction. Refuse if the firmware is already in Setup Mode without a validated pre-change backup. |
-| 2 | Local keys exist; enrollment is absent or partial; firmware is in Setup Mode | Run the Windows gate, require a validated pre-change backup, build and compare the planned trust set, obtain explicit confirmation, prove every boot artifact before enrollment, enroll, repeat the proof, then print the Secure Boot enablement instruction. |
-| 3 | Local keys exist; enrollment is absent or partial; firmware is in user mode | Run the Windows gate, record the pre-change firmware set, build and compare the planned trust set, obtain explicit confirmation, then print the Setup Mode instruction without enrolling. |
+| 1 | No local sbctl keys | Run the Windows gate, record the pre-change firmware set, create local keys, build and compare the planned trust set, obtain explicit confirmation, configure and prove boot artifacts, then authorize only a PK-delete Setup Mode instruction. Refuse if firmware is already in Setup Mode without a validated pre-change backup. |
+| 2 | Local keys exist; enrollment is absent or partial; firmware is in Setup Mode | Run the Windows gate, require a validated pre-change backup and unchanged KEK/db/dbx, rebuild and compare the confirmed plan, prove every boot artifact before enrollment, enroll db then KEK then PK, prove each readback, repeat the artifact proof, then authorize the Secure Boot enablement instruction. |
+| 3 | Local keys exist; enrollment is absent or partial; firmware is in user mode | Run the Windows gate, record the pre-change firmware set, build and compare the planned trust set, obtain explicit confirmation, prove boot artifacts, then authorize only a PK-delete Setup Mode instruction without enrolling. |
 | 4 | The planned trust set is enrolled; Secure Boot is off | Run the Windows gate and complete the final artifact proof before printing the Secure Boot enablement instruction. |
 | 5 | The planned trust set is enrolled; Secure Boot is on | Verify status and complete only guarded, explicitly confirmed post-enrollment work such as Windows opt-in. |
 
-JUDGMENT: Every state that prints a Setup Mode instruction first proves that the recorded and user-confirmed planned trust set preserves every supported current entry; an unknown entry or unsupported signature-list type blocks the instruction. States 1 through 4 rerun the same Windows preflight immediately before any firmware instruction and reject every nonzero result. Every mutating state runs as a durable top-level transaction, uses the shared boot lock, applies auxiliary producer quiescing, restores prior service state on every exit, and commits stable lifecycle state last. Setup is idempotent in every state.
+JUDGMENT: Every state that prints a Setup Mode instruction first proves the explicit PK replacement and preservation of every supported current KEK/db entry, unchanged dbx, valid mode variables, and PK-only firmware capability. An unknown entry or unsupported signature-list type blocks the instruction. States 1 through 4 rerun the same Windows preflight immediately before any firmware instruction and reject every nonzero result. Every mutating state runs as a durable top-level transaction, uses the shared boot lock, applies auxiliary producer quiescing, restores prior service state on every exit, and commits stable lifecycle state last. Setup is idempotent in every state.
+
+JUDGMENT: T-5 implements backup, plan, classification, enrollment ordering, and failure proof behind a production predicate that remains false while interrupted recovery is unavailable. The predicate is checked at entry, before artifact mutation, and before every db, KEK, and PK write. `setup` and `enroll` remain blocked and print no firmware instructions until T-6 supplies recovery for every interruption point and deliberately enables the predicate and dispatcher.
+
+JUDGMENT: Before artifact mutation, an enrollment transaction binds the exact firmware-backup manifest, confirmed plan manifest, ESL and normalized-entry hashes, and dbx baseline. It records each db, KEK, and PK attempt before invoking the pinned package executable and records both command status and direct readback afterward. Immediately before the first possible firmware write, it durably changes file-failure handling from restoring prior boot artifacts to preserving the newly proved set. A later failure remains `recovery-required`; generic file rollback must not reintroduce artifacts that may be untrusted by the partially changed firmware state.
 
 ## 6. Windows Target Contract
 
@@ -178,7 +182,7 @@ JUDGMENT: Borrowing another distribution's dual-signed shim is technically viabl
 2. **T-2 `fix: prove Limine boot artifacts`**: both Limine binaries, embedded checksum proof, failure propagation, final EFI signing and tracking proof, and fixtures.
 3. **T-3 `feat: validate Windows firmware handoff`**: structured BootOrder parser, ESP mapping, root loader validation, numeric/Limine equivalence, durable target identity, and ambiguity tests.
 4. **T-4 `feat: add the Windows encryption preflight`**: edition and management gate, Home decryption, Pro and higher suspension, advisory signer inspection, and no-NTFS tests.
-5. **T-5 `feat: make setup and enrollment state-aware`**: raw firmware backup, planned-set comparison, five setup states, enrollment proof, and failure injection.
+5. **T-5 `feat: make setup and enrollment state-aware`**: raw firmware backup, planned-set comparison, five setup states, dormant enrollment proof, producer quiescing, and failure injection; production mutation remains blocked.
 6. **T-6 `feat: add recovery and software unconfiguration`**: recover, reset, unconfigure, three-way restore, removal guard, and rollback tests.
 7. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, package script, tmpfiles, hook deployment, and staged install, upgrade, and removal tests.
 8. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, and end-user boundaries.

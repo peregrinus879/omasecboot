@@ -26,6 +26,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-preflight.sh` - Hermetic Windows signal, encryption guidance, advisory signer, privilege-drop, and no-NTFS checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
+- `tests/enrollment.sh` - Hermetic firmware-backup, trust-plan, setup-state, and dormant enrollment checks
 - `omarchy/omarchy-menu.jsonc` - Quattro user-menu fragment for graceful reboot-to-Windows handoff
 - `docs/implementation-contract.md` - Remaining implementation and release-gate contract
 - `docs/maintenance.md` - On-demand sources, compatibility findings, removal triggers, and deferred work
@@ -39,17 +40,17 @@ Single dispatcher sources lib modules. Each lib file owns one concern:
 - `checks.sh` - root, deps, EFI mount, gum validation
 - `discover.sh` - EFI file discovery, sbctl tracked-file discovery, sbctl database fallback helpers
 - `sign.sh` - key creation, signing, sbctl compatibility registration, stale entry cleanup, Limine verification/enrollment helpers
-- `enroll.sh` - key enrollment with `-m -f` flags
+- `enroll.sh` - raw firmware backup, strict trust planning, setup-state classification, and guarded enrollment
 - `windows.sh` - Windows firmware BootNext handoff and Limine `efi_boot_entry` management
 - `status.sh` - status display, hook checks, Limine verification/enrollment checks, tracked vs discovered EFI verification
 
 ## Dependencies
 
-sbctl, jq, gum (interactive only), efibootmgr, util-linux, and sbsigntools. Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
+sbctl, jq, OpenSSL, gum (interactive only), efibootmgr, util-linux, and sbsigntools. Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary, tested artifact-proof transaction, validated Windows target identity, and read-only Windows encryption preflight, but deliberately reports repair capability unavailable until interrupted recovery lands. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary, tested artifact-proof transaction, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, and dormant enrollment failure proof. It deliberately reports repair and firmware-enrollment capability unavailable until interrupted recovery lands. `setup`, `enroll`, `sign`, `cleanup`, Windows mutation, active producer automation, and uninstall remain blocked. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults.
@@ -61,7 +62,7 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 - `with_limine_lock` uses `/run/lock/boot-partition.lock`, the mutex shared with limine-entry-tool and limine-snapper-sync. Validate inherited descriptor ownership and the current pathname's device and inode, then call `flock` on inherited FD 200 before entering the critical section. A different pathname, an unchecked inherited FD, or validation without locking does not serialize boot mutations.
 - A Limine pre-hook rejects external hook-aware mutation during an OmaSecBoot transition. A post-hook validates and locks inherited FD 200 or acquires the shared lock itself before repair. ALPM PreTransaction guards block boot-mutating package transactions during `transition` and `recovery-required`, and block package removal until state is verified `disabled` or pristine.
 - Keep repair capability unavailable until interrupted recovery can handle stale manual, Limine, snapshot, and package mutations. Artifact proof alone does not authorize producer automation, and a PostTransaction backup cannot represent a package artifact's pre-transaction state.
-- Pausing `limine-snapper-sync.service` is auxiliary quiescing, not the concurrency boundary. Snapper plugins, transient units, cleanup, and full restore are separate producers. Full `limine-snapper-restore` has no parent shared lock on the audited release; allow it only in stable state, serialize post-repair, and reject it during `transition` and `recovery-required`.
+- Enforce the captured active or inactive state of `limine-snapper-sync.service` only after durable transition publication, then restore that state before stable commit and on handled failure paths. Indeterminate pre-transaction state aborts cleanly. This remains auxiliary quiescing, not the concurrency boundary. Snapper plugins, transient units, cleanup, and full restore are separate producers. Full `limine-snapper-restore` has no parent shared lock on the audited release; allow it only in stable state, serialize post-repair, and reject it during `transition` and `recovery-required`.
 - `cmd_setup()` is the provisioning path and may regenerate Limine-managed boot state. `cmd_sign()` is the lightweight repair path and must not call `limine-update` or rebuild UKIs.
 - `cmd_setup()` and `cmd_sign()` run `sign_all_efi()` as their final mutation. Config repair and checksum re-enrollment happen before signing.
 - Keep `sign_all_efi()` in `cmd_sign()` so new snapshot UKIs are discovered and registered; `zz-sbctl.hook` re-signs only files already known to sbctl.
@@ -82,7 +83,9 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 - The Windows preflight evaluates firmware options, direct BitLocker signatures, and Microsoft loaders on internal GPT ESPs independently as `present`, `absent`, or `unknown`. A complete negative is a bounded observation, not firmware clearance. Every positive or unknown run requires an encryption-state check and recovery-key preparation acknowledgment. Any technical unknown prints preparation guidance, returns nonzero, and has no override that a firmware-mutating command may consume.
 - External ESPs are not mounted or PE-parsed. Internal boot managers are copied under the boot and repair locks, then inspected through inherited FD 3 by `sbverify --list` after `setpriv` drops to `nobody`, clears groups and capabilities, resets the environment, and sets `no_new_privs`. Signer output is untrusted input and recognized issuer metadata never relaxes the preparation checklist.
 - Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof. Keep util-linux and sbsigntools in the T-7 package dependencies; recheck current Microsoft sources before recognizing a new issuer.
-- Before any Setup Mode instruction, back up raw PK, KEK, db, and dbx data, attributes, hashes, absence records, and machine identity. Unknown or unsupported trust entries that the planned `-m -f` set would lose block v1 enrollment; never preserve by subject name or repair with `--append`.
+- Before any Setup Mode instruction, back up raw PK, KEK, db, and dbx data, attributes, hashes, absence records, raw SetupMode/AuditMode/DeployedMode/SecureBoot state, and DMI product UUID. The conforming single OEM PK may be replaced only as an explicitly confirmed exception. Every current supported KEK/db entry must remain in the exact planned `-m -f` set; unknown or unsupported trust entries block v1. Never preserve by subject name or repair with `--append`.
+- V1 has no dbx writer and supports only a confirmed PK-only firmware operation with present zero AuditMode and DeployedMode values. Missing mode variables, clear-all-only firmware, or changed KEK/db/dbx state blocks before enrollment. db, KEK, and PK writes remain dormant behind the unavailable recovery predicate; check it at entry, before artifact mutation, and before every firmware write. T-6 enables the predicate and dispatcher only with tested interrupted recovery.
+- Bind each enrollment transaction to the firmware-backup and confirmed-plan hashes before artifact mutation. Record every firmware-write attempt before invoking the pinned sbctl executable and record its command result plus direct readback. Before the first possible firmware write, durably disable restoration of pre-repair boot artifacts; preserve the proved artifact set and enter `recovery-required` on later failure until T-6 provides phase-aware firmware recovery.
 - Keep software `unconfigure`, PK reset, raw-key recovery, and firmware factory restoration distinct. Package removal is permitted from verified `disabled` or pristine state, preserves lifecycle, transactions, firmware backups, durable Windows opt-in, local sbctl keys, and the stable lock pathname, and removes only `omasecboot`.
 
 ## Post-Change Verification

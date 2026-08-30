@@ -413,25 +413,6 @@ verify_limine_config_targets() {
   verify_limine_embedded_checksum "$(limine_fallback_binary_path)" "$expected"
 }
 
-# Create sbctl signing keys if they do not already exist.
-create_keys() {
-  local installed
-  installed=$(sbctl status --json 2>/dev/null | jq -r '.installed // false') || true
-
-  if [[ "$installed" == "true" ]]; then
-    qpass "Signing keys already exist"
-    return 0
-  fi
-
-  if ! gum confirm "Create new sbctl signing keys?"; then
-    warn "Aborted"
-    return 1
-  fi
-
-  sbctl create-keys || die "Key creation failed"
-  qpass "Signing keys created"
-}
-
 sbctl_entry_should_be_removed() {
   local file="$1" output="${2:-$1}" file_lower output_lower
   file_lower=${file,,}

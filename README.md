@@ -2,10 +2,10 @@
 
 **[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, validated Windows firmware target identity, and a read-only Windows encryption preflight; public mutation and automatic repair remain blocked until interrupted recovery is available.
+The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, and dormant enrollment failure proof. Public mutation and automatic repair remain blocked until interrupted recovery is available.
 
 > [!CAUTION]
-> **Development status, 2026-08-30:** lifecycle manifests, file rollback, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, explicit adoption, hermetic Limine/EFI proof, validated Windows target identity, and the read-only Windows encryption preflight are implemented. Interrupted recovery, firmware-key backup, unconfiguration, and safe removal remain release gates. Public mutation commands and active producer automation fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-08-30:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, producer quiescing, transition guards, explicit adoption, hermetic Limine/EFI proof, validated Windows target identity, the read-only Windows encryption preflight, raw firmware backup, strict trust planning, and dormant db/KEK/PK enrollment proof are implemented. Interrupted recovery, unconfiguration, safe removal, public firmware instructions, and producer activation remain release gates. Public mutation commands fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
 
 ## Why This Tool
 
@@ -40,7 +40,7 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 | Term | Definition |
 |------|------------|
 | **ESP** | EFI System Partition. FAT32 partition used by UEFI firmware to find boot loaders. Mounted at `/boot` on Omarchy. |
-| **Setup Mode** | UEFI firmware state where Secure Boot keys can be enrolled. Entered by clearing existing keys in BIOS settings. |
+| **Setup Mode** | UEFI firmware state with no enrolled PK. OmaSecBoot v1 supports only a separately confirmed firmware-local PK deletion that leaves KEK, db, and dbx unchanged. |
 | **UKI** | Unified Kernel Image. Single EFI file containing kernel, initramfs, and command line. Built by `mkinitcpio` on Omarchy. |
 | **BootNext** | UEFI firmware variable that overrides the boot order for one boot only. Used by `efi_boot_entry` and `efibootmgr -n` to boot Windows directly from firmware. |
 | **Config enrollment** | Embedding `limine.conf`'s checksum into the Limine EFI binary so it can verify config integrity at boot. |
@@ -50,15 +50,16 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 
 ## Development Status
 
-The package-first release uses five durable states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before its mutation, commits stable state last, validates owned nested hooks, and rejects unsafe Limine and package producers. Hermetic transactions prove both Limine checksums, local signatures, sbctl tracking, and a validated Windows firmware target identity. The read-only Windows preflight detects firmware, BitLocker-format, and ESP-loader signals without mounting Windows volumes. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
+The package-first release uses five durable lifecycle states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before mutation, commits stable state last, validates owned nested hooks, restores captured watcher state, and rejects unsafe Limine and package producers. Hermetic transactions prove both Limine checksums, local signatures, sbctl tracking, raw firmware backup, exact trust planning, five setup states, dormant enrollment ordering and readback, and validated Windows firmware target identity. The read-only Windows preflight detects firmware, BitLocker-format, and ESP-loader signals without mounting Windows volumes. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
 
-The remaining release gate requires raw PK/KEK/db/dbx backup before Setup Mode, interrupted recovery, and explicit separation of software unconfiguration from firmware factory restoration. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
+The remaining firmware gate is interrupted recovery for every db, KEK, and post-PK boundary. T-5 deliberately keeps its production predicate false, preserves the proved boot-artifact set after the first possible firmware write, and exposes no Setup Mode or Secure Boot instruction. Software unconfiguration and firmware factory restoration remain separate unfinished paths. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
 
 ## Prerequisites
 
 - **[Omarchy](https://omarchy.com)** with Limine bootloader, UKI, and btrfs/Snapper
 - [sbctl](https://github.com/Foxboron/sbctl) - Secure Boot key manager
 - [jq](https://jqlang.github.io/jq/) - JSON parser
+- [OpenSSL](https://www.openssl.org/) - strict X.509 DER and local key-pair validation
 - [gum](https://github.com/charmbracelet/gum) - interactive adoption and Windows preflight prompts
 - [efibootmgr](https://github.com/rhboot/efibootmgr) and util-linux - firmware, block-device, filesystem, lock, mount, and privilege-drop inspection
 - [sbsigntools](https://git.kernel.org/pub/scm/linux/kernel/git/jejb/sbsigntools.git/) - advisory Windows boot-manager signer metadata
@@ -67,7 +68,7 @@ The remaining release gate requires raw PK/KEK/db/dbx backup before Setup Mode, 
 - For dual-boot: Windows Boot Manager present in the firmware boot entries
 
 ```bash
-sudo pacman -S --needed sbctl jq gum efibootmgr sbsigntools util-linux
+sudo pacman -S --needed sbctl jq openssl gum efibootmgr sbsigntools util-linux
 ```
 
 ### Windows Preflight
@@ -105,7 +106,7 @@ The first supported installation will be the tagged package from the Omarchy Pac
 
 ## Planned Release Workflow
 
-The audited workflow, which is not implemented yet, is:
+The audited workflow is not publicly available. Its backup, planning, classification, and enrollment-proof machinery remains dormant behind the interrupted-recovery gate:
 
 1. Classify durable lifecycle state and require explicit adoption of an existing unrecorded configuration.
 2. Complete Windows edition, recovery-key, management, firmware inventory, and raw PK/KEK/db/dbx backup gates before printing any Setup Mode instruction.
@@ -120,11 +121,11 @@ The current implementation exposes `version`, read-only status, Windows discover
 
 ### `setup`
 
-Blocked until state-aware firmware backup, trust-set comparison, enrollment proof, and interrupted recovery are available.
+Blocked until interrupted recovery deliberately enables the tested dormant firmware-backup, trust-plan, and enrollment machinery. No current command prints a firmware instruction.
 
 ### `enroll`
 
-Blocked until raw PK, KEK, db, and dbx backup plus exact planned-trust comparison are available. No current command prints Setup Mode instructions.
+Blocked until interrupted recovery is available. The dormant path binds raw PK/KEK/db/dbx backup, the confirmed plan, each firmware-write attempt, and direct readback, but no current command can invoke it.
 
 ### `adopt`
 
@@ -259,7 +260,7 @@ Single dispatcher (`bin/omasecboot`) sources modular libraries:
 - `checks.sh` -- prerequisite validation (root, deps, EFI mount)
 - `discover.sh` -- EFI file discovery and sbctl database queries
 - `sign.sh` -- key creation, signing, Limine config management
-- `enroll.sh` -- firmware key enrollment
+- `enroll.sh` -- raw firmware backup, strict trust planning, setup-state observation, and guarded enrollment
 - `windows.sh` -- Windows encryption preflight, firmware BootNext handoff, and Limine `efi_boot_entry` management
 - `status.sh` -- status display and file verification
 

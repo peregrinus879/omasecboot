@@ -18,13 +18,13 @@ done
 
 cmd_setup() {
   header "Secure Boot Setup"
-  fail "Setup is blocked until state-aware firmware backup and enrollment proof are available"
+  fail "Setup is blocked until interrupted recovery enables the dormant firmware proof"
   return 1
 }
 
 cmd_enroll() {
   header "Key Enrollment"
-  fail "Enrollment is blocked until state-aware firmware backup and trust-set proof are available"
+  fail "Enrollment is blocked until interrupted recovery enables dormant enrollment"
   return 1
 }
 
@@ -299,9 +299,9 @@ cmd_help() {
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
   echo
   echo -e "  ${BOLD}Commands${NC}"
-  echo "    setup       Blocked until state-aware firmware proof is available"
+  echo "    setup       Blocked until interrupted recovery is available"
   echo "    adopt       Explicitly adopt an existing OmaSecBoot configuration"
-  echo "    enroll      Blocked until firmware backup and trust-set proof are available"
+  echo "    enroll      Blocked until interrupted recovery is available"
   echo "    windows     Probe Windows or run its read-only encryption preflight"
   echo "    status      Show Secure Boot status and file verification"
   echo "    sign        Blocked until interrupted recovery is available"

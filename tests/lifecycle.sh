@@ -57,8 +57,55 @@ arm_sync_failure() {
   rm -f "$SYNC_FAIL_MARKER"
 }
 
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
+SERVICE_LOAD_FILE="${TEST_DIR}/service-load"
+SERVICE_ACTIVE_FILE="${TEST_DIR}/service-active"
+SERVICE_UNIT_FILE="${TEST_DIR}/service-unit-file"
+SERVICE_ACTION_LOG="${TEST_DIR}/service-actions"
+SERVICE_LOCK_VIOLATION="${TEST_DIR}/service-lock-violation"
+SERVICE_SHOW_FAIL=false
+SERVICE_STOP_FAIL_AFTER=false
+SERVICE_START_FAIL=false
+SERVICE_ACTIVATE_AFTER_CAPTURE=false
+
+systemctl() {
+  local unit="$TRANSACTION_SERVICE_UNIT"
+  case "$*" in
+    "show --property=LoadState --property=ActiveState --property=UnitFileState ${unit}")
+      [[ "$SERVICE_SHOW_FAIL" == false ]] || return 41
+      printf 'LoadState=%s\n' "$(<"$SERVICE_LOAD_FILE")"
+      printf 'ActiveState=%s\n' "$(<"$SERVICE_ACTIVE_FILE")"
+      printf 'UnitFileState=%s\n' "$(<"$SERVICE_UNIT_FILE")"
+      if [[ "$SERVICE_ACTIVATE_AFTER_CAPTURE" == true ]]; then
+        printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+        SERVICE_ACTIVATE_AFTER_CAPTURE=false
+      fi
+      ;;
+    "show --property=ActiveState --value ${unit}")
+      [[ "$SERVICE_SHOW_FAIL" == false ]] || return 41
+      printf '%s\n' "$(<"$SERVICE_ACTIVE_FILE")"
+      ;;
+    "stop ${unit}")
+      if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false \
+        || "$_OMASECBOOT_REPAIR_LOCK_OWNED" != true ]]; then
+        : > "$SERVICE_LOCK_VIOLATION"
+        return 91
+      fi
+      printf 'stop\n' >> "$SERVICE_ACTION_LOG"
+      printf 'inactive\n' > "$SERVICE_ACTIVE_FILE"
+      [[ "$SERVICE_STOP_FAIL_AFTER" == false ]] || return 42
+      ;;
+    "start ${unit}")
+      if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false \
+        || "$_OMASECBOOT_REPAIR_LOCK_OWNED" != true ]]; then
+        : > "$SERVICE_LOCK_VIOLATION"
+        return 92
+      fi
+      printf 'start\n' >> "$SERVICE_ACTION_LOG"
+      [[ "$SERVICE_START_FAIL" == false ]] || return 43
+      printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+      ;;
+    *) return 97 ;;
+  esac
 }
 
 FAILPOINT=""
@@ -78,6 +125,15 @@ reset_state() {
   rm -f "$(limine_lock_path)"
   SYNC_FAIL_PATH=""
   rm -f "$SYNC_FAIL_MARKER"
+  printf 'loaded\n' > "$SERVICE_LOAD_FILE"
+  printf 'inactive\n' > "$SERVICE_ACTIVE_FILE"
+  printf 'disabled\n' > "$SERVICE_UNIT_FILE"
+  : > "$SERVICE_ACTION_LOG"
+  rm -f "$SERVICE_LOCK_VIOLATION"
+  SERVICE_SHOW_FAIL=false
+  SERVICE_STOP_FAIL_AFTER=false
+  SERVICE_START_FAIL=false
+  SERVICE_ACTIVATE_AFTER_CAPTURE=false
 }
 
 noop_transaction() {
@@ -120,6 +176,38 @@ manifest_sync_failure_transaction() {
   transaction_backup_file "$ABSENT_FILE" true
 }
 
+recovery_sync_failure_transaction() {
+  transaction_phase_start "recovery-sync" || return 1
+  arm_sync_failure "$(state_dir_path)"
+  return 24
+}
+
+preserved_file_transaction() {
+  transaction_phase_start "preserve-files" || return 1
+  transaction_backup_file "$PRESENT_FILE" || return 1
+  printf 'proved replacement\n' > "$PRESENT_FILE"
+  preserve_transaction_files_on_failure || return 1
+  return 30
+}
+
+missing_firmware_attachment_transaction() {
+  local backup_id path document
+  backup_id=$_transaction_id
+  path="$(state_dir_path)/firmware-backup/${backup_id}"
+  read_transaction_manifest "$_transaction_id" || return 1
+  document=$(jq -c --arg id "$backup_id" --arg path "$path" \
+    --arg hash "$(printf '0%.0s' {1..64})" '
+      .firmware_backup = {
+        id: $id,
+        path: $path,
+        status: "complete",
+        manifest_sha256: $hash
+      }
+    ' <<< "$_manifest_json") || return 1
+  write_transaction_manifest_json "$document" || return 1
+  return 31
+}
+
 signalled_transaction() {
   transaction_phase_start "signal-test"
   kill -TERM "$BASHPID"
@@ -137,6 +225,21 @@ zero_exit_transaction() {
 
 reject_adoption_preflight() {
   return 1
+}
+
+service_observation_transaction() {
+  [[ "$(<"$SERVICE_ACTIVE_FILE")" == inactive ]] || return 1
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == transition ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+    .service_state[$unit].quiesce_status == "completed" and
+    .service_state[$unit].restore_status == "pending"
+  ' <<< "$_manifest_json" >/dev/null || return 1
+  transaction_phase_start "observe-service" || return 1
+  transaction_phase_complete "observe-service"
 }
 
 reset_state
@@ -214,8 +317,164 @@ jq -e '
     "kind": "absent-lifecycle",
     "target": null
   }] and
-  .service_state["limine-snapper-sync.service"].active_state == "inactive"
+  .service_state["limine-snapper-sync.service"].active_state == "inactive" and
+  .service_state["limine-snapper-sync.service"].quiesce_status == "completed" and
+  .service_state["limine-snapper-sync.service"].restore_status == "completed"
 ' "$adoption_manifest" >/dev/null || fail_test "adoption manifest is incomplete"
+
+reset_state
+SERVICE_SHOW_FAIL=true
+if adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent"; then
+  fail_test "failed service capture published a transaction"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "failed service capture changed lifecycle state"
+[[ ! -s "$SERVICE_ACTION_LOG" ]] \
+  || fail_test "failed service capture acted on the service"
+
+reset_state
+printf 'activating\n' > "$SERVICE_ACTIVE_FILE"
+if adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent"; then
+  fail_test "transitional service state published a transaction"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "transitional service state changed lifecycle state"
+
+reset_state
+printf 'invented\n' > "$SERVICE_UNIT_FILE"
+if adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent"; then
+  fail_test "unknown unit-file state published a transaction"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "unknown unit-file state changed lifecycle state"
+
+reset_state
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+printf 'masked\n' > "$SERVICE_UNIT_FILE"
+if adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent"; then
+  fail_test "active masked service published a transaction"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "active masked service changed lifecycle state"
+
+reset_state
+SERVICE_ACTIVATE_AFTER_CAPTURE=true
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "inactive-to-active service race was not contained"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == inactive ]] \
+  || fail_test "inactive-to-active race did not restore the captured state"
+mapfile -t service_actions < "$SERVICE_ACTION_LOG"
+[[ "${service_actions[*]}" == stop ]] \
+  || fail_test "inactive-to-active race did not stop exactly once"
+inactive_race_manifest=$(lifecycle_manifest_path \
+  "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .service_state[$unit].active_state == "inactive" and
+  .service_state[$unit].quiesce_status == "completed" and
+  .service_state[$unit].restore_status == "completed"
+' "$inactive_race_manifest" >/dev/null \
+  || fail_test "inactive-to-active service outcomes were not durable"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "service success fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+: > "$SERVICE_ACTION_LOG"
+run_lifecycle_transaction "service-success" "active" "active" \
+  service_observation_transaction || fail_test "active service transaction failed"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "successful transaction did not restore the active service"
+mapfile -t service_actions < "$SERVICE_ACTION_LOG"
+[[ "${service_actions[*]}" == 'stop start' ]] \
+  || fail_test "successful transaction service actions were not stop then start"
+read_lifecycle || fail_test "service success lifecycle became unreadable"
+service_success_manifest=$(lifecycle_manifest_path \
+  "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .status == "completed" and
+  .service_state[$unit].quiesce_status == "completed" and
+  .service_state[$unit].restore_status == "completed" and
+  (.completed_phases | index("observe-service") != null)
+' "$service_success_manifest" >/dev/null \
+  || fail_test "successful service outcomes were not durable"
+[[ ! -e "$SERVICE_LOCK_VIOLATION" ]] \
+  || fail_test "service action ran without both transaction locks"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "stop-failure fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+SERVICE_STOP_FAIL_AFTER=true
+if run_lifecycle_transaction "service-stop-failure" "active" "active" \
+  noop_transaction; then
+  fail_test "stop-after-effect failure reported success"
+fi
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "stop failure did not restore the service"
+read_lifecycle || fail_test "stop-failure lifecycle became unreadable"
+[[ "$_lifecycle_state" == recovery-required ]] \
+  || fail_test "post-transition stop failure did not require recovery"
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .service_state[$unit].quiesce_status == "failed" and
+  .service_state[$unit].restore_status == "completed" and
+  (.completed_phases | index("verify") == null)
+' "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "stop failure outcomes were not durable"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "callback-service fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+if run_lifecycle_transaction "service-callback-failure" "active" "active" \
+  failed_transaction; then
+  fail_test "active-service callback failure reported success"
+else
+  service_callback_rc=$?
+fi
+[[ $service_callback_rc -eq 23 ]] \
+  || fail_test "active-service callback lost its status"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "callback failure did not restore the service"
+read_lifecycle || fail_test "callback-service lifecycle became unreadable"
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .service_state[$unit].quiesce_status == "completed" and
+  .service_state[$unit].restore_status == "completed"
+' "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "callback failure service outcomes were not durable"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "restore-failure fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
+SERVICE_START_FAIL=true
+if run_lifecycle_transaction "service-restore-failure" "active" "active" \
+  noop_transaction; then
+  fail_test "service restoration failure reported success"
+fi
+read_lifecycle || fail_test "restore-failure lifecycle became unreadable"
+[[ "$_lifecycle_state" == recovery-required \
+  && "$(<"$SERVICE_ACTIVE_FILE")" == inactive ]] \
+  || fail_test "service restoration failure did not require recovery"
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .service_state[$unit].quiesce_status == "completed" and
+  .service_state[$unit].restore_status == "failed" and
+  (.failure.reason | contains("service restoration failed"))
+' "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "service restoration failure was not durable"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "post-service fixture adoption failed"
 
 : > "$(snapshot_restore_lock_path)"
 if run_lifecycle_transaction "repair" "active" "active" noop_transaction \
@@ -258,6 +517,39 @@ atomic_write_control_file "$file_failure_manifest" 600 < "$unsafe_manifest"
 if read_transaction_manifest "$_lifecycle_transaction_id" >/dev/null 2>&1; then
   fail_test "transaction manifest trusted unsafe restore metadata"
 fi
+
+reset_state
+printf 'original\n' > "$PRESENT_FILE"
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "preserved-file fixture adoption failed"
+if run_lifecycle_transaction "preserved-file-failure" "active" "active" \
+  preserved_file_transaction; then
+  fail_test "preserved-file failure reported success"
+fi
+grep -Fxq 'proved replacement' "$PRESENT_FILE" \
+  || fail_test "preserve policy restored the prior file"
+read_lifecycle || fail_test "preserved-file lifecycle unreadable"
+jq -e '.file_rollback_policy == "preserve" and
+  .rollback.status == "preserved" and .rollback.failures == []' \
+  "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "preserved-file outcome was not durable"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "firmware-attachment fixture adoption failed"
+if run_lifecycle_transaction "missing-firmware-attachment" "active" "active" \
+  missing_firmware_attachment_transaction; then
+  fail_test "missing firmware attachment failure reported success"
+fi
+read_lifecycle || fail_test "missing firmware attachment blocked recovery"
+[[ "$_lifecycle_state" == recovery-required ]] \
+  || fail_test "missing firmware attachment did not require recovery"
+jq -e '.firmware_backup.status == "complete" and
+  .rollback.status == "completed"' \
+  "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "generic recovery depended on the firmware attachment"
 
 reset_state
 printf 'original\n' > "$PRESENT_FILE"
@@ -357,6 +649,22 @@ read_lifecycle || fail_test "recovery-state retry damaged lifecycle readability"
   || fail_test "recovery-state write was not retried"
 
 reset_state
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "recovery-sync fixture adoption failed"
+if run_lifecycle_transaction "recovery-sync-failure" "active" "active" \
+  recovery_sync_failure_transaction; then
+  fail_test "post-rename recovery sync failure reported success"
+fi
+[[ -e "$SYNC_FAIL_MARKER" ]] \
+  || fail_test "recovery state did not reach the post-rename sync"
+SYNC_FAIL_PATH=""
+rm -f "$SYNC_FAIL_MARKER"
+read_lifecycle || fail_test "recovery sync retry damaged lifecycle readability"
+[[ "$_lifecycle_state" == recovery-required && "$_transaction_active" == false ]] \
+  || fail_test "recovery sync retry did not confirm durable recovery"
+
+reset_state
 adopt_lifecycle : "no" "unknown" "yes" "unset" \
   "absent" "unknown" "absent" "unknown" \
   || fail_test "failure fixture adoption failed"
@@ -389,9 +697,10 @@ reset_state
 adopt_lifecycle : "no" "no" "yes" "yes" \
   "absent" "absent" "absent" "absent" \
   || fail_test "exit fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
 exit_marker="${TEST_DIR}/previous-exit-trap"
 if (
-  trap 'printf previous > "$exit_marker"' EXIT
+  trap 'printf "%s\n" "$?" > "$exit_marker"' EXIT
   run_lifecycle_transaction "repair" "active" "active" exiting_transaction
 ); then
   fail_test "exiting transaction succeeded"
@@ -399,15 +708,22 @@ else
   exit_rc=$?
 fi
 [[ $exit_rc -eq 37 ]] || fail_test "callback exit status was lost"
-grep -Fxq previous "$exit_marker" || fail_test "transaction discarded a prior EXIT trap"
+grep -Fxq 37 "$exit_marker" || fail_test "prior EXIT trap received the wrong status"
 read_lifecycle || fail_test "exiting transaction state became unreadable"
 [[ $_lifecycle_state == recovery-required ]] \
   || fail_test "callback exit did not require recovery"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "callback exit did not restore the active service"
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .service_state[$unit].restore_status == "completed"
+' "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+  || fail_test "callback exit service restoration was not durable"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "yes" \
   "absent" "absent" "absent" "absent" \
   || fail_test "zero-exit fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
 if (trap - EXIT; run_lifecycle_transaction \
   "repair" "active" "active" zero_exit_transaction); then
   fail_test "callback exit zero reported transaction success"
@@ -418,10 +734,13 @@ fi
 read_lifecycle || fail_test "zero-exit transaction state became unreadable"
 [[ $_lifecycle_state == recovery-required ]] \
   || fail_test "callback exit zero did not require recovery"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "callback exit zero did not restore the active service"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
   || fail_test "signal fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
 signal_marker="${TEST_DIR}/previous-signal-trap"
 if (
   trap - EXIT
@@ -437,12 +756,17 @@ grep -Fxq previous "$signal_marker" || fail_test "transaction discarded a prior 
 read_lifecycle || fail_test "signalled lifecycle could not be read"
 [[ $_lifecycle_state == recovery-required ]] \
   || fail_test "signal did not leave recovery-required"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "signal did not restore the active service"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
   || fail_test "stale fixture adoption failed"
+printf 'active\n' > "$SERVICE_ACTIVE_FILE"
 with_boot_repair_lock
 begin_lifecycle_transaction "repair" "active" || fail_test "stale transaction did not start"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == inactive ]] \
+  || fail_test "stale fixture did not quiesce the active service"
 stale_manifest=$(lifecycle_manifest_path "$_transaction_id")
 stale_tmp="${TEST_DIR}/stale-manifest.json"
 jq '.owner.start_time = "0"' "$stale_manifest" > "$stale_tmp"
@@ -460,8 +784,29 @@ release_boot_repair_lock
 read_lifecycle || fail_test "reconciled lifecycle could not be read"
 [[ $_lifecycle_state == recovery-required ]] \
   || fail_test "stale transition did not require recovery"
-jq -e '.status == "stale" and .failure.reason == "transaction owner is no longer valid"' \
+jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" '
+  .status == "stale" and
+  .failure.reason == "transaction owner is no longer valid" and
+  .service_state[$unit].restore_status == "completed"
+' \
   "$stale_manifest" >/dev/null || fail_test "stale owner was not recorded"
+[[ "$(<"$SERVICE_ACTIVE_FILE")" == active ]] \
+  || fail_test "stale reconciliation did not restore the active service"
+
+reset_state
+adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
+  || fail_test "service-schema fixture adoption failed"
+service_schema_manifest=$(lifecycle_manifest_path \
+  "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+service_schema_tmp="${TEST_DIR}/service-schema.json"
+jq --arg unit "$TRANSACTION_SERVICE_UNIT" \
+  '.service_state[$unit].restore_status = "invented"' \
+  "$service_schema_manifest" > "$service_schema_tmp"
+atomic_write_control_file "$service_schema_manifest" 600 < "$service_schema_tmp"
+if read_transaction_manifest \
+  "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")" >/dev/null 2>&1; then
+  fail_test "transaction manifest trusted an unsupported service outcome"
+fi
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \

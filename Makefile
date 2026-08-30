@@ -43,3 +43,4 @@ test:
 	bash tests/windows.sh
 	bash tests/windows-preflight.sh
 	bash tests/windows-entry.sh
+	bash tests/enrollment.sh
