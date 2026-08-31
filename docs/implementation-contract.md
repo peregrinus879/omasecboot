@@ -27,7 +27,15 @@ The product lifecycle is separate from the firmware and key-enrollment state use
 
 JUDGMENT: Every top-level mutation writes a root-owned transaction manifest before changing persistent state. The manifest records its ID, boot ID, owner PID and process start time, prior stable state, operation, completed phases, backup paths and hashes, captured service state, and quiesce/restore outcomes. Stable lifecycle state is committed last.
 
-JUDGMENT: A stale transition becomes `recovery-required`. Normal commands stop and identify the recovery command and transaction. A failed rollback never reports success.
+FACT: The package-first implementation has not shipped a lifecycle schema to users, so schema 2 starts without an in-place migration. Normal readers reject every other schema. The dormant removal classifier has one read-only exception for an exact historical schema-1 `disabled` record whose completed transaction manifest and recorded backup hashes validate; no other legacy document authorizes removal or mutation.
+
+JUDGMENT: Lifecycle schema 2 uses exact-key validation for lifecycle state, transaction manifests, artifact references, root incident seals, and recovery-attempt seals. A failed or stale root transaction publishes one create-once `incident.json` seal that binds the final terminal manifest hash. Publication uncertainty preserves the terminal manifest bytes and records a sealed failure instead of rewriting completed history. Create-once publication uses an atomic same-directory no-replace rename and requires the destination directory to synchronize before lifecycle state may reference the seal.
+
+JUDGMENT: Generic artifact references and transaction backups validate their current files and hashes. Firmware-backup and enrollment-plan fields retain historical transaction bindings because rollback can intentionally restore a different current plan file; firmware mutation boundaries validate those live artifacts directly before use.
+
+JUDGMENT: T-6.1 validates future attempt manifests and seals as a chain linked to the immutable root and immediately preceding attempt, with root-captured service identity preserved throughout. The reader accepts at most 32 attempts, and the read-only capacity check rejects another attempt before any recovery writer is called. Incident reads classify evidence as `absent`, `supported`, `unsupported-schema`, `attempt-limit`, `malformed`, or `control-state-ambiguous`. Attempt creation, recovery dispatch, and stable-state recovery capability remain unavailable until their later T-6 units.
+
+JUDGMENT: The retained recovery draft contributes root-first publication ordering and failure-injection points. Schema 2 replaces mutable-manifest sealing and prepared attempt records with separate terminal seal documents and exact references. Generic callback recovery runners and stable-state recovery activation are removed.
 
 JUDGMENT: Existing installations require an explicit adoption flow. It displays the existing managed settings and records either a user-confirmed original value or `unknown`; it never invents the pre-OmaSecBoot state. Automatic `unconfigure` refuses an unknown original value.
 
@@ -183,14 +191,21 @@ JUDGMENT: Borrowing another distribution's dual-signed shim is technically viabl
 3. **T-3 `feat: validate Windows firmware handoff`**: structured BootOrder parser, ESP mapping, root loader validation, numeric/Limine equivalence, durable target identity, and ambiguity tests.
 4. **T-4 `feat: add the Windows encryption preflight`**: edition and management gate, Home decryption, Pro and higher suspension, advisory signer inspection, and no-NTFS tests.
 5. **T-5 `feat: make setup and enrollment state-aware`**: raw firmware backup, planned-set comparison, five setup states, dormant enrollment proof, producer quiescing, and failure injection; production mutation remains blocked.
-6. **T-6 `feat: add recovery and software unconfiguration`**: recover, reset, unconfigure, three-way restore, removal guard, and rollback tests.
-7. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, package script, tmpfiles, hook deployment, and staged install, upgrade, and removal tests.
-8. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, and end-user boundaries.
-9. **T-9 `ci: verify shell and package builds`**: tests, syntax, ShellCheck, and package build workflow.
-10. **P-1 `build: add omasecboot`**: tagged release recipe and `source: local` metadata in omarchy-pkgs.
-11. **O-1 `feat: add Secure Boot setup and removal`**: both Omarchy wrappers and focused shell tests.
-12. **O-2 `feat: add Secure Boot menu actions`**: three menu entries and guard tests.
-13. **O-3 `docs: document Secure Boot`**: the new manual page and edits to manuals 02, 50, and 26.
+6. **T-6.1 `feat: seal lifecycle recovery incidents`**: schema-2 exact validators, create-once root seals, exact attempt-seal schemas, bounded read validation, publication-uncertainty evidence, and the exact read-only legacy-disabled removal classifier; attempt mutation and production recovery gates remain closed.
+7. **T-6.2 `feat: recover boot artifact producers`**: registry-selected producer recovery, ancestor-bound producer leases, failed-package handling, and serialized repair coverage for package, Limine, snapshot, and restore producers.
+8. **T-6.3 `feat: recover firmware trust mutations`**: phase-aware continuation for firmware backup binding, preservation-policy publication, write-attempt records, direct readback, and the supported PK-only trust plan.
+9. **T-6.4 `feat: add dormant Windows BootNext mutation`**: direct target revalidation and BootNext write/readback behind a closed production gate.
+10. **T-6.5 `feat: recover Windows handoff mutations`**: boot-ID-bound Windows handoff recovery and the `consumed-unknown` outcome without claiming that Windows booted.
+11. **T-6.6 `feat: add software unconfiguration`**: conflict-detecting three-way restore of owned settings, verification of both Limine targets, durable-state preservation, and final `disabled` commit.
+12. **T-6.7 `feat: add recoverable Secure Boot commands`**: setup, signing, enrollment, Windows mutation, cleanup, and unconfiguration through the recovery registry while the consolidated production gate remains closed.
+13. **T-6.8 `feat: activate recoverable Secure Boot lifecycle`**: production capability after interrupted-recovery, ownership, producer, firmware, Windows, and uninstall tests prove the complete lifecycle contract.
+14. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, package script, tmpfiles, hook deployment, and staged install, upgrade, and removal tests.
+15. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, and end-user boundaries.
+16. **T-9 `ci: verify shell and package builds`**: tests, syntax, ShellCheck, and package build workflow.
+17. **P-1 `build: add omasecboot`**: tagged release recipe and `source: local` metadata in omarchy-pkgs.
+18. **O-1 `feat: add Secure Boot setup and removal`**: both Omarchy wrappers and focused shell tests.
+19. **O-2 `feat: add Secure Boot menu actions`**: three menu entries and guard tests.
+20. **O-3 `docs: document Secure Boot`**: the new manual page and edits to manuals 02, 50, and 26.
 
 Touched code conforms to each repository's style as part of its functional unit.
 

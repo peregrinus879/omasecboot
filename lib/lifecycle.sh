@@ -1,19 +1,30 @@
 #!/bin/bash
 # OmaSecBoot: durable lifecycle, transaction, and hook ownership protocol
 
-readonly LIFECYCLE_SCHEMA_VERSION=1
+readonly LIFECYCLE_SCHEMA_VERSION=2
+readonly LEGACY_LIFECYCLE_SCHEMA_VERSION=1
+readonly MAX_RECOVERY_ATTEMPT_SEALS=32
+readonly MAX_TRANSACTION_BACKUPS=4096
+readonly MAX_CONTROL_DOCUMENT_BYTES=1048576
 readonly TRANSACTION_SERVICE_UNIT="limine-snapper-sync.service"
 
 _lifecycle_state=unmanaged
 _lifecycle_generation=0
 _lifecycle_transaction_id=""
 _lifecycle_json=""
+_lifecycle_read_status=absent
 _manifest_json=""
+_manifest_id=""
+_manifest_sha256=""
+_incident_json=""
+_incident_read_status=absent
+_recovery_root_service_json=""
 _transaction_active=false
 _transaction_id=""
 _transaction_token=""
 _transaction_operation=""
 _transaction_target_state=""
+_recovery_incident_json=""
 _OMASECBOOT_FULL_RESTORE_POST=false
 _transaction_previous_exit=""
 _transaction_previous_int=""
@@ -45,6 +56,26 @@ lifecycle_manifest_path() {
   [[ "$transaction_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
     || return 1
   printf '%s/%s/manifest.json\n' "$(transactions_dir_path)" "$transaction_id"
+}
+
+lifecycle_incident_path() {
+  local transaction_id="$1" manifest
+  manifest=$(lifecycle_manifest_path "$transaction_id") || return 1
+  printf '%s/incident.json\n' "$(dirname "$manifest")"
+}
+
+incident_reference_from_json() {
+  local document="$1" path="$2" hash
+  hash=$(sha256_file "$path") || return 1
+  jq -cn --argjson seal "$document" --arg path "$path" --arg hash "$hash" '{
+    id: $seal.id,
+    kind: $seal.kind,
+    operation: $seal.operation,
+    ordinal: $seal.ordinal,
+    path: $path,
+    sha256: $hash,
+    status: $seal.incident_status
+  }'
 }
 
 utc_timestamp() {
@@ -141,11 +172,19 @@ new_transaction_token() {
 }
 
 sha256_text() {
-  printf '%s' "$1" | sha256sum | awk '{ print $1 }'
+  local output hash
+  output=$(printf '%s' "$1" | sha256sum) || return 1
+  hash=${output%% *}
+  [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$hash"
 }
 
 sha256_file() {
-  sha256sum "$1" | awk '{ print $1 }'
+  local output hash
+  output=$(sha256sum "$1") || return 1
+  hash=${output%% *}
+  [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$hash"
 }
 
 capture_service_state() {
@@ -341,108 +380,293 @@ atomic_write_control_file() {
   durable_sync "$parent"
 }
 
-read_lifecycle() {
-  local state_dir state_file
-  state_dir=$(state_dir_path)
-  state_file=$(lifecycle_file_path)
-  _lifecycle_state=unmanaged
-  _lifecycle_generation=0
-  _lifecycle_transaction_id=""
-  _lifecycle_json=""
+atomic_create_control_file() {
+  local destination="$1" mode="$2" parent temporary old_umask
+  parent=$(dirname "$destination")
+  validate_control_directory "$parent" || return 1
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
 
-  if [[ ! -e "$state_dir" && ! -L "$state_dir" ]]; then
-    return 0
-  fi
-  validate_control_directory "$state_dir" || return 1
-  if [[ ! -e "$state_file" && ! -L "$state_file" ]]; then
-    return 0
-  fi
-  validate_control_file "$state_file" || return 1
+  old_umask=$(umask)
+  umask 077
+  temporary=$(mktemp "${parent}/.$(basename "$destination").XXXXXX") || {
+    umask "$old_umask"
+    return 1
+  }
+  umask "$old_umask"
 
-  jq -e --argjson schema "$LIFECYCLE_SCHEMA_VERSION" '
+  if ! cat > "$temporary" \
+    || ! chmod "$mode" "$temporary" \
+    || ! validate_control_file "$temporary" \
+    || ! durable_sync "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -T --no-copy --update=none-fail "$temporary" "$destination"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  validate_control_file "$destination" || return 1
+  durable_sync "$parent"
+}
+
+read_control_document() {
+  local path="$1" maximum="${2:-$MAX_CONTROL_DOCUMENT_BYTES}" size document
+  [[ "$maximum" =~ ^[1-9][0-9]*$ ]] || return 1
+  validate_control_file "$path" || return 1
+  size=$(stat -Lc '%s' "$path" 2>/dev/null) || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  (( size > 0 && size <= maximum )) || return 1
+  document=$(jq -ces '
+    if length == 1 then .[0] else error("expected one JSON value") end
+  ' "$path") || return 1
+  printf '%s\n' "$document"
+}
+
+validate_lifecycle_json() {
+  local document="$1"
+  jq -e --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+    --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def operation:
+      type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def artifact_reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | absolute_path) and (.schema_version | type == "number" and . >= 1 and floor == .) and
+      (.sha256 | digest);
+    def incident_reference:
+      type == "object" and
+      keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+      (.id | uuid) and (.operation | operation) and (.path | absolute_path) and
+      (.sha256 | digest) and
+      (if .kind == "root" then
+        .ordinal == 0 and
+        (.status == "failed" or .status == "stale" or
+          .status == "publication-uncertain")
+      elif .kind == "attempt" then
+        (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+        (.status == "failed" or .status == "stale" or .status == "completed")
+      else false end);
+    def adoption:
+      type == "object" and keys == ["managed_settings","recorded_at","source"] and
+      .source == "explicit" and (.recorded_at | timestamp) and
+      (.managed_settings | type == "array" and length == 4) and
+      (.managed_settings[0] |
+        keys == ["key","observed","original","path"] and
+        .path == "/etc/default/limine" and .key == "ENABLE_VERIFICATION" and
+        (.observed == "yes" or .observed == "no" or .observed == "unset") and
+        (.original == "yes" or .original == "no" or .original == "unset" or
+          .original == "unknown")) and
+      (.managed_settings[1] |
+        keys == ["key","observed","original","path"] and
+        .path == "/etc/default/limine" and .key == "ENABLE_ENROLL_LIMINE_CONFIG" and
+        (.observed == "yes" or .observed == "no" or .observed == "unset") and
+        (.original == "yes" or .original == "no" or .original == "unset" or
+          .original == "unknown")) and
+      (.managed_settings[2] |
+        keys == ["key","observed","original","path","token"] and
+        .path == "/etc/default/limine" and .key == "COMMANDS_BEFORE_SAVE" and
+        .token == "limine-reset-enroll" and
+        (.observed == "present" or .observed == "absent") and
+        (.original == "present" or .original == "absent" or .original == "unknown")) and
+      (.managed_settings[3] |
+        keys == ["key","observed","original","path","token"] and
+        .path == "/etc/default/limine" and .key == "COMMANDS_AFTER_SAVE" and
+        .token == "limine-enroll-config" and
+        (.observed == "present" or .observed == "absent") and
+        (.original == "present" or .original == "absent" or .original == "unknown"));
+    def completed_transaction:
+      type == "object" and
+      keys == ["completed_at","id","manifest","manifest_sha256","operation"] and
+      (.id | uuid) and (.operation | operation) and (.manifest | absolute_path) and
+      (.manifest_sha256 | digest) and (.completed_at | timestamp);
+    def transition_reference:
+      type == "object" and
+      keys == ["attempt_number","id","kind","manifest","operation","previous_attempt","root_incident"] and
+      (.id | uuid) and (.operation | operation) and (.manifest | absolute_path) and
+      (if .kind == "root" then
+        .attempt_number == null and .root_incident == null and .previous_attempt == null
+      elif .kind == "recovery-attempt" then
+        (.attempt_number | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+        (.root_incident | incident_reference) and .root_incident.kind == "root" and
+        (.previous_attempt == null or
+          ((.previous_attempt | incident_reference) and .previous_attempt.kind == "attempt"))
+      else false end);
+    def incident_state:
+      type == "object" and
+      keys == ["attempt_count","id","kind","last_recovery_attempt","manifest","operation","root_incident"] and
+      .kind == "incident" and (.id | uuid) and (.operation | operation) and
+      (.manifest | absolute_path) and (.root_incident | incident_reference) and
+      .root_incident.kind == "root" and .root_incident.id == .id and
+      .root_incident.operation == .operation and
+      (.attempt_count | type == "number" and . >= 0 and . <= $max_attempts and floor == .) and
+      (if .attempt_count == 0 then .last_recovery_attempt == null
+       else (.last_recovery_attempt | incident_reference) and
+         .last_recovery_attempt.kind == "attempt" and
+         .last_recovery_attempt.ordinal == .attempt_count and
+         (.last_recovery_attempt.status == "failed" or
+           .last_recovery_attempt.status == "stale")
+       end);
+    def resolved_recovery:
+      type == "object" and
+      keys == ["attempt_count","final_attempt","proof","resolved_at","root_incident"] and
+      (.attempt_count | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+      (.root_incident | incident_reference) and .root_incident.kind == "root" and
+      (.final_attempt | incident_reference) and .final_attempt.kind == "attempt" and
+      .final_attempt.ordinal == .attempt_count and .final_attempt.status == "completed" and
+      (.proof | artifact_reference) and (.resolved_at | timestamp);
     type == "object" and
+    keys == ["adoption","generation","last_recovery","last_transaction","managed_settings",
+      "schema_version","state","tracking_ownership","transaction","updated_at","writer_version"] and
     .schema_version == $schema and
-    (.writer_version | type == "string") and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
     (.generation | type == "number" and . >= 1 and floor == .) and
     (.state == "disabled" or .state == "active" or
       .state == "transition" or .state == "recovery-required") and
-    (.updated_at | type == "string") and
-    (if .state == "transition" or .state == "recovery-required" then
-      (.transaction | type == "object") and
-      (.transaction.id | type == "string") and
-      (.transaction.operation | type == "string" and
-        test("^[a-z0-9][a-z0-9-]*$")) and
-      (.transaction.manifest | type == "string")
-    else
-      .transaction == null
-    end)
-  ' "$state_file" >/dev/null || return 1
-
-  _lifecycle_json=$(jq -c . "$state_file") || return 1
-  _lifecycle_state=$(jq -r '.state' <<< "$_lifecycle_json") || return 1
-  _lifecycle_generation=$(jq -r '.generation' <<< "$_lifecycle_json") || return 1
-  if [[ "$_lifecycle_state" == transition || "$_lifecycle_state" == recovery-required ]]; then
-    _lifecycle_transaction_id=$(jq -r '.transaction.id' <<< "$_lifecycle_json") || return 1
-    [[ "$(jq -r '.transaction.manifest' <<< "$_lifecycle_json")" == \
-      "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" ]] || return 1
-  fi
+    (.updated_at | timestamp) and
+    (.adoption == null or (.adoption | adoption)) and
+    (.last_transaction == null or (.last_transaction | completed_transaction)) and
+    (.last_recovery == null or (.last_recovery | resolved_recovery)) and
+    (.managed_settings == null or (.managed_settings | artifact_reference)) and
+    (.tracking_ownership == null or (.tracking_ownership | artifact_reference)) and
+    (if .state == "transition" then
+      (.transaction | transition_reference)
+    elif .state == "recovery-required" then
+      (.transaction | incident_state)
+    else .transaction == null and (.last_transaction | completed_transaction) end)
+  ' <<< "$document" >/dev/null
 }
 
-read_transaction_manifest() {
-  local transaction_id="$1" manifest transaction_dir prior_state
-  local backup_entry backup_kind backup_path backup_hash backup_target backup_mode
-  local backup_uid backup_gid firmware_backup_id firmware_backup_path
-  local enrollment_backup_id enrollment_plan_path
+validate_transaction_manifest_json() {
+  local transaction_id="$1" document="$2" check_files="${3:-true}" transaction_dir
+  local prior_state backup_entry backup_kind backup_path backup_hash backup_target
+  local backup_mode backup_uid backup_gid firmware_backup_id firmware_backup_path
+  local enrollment_backup_id enrollment_plan_path reference captured_service_state
   local -A backup_targets=()
-  manifest=$(lifecycle_manifest_path "$transaction_id") || return 1
-  transaction_dir=$(dirname "$manifest")
-  validate_private_control_directory "$transaction_dir" || return 1
-  validate_private_control_file "$manifest" || return 1
+  [[ "$check_files" == true || "$check_files" == false ]] || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
 
   jq -e --arg id "$transaction_id" --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
-    --argjson owner_uid "$(control_owner_uid)" \
-    --arg service_unit "$TRANSACTION_SERVICE_UNIT" '
+    --argjson owner_uid "$(control_owner_uid)" --arg service_unit "$TRANSACTION_SERVICE_UNIT" \
+    --arg transaction_dir "$transaction_dir" \
+    --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" \
+    --argjson max_backups "$MAX_TRANSACTION_BACKUPS" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def operation:
+      type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def phase:
+      type == "string" and length <= 128 and test("^[a-z0-9][a-z0-9-]*$");
+    def artifact_reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | absolute_path) and (.schema_version | type == "number" and . >= 1 and floor == .) and
+      (.sha256 | digest);
+    def incident_reference:
+      type == "object" and
+      keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+      (.id | uuid) and (.operation | operation) and (.path | absolute_path) and
+      (.sha256 | digest) and
+      (if .kind == "root" then
+        .ordinal == 0 and
+        (.status == "failed" or .status == "stale" or
+          .status == "publication-uncertain")
+      elif .kind == "attempt" then
+        (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+        (.status == "failed" or .status == "stale" or .status == "completed")
+      else false end);
+    def failure:
+      type == "object" and keys == ["exit_code","phase","reason","recorded_at"] and
+      (.exit_code | type == "number" and . >= 0 and . <= 255 and floor == .) and
+      (.phase == null or (.phase | phase)) and
+      (.reason | type == "string" and length > 0 and length <= 1024) and
+      (.recorded_at | timestamp);
     type == "object" and
+    keys == ["backups","boot_id","completed_at","completed_phases","created_at",
+      "current_phase","domain_records","enrollment_plan","failure","file_rollback_policy",
+      "firmware_backup","firmware_writes","id","kind","operation","owner","prior_state",
+      "recovery","rollback","schema_version","service_state","status","target_state",
+      "token_sha256","writer_version"] and
     .schema_version == $schema and
-    (.writer_version | type == "string") and
-    .id == $id and
-    (.operation | type == "string" and test("^[a-z0-9][a-z0-9-]*$")) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .id == $id and (.operation | operation) and
     (.target_state == "disabled" or .target_state == "active") and
     (.status == "transition" or .status == "completed" or
       .status == "failed" or .status == "stale") and
-    (.created_at | type == "string") and
-    (.boot_id | type == "string") and
-    (.token_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-    (.owner | type == "object") and
+    (.created_at | timestamp) and
+    (.boot_id | uuid) and (.token_sha256 | digest) and
+    (.owner | type == "object" and keys == ["pid","start_time","uid"]) and
     (.owner.pid | type == "number" and . > 0 and floor == .) and
-    (.owner.start_time | type == "string" and test("^[0-9]+$")) and
+    (.owner.start_time | type == "string" and test("^[0-9]+$") and length <= 32) and
     .owner.uid == $owner_uid and
-    (.prior_state == "unmanaged" or .prior_state == "disabled" or .prior_state == "active") and
-    (.completed_phases | type == "array" and all(.[]; type == "string")) and
-    (.backups | type == "array" and length >= 1) and
+    (if .kind == "root" then
+      (.prior_state == "unmanaged" or .prior_state == "disabled" or .prior_state == "active") and
+      .recovery == null
+    elif .kind == "recovery-attempt" then
+      .prior_state == "recovery-required" and
+      (.recovery | type == "object" and
+        keys == ["attempt_number","previous_attempt","root_incident"]) and
+      (.recovery.attempt_number | type == "number" and . >= 1 and
+        . <= $max_attempts and floor == .) and
+      (.recovery.root_incident | incident_reference) and
+      .recovery.root_incident.kind == "root" and
+      (if .recovery.attempt_number == 1 then .recovery.previous_attempt == null
+       else (.recovery.previous_attempt | incident_reference) and
+         .recovery.previous_attempt.kind == "attempt" and
+         .recovery.previous_attempt.ordinal == (.recovery.attempt_number - 1)
+       end)
+    else false end) and
+    (.current_phase == null or (.current_phase | phase)) and
+    (.completed_phases | type == "array" and length <= 128 and
+      all(.[]; phase) and length == (unique | length)) and
+    (.backups | type == "array" and length >= 1 and length <= $max_backups) and
     (all(.backups[];
       type == "object" and
       if .kind == "absent-lifecycle" then
+        keys == ["kind","path","sha256","target"] and
         .path == null and .sha256 == null and .target == null
       elif .kind == "prior-lifecycle" then
-        (.path | type == "string") and
-        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-        .target == null
+        keys == ["kind","path","sha256","target"] and
+        (.path | absolute_path) and (.sha256 | digest) and .target == null
       elif .kind == "file" then
-        (.path | type == "string") and
-        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-        (.target | type == "string" and startswith("/")) and
+        keys == ["gid","kind","mode","path","sha256","target","uid"] and
+        (.path | absolute_path) and (.sha256 | digest) and (.target | absolute_path) and
         (.mode | type == "string" and test("^[0-7]{3,4}$")) and
         (.uid | type == "number" and . >= 0 and floor == .) and
         (.gid | type == "number" and . >= 0 and floor == .)
       elif .kind == "absent-file" then
-        .path == null and .sha256 == null and
-        (.target | type == "string" and startswith("/")) and
+        keys == ["gid","kind","mode","path","sha256","target","uid"] and
+        .path == null and .sha256 == null and (.target | absolute_path) and
         .mode == null and .uid == null and .gid == null
-      else false end
-    )) and
+      else false end)) and
+    (.backups[0].kind == "absent-lifecycle" or
+      .backups[0].kind == "prior-lifecycle") and
+    (all(.backups[1:][]; .kind == "file" or .kind == "absent-file")) and
+    (all(.backups | to_entries[1:][];
+      .value.kind == "absent-file" or
+      .value.path == ($transaction_dir + "/file-" + (.key | tostring) + ".backup"))) and
+    ([.backups[] | select(.target != null) | .target] as $targets |
+      ($targets | length) == ($targets | unique | length)) and
+    ([.backups[] | select(.path != null) | .path] as $paths |
+      ($paths | length) == ($paths | unique | length)) and
     (.service_state | type == "object" and keys == [$service_unit]) and
-    (.service_state[$service_unit] | type == "object") and
+    (.service_state[$service_unit] | type == "object" and
+      keys == ["active_state","load_state","quiesce_status","restore_status","unit_file_state"]) and
     (.service_state[$service_unit].load_state == "loaded" or
       .service_state[$service_unit].load_state == "not-found" or
       .service_state[$service_unit].load_state == "masked") and
@@ -485,78 +709,84 @@ read_transaction_manifest() {
     end) and
     (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve") and
     (.firmware_backup == null or (
-      (.firmware_backup | type == "object") and
-      (.firmware_backup | keys == ["id","manifest_sha256","path","status"]) and
-      (.firmware_backup.id | type == "string" and
-        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
-      (.firmware_backup.path | type == "string" and startswith("/")) and
+      (.firmware_backup | type == "object" and
+        keys == ["id","manifest_sha256","path","status"]) and
+      (.firmware_backup.id | uuid) and (.firmware_backup.path | absolute_path) and
       (.firmware_backup.status == "pending" or .firmware_backup.status == "complete") and
       (if .firmware_backup.status == "complete" then
-        (.firmware_backup.manifest_sha256 | type == "string" and
-          test("^[0-9a-f]{64}$"))
-      else .firmware_backup.manifest_sha256 == null end)
-    )) and
+        (.firmware_backup.manifest_sha256 | digest)
+      else .firmware_backup.manifest_sha256 == null end))) and
     (.enrollment_plan == null or (
-      (.enrollment_plan | type == "object") and
-      (.enrollment_plan | keys == ["backup_id","dbx","manifest_sha256","path","variables"]) and
-      (.enrollment_plan.backup_id | type == "string" and
-        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
-      (.enrollment_plan.path | type == "string" and startswith("/")) and
-      (.enrollment_plan.manifest_sha256 | type == "string" and
-        test("^[0-9a-f]{64}$")) and
+      (.enrollment_plan | type == "object" and
+        keys == ["backup_id","dbx","manifest_sha256","path","variables"]) and
+      (.enrollment_plan.backup_id | uuid) and (.enrollment_plan.path | absolute_path) and
+      (.enrollment_plan.manifest_sha256 | digest) and
       (.enrollment_plan.variables | type == "object" and keys == ["KEK","PK","db"]) and
       (all(.enrollment_plan.variables[];
         type == "object" and keys == ["entries_sha256","esl_sha256"] and
-        (.entries_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
-        (.esl_sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
+        (.entries_sha256 | digest) and (.esl_sha256 | digest))) and
       (.enrollment_plan.dbx | type == "object" and keys == ["present","raw_sha256"]) and
       (.enrollment_plan.dbx.present | type == "boolean") and
-      (if .enrollment_plan.dbx.present then
-        (.enrollment_plan.dbx.raw_sha256 | type == "string" and
-          test("^[0-9a-f]{64}$"))
-      else .enrollment_plan.dbx.raw_sha256 == null end) and
+      (if .enrollment_plan.dbx.present then (.enrollment_plan.dbx.raw_sha256 | digest)
+       else .enrollment_plan.dbx.raw_sha256 == null end) and
       .firmware_backup != null and .firmware_backup.status == "complete" and
-      .firmware_backup.id == .enrollment_plan.backup_id
-    )) and
+      .firmware_backup.id == .enrollment_plan.backup_id)) and
     (.firmware_writes as $writes |
       ($writes | type) == "array" and ($writes | length) <= 3 and
       all($writes[];
         type == "object" and
         keys == ["command_exit_code","completed_at","hierarchy","readback_status","started_at"] and
         (.hierarchy == "db" or .hierarchy == "KEK" or .hierarchy == "PK") and
-        (.started_at | type == "string") and
+        (.started_at | timestamp) and
         (.command_exit_code == null or
-          (.command_exit_code | type == "number" and . >= 0 and floor == .)) and
+          (.command_exit_code | type == "number" and . >= 0 and . <= 255 and floor == .)) and
         (.readback_status == "pending" or .readback_status == "verified" or
           .readback_status == "failed") and
-        (.completed_at == null or (.completed_at | type == "string"))) and
+        (.completed_at == null or (.completed_at | timestamp))) and
       ([$writes[].hierarchy] == [] or [$writes[].hierarchy] == ["db"] or
         [$writes[].hierarchy] == ["db","KEK"] or
         [$writes[].hierarchy] == ["db","KEK","PK"])) and
     (if (.firmware_writes | length) > 0 then
       .file_rollback_policy == "preserve" and .enrollment_plan != null
     else true end) and
-    (.current_phase == null or (.current_phase | type == "string")) and
-    (.failure == null or (.failure | type == "object")) and
+    (.domain_records | type == "object" and
+      keys == ["bootnext","final_proof","managed_settings","producer",
+        "tracking_ownership","unconfigure","windows"]) and
+    (all(.domain_records[]; . == null or artifact_reference)) and
+    (if .status == "transition" then
+      .completed_at == null and .failure == null
+    elif .status == "completed" then
+      (.completed_at | timestamp) and .failure == null and .current_phase == null and
+      .rollback == null
+    else
+      (.completed_at | timestamp) and (.failure | failure) and
+      .failure.phase == .current_phase
+    end) and
     (.rollback == null or (
-      (.rollback | type == "object") and
+      (.rollback | type == "object" and keys == ["attempted_at","failures","status"]) and
       (.rollback.status == "completed" or .rollback.status == "failed" or
         .rollback.status == "preserved") and
-      (.rollback.attempted_at | type == "string") and
-      ((.rollback.failures | type) == "array") and
-      (.rollback.failures | all(.[]; type == "string"))
-    ))
-  ' "$manifest" >/dev/null || return 1
-  _manifest_json=$(jq -c . "$manifest") || return 1
-  prior_state=$(jq -r '.prior_state' <<< "$_manifest_json") || return 1
-  backup_kind=$(jq -r '.backups[0].kind' <<< "$_manifest_json") || return 1
+      (.rollback.attempted_at | timestamp) and
+      (.rollback.failures | type == "array" and length <= 128 and
+        all(.[]; type == "string" and length <= 4096))))
+  ' <<< "$document" >/dev/null || return 1
+  captured_service_state=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
+    ($unit): {
+      load_state: .service_state[$unit].load_state,
+      active_state: .service_state[$unit].active_state,
+      unit_file_state: .service_state[$unit].unit_file_state
+    }
+  }' <<< "$document") || return 1
+  validate_captured_service_state "$captured_service_state" || return 1
+  [[ "$check_files" == true ]] || return 0
+
+  prior_state=$(jq -r '.prior_state' <<< "$document") || return 1
+  backup_kind=$(jq -r '.backups[0].kind' <<< "$document") || return 1
   if [[ "$prior_state" == unmanaged ]]; then
-    [[ "$backup_kind" == absent-lifecycle \
-      && $(jq -r '.backups[0].path' <<< "$_manifest_json") == null \
-      && $(jq -r '.backups[0].sha256' <<< "$_manifest_json") == null ]] || return 1
+    [[ "$backup_kind" == absent-lifecycle ]] || return 1
   else
-    backup_path=$(jq -r '.backups[0].path' <<< "$_manifest_json") || return 1
-    backup_hash=$(jq -r '.backups[0].sha256' <<< "$_manifest_json") || return 1
+    backup_path=$(jq -r '.backups[0].path' <<< "$document") || return 1
+    backup_hash=$(jq -r '.backups[0].sha256' <<< "$document") || return 1
     [[ "$backup_kind" == prior-lifecycle \
       && "$backup_path" == "${transaction_dir}/prior-lifecycle.json" ]] || return 1
     validate_private_control_file "$backup_path" || return 1
@@ -566,12 +796,17 @@ read_transaction_manifest() {
   while IFS= read -r backup_entry; do
     [[ -n "$backup_entry" ]] || continue
     backup_kind=$(jq -r '.kind' <<< "$backup_entry") || return 1
-    backup_path=$(jq -r '.path // ""' <<< "$backup_entry") || return 1
-    backup_hash=$(jq -r '.sha256 // ""' <<< "$backup_entry") || return 1
+    backup_path=$(jq -r 'if .path == null then "" else .path end' \
+      <<< "$backup_entry") || return 1
+    backup_hash=$(jq -r 'if .sha256 == null then "" else .sha256 end' \
+      <<< "$backup_entry") || return 1
     backup_target=$(jq -r '.target' <<< "$backup_entry") || return 1
-    backup_mode=$(jq -r '.mode // ""' <<< "$backup_entry") || return 1
-    backup_uid=$(jq -r '.uid // ""' <<< "$backup_entry") || return 1
-    backup_gid=$(jq -r '.gid // ""' <<< "$backup_entry") || return 1
+    backup_mode=$(jq -r 'if .mode == null then "" else .mode end' \
+      <<< "$backup_entry") || return 1
+    backup_uid=$(jq -r 'if .uid == null then "" else .uid end' \
+      <<< "$backup_entry") || return 1
+    backup_gid=$(jq -r 'if .gid == null then "" else .gid end' \
+      <<< "$backup_entry") || return 1
     [[ "$backup_target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
     path_has_no_symlink_components "$backup_target" || return 1
     [[ -z "${backup_targets[$backup_target]:-}" ]] || return 1
@@ -588,22 +823,656 @@ read_transaction_manifest() {
       [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
     fi
   done < <(jq -c '.backups[] |
-    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json")
+    select(.kind == "file" or .kind == "absent-file")' <<< "$document")
 
-  if [[ $(jq -r '.firmware_backup == null' <<< "$_manifest_json") == false ]]; then
-    firmware_backup_id=$(jq -r '.firmware_backup.id' <<< "$_manifest_json") || return 1
-    firmware_backup_path=$(jq -r '.firmware_backup.path' <<< "$_manifest_json") || return 1
+  if [[ $(jq -r '.firmware_backup == null' <<< "$document") == false ]]; then
+    firmware_backup_id=$(jq -r '.firmware_backup.id' <<< "$document") || return 1
+    firmware_backup_path=$(jq -r '.firmware_backup.path' <<< "$document") || return 1
     [[ "$firmware_backup_path" == \
       "$(state_dir_path)/firmware-backup/${firmware_backup_id}" ]] || return 1
   fi
-  if [[ $(jq -r '.enrollment_plan == null' <<< "$_manifest_json") == false ]]; then
-    enrollment_backup_id=$(jq -r '.enrollment_plan.backup_id' <<< "$_manifest_json") \
+  if [[ $(jq -r '.enrollment_plan == null' <<< "$document") == false ]]; then
+    enrollment_backup_id=$(jq -r '.enrollment_plan.backup_id' <<< "$document") \
       || return 1
-    enrollment_plan_path=$(jq -r '.enrollment_plan.path' <<< "$_manifest_json") \
-      || return 1
+    enrollment_plan_path=$(jq -r '.enrollment_plan.path' <<< "$document") || return 1
     [[ "$enrollment_plan_path" == \
       "$(state_dir_path)/firmware-backup/${enrollment_backup_id}/plan" ]] || return 1
   fi
+  while IFS= read -r reference; do
+    [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" "$transaction_dir" \
+      || return 1
+  done < <(jq -c '.domain_records[] | select(. != null)' <<< "$document")
+}
+
+validate_artifact_reference_file() {
+  local reference="$1" owner_dir="${2:-$(state_dir_path)}" path hash
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  hash=$(jq -r '.sha256' <<< "$reference") || return 1
+  [[ "$path" == "${owner_dir}/"* && "$path" != *'/../'* ]] || return 1
+  path_has_no_symlink_components "$path" || return 1
+  validate_private_control_file "$path" || return 1
+  [[ "$(sha256_file "$path")" == "$hash" ]]
+}
+
+read_transaction_manifest() {
+  local transaction_id="$1" manifest transaction_dir document schema manifest_hash
+  manifest=$(lifecycle_manifest_path "$transaction_id") || return 1
+  transaction_dir=$(dirname "$manifest")
+  validate_private_control_directory "$transaction_dir" || return 1
+  validate_private_control_file "$manifest" || return 1
+  manifest_hash=$(sha256_file "$manifest") || return 1
+  _manifest_json=""
+  _manifest_id=""
+  _manifest_sha256=""
+  document=$(read_control_document "$manifest") || return 1
+  schema=$(jq -r 'if (.schema_version | type) == "number" and
+    (.schema_version | floor) == .schema_version then .schema_version else "invalid" end' \
+    <<< "$document") || return 1
+  [[ "$schema" == "$LIFECYCLE_SCHEMA_VERSION" ]] || return 1
+  validate_transaction_manifest_json "$transaction_id" "$document" || return 1
+  _manifest_json="$document"
+  _manifest_id="$transaction_id"
+  _manifest_sha256="$manifest_hash"
+}
+
+validate_incident_seal_json() {
+  local transaction_id="$1" document="$2"
+  jq -e --arg id "$transaction_id" --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+    --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def operation:
+      type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def incident_reference:
+      type == "object" and
+      keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+      (.id | uuid) and (.operation | operation) and (.path | absolute_path) and
+      (.sha256 | digest) and
+      (if .kind == "root" then
+        .ordinal == 0 and
+        (.status == "failed" or .status == "stale" or
+          .status == "publication-uncertain")
+      elif .kind == "attempt" then
+        (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+        (.status == "failed" or .status == "stale" or .status == "completed")
+      else false end);
+    def phase:
+      type == "string" and length <= 128 and test("^[a-z0-9][a-z0-9-]*$");
+    def failure:
+      type == "object" and keys == ["exit_code","phase","reason","recorded_at"] and
+      (.exit_code | type == "number" and . >= 0 and . <= 255 and floor == .) and
+      (.phase == null or (.phase | phase)) and
+      (.reason | type == "string" and length > 0 and length <= 1024) and
+      (.recorded_at | timestamp);
+    type == "object" and
+    keys == ["failure","id","incident_status","kind","manifest","manifest_sha256",
+      "manifest_status","operation","ordinal","previous_attempt","rollback_disposition",
+      "root_incident","schema_version","sealed_at","writer_version"] and
+    .schema_version == $schema and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .id == $id and (.operation | operation) and (.manifest | absolute_path) and
+    (.manifest_sha256 | digest) and (.sealed_at | timestamp) and
+    (.manifest_status == "completed" or .manifest_status == "failed" or
+      .manifest_status == "stale") and
+    (.incident_status == "completed" or .incident_status == "failed" or
+      .incident_status == "stale" or .incident_status == "publication-uncertain") and
+    (.failure == null or (.failure | failure)) and
+    (.rollback_disposition == "manifest-recorded" or
+      .rollback_disposition == "not-attempted-stable-publication-ambiguous") and
+    (if .kind == "root" then
+      .ordinal == 0 and .root_incident == null and .previous_attempt == null and
+      .incident_status != "completed"
+    elif .kind == "attempt" then
+      (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+      (.root_incident | incident_reference) and .root_incident.kind == "root" and
+      (if .ordinal == 1 then .previous_attempt == null
+       else (.previous_attempt | incident_reference) and
+         .previous_attempt.kind == "attempt" and
+         .previous_attempt.ordinal == (.ordinal - 1)
+       end)
+    else false end) and
+    (if .incident_status == "publication-uncertain" then
+      .kind == "root" and .manifest_status == "completed" and .failure != null and
+      .rollback_disposition == "not-attempted-stable-publication-ambiguous"
+    elif .incident_status == "completed" then
+      .kind == "attempt" and .manifest_status == "completed" and .failure == null and
+      .rollback_disposition == "manifest-recorded"
+    else
+      .manifest_status == .incident_status and .failure != null and
+      .rollback_disposition == "manifest-recorded"
+    end)
+  ' <<< "$document" >/dev/null
+}
+
+read_incident_seal() {
+  local transaction_id="$1" path document saved manifest_hash manifest_status
+  local manifest_operation manifest_kind manifest_recovery schema kind ordinal
+  _incident_json=""
+  _incident_read_status=absent
+  path=$(lifecycle_incident_path "$transaction_id") || {
+    _incident_read_status=malformed
+    return 1
+  }
+  [[ -e "$path" || -L "$path" ]] || return 1
+  if ! validate_private_control_file "$path"; then
+    _incident_read_status=control-state-ambiguous
+    return 1
+  fi
+  if ! document=$(read_control_document "$path"); then
+    _incident_read_status=malformed
+    return 1
+  fi
+  schema=$(jq -r 'if (.schema_version | type) == "number" and
+    (.schema_version | floor) == .schema_version then .schema_version else "invalid" end' \
+    <<< "$document") || {
+      _incident_read_status=malformed
+      return 1
+    }
+  if [[ "$schema" == invalid ]]; then
+    _incident_read_status=malformed
+    return 1
+  fi
+  if [[ "$schema" != "$LIFECYCLE_SCHEMA_VERSION" ]]; then
+    _incident_read_status=unsupported-schema
+    return 1
+  fi
+  kind=$(jq -r '.kind // ""' <<< "$document") || return 1
+  ordinal=$(jq -r '.ordinal // ""' <<< "$document") || return 1
+  if [[ "$kind" == attempt && "$ordinal" =~ ^[0-9]+$ ]] \
+    && (( ordinal > MAX_RECOVERY_ATTEMPT_SEALS )); then
+    _incident_read_status=attempt-limit
+    return 2
+  fi
+  if ! validate_incident_seal_json "$transaction_id" "$document"; then
+    _incident_read_status=malformed
+    return 1
+  fi
+  [[ "$(jq -r '.manifest' <<< "$document")" == \
+    "$(lifecycle_manifest_path "$transaction_id")" ]] || {
+      _incident_read_status=control-state-ambiguous
+      return 1
+    }
+  manifest_hash=$(jq -r '.manifest_sha256' <<< "$document") || return 1
+  [[ "$(sha256_file "$(lifecycle_manifest_path "$transaction_id")")" == \
+    "$manifest_hash" ]] || {
+      _incident_read_status=control-state-ambiguous
+      return 1
+    }
+
+  saved="$document"
+  if ! read_transaction_manifest "$transaction_id"; then
+    _incident_read_status=control-state-ambiguous
+    return 1
+  fi
+  manifest_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
+  manifest_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
+  manifest_kind=$(jq -r '.kind' <<< "$_manifest_json") || return 1
+  [[ "$manifest_status" == "$(jq -r '.manifest_status' <<< "$saved")" \
+    && "$manifest_operation" == "$(jq -r '.operation' <<< "$saved")" ]] || {
+      _incident_read_status=control-state-ambiguous
+      return 1
+    }
+  if [[ $(jq -r '.kind' <<< "$saved") == root ]]; then
+    [[ "$manifest_kind" == root \
+      && $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || {
+        _incident_read_status=control-state-ambiguous
+        return 1
+      }
+  else
+    [[ "$manifest_kind" == recovery-attempt ]] || {
+      _incident_read_status=control-state-ambiguous
+      return 1
+    }
+    manifest_recovery=$(jq -c '.recovery' <<< "$_manifest_json") || return 1
+    [[ "$(jq -r '.attempt_number' <<< "$manifest_recovery")" == \
+      "$(jq -r '.ordinal' <<< "$saved")" \
+      && "$(jq -Sc '.root_incident' <<< "$manifest_recovery")" == \
+        "$(jq -Sc '.root_incident' <<< "$saved")" \
+      && "$(jq -Sc '.previous_attempt' <<< "$manifest_recovery")" == \
+          "$(jq -Sc '.previous_attempt' <<< "$saved")" ]] || {
+        _incident_read_status=control-state-ambiguous
+        return 1
+      }
+  fi
+  if [[ $(jq -r '.incident_status' <<< "$saved") == failed \
+    || $(jq -r '.incident_status' <<< "$saved") == stale ]]; then
+    [[ "$(jq -Sc '.failure' <<< "$_manifest_json")" == \
+      "$(jq -Sc '.failure' <<< "$saved")" ]] || {
+        _incident_read_status=control-state-ambiguous
+        return 1
+      }
+  fi
+  _incident_json="$saved"
+  _incident_read_status=supported
+}
+
+validate_incident_reference() {
+  local reference="$1" id path hash saved
+  _incident_read_status=malformed
+  jq -e --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def operation:
+      type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    type == "object" and
+    keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+    (.id | uuid) and (.operation | operation) and (.sha256 | digest) and
+    (if .kind == "root" then
+      .ordinal == 0 and
+      (.status == "failed" or .status == "stale" or .status == "publication-uncertain")
+    elif .kind == "attempt" then
+      (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+      (.status == "failed" or .status == "stale" or .status == "completed")
+    else false end)
+  ' <<< "$reference" >/dev/null || return 1
+  id=$(jq -r '.id' <<< "$reference") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  hash=$(jq -r '.sha256' <<< "$reference") || return 1
+  [[ "$path" == "$(lifecycle_incident_path "$id")" ]] || return 1
+  if ! validate_private_control_file "$path" \
+    || [[ "$(sha256_file "$path")" != "$hash" ]]; then
+    _incident_read_status=control-state-ambiguous
+    return 1
+  fi
+  read_incident_seal "$id" || return 1
+  saved="$_incident_json"
+  jq -e --argjson reference "$reference" '
+    .id == $reference.id and .kind == $reference.kind and
+    .operation == $reference.operation and .ordinal == $reference.ordinal and
+    .incident_status == $reference.status
+  ' <<< "$saved" >/dev/null || return 1
+  _incident_json="$saved"
+}
+
+validate_incident_chain() {
+  local root_reference="$1" latest_reference="$2" attempt_count="$3"
+  local resolved="${4:-false}" expected current seal root_document root_service
+  local current_id current_status attempt_service
+  local -A seen=()
+  _recovery_root_service_json=""
+  [[ "$attempt_count" =~ ^[0-9]+$ ]] || return 1
+  if (( attempt_count > MAX_RECOVERY_ATTEMPT_SEALS )); then
+    _incident_read_status=attempt-limit
+    return 2
+  fi
+  validate_incident_reference "$root_reference" || return 1
+  root_document="$_incident_json"
+  [[ $(jq -r '.kind' <<< "$root_document") == root ]] || return 1
+  root_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
+    ($unit): {
+      load_state: .service_state[$unit].load_state,
+      active_state: .service_state[$unit].active_state,
+      unit_file_state: .service_state[$unit].unit_file_state
+    }
+  }' <<< "$_manifest_json") || return 1
+  _recovery_root_service_json="$root_service"
+  current="$latest_reference"
+  if (( attempt_count == 0 )); then
+    [[ "$current" == null && "$resolved" == false ]] || return 1
+    _incident_json="$root_document"
+    return 0
+  fi
+  [[ "$current" != null ]] || return 1
+
+  expected=$attempt_count
+  while (( expected > 0 )); do
+    validate_incident_reference "$current" || return 1
+    seal="$_incident_json"
+    current_id=$(jq -r '.id' <<< "$seal") || return 1
+    [[ -z "${seen[$current_id]:-}" ]] || return 1
+    seen["$current_id"]=1
+    [[ "$current_id" != "$(jq -r '.id' <<< "$root_reference")" \
+      && $(jq -r '.kind' <<< "$seal") == attempt \
+      && $(jq -r '.ordinal' <<< "$seal") == "$expected" \
+      && "$(jq -Sc '.root_incident' <<< "$seal")" == \
+        "$(jq -Sc . <<< "$root_reference")" ]] || return 1
+    current_status=$(jq -r '.incident_status' <<< "$seal") || return 1
+    attempt_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
+      ($unit): {
+        load_state: .service_state[$unit].load_state,
+        active_state: .service_state[$unit].active_state,
+        unit_file_state: .service_state[$unit].unit_file_state
+      }
+    }' <<< "$_manifest_json") || return 1
+    [[ "$attempt_service" == "$root_service" ]] || return 1
+    if (( expected == attempt_count )) && [[ "$resolved" == true ]]; then
+      [[ "$current_status" == completed ]] || return 1
+    else
+      [[ "$current_status" == failed || "$current_status" == stale ]] || return 1
+    fi
+    current=$(jq -c '.previous_attempt' <<< "$seal") || return 1
+    expected=$((expected - 1))
+  done
+  [[ "$current" == null ]] || return 1
+  _incident_json="$root_document"
+}
+
+validate_lifecycle_document_references() {
+  local document="$1" state transaction_id manifest operation kind root latest count
+  local reference saved_manifest saved_manifest_id saved_manifest_hash rc
+  local attempt_service attempt_number
+  state=$(jq -r '.state' <<< "$document") || return 1
+
+  while IFS= read -r reference; do
+    [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" || return 1
+  done < <(jq -c '.managed_settings, .tracking_ownership | select(. != null)' \
+    <<< "$document")
+
+  if [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]]; then
+    transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
+    manifest=$(jq -r '.last_transaction.manifest' <<< "$document") || return 1
+    [[ "$manifest" == "$(lifecycle_manifest_path "$transaction_id")" \
+      && "$(sha256_file "$manifest")" == \
+        "$(jq -r '.last_transaction.manifest_sha256' <<< "$document")" ]] || return 1
+    validate_completed_transaction_reference "$document" || return 1
+  fi
+
+  if [[ "$state" == transition ]]; then
+    transaction_id=$(jq -r '.transaction.id' <<< "$document") || return 1
+    manifest=$(jq -r '.transaction.manifest' <<< "$document") || return 1
+    operation=$(jq -r '.transaction.operation' <<< "$document") || return 1
+    kind=$(jq -r '.transaction.kind' <<< "$document") || return 1
+    [[ "$manifest" == "$(lifecycle_manifest_path "$transaction_id")" ]] || return 1
+    read_transaction_manifest "$transaction_id" || return 1
+    [[ $(jq -r '.operation' <<< "$_manifest_json") == "$operation" \
+      && $(jq -r '.kind' <<< "$_manifest_json") == "$kind" ]] || return 1
+    if [[ "$kind" == root ]]; then
+      [[ $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || return 1
+    else
+      saved_manifest="$_manifest_json"
+      saved_manifest_id="$_manifest_id"
+      saved_manifest_hash="$_manifest_sha256"
+      [[ "$(jq -r '.recovery.attempt_number' <<< "$_manifest_json")" == \
+        "$(jq -r '.transaction.attempt_number' <<< "$document")" \
+        && "$(jq -Sc '.recovery.root_incident' <<< "$_manifest_json")" == \
+          "$(jq -Sc '.transaction.root_incident' <<< "$document")" \
+        && "$(jq -Sc '.recovery.previous_attempt' <<< "$_manifest_json")" == \
+          "$(jq -Sc '.transaction.previous_attempt' <<< "$document")" ]] || return 1
+      root=$(jq -c '.transaction.root_incident' <<< "$document") || return 1
+      latest=$(jq -c '.transaction.previous_attempt' <<< "$document") || return 1
+      attempt_number=$(jq -r '.transaction.attempt_number' <<< "$document") || return 1
+      validate_incident_chain "$root" "$latest" "$((attempt_number - 1))" false \
+        || return $?
+      attempt_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
+        ($unit): {
+          load_state: .service_state[$unit].load_state,
+          active_state: .service_state[$unit].active_state,
+          unit_file_state: .service_state[$unit].unit_file_state
+        }
+      }' <<< "$saved_manifest") || return 1
+      [[ "$attempt_service" == "$_recovery_root_service_json" ]] || return 1
+      _manifest_json="$saved_manifest"
+      _manifest_id="$saved_manifest_id"
+      _manifest_sha256="$saved_manifest_hash"
+    fi
+  elif [[ "$state" == recovery-required ]]; then
+    root=$(jq -c '.transaction.root_incident' <<< "$document") || return 1
+    latest=$(jq -c '.transaction.last_recovery_attempt' <<< "$document") || return 1
+    count=$(jq -r '.transaction.attempt_count' <<< "$document") || return 1
+    validate_incident_chain "$root" "$latest" "$count" false || return $?
+    saved_manifest="$_incident_json"
+    transaction_id=$(jq -r '.transaction.id' <<< "$document") || return 1
+    [[ "$transaction_id" == "$(jq -r '.id' <<< "$saved_manifest")" \
+      && $(jq -r '.transaction.operation' <<< "$document") == \
+        "$(jq -r '.operation' <<< "$saved_manifest")" \
+      && $(jq -r '.transaction.manifest' <<< "$document") == \
+        "$(jq -r '.manifest' <<< "$saved_manifest")" ]] || return 1
+  fi
+
+  if [[ $(jq -r '.last_recovery != null' <<< "$document") == true ]]; then
+    root=$(jq -c '.last_recovery.root_incident' <<< "$document") || return 1
+    latest=$(jq -c '.last_recovery.final_attempt' <<< "$document") || return 1
+    count=$(jq -r '.last_recovery.attempt_count' <<< "$document") || return 1
+    validate_incident_chain "$root" "$latest" "$count" true || {
+      rc=$?
+      return "$rc"
+    }
+    reference=$(jq -c '.last_recovery.proof' <<< "$document") || return 1
+    validate_artifact_reference_file "$reference" || return 1
+  fi
+}
+
+validate_completed_transaction_reference() {
+  local document="$1" transaction_id state
+  [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]] || return 0
+  state=$(jq -r '.state' <<< "$document") || return 1
+  transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
+  read_transaction_manifest "$transaction_id" || return 1
+  [[ $(jq -r '.status' <<< "$_manifest_json") == completed \
+    && $(jq -r '.operation' <<< "$_manifest_json") == \
+      "$(jq -r '.last_transaction.operation' <<< "$document")" \
+    && $(jq -r '.completed_at' <<< "$_manifest_json") == \
+      "$(jq -r '.last_transaction.completed_at' <<< "$document")" ]] || return 1
+  if [[ "$state" == active || "$state" == disabled ]]; then
+    [[ $(jq -r '.target_state' <<< "$_manifest_json") == "$state" ]] || return 1
+  fi
+}
+
+read_lifecycle() {
+  local state_dir state_file document schema references_rc attempt_count
+  state_dir=$(state_dir_path)
+  state_file=$(lifecycle_file_path)
+  _lifecycle_state=unmanaged
+  _lifecycle_generation=0
+  _lifecycle_transaction_id=""
+  _lifecycle_json=""
+  _lifecycle_read_status=absent
+
+  if [[ ! -e "$state_dir" && ! -L "$state_dir" ]]; then
+    return 0
+  fi
+  if ! validate_control_directory "$state_dir"; then
+    _lifecycle_read_status=control-state-ambiguous
+    return 1
+  fi
+  if [[ ! -e "$state_file" && ! -L "$state_file" ]]; then
+    return 0
+  fi
+  if ! validate_control_file "$state_file"; then
+    _lifecycle_read_status=control-state-ambiguous
+    return 1
+  fi
+  if ! document=$(read_control_document "$state_file"); then
+    _lifecycle_read_status=malformed
+    return 1
+  fi
+  schema=$(jq -r 'if (.schema_version | type) == "number" and
+    (.schema_version | floor) == .schema_version then .schema_version else "invalid" end' \
+    <<< "$document") || {
+      _lifecycle_read_status=malformed
+      return 1
+    }
+  if [[ "$schema" == invalid ]]; then
+    _lifecycle_read_status=malformed
+    return 1
+  fi
+  if [[ "$schema" != "$LIFECYCLE_SCHEMA_VERSION" ]]; then
+    _lifecycle_read_status=unsupported-schema
+    return 1
+  fi
+  attempt_count=$(jq -r 'if .state == "recovery-required" and
+    (.transaction.attempt_count | type) == "number" then .transaction.attempt_count
+    elif .last_recovery != null and (.last_recovery.attempt_count | type) == "number"
+    then .last_recovery.attempt_count else 0 end' <<< "$document") || {
+      _lifecycle_read_status=malformed
+      return 1
+    }
+  if [[ "$attempt_count" =~ ^[0-9]+$ ]] \
+    && (( attempt_count > MAX_RECOVERY_ATTEMPT_SEALS )); then
+    _lifecycle_read_status=attempt-limit
+    return 1
+  fi
+  if ! validate_lifecycle_json "$document"; then
+    _lifecycle_read_status=malformed
+    return 1
+  fi
+  validate_lifecycle_document_references "$document"
+  references_rc=$?
+  if [[ $references_rc -ne 0 ]]; then
+    if [[ $references_rc -eq 2 ]]; then
+      _lifecycle_read_status=attempt-limit
+    else
+      _lifecycle_read_status=control-state-ambiguous
+    fi
+    return 1
+  fi
+
+  _lifecycle_json="$document"
+  _lifecycle_state=$(jq -r '.state' <<< "$document") || return 1
+  _lifecycle_generation=$(jq -r '.generation' <<< "$document") || return 1
+  if [[ "$_lifecycle_state" == transition || "$_lifecycle_state" == recovery-required ]]; then
+    _lifecycle_transaction_id=$(jq -r '.transaction.id' <<< "$document") || return 1
+  fi
+  _lifecycle_read_status=supported
+}
+
+validate_legacy_disabled_manifest() {
+  local transaction_id="$1" document="$2" converted
+  jq -e --arg id "$transaction_id" '
+    type == "object" and
+    keys == ["backups","boot_id","completed_at","completed_phases","created_at",
+      "current_phase","enrollment_plan","failure","file_rollback_policy","firmware_backup",
+      "firmware_writes","id","operation","owner","prior_state","rollback","schema_version",
+      "service_state","status","target_state","token_sha256","writer_version"] and
+    .schema_version == 1 and .id == $id and .status == "completed" and
+    .target_state == "disabled"
+  ' <<< "$document" >/dev/null || return 1
+  converted=$(jq -c --argjson schema "$LIFECYCLE_SCHEMA_VERSION" '
+    .schema_version = $schema |
+    .kind = "root" |
+    .recovery = null |
+    .domain_records = {
+      bootnext: null,
+      final_proof: null,
+      managed_settings: null,
+      producer: null,
+      tracking_ownership: null,
+      unconfigure: null,
+      windows: null
+    }
+  ' <<< "$document") || return 1
+  validate_transaction_manifest_json "$transaction_id" "$converted"
+}
+
+validate_legacy_disabled_lifecycle() {
+  local document="$1" transaction_id manifest manifest_document
+  jq -e '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def operation:
+      type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def adoption:
+      type == "object" and keys == ["managed_settings","recorded_at","source"] and
+      .source == "explicit" and (.recorded_at | timestamp) and
+      (.managed_settings | type == "array" and length == 4) and
+      (.managed_settings[0] | keys == ["key","observed","original","path"] and
+        .path == "/etc/default/limine" and .key == "ENABLE_VERIFICATION" and
+        (.observed == "yes" or .observed == "no" or .observed == "unset") and
+        (.original == "yes" or .original == "no" or .original == "unset" or
+          .original == "unknown")) and
+      (.managed_settings[1] | keys == ["key","observed","original","path"] and
+        .path == "/etc/default/limine" and .key == "ENABLE_ENROLL_LIMINE_CONFIG" and
+        (.observed == "yes" or .observed == "no" or .observed == "unset") and
+        (.original == "yes" or .original == "no" or .original == "unset" or
+          .original == "unknown")) and
+      (.managed_settings[2] | keys == ["key","observed","original","path","token"] and
+        .path == "/etc/default/limine" and .key == "COMMANDS_BEFORE_SAVE" and
+        .token == "limine-reset-enroll" and
+        (.observed == "present" or .observed == "absent") and
+        (.original == "present" or .original == "absent" or .original == "unknown")) and
+      (.managed_settings[3] | keys == ["key","observed","original","path","token"] and
+        .path == "/etc/default/limine" and .key == "COMMANDS_AFTER_SAVE" and
+        .token == "limine-enroll-config" and
+        (.observed == "present" or .observed == "absent") and
+        (.original == "present" or .original == "absent" or .original == "unknown"));
+    def completed_transaction:
+      type == "object" and keys == ["completed_at","id","manifest","operation"] and
+      (.id | uuid) and (.operation | operation) and
+      (.manifest | type == "string" and startswith("/")) and (.completed_at | timestamp);
+    type == "object" and
+    keys == ["adoption","generation","last_transaction","schema_version","state",
+      "transaction","updated_at","writer_version"] and
+    .schema_version == 1 and .state == "disabled" and .transaction == null and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    (.generation | type == "number" and . >= 1 and floor == .) and
+    (.updated_at | timestamp) and (.adoption == null or (.adoption | adoption)) and
+    (.last_transaction | completed_transaction)
+  ' <<< "$document" >/dev/null || return 1
+  transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
+  manifest=$(jq -r '.last_transaction.manifest' <<< "$document") || return 1
+  [[ "$manifest" == "$(lifecycle_manifest_path "$transaction_id")" ]] || return 1
+  validate_private_control_directory "$(dirname "$manifest")" || return 1
+  validate_private_control_file "$manifest" || return 1
+  manifest_document=$(read_control_document "$manifest") || return 1
+  validate_legacy_disabled_manifest "$transaction_id" "$manifest_document" || return 1
+  [[ $(jq -r '.operation' <<< "$manifest_document") == \
+      "$(jq -r '.last_transaction.operation' <<< "$document")" \
+    && $(jq -r '.completed_at' <<< "$manifest_document") == \
+      "$(jq -r '.last_transaction.completed_at' <<< "$document")" ]]
+}
+
+lifecycle_removal_is_allowed() {
+  local state_dir state_file document schema result=1
+  local saved_manifest="$_manifest_json"
+  local saved_id="$_manifest_id" saved_hash="$_manifest_sha256"
+  state_dir=$(state_dir_path)
+  state_file=$(lifecycle_file_path)
+  if [[ ! -e "$state_dir" && ! -L "$state_dir" ]]; then
+    return 0
+  fi
+  validate_control_directory "$state_dir" || return 1
+  if [[ ! -e "$state_file" && ! -L "$state_file" ]]; then
+    return 0
+  fi
+  document=$(read_control_document "$state_file") || return 1
+  schema=$(jq -r 'if (.schema_version | type) == "number" and
+    (.schema_version | floor) == .schema_version then .schema_version else "invalid" end' \
+    <<< "$document") || return 1
+  if [[ "$schema" == "$LIFECYCLE_SCHEMA_VERSION" ]]; then
+    if validate_lifecycle_json "$document" \
+      && [[ $(jq -r '.state' <<< "$document") == disabled ]] \
+      && validate_lifecycle_document_references "$document"; then
+      result=0
+    fi
+  elif [[ "$schema" == "$LEGACY_LIFECYCLE_SCHEMA_VERSION" ]]; then
+    if validate_legacy_disabled_lifecycle "$document"; then
+      result=0
+    fi
+  fi
+  _manifest_json="$saved_manifest"
+  _manifest_id="$saved_id"
+  _manifest_sha256="$saved_hash"
+  return "$result"
+}
+
+read_recovery_incident() {
+  local root
+  _recovery_incident_json=""
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == recovery-required ]] || return 1
+  root=$(jq -c '.transaction.root_incident' <<< "$_lifecycle_json") || return 1
+  validate_incident_reference "$root" || return 1
+  _recovery_incident_json="$_incident_json"
+}
+
+recovery_attempt_capacity_available() {
+  read_recovery_incident || return 1
+  (( $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") <
+    MAX_RECOVERY_ATTEMPT_SEALS ))
 }
 
 manifest_owner_is_alive() {
@@ -625,14 +1494,18 @@ write_transition_lifecycle() {
   local base generation document
 
   if [[ "$_lifecycle_state" == unmanaged ]]; then
-    base=$(jq -cn --arg version "$OMASECBOOT_VERSION" '{
-      schema_version: 1,
+    base=$(jq -cn --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+      --arg version "$OMASECBOOT_VERSION" '{
+      schema_version: $schema,
       writer_version: $version,
       generation: 0,
       state: "unmanaged",
       transaction: null,
       last_transaction: null,
+      last_recovery: null,
       adoption: null,
+      managed_settings: null,
+      tracking_ownership: null,
       updated_at: null
     }') || return 1
   else
@@ -647,19 +1520,26 @@ write_transition_lifecycle() {
     --arg id "$transaction_id" \
     --arg operation "$operation" \
     --arg manifest "$manifest" \
+    --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
     --arg timestamp "$timestamp" '
       $base |
-      .schema_version = 1 |
+      .schema_version = $schema |
       .writer_version = $version |
       .generation = $generation |
       .state = "transition" |
       .transaction = {
+        attempt_number: null,
         id: $id,
+        kind: "root",
         operation: $operation,
-        manifest: $manifest
+        manifest: $manifest,
+        previous_attempt: null,
+        root_incident: null
       } |
       .updated_at = $timestamp
     ') || return 1
+  validate_lifecycle_json "$document" || return 1
+  validate_lifecycle_document_references "$document" || return 1
   printf '%s\n' "$document" | atomic_write_control_file "$(lifecycle_file_path)" 644
 }
 
@@ -710,6 +1590,7 @@ begin_lifecycle_transaction() {
   fi
 
   manifest_document=$(jq -cn \
+    --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
     --arg version "$OMASECBOOT_VERSION" \
     --arg id "$transaction_id" \
     --arg operation "$operation" \
@@ -723,9 +1604,10 @@ begin_lifecycle_transaction() {
     --arg prior_state "$_lifecycle_state" \
     --argjson backups "$backups" \
     --argjson service_state "$service_state" '{
-      schema_version: 1,
+      schema_version: $schema,
       writer_version: $version,
       id: $id,
+      kind: "root",
       operation: $operation,
       target_state: $target,
       status: "transition",
@@ -739,6 +1621,7 @@ begin_lifecycle_transaction() {
         uid: $owner_uid
       },
       prior_state: $prior_state,
+      recovery: null,
       current_phase: null,
       completed_phases: [],
       backups: $backups,
@@ -747,11 +1630,24 @@ begin_lifecycle_transaction() {
       firmware_backup: null,
       enrollment_plan: null,
       firmware_writes: [],
+      domain_records: {
+        bootnext: null,
+        final_proof: null,
+        managed_settings: null,
+        producer: null,
+        tracking_ownership: null,
+        unconfigure: null,
+        windows: null
+      },
       failure: null,
       rollback: null
     }') || return 1
+  validate_transaction_manifest_json "$transaction_id" "$manifest_document" || return 1
   printf '%s\n' "$manifest_document" | atomic_write_control_file "$manifest" 600 \
     || return 1
+  _manifest_json="$manifest_document"
+  _manifest_id="$transaction_id"
+  _manifest_sha256=$(sha256_file "$manifest") || return 1
   lifecycle_failpoint "after-manifest-write" || return 1
   _transaction_active=true
   _transaction_id="$transaction_id"
@@ -767,10 +1663,164 @@ begin_lifecycle_transaction() {
   quiesce_transaction_service
 }
 
+validate_transaction_manifest_candidate_files() {
+  local current="$1" candidate="$2" transaction_dir current_count candidate_count
+  local entry kind path hash target mode uid gid firmware_id firmware_path plan_id plan_path
+  local reference
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  current_count=$(jq -r '.backups | length' <<< "$current") || return 1
+  candidate_count=$(jq -r '.backups | length' <<< "$candidate") || return 1
+  (( candidate_count == current_count || candidate_count == current_count + 1 )) || return 1
+  jq -e --argjson current "$current" --argjson count "$current_count" \
+    '.backups[0:$count] == $current.backups' <<< "$candidate" >/dev/null || return 1
+
+  if (( candidate_count == current_count + 1 )); then
+    entry=$(jq -c '.backups[-1]' <<< "$candidate") || return 1
+    kind=$(jq -r '.kind' <<< "$entry") || return 1
+    target=$(jq -r '.target' <<< "$entry") || return 1
+    [[ "$kind" == file || "$kind" == absent-file ]] || return 1
+    [[ "$target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+    path_has_no_symlink_components "$target" || return 1
+    if [[ "$kind" == file ]]; then
+      path=$(jq -r '.path' <<< "$entry") || return 1
+      hash=$(jq -r '.sha256' <<< "$entry") || return 1
+      mode=$(jq -r '.mode' <<< "$entry") || return 1
+      uid=$(jq -r '.uid' <<< "$entry") || return 1
+      gid=$(jq -r '.gid' <<< "$entry") || return 1
+      [[ "$path" == "${transaction_dir}/file-${current_count}.backup" \
+        && "$uid" == "$(control_owner_uid)" ]] || return 1
+      mode_is_control_safe "$mode" || return 1
+      validate_private_control_file "$path" || return 1
+      [[ "$(sha256_file "$path")" == "$hash" \
+        && "$gid" =~ ^[0-9]+$ ]] || return 1
+    fi
+  fi
+
+  if [[ $(jq -r '.firmware_backup != null' <<< "$candidate") == true ]]; then
+    firmware_id=$(jq -r '.firmware_backup.id' <<< "$candidate") || return 1
+    firmware_path=$(jq -r '.firmware_backup.path' <<< "$candidate") || return 1
+    [[ "$firmware_path" == \
+      "$(state_dir_path)/firmware-backup/${firmware_id}" ]] || return 1
+  fi
+  if [[ $(jq -r '.enrollment_plan != null' <<< "$candidate") == true ]]; then
+    plan_id=$(jq -r '.enrollment_plan.backup_id' <<< "$candidate") || return 1
+    plan_path=$(jq -r '.enrollment_plan.path' <<< "$candidate") || return 1
+    [[ "$plan_path" == "$(state_dir_path)/firmware-backup/${plan_id}/plan" ]] \
+      || return 1
+  fi
+  while IFS= read -r reference; do
+    [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" "$transaction_dir" \
+      || return 1
+  done < <(jq -c '.domain_records[] | select(. != null)' <<< "$candidate")
+}
+
 write_transaction_manifest_json() {
-  local document="$1" manifest
+  local document="$1" manifest incident current current_status next_status candidate
+  [[ "$_transaction_active" == true \
+    && "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
-  printf '%s\n' "$document" | atomic_write_control_file "$manifest" 600
+  incident=$(lifecycle_incident_path "$_transaction_id") || return 1
+  [[ ! -e "$incident" && ! -L "$incident" ]] || return 1
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == transition \
+    && "$_lifecycle_transaction_id" == "$_transaction_id" ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current="$_manifest_json"
+  candidate=$(jq -c . <<< "$document") || return 1
+  validate_transaction_manifest_json "$_transaction_id" "$candidate" || return 1
+  current_status=$(jq -r '.status' <<< "$current") || return 1
+  next_status=$(jq -r '.status' <<< "$candidate") || return 1
+  [[ "$current_status" == transition && "$next_status" == transition ]] || return 1
+  jq -en --argjson current "$current" --argjson candidate "$candidate" \
+    --arg unit "$TRANSACTION_SERVICE_UNIT" '
+      def outcome_forward($old; $new):
+        $old == $new or
+        ($old == "pending" and ($new == "completed" or $new == "failed"));
+      def envelope:
+        del(.backups, .completed_phases, .current_phase, .domain_records,
+          .enrollment_plan, .file_rollback_policy, .firmware_backup, .firmware_writes,
+          .rollback, .service_state[$unit].quiesce_status,
+          .service_state[$unit].restore_status);
+      ($current | envelope) == ($candidate | envelope) and
+      (($candidate.completed_phases == $current.completed_phases and
+        ($candidate.current_phase == $current.current_phase or
+          ($current.current_phase == null and $candidate.current_phase != null))) or
+       ($current.current_phase != null and $candidate.current_phase == null and
+        $candidate.completed_phases ==
+          ($current.completed_phases + [$current.current_phase]))) and
+      outcome_forward($current.service_state[$unit].quiesce_status;
+        $candidate.service_state[$unit].quiesce_status) and
+      outcome_forward($current.service_state[$unit].restore_status;
+        $candidate.service_state[$unit].restore_status) and
+      ($current.file_rollback_policy == $candidate.file_rollback_policy or
+        ($current.file_rollback_policy == "restore" and
+          $candidate.file_rollback_policy == "preserve")) and
+      ($current.firmware_backup == $candidate.firmware_backup or
+        $current.firmware_backup == null or
+        ($current.firmware_backup.status == "pending" and
+          $candidate.firmware_backup.status == "complete" and
+          $current.firmware_backup.id == $candidate.firmware_backup.id and
+          $current.firmware_backup.path == $candidate.firmware_backup.path)) and
+      ($current.enrollment_plan == null or
+        $current.enrollment_plan == $candidate.enrollment_plan) and
+      ($current.firmware_writes as $old | $candidate.firmware_writes as $new |
+        $new == $old or
+        (($new | length) == (($old | length) + 1) and
+          $new[0:($old | length)] == $old and
+          $new[-1].readback_status == "pending") or
+        (($new | length) == ($old | length) and ($old | length) > 0 and
+          $new[0:-1] == $old[0:-1] and
+          $old[-1].readback_status == "pending" and
+          $new[-1].hierarchy == $old[-1].hierarchy and
+          $new[-1].started_at == $old[-1].started_at and
+          ($new[-1].readback_status == "verified" or
+            $new[-1].readback_status == "failed") and
+          $new[-1].command_exit_code != null and $new[-1].completed_at != null)) and
+      ($current.rollback == null or $current.rollback == $candidate.rollback) and
+      all($current.domain_records | to_entries[];
+        .value == null or .value == $candidate.domain_records[.key])
+    ' >/dev/null || return 1
+  validate_transaction_manifest_candidate_files "$current" "$candidate" || return 1
+  printf '%s\n' "$candidate" | atomic_write_control_file "$manifest" 600 || return 1
+  _manifest_json="$candidate"
+  _manifest_id="$_transaction_id"
+  _manifest_sha256=$(sha256_file "$manifest") || return 1
+}
+
+write_transaction_manifest_status_json() {
+  local expected_status="$1" next_status="$2" document="$3"
+  local manifest incident current current_status document_status candidate
+  [[ "$_transaction_active" == true \
+    && "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  case "${expected_status}:${next_status}" in
+    transition:completed|transition:failed|transition:stale) ;;
+    *) return 1 ;;
+  esac
+  manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
+  incident=$(lifecycle_incident_path "$_transaction_id") || return 1
+  [[ ! -e "$incident" && ! -L "$incident" ]] || return 1
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == transition \
+    && "$_lifecycle_transaction_id" == "$_transaction_id" ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current="$_manifest_json"
+  candidate=$(jq -c . <<< "$document") || return 1
+  validate_transaction_manifest_json "$_transaction_id" "$candidate" || return 1
+  current_status=$(jq -r '.status' <<< "$current") || return 1
+  document_status=$(jq -r '.status' <<< "$candidate") || return 1
+  [[ "$current_status" == "$expected_status" && "$document_status" == "$next_status" ]] \
+    || return 1
+  jq -en --argjson current "$current" --argjson candidate "$candidate" '
+      def envelope:
+        del(.completed_at, .failure, .status);
+      ($current | envelope) == ($candidate | envelope)
+    ' >/dev/null || return 1
+  printf '%s\n' "$candidate" | atomic_write_control_file "$manifest" 600 || return 1
+  _manifest_json="$candidate"
+  _manifest_id="$_transaction_id"
+  _manifest_sha256=$(sha256_file "$manifest") || return 1
 }
 
 transaction_service_active_state() {
@@ -1095,15 +2145,24 @@ rollback_transaction_files() {
 }
 
 rollback_and_mark_recovery() {
-  local exit_code="$1" reason="$2" status="${3:-failed}" rollback_rc=0 restore_rc=0
-  rollback_transaction_files || rollback_rc=$?
-  if [[ $rollback_rc -ne 0 ]]; then
-    reason="${reason}; file rollback failed"
-  fi
-  restore_transaction_service || restore_rc=$?
-  if [[ $restore_rc -ne 0 ]]; then
-    reason="${reason}; service restoration failed"
-  fi
+  local exit_code="$1" reason="$2" status="${3:-failed}"
+  local manifest_status rollback_rc=0 restore_rc=0
+  read_transaction_manifest "$_transaction_id" || return 1
+  manifest_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
+  case "$manifest_status" in
+    transition)
+      rollback_transaction_files || rollback_rc=$?
+      if [[ $rollback_rc -ne 0 ]]; then
+        reason="${reason}; file rollback failed"
+      fi
+      restore_transaction_service || restore_rc=$?
+      if [[ $restore_rc -ne 0 ]]; then
+        reason="${reason}; service restoration failed"
+      fi
+      ;;
+    completed|failed|stale) ;;
+    *) return 1 ;;
+  esac
   ensure_lifecycle_recovery "$exit_code" "$reason" "$status"
 }
 
@@ -1111,7 +2170,10 @@ transaction_phase_start() {
   local phase="$1" document
   [[ "$_transaction_active" == true && "$phase" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  [[ $(jq -r '.status' <<< "$_manifest_json") == transition ]] || return 1
+  [[ $(jq -r '.status' <<< "$_manifest_json") == transition \
+    && $(jq -r --arg phase "$phase" \
+      '(.completed_phases | index($phase)) == null' <<< "$_manifest_json") == true ]] \
+    || return 1
   document=$(jq -c --arg phase "$phase" '.current_phase = $phase' <<< "$_manifest_json") \
     || return 1
   write_transaction_manifest_json "$document"
@@ -1123,9 +2185,7 @@ transaction_phase_complete() {
   read_transaction_manifest "$_transaction_id" || return 1
   [[ $(jq -r '.current_phase // ""' <<< "$_manifest_json") == "$phase" ]] || return 1
   document=$(jq -c --arg phase "$phase" '
-    if (.completed_phases | index($phase)) == null then
-      .completed_phases += [$phase]
-    else . end |
+    .completed_phases += [$phase] |
     .current_phase = null
   ' <<< "$_manifest_json") || return 1
   write_transaction_manifest_json "$document"
@@ -1195,24 +2255,29 @@ transaction_set_adoption() {
       } |
       .updated_at = $timestamp
     ' <<< "$_lifecycle_json") || return 1
+  validate_lifecycle_json "$state_document" || return 1
+  validate_lifecycle_document_references "$state_document" || return 1
   lifecycle_failpoint "before-adoption-state-write" || return 1
   printf '%s\n' "$state_document" | atomic_write_control_file "$(lifecycle_file_path)" 644
 }
 
 commit_lifecycle_transaction() {
-  local manifest_document state_document timestamp manifest
+  local manifest_document state_document timestamp manifest manifest_hash
   local manifest_operation manifest_target lifecycle_operation
   [[ "$_transaction_active" == true ]] || return 1
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == transition \
     && "$_lifecycle_transaction_id" == "$_transaction_id" ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  [[ $(jq -r '.current_phase // ""' <<< "$_manifest_json") == "" ]] || return 1
+  [[ $(jq -r '.current_phase == null' <<< "$_manifest_json") == true \
+    && $(jq -r '.kind' <<< "$_manifest_json") == root \
+    && $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || return 1
   manifest_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
   manifest_target=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
   lifecycle_operation=$(jq -r '.transaction.operation' <<< "$_lifecycle_json") || return 1
   [[ "$manifest_operation" == "$_transaction_operation" \
     && "$manifest_operation" == "$lifecycle_operation" \
+    && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == root \
     && "$manifest_target" == "$_transaction_target_state" ]] || return 1
   restore_transaction_service || return 1
   transaction_service_outcomes_are_complete || return 1
@@ -1225,7 +2290,9 @@ commit_lifecycle_transaction() {
     .completed_at = $timestamp |
     .failure = null
   ' <<< "$_manifest_json") || return 1
-  write_transaction_manifest_json "$manifest_document" || return 1
+  write_transaction_manifest_status_json transition completed "$manifest_document" || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  manifest_hash=$(sha256_file "$manifest") || return 1
   lifecycle_failpoint "after-completed-manifest-write" || return 1
 
   state_document=$(jq -c \
@@ -1234,6 +2301,7 @@ commit_lifecycle_transaction() {
     --arg id "$_transaction_id" \
     --arg operation "$manifest_operation" \
     --arg manifest "$manifest" \
+    --arg manifest_hash "$manifest_hash" \
     --arg timestamp "$timestamp" '
       .writer_version = $version |
       .generation += 1 |
@@ -1243,11 +2311,206 @@ commit_lifecycle_transaction() {
         id: $id,
         operation: $operation,
         manifest: $manifest,
+        manifest_sha256: $manifest_hash,
         completed_at: $timestamp
       } |
       .updated_at = $timestamp
     ' <<< "$_lifecycle_json") || return 1
+  validate_lifecycle_json "$state_document" || return 1
+  validate_lifecycle_document_references "$state_document" || return 1
   lifecycle_failpoint "before-stable-state-write" || return 1
+  printf '%s\n' "$state_document" | atomic_write_control_file "$(lifecycle_file_path)" 644 \
+    || return 1
+
+  _transaction_active=false
+  unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
+}
+
+finalize_transaction_incident() {
+  local exit_code="$1" reason="$2" status="$3"
+  local current_status current_phase timestamp manifest manifest_hash incident_path
+  local manifest_document manifest_operation seal_document incident_status failure
+  local rollback_disposition
+  [[ "$_transaction_active" == true \
+    && "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  [[ "$exit_code" =~ ^[0-9]+$ && "$exit_code" -le 255 \
+    && ${#reason} -gt 0 && ${#reason} -le 1024 \
+    && ( "$status" == failed || "$status" == stale ) ]] || return 1
+  incident_path=$(lifecycle_incident_path "$_transaction_id") || return 1
+  if [[ -e "$incident_path" || -L "$incident_path" ]]; then
+    read_incident_seal "$_transaction_id" || return 1
+    [[ $(jq -r '.kind' <<< "$_incident_json") == root ]] || return 1
+    durable_sync "$incident_path" || return 1
+    durable_sync "$(dirname "$incident_path")" || return 1
+    lifecycle_failpoint "after-incident-write" || return 1
+    return 0
+  fi
+  read_transaction_manifest "$_transaction_id" || return 1
+  [[ $(jq -r '.kind' <<< "$_manifest_json") == root ]] || return 1
+  current_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
+  timestamp=$(utc_timestamp) || return 1
+  case "$current_status" in
+    transition)
+      current_phase=$(jq -r 'if .current_phase == null then "" else .current_phase end' \
+        <<< "$_manifest_json") || return 1
+      manifest_document=$(jq -c \
+        --arg status "$status" \
+        --arg timestamp "$timestamp" \
+        --arg reason "$reason" \
+        --arg phase "$current_phase" \
+        --argjson exit_code "$exit_code" '
+        .status = $status |
+        .completed_at = $timestamp |
+        .failure = {
+          exit_code: $exit_code,
+          reason: $reason,
+          phase: (if $phase == "" then null else $phase end),
+          recorded_at: $timestamp
+        }
+      ' <<< "$_manifest_json") || return 1
+      write_transaction_manifest_status_json transition "$status" "$manifest_document" \
+        || return 1
+      read_transaction_manifest "$_transaction_id" || return 1
+      incident_status="$status"
+      failure=$(jq -c '.failure' <<< "$_manifest_json") || return 1
+      rollback_disposition="manifest-recorded"
+      ;;
+    failed|stale)
+      incident_status="$current_status"
+      failure=$(jq -c '.failure' <<< "$_manifest_json") || return 1
+      rollback_disposition="manifest-recorded"
+      ;;
+    completed)
+      incident_status=publication-uncertain
+      failure=$(jq -cn \
+        --arg timestamp "$timestamp" \
+        --arg reason "$reason" \
+        --argjson exit_code "$exit_code" '{
+          exit_code: $exit_code,
+          reason: $reason,
+          phase: null,
+          recorded_at: $timestamp
+        }') || return 1
+      rollback_disposition=not-attempted-stable-publication-ambiguous
+      ;;
+    *) return 1 ;;
+  esac
+  manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
+  manifest_hash=$(sha256_file "$manifest") || return 1
+  current_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
+  manifest_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
+  seal_document=$(jq -cn \
+    --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg id "$_transaction_id" \
+    --arg operation "$manifest_operation" \
+    --arg manifest "$manifest" \
+    --arg manifest_hash "$manifest_hash" \
+    --arg manifest_status "$current_status" \
+    --arg incident_status "$incident_status" \
+    --argjson failure "$failure" \
+    --arg rollback_disposition "$rollback_disposition" \
+    --arg timestamp "$timestamp" '{
+      schema_version: $schema,
+      writer_version: $version,
+      kind: "root",
+      id: $id,
+      operation: $operation,
+      ordinal: 0,
+      manifest: $manifest,
+      manifest_sha256: $manifest_hash,
+      manifest_status: $manifest_status,
+      incident_status: $incident_status,
+      failure: $failure,
+      rollback_disposition: $rollback_disposition,
+      root_incident: null,
+      previous_attempt: null,
+      sealed_at: $timestamp
+    }') || return 1
+  validate_incident_seal_json "$_transaction_id" "$seal_document" || return 1
+  if ! printf '%s\n' "$seal_document" | atomic_create_control_file "$incident_path" 600; then
+    read_incident_seal "$_transaction_id" || return 1
+    [[ "$(jq -Sc . <<< "$_incident_json")" == \
+      "$(jq -Sc . <<< "$seal_document")" ]] || return 1
+    durable_sync "$incident_path" || return 1
+    durable_sync "$(dirname "$incident_path")" || return 1
+  fi
+  lifecycle_failpoint "after-incident-write" || return 1
+  read_incident_seal "$_transaction_id"
+}
+
+publish_lifecycle_recovery() {
+  local current_manifest current_operation current_target root_incident seal_document
+  local incident_path
+  local timestamp state_document
+  local lifecycle_owns_transaction=false
+  [[ "$_transaction_active" == true ]] || return 1
+  read_incident_seal "$_transaction_id" || return 1
+  seal_document="$_incident_json"
+  incident_path=$(lifecycle_incident_path "$_transaction_id") || return 1
+  root_incident=$(incident_reference_from_json "$seal_document" "$incident_path") || return 1
+  [[ $(jq -r '.kind' <<< "$seal_document") == root ]] || return 1
+  current_manifest=$(jq -r '.manifest' <<< "$seal_document") || return 1
+  current_operation=$(jq -r '.operation' <<< "$seal_document") || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_target=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
+  [[ "$current_operation" == "$(jq -r '.operation' <<< "$_manifest_json")" ]] \
+    || return 1
+
+  read_lifecycle || return 1
+  if [[ "$_lifecycle_state" == recovery-required ]]; then
+    jq -e --argjson root "$root_incident" '
+      .transaction.id == $root.id and .transaction.operation == $root.operation and
+      .transaction.root_incident == $root and .transaction.attempt_count == 0 and
+      .transaction.last_recovery_attempt == null
+    ' <<< "$_lifecycle_json" >/dev/null || return 1
+    durable_sync "$(lifecycle_file_path)" || return 1
+    durable_sync "$(dirname "$(lifecycle_file_path)")" || return 1
+    _transaction_active=false
+    unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
+    return 0
+  fi
+  if [[ "$_lifecycle_state" == transition \
+    && "$_lifecycle_transaction_id" == "$_transaction_id" \
+    && $(jq -r '.transaction.operation' <<< "$_lifecycle_json") == \
+      "$current_operation" \
+    && $(jq -r '.transaction.manifest' <<< "$_lifecycle_json") == \
+      "$current_manifest" \
+    && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == root ]]; then
+    lifecycle_owns_transaction=true
+  elif [[ "$_lifecycle_state" == "$current_target" \
+    && $(jq -r '.last_transaction.id // ""' <<< "$_lifecycle_json") == \
+      "$_transaction_id" \
+    && $(jq -r '.last_transaction.manifest // ""' <<< "$_lifecycle_json") == \
+      "$current_manifest" ]]; then
+    lifecycle_owns_transaction=true
+  fi
+  [[ "$lifecycle_owns_transaction" == true ]] || return 1
+
+  timestamp=$(utc_timestamp) || return 1
+  state_document=$(jq -c \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg timestamp "$timestamp" \
+    --argjson root "$root_incident" \
+    --arg manifest "$current_manifest" '
+      .writer_version = $version |
+      .generation += 1 |
+      .state = "recovery-required" |
+      .transaction = {
+        attempt_count: 0,
+        id: $root.id,
+        kind: "incident",
+        last_recovery_attempt: null,
+        manifest: $manifest,
+        operation: $root.operation,
+        root_incident: $root
+      } |
+      .updated_at = $timestamp
+    ' <<< "$_lifecycle_json") || return 1
+  validate_lifecycle_json "$state_document" || return 1
+  validate_lifecycle_document_references "$state_document" || return 1
+  lifecycle_failpoint "before-recovery-state-write" || return 1
   printf '%s\n' "$state_document" | atomic_write_control_file "$(lifecycle_file_path)" 644 \
     || return 1
 
@@ -1257,91 +2520,8 @@ commit_lifecycle_transaction() {
 
 mark_lifecycle_recovery() {
   local exit_code="$1" reason="$2" status="${3:-failed}"
-  local manifest_document state_document timestamp current_phase
-  local manifest operation lifecycle_owns_transaction=false recovery_is_published=false
-  [[ "$_transaction_active" == true ]] || return 1
-  [[ "$status" == failed || "$status" == stale ]] || return 1
-  read_lifecycle || return 1
-  if [[ "$_lifecycle_state" == transition \
-    && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-    manifest=$(jq -r '.transaction.manifest' <<< "$_lifecycle_json") || return 1
-    operation=$(jq -r '.transaction.operation' <<< "$_lifecycle_json") || return 1
-    lifecycle_owns_transaction=true
-  elif [[ "$_lifecycle_state" == "$_transaction_target_state" \
-    && $(jq -r '.last_transaction.id // ""' <<< "$_lifecycle_json") == "$_transaction_id" ]]; then
-    manifest=$(jq -r '.last_transaction.manifest' <<< "$_lifecycle_json") || return 1
-    operation=$(jq -r '.last_transaction.operation' <<< "$_lifecycle_json") || return 1
-    lifecycle_owns_transaction=true
-  elif [[ "$_lifecycle_state" == recovery-required \
-    && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-    manifest=$(jq -r '.transaction.manifest' <<< "$_lifecycle_json") || return 1
-    operation=$(jq -r '.transaction.operation' <<< "$_lifecycle_json") || return 1
-    lifecycle_owns_transaction=true
-    recovery_is_published=true
-  fi
-  [[ "$lifecycle_owns_transaction" == true \
-    && "$manifest" == "$(lifecycle_manifest_path "$_transaction_id")" ]] || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  [[ "$(jq -r '.operation' <<< "$_manifest_json")" == "$operation" \
-    && "$(jq -r '.target_state' <<< "$_manifest_json")" == \
-      "$_transaction_target_state" ]] || return 1
-  if [[ "$recovery_is_published" == true ]]; then
-    [[ "$(jq -r '.status' <<< "$_manifest_json")" == "$status" ]] || return 1
-    durable_sync "$(lifecycle_file_path)" || return 1
-    durable_sync "$(dirname "$(lifecycle_file_path)")" || return 1
-    _transaction_active=false
-    unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
-    return 0
-  fi
-  timestamp=$(utc_timestamp) || return 1
-  current_phase=$(jq -r '.current_phase // empty' <<< "$_manifest_json") || return 1
-
-  manifest_document=$(jq -c \
-    --arg status "$status" \
-    --arg timestamp "$timestamp" \
-    --arg reason "$reason" \
-    --arg phase "$current_phase" \
-    --argjson exit_code "$exit_code" '
-      .status = $status |
-      .completed_at = $timestamp |
-      .failure = {
-        exit_code: $exit_code,
-        reason: $reason,
-        phase: (if $phase == "" then null else $phase end),
-        recorded_at: $timestamp
-      }
-    ' <<< "$_manifest_json") || return 1
-  write_transaction_manifest_json "$manifest_document" || return 1
-
-  state_document=$(jq -c \
-    --arg version "$OMASECBOOT_VERSION" \
-    --arg timestamp "$timestamp" \
-    --arg id "$_transaction_id" \
-    --arg operation "$operation" \
-    --arg manifest "$manifest" \
-    --arg reason "$reason" \
-    --argjson exit_code "$exit_code" '
-      .writer_version = $version |
-      .generation += 1 |
-      .state = "recovery-required" |
-      .transaction = {
-        id: $id,
-        operation: $operation,
-        manifest: $manifest,
-        failure: {
-          exit_code: $exit_code,
-          reason: $reason,
-          recorded_at: $timestamp
-        }
-      } |
-      .updated_at = $timestamp
-    ' <<< "$_lifecycle_json") || return 1
-  lifecycle_failpoint "before-recovery-state-write" || return 1
-  printf '%s\n' "$state_document" | atomic_write_control_file "$(lifecycle_file_path)" 644 \
-    || return 1
-
-  _transaction_active=false
-  unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
+  finalize_transaction_incident "$exit_code" "$reason" "$status" || return 1
+  publish_lifecycle_recovery
 }
 
 ensure_lifecycle_recovery() {
@@ -1351,7 +2531,8 @@ ensure_lifecycle_recovery() {
 }
 
 reconcile_stale_lifecycle() {
-  local transaction_id reason="transaction owner is no longer valid" restore_rc=0
+  local transaction_id manifest_status
+  local reason="transaction owner is no longer valid" restore_rc=0
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == transition ]] || return 0
   transaction_id="$_lifecycle_transaction_id"
@@ -1362,10 +2543,18 @@ reconcile_stale_lifecycle() {
   _transaction_id="$transaction_id"
   _transaction_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
   _transaction_target_state=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
-  restore_transaction_service || restore_rc=$?
-  if [[ $restore_rc -ne 0 ]]; then
-    reason="${reason}; service restoration failed"
-  fi
+  manifest_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
+  [[ $(jq -r '.kind' <<< "$_manifest_json") == root ]] || return 1
+  case "$manifest_status" in
+    transition)
+      restore_transaction_service || restore_rc=$?
+      if [[ $restore_rc -ne 0 ]]; then
+        reason="${reason}; service restoration failed"
+      fi
+      ;;
+    completed|failed|stale) ;;
+    *) return 1 ;;
+  esac
   ensure_lifecycle_recovery 1 "$reason" stale
 }
 
@@ -1608,6 +2797,15 @@ reconcile_stale_transition_from_hook() {
   return "$reconcile_rc"
 }
 
+full_restore_lifecycle_is_admissible() {
+  case "$_lifecycle_state" in
+    unmanaged|disabled) return 0 ;;
+    active) lifecycle_repair_is_available ;;
+    transition|recovery-required) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
 lifecycle_hook_pre() {
   require_control_root || return 100
   read_lifecycle || {
@@ -1616,14 +2814,10 @@ lifecycle_hook_pre() {
   }
 
   if is_full_snapshot_restore_hook; then
-    if [[ "$_lifecycle_state" == active ]] && ! lifecycle_repair_is_available; then
-      fail "Full snapshot restore is blocked until complete boot repair is available"
-      return 100
+    if [[ "$_lifecycle_state" == transition ]]; then
+      reconcile_stale_transition_from_hook || true
     fi
-    if [[ "$_lifecycle_state" == transition \
-      || "$_lifecycle_state" == recovery-required ]]; then
-      [[ "$_lifecycle_state" != transition ]] \
-        || reconcile_stale_transition_from_hook || true
+    if ! full_restore_lifecycle_is_admissible; then
       fail "Full snapshot restore is allowed only in stable lifecycle state"
       return 100
     fi
@@ -1633,8 +2827,7 @@ lifecycle_hook_pre() {
       fail "Lifecycle state became invalid during full snapshot restore admission"
       return 100
     fi
-    if [[ "$_lifecycle_state" == transition \
-      || "$_lifecycle_state" == recovery-required ]]; then
+    if ! full_restore_lifecycle_is_admissible; then
       release_repair_lock
       fail "Full snapshot restore is allowed only in stable lifecycle state"
       return 100
@@ -1668,6 +2861,10 @@ lifecycle_hook_pre() {
         return 0
       fi
       fail "Boot mutation lacks the validated inherited Limine lock"
+      return 100
+      ;;
+    *)
+      fail "Boot mutation blocked: lifecycle state is unsupported"
       return 100
       ;;
   esac
@@ -1715,6 +2912,10 @@ lifecycle_hook_post() {
       }
       _OMASECBOOT_FULL_RESTORE_POST=false
       ;;
+    *)
+      fail "Boot repair blocked: lifecycle state is unsupported"
+      return 100
+      ;;
   esac
 }
 
@@ -1755,6 +2956,10 @@ guard_boot_transaction() {
       fail "Boot-mutating package transaction blocked: lifecycle is recovery-required for transaction ${_lifecycle_transaction_id}"
       return 1
       ;;
+    *)
+      fail "Boot-mutating package transaction blocked: lifecycle state is unsupported"
+      return 1
+      ;;
   esac
 }
 
@@ -1768,6 +2973,10 @@ lifecycle_automation_is_active() {
     unmanaged|disabled) return 1 ;;
     transition|recovery-required)
       fail "Automatic repair blocked while lifecycle is ${_lifecycle_state} for transaction ${_lifecycle_transaction_id}"
+      return 2
+      ;;
+    *)
+      fail "Automatic repair blocked: lifecycle state is unsupported"
       return 2
       ;;
   esac
@@ -1808,6 +3017,10 @@ show_lifecycle_status() {
       ;;
     recovery-required)
       fail "Lifecycle: recovery-required (${_lifecycle_transaction_id})"
+      return 1
+      ;;
+    *)
+      fail "Lifecycle: unsupported state"
       return 1
       ;;
   esac
