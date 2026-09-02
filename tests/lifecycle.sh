@@ -226,7 +226,35 @@ preserved_file_transaction() {
   transaction_backup_file "$PRESENT_FILE" || return 1
   printf 'proved replacement\n' > "$PRESENT_FILE"
   preserve_transaction_files_on_failure || return 1
+  preserve_transaction_files_on_failure || return 1
   return 30
+}
+
+firmware_ledger_manifest() {
+  local manifest="$1" writes="$2" id digest
+  id=$(jq -r '.id' <<< "$manifest") || return 1
+  digest=$(printf '0%.0s' {1..64})
+  jq -c --arg id "$id" --arg digest "$digest" --argjson writes "$writes" '
+    .file_rollback_policy = "preserve" |
+    .firmware_backup = {
+      id: $id,
+      path: ("/firmware-backup/" + $id),
+      status: "complete",
+      manifest_sha256: $digest
+    } |
+    .enrollment_plan = {
+      backup_id: $id,
+      path: ("/firmware-backup/" + $id + "/plan"),
+      manifest_sha256: $digest,
+      variables: {
+        PK: {esl_sha256: $digest, entries_sha256: $digest},
+        KEK: {esl_sha256: $digest, entries_sha256: $digest},
+        db: {esl_sha256: $digest, entries_sha256: $digest}
+      },
+      dbx: {present: true, raw_sha256: $digest}
+    } |
+    .firmware_writes = $writes
+  ' <<< "$manifest"
 }
 
 missing_firmware_attachment_transaction() {
@@ -375,6 +403,7 @@ create_test_attempt_seal() {
       domain_records: {
         bootnext: null,
         final_proof: null,
+        firmware: null,
         managed_settings: null,
         producer: null,
         tracking_ownership: null,
@@ -713,6 +742,76 @@ jq -e '.file_rollback_policy == "preserve" and
   .rollback.status == "preserved" and .rollback.failures == []' \
   "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
   || fail_test "preserved-file outcome was not durable"
+
+ledger_id=$_lifecycle_transaction_id
+ledger_base=$(jq -c . "$(lifecycle_manifest_path "$ledger_id")")
+ledger_timestamp=$(jq -r '.created_at' <<< "$ledger_base")
+legal_retries=$(jq -cn --arg timestamp "$ledger_timestamp" '[
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:null,
+    readback_status:"unchanged",completed_at:$timestamp},
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:0,
+    readback_status:"verified",completed_at:$timestamp},
+  {hierarchy:"KEK",started_at:$timestamp,command_exit_code:null,
+    readback_status:"unchanged",completed_at:$timestamp},
+  {hierarchy:"KEK",started_at:$timestamp,command_exit_code:0,
+    readback_status:"verified",completed_at:$timestamp},
+  {hierarchy:"PK",started_at:$timestamp,command_exit_code:null,
+    readback_status:"unchanged",completed_at:$timestamp},
+  {hierarchy:"PK",started_at:$timestamp,command_exit_code:0,
+    readback_status:"verified",completed_at:$timestamp}
+]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$legal_retries")
+validate_transaction_manifest_json "$ledger_id" "$ledger_document" false \
+  || fail_test "legal firmware retry ledger was rejected"
+known_result_pending=$(jq -cn --arg timestamp "$ledger_timestamp" '[{
+  hierarchy:"db",started_at:$timestamp,command_exit_code:31,
+  readback_status:"pending",completed_at:null
+}]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$known_result_pending")
+validate_transaction_manifest_json "$ledger_id" "$ledger_document" false \
+  || fail_test "known firmware command result with pending readback was rejected"
+null_result_reconciled=$(jq -cn --arg timestamp "$ledger_timestamp" '[{
+  hierarchy:"db",started_at:$timestamp,command_exit_code:null,
+  readback_status:"verified",completed_at:$timestamp
+}]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$null_result_reconciled")
+validate_transaction_manifest_json "$ledger_id" "$ledger_document" false \
+  || fail_test "reconciled unknown firmware command result was rejected"
+second_pending=$(jq -c '. + [.[0]]' <<< "$known_result_pending")
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$second_pending")
+if validate_transaction_manifest_json "$ledger_id" "$ledger_document" false; then
+  fail_test "firmware ledger accepted a record after pending readback"
+fi
+skipped_hierarchy=$(jq -cn --arg timestamp "$ledger_timestamp" '[{
+  hierarchy:"KEK",started_at:$timestamp,command_exit_code:0,
+  readback_status:"verified",completed_at:$timestamp
+}]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$skipped_hierarchy")
+if validate_transaction_manifest_json "$ledger_id" "$ledger_document" false; then
+  fail_test "firmware ledger accepted a skipped hierarchy"
+fi
+failed_then_retry=$(jq -cn --arg timestamp "$ledger_timestamp" '[
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:1,
+    readback_status:"failed",completed_at:$timestamp},
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:0,
+    readback_status:"verified",completed_at:$timestamp}
+]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$failed_then_retry")
+if validate_transaction_manifest_json "$ledger_id" "$ledger_document" false; then
+  fail_test "firmware ledger accepted a record after terminal failure"
+fi
+third_db_attempt=$(jq -cn --arg timestamp "$ledger_timestamp" '[
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:1,
+    readback_status:"unchanged",completed_at:$timestamp},
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:1,
+    readback_status:"unchanged",completed_at:$timestamp},
+  {hierarchy:"db",started_at:$timestamp,command_exit_code:null,
+    readback_status:"pending",completed_at:null}
+]')
+ledger_document=$(firmware_ledger_manifest "$ledger_base" "$third_db_attempt")
+if validate_transaction_manifest_json "$ledger_id" "$ledger_document" false; then
+  fail_test "firmware ledger accepted a third command attempt"
+fi
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "yes" \
@@ -1464,9 +1563,30 @@ printf '%s\n' "$schema2_disabled_state" \
   | atomic_write_control_file "$legacy_state_file" 644
 lifecycle_removal_is_allowed \
   || fail_test "schema-2 disabled state did not restore after rejection tests"
-legacy_manifest_document=$(jq -c '
-  del(.kind, .recovery, .domain_records) | .schema_version = 1
-' "$legacy_manifest")
+legacy_manifest_document=$(jq -c '{
+  schema_version: 1,
+  writer_version,
+  id,
+  operation,
+  target_state,
+  status,
+  created_at,
+  completed_at,
+  boot_id,
+  token_sha256,
+  owner,
+  prior_state,
+  current_phase,
+  completed_phases,
+  backups,
+  service_state,
+  file_rollback_policy,
+  firmware_backup,
+  enrollment_plan,
+  firmware_writes,
+  failure,
+  rollback
+}' "$legacy_manifest")
 printf '%s\n' "$legacy_manifest_document" \
   | atomic_write_control_file "$legacy_manifest" 600
 legacy_lifecycle_document=$(jq -c '{

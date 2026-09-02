@@ -259,9 +259,46 @@ artifact_repair_preflight() {
   printf 'artifact-preflight\n' >> "$ARTIFACT_LOG"
 }
 
+persist_fixture_final_proof() {
+  local transaction_dir proof_path timestamp digest document reference
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  proof_path="${transaction_dir}/final-proof.json"
+  timestamp=$(utc_timestamp) || return 1
+  digest=$(sha256_text fixture) || return 1
+  document=$(jq -cn \
+    --argjson schema "$FINAL_PROOF_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" \
+    --arg checksum "$_repair_config_checksum" \
+    --arg config "${CASE_DIR}/limine.conf" \
+    --arg artifact "${CASE_DIR}/boot.efi" \
+    --arg digest "$digest" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      proved_at: $timestamp,
+      config: {path: $config, checksum: $checksum, sha256: $digest, identity: "1:1"},
+      obligations: {kind: "not-applicable", paths: []},
+      artifacts: [{
+        identity: "1:1",
+        path: $artifact,
+        sha256: $digest,
+        signature: "local",
+        tracking: "tracked"
+      }]
+    }') || return 1
+  validate_final_proof_json "$_transaction_id" "$document" || return 1
+  printf '%s\n' "$document" | atomic_create_control_file "$proof_path" 600 || return 1
+  reference=$(transaction_artifact_reference "$proof_path" "$FINAL_PROOF_SCHEMA_VERSION") \
+    || return 1
+  transaction_set_domain_record final_proof "$reference"
+}
+
 repair_boot_artifacts() {
   transaction_phase_start "backup-artifacts" || return 1
   printf 'artifact-repair\n' >> "$ARTIFACT_LOG"
+  persist_fixture_final_proof || return 1
   transaction_phase_complete "backup-artifacts"
 }
 
@@ -777,8 +814,120 @@ test_missing_current_entry_blocks() {
     || fail_test "failed trust plan retained generated key files"
 }
 
+test_firmware_frontier_classifier() {
+  local backup_id output
+  setup_fixture firmware-frontiers
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
+    || fail_test "initial enrollment state was not F0"
+  sbctl 'enroll-keys -m -f --partial db' \
+    || fail_test "frontier fixture db write failed"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F1 ]] \
+    || fail_test "db enrollment state was not F1"
+  sbctl 'enroll-keys -m -f --partial KEK' \
+    || fail_test "frontier fixture KEK write failed"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F2 ]] \
+    || fail_test "KEK enrollment state was not F2"
+  sbctl 'enroll-keys -m -f --partial PK' \
+    || fail_test "frontier fixture PK write failed"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F3 ]] \
+    || fail_test "PK enrollment state was not F3"
+
+  write_state_variable AuditMode 1
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == invalid ]] \
+    || fail_test "mode drift was not classified invalid"
+  write_state_variable AuditMode 0
+  rm -f "$(firmware_variable_path DeployedMode)"
+  output=""
+  if output=$(classify_firmware_enrollment_frontier "$backup_id"); then
+    fail_test "unreadable firmware state was classified"
+  fi
+  [[ -z "$output" ]] || fail_test "unreadable firmware state returned a frontier"
+}
+
+firmware_ledger_writer_callback() {
+  local backup_id="$1" timestamp combined tampered retry_output
+  transaction_phase_start "bind-enrollment-plan" || return 1
+  bind_enrollment_transaction "$backup_id" || return 1
+  transaction_phase_complete "bind-enrollment-plan" || return 1
+  preserve_transaction_files_on_failure || return 1
+  preserve_transaction_files_on_failure || return 1
+
+  read_transaction_manifest "$_transaction_id" || return 1
+  timestamp=$(utc_timestamp) || return 1
+  combined=$(jq -c --arg timestamp "$timestamp" '
+    .firmware_writes += [{
+      hierarchy: "db",
+      started_at: $timestamp,
+      command_exit_code: 0,
+      readback_status: "pending",
+      completed_at: null
+    }]
+  ' <<< "$_manifest_json") || return 1
+  if write_transaction_manifest_json "$combined"; then
+    return 71
+  fi
+
+  record_firmware_write_start db || return 1
+  record_firmware_write_result db unchanged || return 1
+  record_firmware_write_start db || return 1
+  record_firmware_write_command_result db 31 || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  jq -e '.firmware_writes[0].command_exit_code == null and
+    .firmware_writes[0].readback_status == "unchanged" and
+    .firmware_writes[1].command_exit_code == 31 and
+    .firmware_writes[1].readback_status == "pending"' \
+    <<< "$_manifest_json" >/dev/null || return 72
+  tampered=$(jq -c '.firmware_writes[0].command_exit_code = 0' \
+    <<< "$_manifest_json") || return 1
+  if write_transaction_manifest_json "$tampered"; then
+    return 73
+  fi
+  record_firmware_write_result db unchanged || return 1
+  if retry_output=$(record_firmware_write_start db 2>&1); then
+    return 74
+  fi
+  printf '%s\n' "$retry_output" > "${CASE_DIR}/retry-limit.out"
+  [[ "$retry_output" == *"firmware write retry limit reached for db"* ]] || return 75
+  printf 'passed\n' > "${CASE_DIR}/ledger-writer-pass"
+  return 42
+}
+
+test_live_firmware_ledger_writer() {
+  local backup_id callback_rc manifest
+  setup_fixture live-ledger-writer
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  if run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
+    enrollment_preflight firmware_ledger_writer_callback "$backup_id"; then
+    fail_test "ledger writer fixture reported success"
+  else
+    callback_rc=$?
+  fi
+  [[ $callback_rc -eq 42 && -f "${CASE_DIR}/ledger-writer-pass" ]] \
+    || fail_test "live ledger writer rejected a legal evidence transition"
+  grep -Fq 'firmware write retry limit reached for db' "${CASE_DIR}/retry-limit.out" \
+    || fail_test "third firmware attempt lacked its fixed diagnostic"
+  read_lifecycle || fail_test "live ledger writer lifecycle unreadable"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "live ledger writer failure did not retain its incident"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '(.firmware_writes | length) == 2 and
+    all(.firmware_writes[]; .hierarchy == "db" and
+      .readback_status == "unchanged") and
+    .firmware_writes[0].command_exit_code == null and
+    .firmware_writes[1].command_exit_code == 31 and
+    .rollback.status == "preserved"' "$manifest" >/dev/null \
+    || fail_test "live ledger writer did not preserve exact evidence"
+  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
+    fail_test "ledger writer evidence test reached a firmware command"
+  fi
+}
+
 test_enrollment_guard_and_success() {
-  local backup_id manifest
+  local backup_id manifest transaction_id firmware_proof proof_document tampered
   setup_fixture enrollment-success
   [[ "$(observe_setup_state)" == 1 ]] || fail_test "observed state 1 mismatch"
   backup_id=$(prepare_and_activate)
@@ -787,6 +936,8 @@ test_enrollment_guard_and_success() {
   enter_setup_mode
   [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
     || fail_test "observed state 2 mismatch"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
+    || fail_test "dormant enrollment did not start from F0"
   : > "$SBCTL_LOG"
   if run_dormant_enrollment "$backup_id"; then
     fail_test "false production guard allowed enrollment"
@@ -809,7 +960,8 @@ test_enrollment_guard_and_success() {
   [[ "$_lifecycle_state" == active ]] || fail_test "enrollment did not commit active"
   [[ "$(observe_setup_state "$backup_id")" == 4 ]] \
     || fail_test "observed state 4 mismatch"
-  manifest=$(lifecycle_manifest_path "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+  transaction_id=$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")
+  manifest=$(lifecycle_manifest_path "$transaction_id")
   jq -e --arg backup_id "$backup_id" '
     .file_rollback_policy == "preserve" and
     .firmware_backup.id == $backup_id and
@@ -822,12 +974,85 @@ test_enrollment_guard_and_success() {
     (.completed_phases | index("enroll-db") != null) and
     (.completed_phases | index("enroll-kek") != null) and
     (.completed_phases | index("enroll-pk") != null) and
-    (.completed_phases | index("prove-enrolled-trust") != null)
+    (.completed_phases | index("prove-enrolled-trust") != null) and
+    .domain_records.final_proof.schema_version == 2 and
+    .domain_records.firmware.schema_version == 1
   ' "$manifest" >/dev/null || fail_test "enrollment phases are incomplete"
+  read_transaction_manifest "$transaction_id" \
+    || fail_test "completed enrollment manifest failed validation"
+  firmware_proof=$(jq -r '.domain_records.firmware.path' "$manifest")
+  proof_document=$(read_control_document "$firmware_proof") \
+    || fail_test "firmware proof is unreadable"
+  validate_firmware_proof_json "$transaction_id" "$proof_document" "$_manifest_json" \
+    || fail_test "firmware proof did not validate"
+  tampered=$(jq -c '.firmware_writes_sha256 =
+    "0000000000000000000000000000000000000000000000000000000000000000"' \
+    <<< "$proof_document")
+  if validate_firmware_proof_json "$transaction_id" "$tampered" "$_manifest_json"; then
+    fail_test "firmware proof accepted a changed ledger hash"
+  fi
+  tampered=$(jq -c '.domain_records.firmware = null' "$manifest")
+  if validate_transaction_manifest_json "$transaction_id" "$tampered"; then
+    fail_test "completed enrollment accepted a missing firmware proof"
+  fi
   grep -Fxq artifact-proof "$ARTIFACT_LOG" || fail_test "post-enrollment artifact proof missing"
   write_state_variable SecureBoot 1
   [[ "$(observe_setup_state "$backup_id")" == 5 ]] \
     || fail_test "observed state 5 mismatch"
+}
+
+test_firmware_command_evidence_boundaries() {
+  local backup_id manifest
+  setup_fixture unknown-command-result
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  ENROLLMENT_MUTATION_POINT=after-db-command
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "post-command failpoint reported success"
+  fi
+  read_lifecycle || fail_test "post-command lifecycle unreadable"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '(.firmware_writes | length) == 1 and
+    .firmware_writes[0].hierarchy == "db" and
+    .firmware_writes[0].command_exit_code == null and
+    .firmware_writes[0].readback_status == "pending" and
+    .rollback.status == "preserved"' "$manifest" >/dev/null \
+    || fail_test "unknown command result was not retained as pending"
+
+  setup_fixture pending-readback
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  ENROLLMENT_MUTATION_POINT=after-db-command-result
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "post-command-result failpoint reported success"
+  fi
+  read_lifecycle || fail_test "pending-readback lifecycle unreadable"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '(.firmware_writes | length) == 1 and
+    .firmware_writes[0].hierarchy == "db" and
+    .firmware_writes[0].command_exit_code == 0 and
+    .firmware_writes[0].readback_status == "pending" and
+    .rollback.status == "preserved"' "$manifest" >/dev/null \
+    || fail_test "known command result with pending readback was not durable"
+
+  setup_fixture unchanged-readback
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  SBCTL_FAIL_PHASE=before-db
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "no-effect db command reported success"
+  fi
+  read_lifecycle || fail_test "unchanged-readback lifecycle unreadable"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '(.firmware_writes | length) == 1 and
+    .firmware_writes[0].hierarchy == "db" and
+    .firmware_writes[0].command_exit_code == 31 and
+    .firmware_writes[0].readback_status == "unchanged" and
+    .rollback.status == "preserved"' "$manifest" >/dev/null \
+    || fail_test "exact pre-frontier readback was not recorded unchanged"
 }
 
 test_dbx_drift_blocks_cleanly() {
@@ -1039,7 +1264,10 @@ run_case activation-artifact-guard test_activation_artifact_guard
 run_case preparation test_preparation_and_backup
 run_case absent-dbx test_absent_dbx_record
 run_case missing-entry test_missing_current_entry_blocks
+run_case firmware-frontiers test_firmware_frontier_classifier
+run_case live-ledger-writer test_live_firmware_ledger_writer
 run_case enrollment-success test_enrollment_guard_and_success
+run_case firmware-command-evidence test_firmware_command_evidence_boundaries
 run_case dbx-drift test_dbx_drift_blocks_cleanly
 run_case partial-readback test_partial_readback_failure
 run_case db-command-failure test_db_command_failure_after_effect

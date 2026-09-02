@@ -7,6 +7,7 @@ readonly PRODUCER_RECORD_SCHEMA_VERSION=1
 readonly PRODUCER_BASELINE_SCHEMA_VERSION=1
 readonly LEGACY_FINAL_PROOF_SCHEMA_VERSION=1
 readonly FINAL_PROOF_SCHEMA_VERSION=2
+readonly FIRMWARE_PROOF_SCHEMA_VERSION=1
 readonly MAX_RECOVERY_ATTEMPT_SEALS=32
 readonly MAX_TRANSACTION_BACKUPS=4096
 readonly MAX_CONTROL_DOCUMENT_BYTES=1048576
@@ -14,6 +15,8 @@ readonly MAX_PRODUCER_TARGETS=16384
 # shellcheck disable=SC2034 # Consumed by the producer module.
 readonly MAX_PRODUCER_TARGET_BYTES=491520
 readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
+readonly MAX_FIRMWARE_WRITE_ATTEMPTS=6
+readonly MAX_FIRMWARE_HIERARCHY_ATTEMPTS=2
 readonly TRANSACTION_SERVICE_UNIT="limine-snapper-sync.service"
 
 _lifecycle_state=unmanaged
@@ -365,6 +368,78 @@ validate_final_proof_reference() {
   document=$(read_control_document "$path") || return 1
   [[ $(jq -r '.schema_version' <<< "$document") == "$schema" ]] || return 1
   validate_final_proof_json "$transaction_id" "$document"
+}
+
+validate_firmware_proof_json() {
+  local transaction_id="$1" document="$2" manifest="$3" writes writes_hash
+  writes=$(jq -cS '.firmware_writes' <<< "$manifest") || return 1
+  writes_hash=$(sha256_text "$writes") || return 1
+  jq -e --arg id "$transaction_id" --argjson schema "$FIRMWARE_PROOF_SCHEMA_VERSION" \
+    --arg writes_hash "$writes_hash" --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def artifact_reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | absolute_path) and .schema_version == 2 and (.sha256 | digest);
+    type == "object" and
+    keys == ["artifact_proof","enrollment_plan","firmware_backup","firmware_writes_sha256",
+      "modes","proved_at","schema_version","transaction_id","variables","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    (.proved_at | timestamp) and
+    (.firmware_backup | type == "object" and keys == ["id","manifest_sha256","path"] and
+      (.id | uuid) and (.manifest_sha256 | digest) and (.path | absolute_path)) and
+    (.enrollment_plan | type == "object" and
+      keys == ["backup_id","manifest_sha256","path"] and
+      (.backup_id | uuid) and (.manifest_sha256 | digest) and (.path | absolute_path)) and
+    (.variables | type == "object" and keys == ["KEK","PK","db","dbx"] and
+      (all(.PK,.KEK,.db;
+        type == "object" and keys == ["entries_sha256"] and (.entries_sha256 | digest))) and
+      (.dbx | type == "object" and keys == ["present","raw_sha256"] and
+        (.present | type == "boolean") and
+        (if .present then (.raw_sha256 | digest) else .raw_sha256 == null end))) and
+    (.modes | type == "object" and
+      keys == ["AuditMode","DeployedMode","SecureBoot","SetupMode"] and
+      .AuditMode == 0 and .DeployedMode == 0 and .SecureBoot == 0 and .SetupMode == 0) and
+    .firmware_writes_sha256 == $writes_hash and
+    (.artifact_proof | artifact_reference) and
+    .firmware_backup == {
+      id: $manifest.firmware_backup.id,
+      manifest_sha256: $manifest.firmware_backup.manifest_sha256,
+      path: $manifest.firmware_backup.path
+    } and
+    .enrollment_plan == {
+      backup_id: $manifest.enrollment_plan.backup_id,
+      manifest_sha256: $manifest.enrollment_plan.manifest_sha256,
+      path: $manifest.enrollment_plan.path
+    } and
+    .variables == {
+      PK: {entries_sha256: $manifest.enrollment_plan.variables.PK.entries_sha256},
+      KEK: {entries_sha256: $manifest.enrollment_plan.variables.KEK.entries_sha256},
+      db: {entries_sha256: $manifest.enrollment_plan.variables.db.entries_sha256},
+      dbx: $manifest.enrollment_plan.dbx
+    } and
+    .artifact_proof == $manifest.domain_records.final_proof
+  ' <<< "$document" >/dev/null
+}
+
+validate_firmware_proof_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$FIRMWARE_PROOF_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/firmware-proof.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_firmware_proof_json "$transaction_id" "$document" "$manifest"
 }
 
 incident_reference_from_json() {
@@ -877,7 +952,9 @@ validate_transaction_manifest_json() {
     --argjson owner_uid "$(control_owner_uid)" --arg service_unit "$TRANSACTION_SERVICE_UNIT" \
     --arg transaction_dir "$transaction_dir" \
     --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" \
-    --argjson max_backups "$MAX_TRANSACTION_BACKUPS" '
+    --argjson max_backups "$MAX_TRANSACTION_BACKUPS" \
+    --argjson max_firmware_writes "$MAX_FIRMWARE_WRITE_ATTEMPTS" \
+    --argjson max_hierarchy_writes "$MAX_FIRMWARE_HIERARCHY_ATTEMPTS" '
     def uuid:
       type == "string" and
       test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
@@ -1051,7 +1128,7 @@ validate_transaction_manifest_json() {
       .firmware_backup != null and .firmware_backup.status == "complete" and
       .firmware_backup.id == .enrollment_plan.backup_id)) and
     (.firmware_writes as $writes |
-      ($writes | type) == "array" and ($writes | length) <= 3 and
+      ($writes | type) == "array" and ($writes | length) <= $max_firmware_writes and
       all($writes[];
         type == "object" and
         keys == ["command_exit_code","completed_at","hierarchy","readback_status","started_at"] and
@@ -1059,17 +1136,36 @@ validate_transaction_manifest_json() {
         (.started_at | timestamp) and
         (.command_exit_code == null or
           (.command_exit_code | type == "number" and . >= 0 and . <= 255 and floor == .)) and
-        (.readback_status == "pending" or .readback_status == "verified" or
-          .readback_status == "failed") and
-        (.completed_at == null or (.completed_at | timestamp))) and
-      ([$writes[].hierarchy] == [] or [$writes[].hierarchy] == ["db"] or
-        [$writes[].hierarchy] == ["db","KEK"] or
-        [$writes[].hierarchy] == ["db","KEK","PK"])) and
+        (.readback_status == "pending" or .readback_status == "unchanged" or
+          .readback_status == "verified" or .readback_status == "failed") and
+        (if .readback_status == "pending" then .completed_at == null
+         else (.completed_at | timestamp) end)) and
+      ([$writes[] | select(.hierarchy == "db")] | length) <= $max_hierarchy_writes and
+      ([$writes[] | select(.hierarchy == "KEK")] | length) <= $max_hierarchy_writes and
+      ([$writes[] | select(.hierarchy == "PK")] | length) <= $max_hierarchy_writes and
+      (reduce $writes[] as $write (
+        {ok: true, next: "db", terminal: false};
+        if ((.ok | not) or .terminal or $write.hierarchy != .next) then
+          .ok = false
+        elif $write.readback_status == "pending" then
+          .terminal = true
+        elif $write.readback_status == "failed" then
+          .terminal = true
+        elif $write.readback_status == "unchanged" then
+          .
+        elif $write.readback_status == "verified" then
+          .next = (if .next == "db" then "KEK"
+                   elif .next == "KEK" then "PK"
+                   else "complete" end)
+        else
+          .ok = false
+        end
+      ) | .ok)) and
     (if (.firmware_writes | length) > 0 then
       .file_rollback_policy == "preserve" and .enrollment_plan != null
     else true end) and
     (.domain_records | type == "object" and
-      keys == ["bootnext","final_proof","managed_settings","producer",
+      keys == ["bootnext","final_proof","firmware","managed_settings","producer",
         "tracking_ownership","unconfigure","windows"]) and
     (all(.domain_records[]; . == null or artifact_reference)) and
     (if .status == "transition" then
@@ -1175,20 +1271,24 @@ validate_artifact_reference_file() {
 }
 
 validate_transaction_domain_records() {
-  local transaction_id="$1" document="$2" producer proof path producer_document kind status
+  local transaction_id="$1" document="$2" producer proof firmware path producer_document
+  local kind status operation
   local extracted
   local -a fields
   extracted=$(jq -er '
     (.domain_records.producer | tojson),
     (.domain_records.final_proof | tojson),
-    .kind, .status
+    (.domain_records.firmware | tojson),
+    .kind, .status, .operation
   ' <<< "$document") || return 1
   mapfile -t fields <<< "$extracted"
-  [[ ${#fields[@]} -eq 4 ]] || return 1
+  [[ ${#fields[@]} -eq 6 ]] || return 1
   producer=${fields[0]}
   proof=${fields[1]}
-  kind=${fields[2]}
-  status=${fields[3]}
+  firmware=${fields[2]}
+  kind=${fields[3]}
+  status=${fields[4]}
+  operation=${fields[5]}
 
   if [[ "$producer" != null ]]; then
     [[ "$kind" == root ]] || return 1
@@ -1203,11 +1303,12 @@ validate_transaction_domain_records() {
       $manifest.boot_id == $producer.owner.boot_id and
       $manifest.owner.pid == $producer.owner.pid and
       $manifest.owner.start_time == $producer.owner.start_time and
-      $manifest.owner.uid == $producer.owner.uid and
-      $manifest.firmware_backup == null and $manifest.enrollment_plan == null and
-      $manifest.firmware_writes == [] and
-      $manifest.domain_records.bootnext == null and
-      $manifest.domain_records.managed_settings == null and
+       $manifest.owner.uid == $producer.owner.uid and
+       $manifest.firmware_backup == null and $manifest.enrollment_plan == null and
+       $manifest.firmware_writes == [] and
+       $manifest.domain_records.bootnext == null and
+       $manifest.domain_records.firmware == null and
+       $manifest.domain_records.managed_settings == null and
       $manifest.domain_records.tracking_ownership == null and
       $manifest.domain_records.unconfigure == null and
       $manifest.domain_records.windows == null and
@@ -1221,8 +1322,43 @@ validate_transaction_domain_records() {
   if [[ "$proof" != null ]]; then
     validate_final_proof_reference "$transaction_id" "$proof" || return 1
   fi
+  if [[ "$firmware" != null ]]; then
+    [[ "$kind" == root && "$operation" == enroll-secure-boot && "$producer" == null \
+      && "$proof" != null ]] || return 1
+    validate_firmware_proof_reference "$transaction_id" "$firmware" "$document" || return 1
+  elif [[ "$operation" == enroll-secure-boot && "$status" == completed ]]; then
+    return 1
+  fi
+  if [[ "$operation" == enroll-secure-boot ]]; then
+    [[ "$kind" == root && "$producer" == null ]] || return 1
+    jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
+      .target_state == "active" and .prior_state == "active" and
+      .domain_records.bootnext == null and
+      .domain_records.managed_settings == null and
+      .domain_records.tracking_ownership == null and
+      .domain_records.unconfigure == null and .domain_records.windows == null and
+      (if .firmware_backup == null then
+        .enrollment_plan == null and .firmware_writes == [] and
+        .domain_records.firmware == null and .file_rollback_policy == "restore"
+       else
+        .firmware_backup.status == "complete" and .enrollment_plan != null
+       end) and
+      (if .status == "completed" then
+        .firmware_backup != null and .enrollment_plan != null and
+        .file_rollback_policy == "preserve" and
+        .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $final_schema and
+        .domain_records.firmware != null and
+        (.completed_phases | index("prove-enrolled-trust") != null) and
+        (all(.firmware_writes[];
+          .readback_status == "verified" or .readback_status == "unchanged")) and
+        [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
+          ["db","KEK","PK"]
+       else true end)
+    ' <<< "$document" >/dev/null || return 1
+  fi
   if [[ "$kind" == recovery-attempt ]]; then
-    [[ "$producer" == null ]] || return 1
+    [[ "$producer" == null && "$firmware" == null ]] || return 1
     if [[ "$proof" != null ]]; then
       [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
         || return 1
@@ -1762,6 +1898,7 @@ validate_legacy_disabled_manifest() {
     .domain_records = {
       bootnext: null,
       final_proof: null,
+      firmware: null,
       managed_settings: null,
       producer: null,
       tracking_ownership: null,
@@ -1925,7 +2062,8 @@ load_producer_recovery_context() {
     .kind == "root" and .prior_state == "active" and
     .file_rollback_policy == "preserve" and
     .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-    .domain_records.bootnext == null and .domain_records.managed_settings == null and
+    .domain_records.bootnext == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and
     .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
     .domain_records.windows == null
   ' <<< "$_recovery_root_manifest_json" >/dev/null || return 1
@@ -2094,6 +2232,7 @@ begin_lifecycle_transaction() {
       domain_records: {
         bootnext: null,
         final_proof: null,
+        firmware: null,
         managed_settings: null,
         producer: null,
         tracking_ownership: null,
@@ -2199,6 +2338,7 @@ begin_producer_lifecycle_transaction() {
       domain_records: {
         bootnext: null,
         final_proof: null,
+        firmware: null,
         managed_settings: null,
         producer: $producer,
         tracking_ownership: null,
@@ -2350,6 +2490,7 @@ begin_lifecycle_recovery_attempt() {
       domain_records: {
         bootnext: null,
         final_proof: null,
+        firmware: null,
         managed_settings: null,
         producer: null,
         tracking_ownership: null,
@@ -2454,6 +2595,25 @@ write_transaction_manifest_json() {
       def outcome_forward($old; $new):
         $old == $new or
         ($old == "pending" and ($new == "completed" or $new == "failed"));
+      def firmware_writes_forward($old; $new):
+        if $new == $old then true
+        elif (($new | length) == (($old | length) + 1) and
+          $new[0:($old | length)] == $old and
+          $new[-1].command_exit_code == null and
+          $new[-1].readback_status == "pending") then true
+        elif (($new | length) == ($old | length) and ($old | length) > 0 and
+          $new[0:-1] == $old[0:-1] and $old[-1].readback_status == "pending") then
+          (($old[-1].command_exit_code == null and
+            $new[-1].command_exit_code != null and
+            ($old[-1] | .command_exit_code = $new[-1].command_exit_code) == $new[-1]) or
+           ($new[-1].hierarchy == $old[-1].hierarchy and
+            $new[-1].started_at == $old[-1].started_at and
+            $new[-1].command_exit_code == $old[-1].command_exit_code and
+            ($new[-1].readback_status == "unchanged" or
+              $new[-1].readback_status == "verified" or
+              $new[-1].readback_status == "failed") and
+            $new[-1].completed_at != null))
+        else false end;
       def envelope:
         del(.backups, .completed_phases, .current_phase, .domain_records,
           .enrollment_plan, .file_rollback_policy, .firmware_backup, .firmware_writes,
@@ -2481,19 +2641,7 @@ write_transaction_manifest_json() {
           $current.firmware_backup.path == $candidate.firmware_backup.path)) and
       ($current.enrollment_plan == null or
         $current.enrollment_plan == $candidate.enrollment_plan) and
-      ($current.firmware_writes as $old | $candidate.firmware_writes as $new |
-        $new == $old or
-        (($new | length) == (($old | length) + 1) and
-          $new[0:($old | length)] == $old and
-          $new[-1].readback_status == "pending") or
-        (($new | length) == ($old | length) and ($old | length) > 0 and
-          $new[0:-1] == $old[0:-1] and
-          $old[-1].readback_status == "pending" and
-          $new[-1].hierarchy == $old[-1].hierarchy and
-          $new[-1].started_at == $old[-1].started_at and
-          ($new[-1].readback_status == "verified" or
-            $new[-1].readback_status == "failed") and
-          $new[-1].command_exit_code != null and $new[-1].completed_at != null)) and
+      firmware_writes_forward($current.firmware_writes; $candidate.firmware_writes) and
       ($current.rollback == null or $current.rollback == $candidate.rollback) and
       all($current.domain_records | to_entries[];
         .value == null or .value == $candidate.domain_records[.key])
@@ -2734,8 +2882,11 @@ preserve_transaction_files_on_failure() {
   local document
   [[ "$_transaction_active" == true ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  [[ $(jq -r '.status' <<< "$_manifest_json") == transition \
-    && $(jq -r '.file_rollback_policy' <<< "$_manifest_json") == restore ]] || return 1
+  [[ $(jq -r '.status' <<< "$_manifest_json") == transition ]] || return 1
+  if [[ $(jq -r '.file_rollback_policy' <<< "$_manifest_json") == preserve ]]; then
+    return 0
+  fi
+  [[ $(jq -r '.file_rollback_policy' <<< "$_manifest_json") == restore ]] || return 1
   document=$(jq -c '.file_rollback_policy = "preserve"' <<< "$_manifest_json") \
     || return 1
   write_transaction_manifest_json "$document"
@@ -3011,7 +3162,7 @@ transaction_set_domain_record() {
   local name="$1" reference="$2" document
   [[ "$_transaction_active" == true ]] || return 1
   case "$name" in
-    bootnext|final_proof|managed_settings|producer|tracking_ownership|unconfigure|windows) ;;
+    bootnext|final_proof|firmware|managed_settings|producer|tracking_ownership|unconfigure|windows) ;;
     *) return 1 ;;
   esac
   read_transaction_manifest "$_transaction_id" || return 1

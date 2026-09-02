@@ -543,15 +543,35 @@ test_successful_repair() {
     "$LEGACY_FINAL_PROOF_SCHEMA_VERSION")
   root_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
     kind: "root",
+    operation: "artifact-success",
     status: "completed",
-    domain_records: {producer: null, final_proof: $proof}
+    domain_records: {
+      bootnext: null,
+      final_proof: $proof,
+      firmware: null,
+      managed_settings: null,
+      producer: null,
+      tracking_ownership: null,
+      unconfigure: null,
+      windows: null
+    }
   }')
   validate_transaction_domain_records "$transaction_id" "$root_manifest" \
     || fail_test "historical schema-1 root final proof became unreadable"
   recovery_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
     kind: "recovery-attempt",
+    operation: "producer-recovery",
     status: "transition",
-    domain_records: {producer: null, final_proof: $proof}
+    domain_records: {
+      bootnext: null,
+      final_proof: $proof,
+      firmware: null,
+      managed_settings: null,
+      producer: null,
+      tracking_ownership: null,
+      unconfigure: null,
+      windows: null
+    }
   }')
   if validate_transaction_domain_records "$transaction_id" "$recovery_manifest"; then
     fail_test "producer recovery accepted a schema-1 final proof"
