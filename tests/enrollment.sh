@@ -540,6 +540,18 @@ enter_setup_mode() {
   write_state_variable SetupMode 1
 }
 
+recover_firmware_incident() {
+  local rc=0
+  with_boot_repair_lock || return 1
+  run_firmware_recovery_locked || rc=$?
+  release_boot_repair_lock
+  return "$rc"
+}
+
+fail_before_enrollment_binding() {
+  return 44
+}
+
 test_esl_parser() {
   local output truncated unknown trailing_certificate trailing_esl
   setup_fixture parser
@@ -735,7 +747,7 @@ test_activation_artifact_guard() {
 }
 
 test_preparation_and_backup() {
-  local backup_id original_uuid
+  local backup_id original_uuid name
   setup_fixture preparation
   backup_id=$(prepare_and_activate)
   read_lifecycle || fail_test "prepared lifecycle is unreadable"
@@ -768,6 +780,17 @@ test_preparation_and_backup() {
     (.confirmation.planned_pk_sha256 | test("^[0-9a-f]{64}$"))
   ' "$(firmware_plan_path "$backup_id")/manifest.json" >/dev/null \
     || fail_test "explicit plan confirmation is incomplete"
+  for name in PK KEK db; do
+    [[ ! -e "$(firmware_plan_path "$backup_id")/current-${name}.entries" \
+      && ! -L "$(firmware_plan_path "$backup_id")/current-${name}.entries" ]] \
+      || fail_test "plan retained unsealed current-${name} evidence"
+  done
+  validate_enrollment_plan "$backup_id" true \
+    || fail_test "plan did not re-derive its backup-preservation proof"
+  [[ "$_validated_current_pk_hash" == \
+    "$(jq -r '.confirmation.current_pk_sha256' \
+      "$(firmware_plan_path "$backup_id")/manifest.json")" ]] \
+    || fail_test "re-derived current PK did not match the confirmation"
   grep -Fxq 'create-keys' "$SBCTL_LOG" || fail_test "local keys were not created"
   [[ $(grep -Fxc 'enroll-keys -m -f --export esl' "$SBCTL_LOG") -ge 3 ]] \
     || fail_test "plan was not regenerated across preparation and activation"
@@ -1077,7 +1100,7 @@ test_dbx_drift_blocks_cleanly() {
 }
 
 test_partial_readback_failure() {
-  local backup_id manifest
+  local backup_id manifest root_id
   setup_fixture partial-readback
   backup_id=$(prepare_and_activate)
   enter_setup_mode
@@ -1104,6 +1127,16 @@ test_partial_readback_failure() {
     fail_test "enrollment continued after db mismatch"
   fi
   current_pk_is_absent || fail_test "partial failure enrolled PK"
+  root_id="$_lifecycle_transaction_id"
+  SBCTL_MISMATCH_PHASE=""
+  if recover_firmware_incident; then
+    fail_test "contradictory firmware state admitted automatic recovery"
+  fi
+  read_lifecycle || fail_test "terminal firmware mismatch damaged lifecycle evidence"
+  [[ "$_lifecycle_state" == recovery-required \
+    && "$_lifecycle_transaction_id" == "$root_id" \
+    && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 0 ]] \
+    || fail_test "terminal firmware mismatch published a recovery attempt"
 }
 
 test_db_command_failure_after_effect() {
@@ -1244,6 +1277,221 @@ test_windows_gate_blocks_preparation() {
   [[ ! -e "$SBCTL_ROOT/keys" ]] || fail_test "Windows refusal created local keys"
 }
 
+test_firmware_recovery_from_unbound_root() {
+  local backup_id root_id root_manifest root_incident root_manifest_hash root_incident_hash
+  local recovery_id recovery_manifest
+  setup_fixture recovery-unbound-root
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  if run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
+    enrollment_preflight fail_before_enrollment_binding "$backup_id"; then
+    fail_test "unbound enrollment incident reported success"
+  fi
+  read_lifecycle || fail_test "unbound enrollment incident was unreadable"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "unbound enrollment incident did not require recovery"
+  root_id="$_lifecycle_transaction_id"
+  root_manifest=$(lifecycle_manifest_path "$root_id")
+  root_incident=$(lifecycle_incident_path "$root_id")
+  root_manifest_hash=$(sha256_file "$root_manifest")
+  root_incident_hash=$(sha256_file "$root_incident")
+  jq -e '.firmware_backup == null and .enrollment_plan == null and
+    .firmware_writes == [] and .file_rollback_policy == "restore"' \
+    "$root_manifest" >/dev/null || fail_test "unbound root retained enrollment authority"
+
+  : > "$SBCTL_LOG"
+  : > "$ARTIFACT_LOG"
+  recover_firmware_incident || fail_test "unbound enrollment incident did not recover"
+  read_lifecycle || fail_test "unbound recovery result was unreadable"
+  [[ "$_lifecycle_state" == active ]] || fail_test "unbound recovery did not restore active"
+  recovery_id=$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")
+  recovery_manifest=$(lifecycle_manifest_path "$recovery_id")
+  jq -e --arg backup_id "$backup_id" '
+    .kind == "recovery-attempt" and .operation == "firmware-recovery" and
+    .status == "completed" and .firmware_backup.id == $backup_id and
+    .enrollment_plan.backup_id == $backup_id and
+    [.firmware_writes[].hierarchy] == ["db","KEK","PK"] and
+    all(.firmware_writes[];
+      .command_exit_code == 0 and .readback_status == "verified") and
+    .domain_records.final_proof.schema_version == 2 and
+    .domain_records.firmware.schema_version == 1
+  ' "$recovery_manifest" >/dev/null || fail_test "unbound recovery proof was incomplete"
+  [[ $(sha256_file "$root_manifest") == "$root_manifest_hash" \
+    && $(sha256_file "$root_incident") == "$root_incident_hash" ]] \
+    || fail_test "firmware recovery rewrote root evidence"
+  mapfile -t partial_calls < <(grep -- '--partial' "$SBCTL_LOG")
+  [[ "${partial_calls[*]}" == \
+    'enroll-keys -m -f --partial db enroll-keys -m -f --partial KEK enroll-keys -m -f --partial PK' ]] \
+    || fail_test "unbound recovery used the wrong enrollment order"
+  [[ $(grep -Fxc artifact-proof "$ARTIFACT_LOG") -eq 1 ]] \
+    || fail_test "firmware recovery omitted its second EFI verification"
+}
+
+test_firmware_recovery_resolves_pending_effect() {
+  local backup_id root_id root_manifest_hash root_incident_hash recovery_manifest
+  setup_fixture recovery-pending-effect
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  ENROLLMENT_MUTATION_POINT=after-db-command
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "pending-effect fixture reported success"
+  fi
+  read_lifecycle || fail_test "pending-effect root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  root_manifest_hash=$(sha256_file "$(lifecycle_manifest_path "$root_id")")
+  root_incident_hash=$(sha256_file "$(lifecycle_incident_path "$root_id")")
+  ENROLLMENT_MUTATION_POINT=""
+  ENROLLMENT_MUTATION_USED=false
+  : > "$SBCTL_LOG"
+  recover_firmware_incident || fail_test "pending-effect incident did not recover"
+  read_lifecycle || fail_test "pending-effect recovery was unreadable"
+  recovery_manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '
+    [.firmware_writes[].hierarchy] == ["db","KEK","PK"] and
+    .firmware_writes[0].command_exit_code == null and
+    .firmware_writes[0].readback_status == "verified" and
+    all(.firmware_writes[1:][];
+      .command_exit_code == 0 and .readback_status == "verified")
+  ' "$recovery_manifest" >/dev/null \
+    || fail_test "pending command effect was not resolved from direct readback"
+  if grep -Fq -- '--partial db' "$SBCTL_LOG"; then
+    fail_test "recovery replayed a db write whose effect was already present"
+  fi
+  [[ $(sha256_file "$(lifecycle_manifest_path "$root_id")") == "$root_manifest_hash" \
+    && $(sha256_file "$(lifecycle_incident_path "$root_id")") == "$root_incident_hash" ]] \
+    || fail_test "pending-effect recovery rewrote root evidence"
+}
+
+test_firmware_recovery_inherits_resolved_retry() {
+  local backup_id first_attempt first_manifest first_manifest_hash final_manifest
+  setup_fixture recovery-pending-retry
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  ENROLLMENT_MUTATION_POINT=before-db-write
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "pending retry fixture reported success"
+  fi
+  ENROLLMENT_MUTATION_POINT=after-recovery-artifact-repair
+  ENROLLMENT_MUTATION_USED=false
+  if recover_firmware_incident; then
+    fail_test "injected recovery artifact failure reported success"
+  fi
+  read_lifecycle || fail_test "failed recovery attempt was unreadable"
+  [[ "$_lifecycle_state" == recovery-required \
+    && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 1 ]] \
+    || fail_test "failed recovery attempt did not remain recoverable"
+  first_attempt=$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")
+  first_manifest=$(lifecycle_manifest_path "$first_attempt")
+  jq -e '(.firmware_writes | length) == 1 and
+    .firmware_writes[0].command_exit_code == null and
+    .firmware_writes[0].readback_status == "unchanged"' "$first_manifest" >/dev/null \
+    || fail_test "first recovery attempt did not seal the pending resolution"
+  first_manifest_hash=$(sha256_file "$first_manifest")
+
+  ENROLLMENT_MUTATION_POINT=""
+  ENROLLMENT_MUTATION_USED=false
+  : > "$SBCTL_LOG"
+  recover_firmware_incident || fail_test "resolved retry did not recover"
+  read_lifecycle || fail_test "resolved retry result was unreadable"
+  final_manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '
+    [.firmware_writes[].hierarchy] == ["db","db","KEK","PK"] and
+    .firmware_writes[0].readback_status == "unchanged" and
+    all(.firmware_writes[1:][]; .readback_status == "verified")
+  ' "$final_manifest" >/dev/null \
+    || fail_test "resolved retry did not inherit the cumulative ledger"
+  [[ $(sha256_file "$first_manifest") == "$first_manifest_hash" ]] \
+    || fail_test "later firmware recovery rewrote prior attempt evidence"
+  grep -Fxq 'enroll-keys -m -f --partial db' "$SBCTL_LOG" \
+    || fail_test "resolved retry did not issue the bounded db retry"
+}
+
+test_firmware_recovery_retry_limit_is_cumulative() {
+  local backup_id manifest command_count
+  setup_fixture recovery-retry-limit
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  SBCTL_FAIL_PHASE=before-db
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "retry-limit root reported success"
+  fi
+  if recover_firmware_incident; then
+    fail_test "second unchanged db attempt reported recovery success"
+  fi
+  SBCTL_FAIL_PHASE=""
+  if recover_firmware_incident; then
+    fail_test "third cumulative db attempt bypassed the retry limit"
+  fi
+  read_lifecycle || fail_test "retry-limit recovery state was unreadable"
+  manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '(.firmware_writes | length) == 2 and
+    all(.firmware_writes[];
+      .hierarchy == "db" and .readback_status == "unchanged")' "$manifest" >/dev/null \
+    || fail_test "recovery reset the cumulative firmware retry ledger"
+  command_count=$(grep -Fxc 'enroll-keys -m -f --partial db' "$SBCTL_LOG")
+  [[ $command_count -eq 2 ]] || fail_test "retry limit issued ${command_count} db commands"
+}
+
+test_firmware_recovery_completes_post_pk_effect() {
+  local backup_id manifest
+  setup_fixture recovery-post-pk-effect
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  SBCTL_FAIL_PHASE=after-PK
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "post-PK recovery fixture reported success"
+  fi
+  SBCTL_FAIL_PHASE=""
+  : > "$SBCTL_LOG"
+  recover_firmware_incident || fail_test "post-PK effect did not recover"
+  read_lifecycle || fail_test "post-PK recovery result was unreadable"
+  manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '
+    [.firmware_writes[].hierarchy] == ["db","KEK","PK"] and
+    .firmware_writes[2].command_exit_code == 36 and
+    all(.firmware_writes[]; .readback_status == "verified") and
+    .domain_records.firmware != null
+  ' "$manifest" >/dev/null || fail_test "post-PK recovery proof was incomplete"
+  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
+    fail_test "post-PK recovery replayed an already completed firmware write"
+  fi
+}
+
+test_firmware_recovery_leaves_unreadable_pending() {
+  local backup_id root_id root_manifest attempt_count
+  setup_fixture recovery-unreadable-pending
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  ALLOW_ENROLL=true
+  ENROLLMENT_MUTATION_POINT=after-db-command
+  if run_dormant_enrollment "$backup_id"; then
+    fail_test "unreadable pending fixture reported success"
+  fi
+  read_lifecycle || fail_test "unreadable pending root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  root_manifest=$(lifecycle_manifest_path "$root_id")
+  rm -f "$(firmware_variable_path DeployedMode)"
+  if recover_firmware_incident; then
+    fail_test "technical firmware uncertainty reported recovery success"
+  fi
+  read_lifecycle || fail_test "technical uncertainty damaged lifecycle evidence"
+  attempt_count=$(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json")
+  [[ "$_lifecycle_state" == recovery-required && "$attempt_count" == 0 \
+    && "$_lifecycle_transaction_id" == "$root_id" ]] \
+    || fail_test "technical uncertainty replaced the root incident"
+  jq -e '.firmware_writes[-1].readback_status == "pending"' "$root_manifest" >/dev/null \
+    || fail_test "technical uncertainty resolved an unreadable pending write"
+}
+
 run_case() {
   local name="$1" function="$2"
   (
@@ -1276,5 +1524,11 @@ run_case artifact-drift test_artifact_repair_drift_blocks_write
 run_case guard-flip test_guard_flip_blocks_write
 run_case plan-tamper test_plan_manifest_tamper_blocks
 run_case windows-gate test_windows_gate_blocks_preparation
+run_case recovery-unbound-root test_firmware_recovery_from_unbound_root
+run_case recovery-pending-effect test_firmware_recovery_resolves_pending_effect
+run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry
+run_case recovery-retry-limit test_firmware_recovery_retry_limit_is_cumulative
+run_case recovery-post-pk-effect test_firmware_recovery_completes_post_pk_effect
+run_case recovery-unreadable-pending test_firmware_recovery_leaves_unreadable_pending
 
 printf 'enrollment tests passed\n'

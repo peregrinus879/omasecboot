@@ -159,6 +159,13 @@ reset_state() {
   _incident_json=""
   _incident_read_status=absent
   _recovery_root_service_json=""
+  _recovery_root_reference=""
+  _recovery_root_manifest_json=""
+  _recovery_previous_reference="null"
+  _recovery_previous_manifest_json=""
+  _recovery_attempt_count=0
+  _recovery_target_state=""
+  _recovery_producer_reference="null"
   _recovery_incident_json=""
   _transaction_active=false
   _transaction_id=""
@@ -373,7 +380,7 @@ create_test_attempt_seal() {
       writer_version: $version,
       id: $id,
       kind: "recovery-attempt",
-      operation: "recover-test",
+      operation: "firmware-recovery",
       target_state: "active",
       status: $status,
       created_at: $timestamp,
@@ -431,7 +438,7 @@ create_test_attempt_seal() {
       writer_version: $version,
       kind: "attempt",
       id: $id,
-      operation: "recover-test",
+      operation: "firmware-recovery",
       ordinal: $ordinal,
       manifest: $manifest,
       manifest_sha256: $hash,
@@ -1135,7 +1142,7 @@ FAILPOINT=""
 FAILPOINT_KILL=false
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
   || fail_test "incident fixture adoption failed"
-if run_lifecycle_transaction "repair" "active" "active" failed_transaction; then
+if run_lifecycle_transaction "enroll-secure-boot" "active" "active" failed_transaction; then
   fail_test "root incident transaction succeeded"
 fi
 read_lifecycle || fail_test "root incident lifecycle unreadable"
@@ -1331,6 +1338,57 @@ printf '%s\n' "$latest_attempt_original" \
 printf '%s\n' "$valid_attempt_lifecycle" \
   | atomic_write_control_file "$(lifecycle_file_path)" 644
 read_lifecycle || fail_test "attempt chain did not recover after service-state restore"
+
+latest_manifest_tampered=$(jq -c '.operation = "producer-recovery"' \
+  <<< "$latest_manifest_original")
+printf '%s\n' "$latest_manifest_tampered" \
+  | atomic_write_control_file "$latest_attempt_manifest" 600
+latest_seal_operation_tamper=$(jq -c \
+  --arg hash "$(sha256_file "$latest_attempt_manifest")" '
+    .operation = "producer-recovery" | .manifest_sha256 = $hash
+  ' <<< "$latest_attempt_original")
+printf '%s\n' "$latest_seal_operation_tamper" \
+  | atomic_write_control_file "$latest_attempt_path" 600
+operation_tamper_lifecycle=$(jq -c \
+  --arg hash "$(sha256_file "$latest_attempt_path")" '
+    .transaction.last_recovery_attempt.operation = "producer-recovery" |
+    .transaction.last_recovery_attempt.sha256 = $hash
+  ' <<< "$valid_attempt_lifecycle")
+printf '%s\n' "$operation_tamper_lifecycle" \
+  | atomic_write_control_file "$(lifecycle_file_path)" 644
+if read_lifecycle >/dev/null 2>&1; then
+  fail_test "firmware root accepted a producer recovery attempt"
+fi
+[[ "$_lifecycle_read_status" == control-state-ambiguous ]] \
+  || fail_test "cross-domain recovery was not classified as ambiguous"
+
+latest_manifest_tampered=$(jq -c '.file_rollback_policy = "restore"' \
+  <<< "$latest_manifest_original")
+printf '%s\n' "$latest_manifest_tampered" \
+  | atomic_write_control_file "$latest_attempt_manifest" 600
+latest_seal_policy_tamper=$(jq -c \
+  --arg hash "$(sha256_file "$latest_attempt_manifest")" \
+  '.manifest_sha256 = $hash' <<< "$latest_attempt_original")
+printf '%s\n' "$latest_seal_policy_tamper" \
+  | atomic_write_control_file "$latest_attempt_path" 600
+policy_tamper_lifecycle=$(jq -c \
+  --arg hash "$(sha256_file "$latest_attempt_path")" \
+  '.transaction.last_recovery_attempt.sha256 = $hash' \
+  <<< "$valid_attempt_lifecycle")
+printf '%s\n' "$policy_tamper_lifecycle" \
+  | atomic_write_control_file "$(lifecycle_file_path)" 644
+if read_lifecycle >/dev/null 2>&1; then
+  fail_test "recovery chain accepted rollback-policy regression"
+fi
+[[ "$_lifecycle_read_status" == control-state-ambiguous ]] \
+  || fail_test "rollback-policy regression was not classified as ambiguous"
+printf '%s\n' "$latest_manifest_original" \
+  | atomic_write_control_file "$latest_attempt_manifest" 600
+printf '%s\n' "$latest_attempt_original" \
+  | atomic_write_control_file "$latest_attempt_path" 600
+printf '%s\n' "$valid_attempt_lifecycle" \
+  | atomic_write_control_file "$(lifecycle_file_path)" 644
+read_lifecycle || fail_test "attempt chain did not recover after domain tests"
 
 root_incident_original=$(jq -c . "$root_incident_path")
 if read_incident_seal 00000000-0000-0000-0000-000000000001 >/dev/null 2>&1; then

@@ -35,6 +35,8 @@ _deployed_mode=""
 _secure_boot_mode=""
 _setup_state=""
 _enrollment_backup_id=""
+_firmware_recovery_backup_id=""
+_validated_current_pk_hash=""
 
 enrollment_failpoint() {
   return 0
@@ -1005,26 +1007,62 @@ canonicalize_backup_database() {
 }
 
 validate_planned_trust_preserves_backup() {
-  local backup_id="$1" plan_dir="$2" name current planned count type
+  local backup_id="$1" plan_dir="$2" name current planned count type current_pk
+  local runtime current_dir rc=0
+  _validated_current_pk_hash=""
+  ensure_firmware_runtime_dir || return 1
+  runtime=$(firmware_runtime_dir_path) || return 1
+  current_dir=$(mktemp -d "${runtime}/current-plan.XXXXXX") || return 1
+  chmod 700 "$current_dir" || {
+    rm -rf "$current_dir"
+    return 1
+  }
+  validate_private_control_directory "$current_dir" || {
+    rm -rf "$current_dir"
+    return 1
+  }
   for name in PK KEK db; do
-    current="${plan_dir}/current-${name}.entries"
+    current="${current_dir}/${name}.entries"
     planned="${plan_dir}/${name}.entries"
-    canonicalize_backup_database "$backup_id" "$name" "$current" || return 1
-    validate_private_control_file "$planned" || return 1
-    canonical_entries_have_duplicates "$planned" && return 1
+    if ! canonicalize_backup_database "$backup_id" "$name" "$current" \
+      || ! validate_private_control_file "$current" \
+      || ! validate_private_control_file "$planned" \
+      || canonical_entries_have_duplicates "$planned"; then
+      rc=1
+      break
+    fi
   done
-  count=$(wc -l < "${plan_dir}/current-PK.entries") || return 1
-  [[ $count -eq 1 ]] || return 1
-  type=$(cut -f1 "${plan_dir}/current-PK.entries") || return 1
-  [[ "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || return 1
-  count=$(wc -l < "${plan_dir}/PK.entries") || return 1
-  [[ $count -eq 1 ]] || return 1
-  type=$(cut -f1 "${plan_dir}/PK.entries") || return 1
-  [[ "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || return 1
-  canonical_entries_are_subset "${plan_dir}/current-KEK.entries" \
-    "${plan_dir}/KEK.entries" || return 1
-  canonical_entries_are_subset "${plan_dir}/current-db.entries" \
-    "${plan_dir}/db.entries"
+  if (( rc == 0 )); then
+    count=$(wc -l < "${current_dir}/PK.entries") || rc=1
+    [[ $rc -eq 0 && $count -eq 1 ]] || rc=1
+  fi
+  if (( rc == 0 )); then
+    type=$(cut -f1 "${current_dir}/PK.entries") || rc=1
+    [[ $rc -eq 0 && "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || rc=1
+  fi
+  if (( rc == 0 )); then
+    current_pk=$(cut -f5 "${current_dir}/PK.entries") || rc=1
+    [[ $rc -eq 0 && "$current_pk" =~ ^[0-9a-f]{64}$ ]] || rc=1
+  fi
+  if (( rc == 0 )); then
+    count=$(wc -l < "${plan_dir}/PK.entries") || rc=1
+    [[ $rc -eq 0 && $count -eq 1 ]] || rc=1
+  fi
+  if (( rc == 0 )); then
+    type=$(cut -f1 "${plan_dir}/PK.entries") || rc=1
+    [[ $rc -eq 0 && "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || rc=1
+  fi
+  if (( rc == 0 )) && ! canonical_entries_are_subset \
+    "${current_dir}/KEK.entries" "${plan_dir}/KEK.entries"; then
+    rc=1
+  fi
+  if (( rc == 0 )) && ! canonical_entries_are_subset \
+    "${current_dir}/db.entries" "${plan_dir}/db.entries"; then
+    rc=1
+  fi
+  rm -rf "$current_dir" || return 1
+  (( rc == 0 )) || return 1
+  _validated_current_pk_hash="$current_pk"
 }
 
 build_enrollment_plan() {
@@ -1222,11 +1260,12 @@ validate_enrollment_plan() {
       && "$(wc -l < "${plan_dir}/${name}.entries")" == \
         "$(jq -r '.entry_count' <<< "$entry")" ]] || return 1
   done
+  validate_planned_trust_preserves_backup "$backup_id" "$plan_dir" || return 1
   if jq -e '.confirmation != null' "$manifest" >/dev/null; then
     hash=$(jq -c 'del(.confirmation)' "$manifest" | sha256sum) || return 1
     read -r hash _ <<< "$hash"
     [[ "$hash" == "$(jq -r '.confirmation.plan_sha256' "$manifest")" ]] || return 1
-    current_pk=$(cut -f5 "${plan_dir}/current-PK.entries") || return 1
+    current_pk="$_validated_current_pk_hash"
     planned_pk=$(cut -f5 "${plan_dir}/PK.entries") || return 1
     [[ "$current_pk" == "$(jq -r '.confirmation.current_pk_sha256' "$manifest")" \
       && "$planned_pk" == "$(jq -r '.confirmation.planned_pk_sha256' "$manifest")" ]] \
@@ -1249,7 +1288,7 @@ record_enrollment_plan_confirmation() {
   timestamp=$(utc_timestamp) || return 1
   hash=$(jq -c 'del(.confirmation)' "$manifest" | sha256sum) || return 1
   read -r hash _ <<< "$hash"
-  current_pk=$(cut -f5 "${plan_dir}/current-PK.entries") || return 1
+  current_pk="$_validated_current_pk_hash"
   planned_pk=$(cut -f5 "${plan_dir}/PK.entries") || return 1
   [[ "$current_pk" =~ ^[0-9a-f]{64}$ && "$planned_pk" =~ ^[0-9a-f]{64}$ ]] \
     || return 1
@@ -1677,6 +1716,121 @@ validate_enrollment_transaction_binding() {
       "$(jq -r '.variables.dbx.raw_sha256 // ""' "$backup_manifest")" ]]
 }
 
+firmware_ledger_expected_frontier() {
+  local document="$1"
+  jq -r '
+    reduce .firmware_writes[] as $write (
+      "F0";
+      if $write.readback_status == "verified" then
+        if . == "F0" then "F1" elif . == "F1" then "F2"
+        elif . == "F2" then "F3" else "invalid" end
+      elif $write.readback_status == "unchanged" then .
+      elif $write.readback_status == "pending" then
+        if ($write.hierarchy == "db" and . == "F0") then "pending-F0-F1"
+        elif ($write.hierarchy == "KEK" and . == "F1") then "pending-F1-F2"
+        elif ($write.hierarchy == "PK" and . == "F2") then "pending-F2-F3"
+        else "invalid" end
+      else "invalid" end
+    )
+  ' <<< "$document"
+}
+
+firmware_ledger_matches_frontier() {
+  local document="$1" frontier="$2" expected
+  expected=$(firmware_ledger_expected_frontier "$document") || return 1
+  case "$expected" in
+    F0|F1|F2|F3) [[ "$frontier" == "$expected" ]] ;;
+    pending-F0-F1) [[ "$frontier" == F0 || "$frontier" == F1 ]] ;;
+    pending-F1-F2) [[ "$frontier" == F1 || "$frontier" == F2 ]] ;;
+    pending-F2-F3) [[ "$frontier" == F2 || "$frontier" == F3 ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_firmware_recovery_authority() {
+  local prior_path prior_lifecycle activation_id activation_manifest backup_id
+  local root_binding previous_binding frontier rollback_policy
+  [[ "$_recovery_target_state" == active \
+    && "$_recovery_producer_reference" == null ]] || return 1
+  jq -e '
+    .kind == "root" and .operation == "enroll-secure-boot" and
+    .target_state == "active" and .prior_state == "active" and
+    .domain_records.producer == null
+  ' <<< "$_recovery_root_manifest_json" >/dev/null || return 1
+
+  prior_path=$(jq -r '.backups[0].path' <<< "$_recovery_root_manifest_json") || return 1
+  prior_lifecycle=$(read_control_document "$prior_path") || return 1
+  validate_lifecycle_json "$prior_lifecycle" || return 1
+  validate_lifecycle_document_references "$prior_lifecycle" || return 1
+  jq -e '
+    .state == "active" and .transaction == null and
+    .last_transaction.operation == "activate-secure-boot-plan"
+  ' <<< "$prior_lifecycle" >/dev/null || return 1
+  activation_id=$(jq -r '.last_transaction.id' <<< "$prior_lifecycle") || return 1
+  read_transaction_manifest "$activation_id" || return 1
+  activation_manifest="$_manifest_json"
+  jq -e '
+    .kind == "root" and .operation == "activate-secure-boot-plan" and
+    .target_state == "active" and .status == "completed" and
+    .firmware_backup.status == "complete" and .enrollment_plan != null and
+    .firmware_writes == []
+  ' <<< "$activation_manifest" >/dev/null || return 1
+  backup_id=$(jq -r '.firmware_backup.id' <<< "$activation_manifest") || return 1
+  validate_firmware_backup "$backup_id" || return 1
+  validate_enrollment_plan "$backup_id" true || return 1
+
+  root_binding=$(jq -c '{firmware_backup, enrollment_plan}' \
+    <<< "$_recovery_root_manifest_json") || return 1
+  previous_binding=$(jq -c '{firmware_backup, enrollment_plan}' \
+    <<< "$_recovery_previous_manifest_json") || return 1
+  jq -en --argjson authority "$activation_manifest" --argjson root "$root_binding" \
+    --argjson previous "$previous_binding" '
+      def binding_is_authorized($binding):
+        ($binding.firmware_backup == null and $binding.enrollment_plan == null) or
+        ($binding.firmware_backup == $authority.firmware_backup and
+          $binding.enrollment_plan == $authority.enrollment_plan);
+      binding_is_authorized($root) and binding_is_authorized($previous)
+    ' >/dev/null || return 1
+  if [[ $(jq -r '.firmware_backup == null' \
+    <<< "$_recovery_previous_manifest_json") == true ]]; then
+    [[ $(jq -r '.firmware_writes == []' \
+      <<< "$_recovery_previous_manifest_json") == true ]] || return 1
+  fi
+
+  frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
+  if [[ "$frontier" != F0 && "$frontier" != F1 && "$frontier" != F2 \
+    && "$frontier" != F3 ]]; then
+    fail "observed firmware trust state is outside the recoverable frontier"
+    return 1
+  fi
+  if [[ $(jq -r '.firmware_writes[-1].readback_status // ""' \
+    <<< "$_recovery_previous_manifest_json") != pending ]]; then
+    if ! firmware_ledger_matches_frontier "$_recovery_previous_manifest_json" \
+      "$frontier"; then
+      fail "firmware write evidence contradicts the observed trust frontier"
+      return 1
+    fi
+  fi
+  rollback_policy=$(jq -r '.file_rollback_policy' \
+    <<< "$_recovery_previous_manifest_json") || return 1
+  if [[ "$rollback_policy" == restore ]]; then
+    [[ "$frontier" == F0 \
+      && $(jq -r '.firmware_writes == []' \
+        <<< "$_recovery_previous_manifest_json") == true ]] || return 1
+  else
+    [[ "$rollback_policy" == preserve ]] || return 1
+  fi
+  _firmware_recovery_backup_id="$backup_id"
+}
+
+load_firmware_recovery_context() {
+  firmware_recovery_is_available || return 1
+  load_recovery_context || return $?
+  [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
+    firmware-recovery ]] || return 1
+  validate_firmware_recovery_authority
+}
+
 record_firmware_write_start() {
   local hierarchy="$1" document timestamp next attempt_count
   [[ "$hierarchy" == db || "$hierarchy" == KEK || "$hierarchy" == PK ]] || return 1
@@ -1750,8 +1904,11 @@ record_firmware_write_result() {
 }
 
 revalidate_firmware_write_boundary() {
-  local backup_id="$1" hierarchy="$2" frontier expected
-  firmware_enrollment_is_available || return 1
+  local backup_id="$1" hierarchy="$2" capability="${3:-firmware_enrollment_is_available}"
+  local frontier expected
+  [[ "$capability" == firmware_enrollment_is_available \
+    || "$capability" == firmware_recovery_is_available ]] || return 1
+  "$capability" || return 1
   validate_enrollment_transaction_binding "$backup_id" || return 1
   revalidate_enrollment_plan_export "$backup_id" || return 1
   case "$hierarchy" in
@@ -1783,23 +1940,26 @@ enrollment_preflight() {
 }
 
 apply_enrollment_hierarchy() {
-  local hierarchy="$1"
+  local hierarchy="$1" capability="${2:-firmware_enrollment_is_available}"
   [[ "$hierarchy" == db || "$hierarchy" == KEK || "$hierarchy" == PK ]] || return 1
-  firmware_enrollment_is_available || return 1
+  [[ "$capability" == firmware_enrollment_is_available \
+    || "$capability" == firmware_recovery_is_available ]] || return 1
+  "$capability" || return 1
   run_sbctl_enrollment enroll-keys -m -f --partial "$hierarchy"
 }
 
 run_enrollment_write_phase() {
-  local backup_id="$1" hierarchy="$2" command_rc=0 frontier readback_status
+  local backup_id="$1" hierarchy="$2" capability="${3:-firmware_enrollment_is_available}"
+  local command_rc=0 frontier readback_status
   transaction_phase_start "enroll-${hierarchy,,}" || return 1
-  revalidate_firmware_write_boundary "$backup_id" "$hierarchy" || return 1
+  revalidate_firmware_write_boundary "$backup_id" "$hierarchy" "$capability" || return 1
   if [[ "$hierarchy" == db ]]; then
     preserve_transaction_files_on_failure || return 1
   fi
   record_firmware_write_start "$hierarchy" || return 1
   enrollment_failpoint "before-${hierarchy,,}-write" || return 1
-  firmware_enrollment_is_available || return 1
-  apply_enrollment_hierarchy "$hierarchy" || command_rc=$?
+  "$capability" || return 1
+  apply_enrollment_hierarchy "$hierarchy" "$capability" || command_rc=$?
   enrollment_failpoint "after-${hierarchy,,}-command" || return 1
   record_firmware_write_command_result "$hierarchy" "$command_rc" || return 1
   enrollment_failpoint "after-${hierarchy,,}-command-result" || return 1
@@ -1810,7 +1970,11 @@ run_enrollment_write_phase() {
     *) readback_status=failed ;;
   esac
   record_firmware_write_result "$hierarchy" "$readback_status" || return 1
-  [[ $command_rc -eq 0 && "$readback_status" == verified ]] || return 1
+  if [[ "$capability" == firmware_enrollment_is_available ]]; then
+    [[ $command_rc -eq 0 && "$readback_status" == verified ]] || return 1
+  else
+    [[ "$readback_status" == verified ]] || return 1
+  fi
   transaction_phase_complete "enroll-${hierarchy,,}"
 }
 
@@ -1920,6 +2084,111 @@ enroll_planned_trust_set() {
   verify_all_efi_artifacts "$_repair_config_checksum" || return 1
   persist_firmware_enrollment_proof "$backup_id" || return 1
   transaction_phase_complete "prove-enrolled-trust"
+}
+
+reconcile_pending_firmware_write() {
+  local backup_id="$1" hierarchy frontier readback_status
+  read_transaction_manifest "$_transaction_id" || return 1
+  [[ $(jq -r '.firmware_writes[-1].readback_status // ""' \
+    <<< "$_manifest_json") == pending ]] || return 0
+  hierarchy=$(jq -r '.firmware_writes[-1].hierarchy' <<< "$_manifest_json") || return 1
+  frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
+  case "${hierarchy}:${frontier}" in
+    db:F0|KEK:F1|PK:F2) readback_status=unchanged ;;
+    db:F1|KEK:F2|PK:F3) readback_status=verified ;;
+    db:F2|db:F3|KEK:F0|KEK:F3|PK:F0|PK:F1) readback_status=failed ;;
+    *) return 1 ;;
+  esac
+  record_firmware_write_result "$hierarchy" "$readback_status" || return 1
+  [[ "$readback_status" != failed ]]
+}
+
+firmware_recovery_transaction() {
+  local backup_id="$1" frontier
+  firmware_recovery_is_available || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  if [[ $(jq -r '.firmware_backup == null' <<< "$_manifest_json") == true ]]; then
+    transaction_phase_start "bind-enrollment-plan" || return 1
+    bind_enrollment_transaction "$backup_id" || return 1
+    transaction_phase_complete "bind-enrollment-plan" || return 1
+  else
+    validate_enrollment_transaction_binding "$backup_id" || return 1
+  fi
+
+  transaction_phase_start "reconcile-firmware-write" || return 1
+  reconcile_pending_firmware_write "$backup_id" || return 1
+  frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  firmware_ledger_matches_frontier "$_manifest_json" "$frontier" || return 1
+  transaction_phase_complete "reconcile-firmware-write" || return 1
+
+  firmware_recovery_is_available || return 1
+  artifact_repair_preflight || return 1
+  repair_boot_artifacts || return 1
+  enrollment_failpoint "after-recovery-artifact-repair" || return 1
+  validate_enrollment_transaction_binding "$backup_id" || return 1
+  revalidate_enrollment_plan_export "$backup_id" || return 1
+
+  while true; do
+    frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
+    read_transaction_manifest "$_transaction_id" || return 1
+    firmware_ledger_matches_frontier "$_manifest_json" "$frontier" || return 1
+    case "$frontier" in
+      F0) run_enrollment_write_phase "$backup_id" db firmware_recovery_is_available \
+        || return 1 ;;
+      F1) run_enrollment_write_phase "$backup_id" KEK firmware_recovery_is_available \
+        || return 1 ;;
+      F2) run_enrollment_write_phase "$backup_id" PK firmware_recovery_is_available \
+        || return 1 ;;
+      F3) break ;;
+      *) return 1 ;;
+    esac
+  done
+
+  transaction_phase_start "prove-enrolled-trust" || return 1
+  firmware_recovery_is_available || return 1
+  validate_enrollment_transaction_binding "$backup_id" || return 1
+  [[ $(classify_firmware_enrollment_frontier "$backup_id") == F3 ]] || return 1
+  verify_all_efi_artifacts "$_repair_config_checksum" || return 1
+  persist_firmware_enrollment_proof "$backup_id" || return 1
+  transaction_phase_complete "prove-enrolled-trust"
+}
+
+run_firmware_recovery_locked() {
+  local backup_id callback_rc=0 commit_rc=0 begin_rc=0
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  load_firmware_recovery_context || return $?
+  backup_id="$_firmware_recovery_backup_id"
+  arm_transaction_traps
+  begin_lifecycle_recovery_attempt firmware-recovery || begin_rc=$?
+  if [[ $begin_rc -ne 0 ]]; then
+    if [[ "$_transaction_active" == true ]]; then
+      if read_lifecycle && [[ "$_lifecycle_state" == transition \
+        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
+        rollback_and_mark_recovery "$begin_rc" \
+          "firmware recovery attempt initialization failed" failed || true
+      else
+        detach_transaction_context
+      fi
+    fi
+    restore_transaction_traps
+    return "$begin_rc"
+  fi
+  firmware_recovery_transaction "$backup_id" || callback_rc=$?
+  if [[ $callback_rc -eq 0 ]]; then
+    commit_lifecycle_recovery_attempt || commit_rc=$?
+    if [[ $commit_rc -ne 0 ]]; then
+      rollback_and_mark_recovery "$commit_rc" \
+        "stable firmware recovery publication failed" failed || true
+      callback_rc=$commit_rc
+    fi
+  else
+    rollback_and_mark_recovery "$callback_rc" "firmware trust recovery failed" failed \
+      || true
+  fi
+  restore_transaction_traps
+  return "$callback_rc"
 }
 
 run_dormant_enrollment() {

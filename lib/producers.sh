@@ -872,7 +872,7 @@ run_registered_producer_recovery_locked() {
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   load_producer_recovery_context || return $?
   arm_transaction_traps
-  begin_lifecycle_recovery_attempt || begin_rc=$?
+  begin_lifecycle_recovery_attempt producer-recovery || begin_rc=$?
   if [[ $begin_rc -ne 0 ]]; then
     if [[ "$_transaction_active" == true ]]; then
       if read_lifecycle && [[ "$_lifecycle_state" == transition \

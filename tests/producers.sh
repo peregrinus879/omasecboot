@@ -556,9 +556,8 @@ producer_recovery_is_available \
 if lifecycle_repair_is_available; then
   fail_test "consolidated production gate unexpectedly opened"
 fi
-if firmware_recovery_is_available; then
-  fail_test "producer recovery opened firmware capability"
-fi
+firmware_recovery_is_available \
+  || fail_test "firmware recovery component capability was not available"
 
 for producer_failpoint in after-producer-manifest-write after-producer-transition-write; do
   reset_case

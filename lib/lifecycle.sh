@@ -33,6 +33,7 @@ _recovery_root_service_json=""
 _recovery_root_reference=""
 _recovery_root_manifest_json=""
 _recovery_previous_reference="null"
+_recovery_previous_manifest_json=""
 _recovery_attempt_count=0
 _recovery_target_state=""
 _recovery_producer_reference="null"
@@ -61,7 +62,7 @@ producer_recovery_is_available() {
 }
 
 firmware_recovery_is_available() {
-  return 1
+  return 0
 }
 
 lifecycle_file_path() {
@@ -375,6 +376,7 @@ validate_firmware_proof_json() {
   writes=$(jq -cS '.firmware_writes' <<< "$manifest") || return 1
   writes_hash=$(sha256_text "$writes") || return 1
   jq -e --arg id "$transaction_id" --argjson schema "$FIRMWARE_PROOF_SCHEMA_VERSION" \
+    --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" \
     --arg writes_hash "$writes_hash" --argjson manifest "$manifest" '
     def uuid:
       type == "string" and
@@ -388,7 +390,7 @@ validate_firmware_proof_json() {
       (explode | all(.[]; . >= 32 and . != 127));
     def artifact_reference:
       type == "object" and keys == ["path","schema_version","sha256"] and
-      (.path | absolute_path) and .schema_version == 2 and (.sha256 | digest);
+      (.path | absolute_path) and .schema_version == $final_schema and (.sha256 | digest);
     type == "object" and
     keys == ["artifact_proof","enrollment_plan","firmware_backup","firmware_writes_sha256",
       "modes","proved_at","schema_version","transaction_id","variables","writer_version"] and
@@ -1323,8 +1325,10 @@ validate_transaction_domain_records() {
     validate_final_proof_reference "$transaction_id" "$proof" || return 1
   fi
   if [[ "$firmware" != null ]]; then
-    [[ "$kind" == root && "$operation" == enroll-secure-boot && "$producer" == null \
-      && "$proof" != null ]] || return 1
+    [[ "$producer" == null && "$proof" != null \
+      && ( ( "$kind" == root && "$operation" == enroll-secure-boot ) \
+        || ( "$kind" == recovery-attempt && "$operation" == firmware-recovery ) ) ]] \
+      || return 1
     validate_firmware_proof_reference "$transaction_id" "$firmware" "$document" || return 1
   elif [[ "$operation" == enroll-secure-boot && "$status" == completed ]]; then
     return 1
@@ -1358,13 +1362,103 @@ validate_transaction_domain_records() {
     ' <<< "$document" >/dev/null || return 1
   fi
   if [[ "$kind" == recovery-attempt ]]; then
-    [[ "$producer" == null && "$firmware" == null ]] || return 1
+    [[ "$producer" == null ]] || return 1
+    case "$operation" in
+      producer-recovery)
+        [[ "$firmware" == null \
+          && $(jq -r '.firmware_backup == null and .enrollment_plan == null and
+            .firmware_writes == [] and .file_rollback_policy == "preserve"' \
+            <<< "$document") == true ]] || return 1
+        ;;
+      firmware-recovery)
+        jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
+          .target_state == "active" and .prior_state == "recovery-required" and
+          .domain_records.bootnext == null and
+          .domain_records.managed_settings == null and
+          .domain_records.tracking_ownership == null and
+          .domain_records.unconfigure == null and .domain_records.windows == null and
+          (if .firmware_backup == null then
+            .enrollment_plan == null and .firmware_writes == []
+           else
+            .firmware_backup.status == "complete" and .enrollment_plan != null
+           end) and
+          (if .status == "completed" then
+            .firmware_backup != null and .enrollment_plan != null and
+            .file_rollback_policy == "preserve" and
+            .domain_records.final_proof != null and
+            .domain_records.final_proof.schema_version == $final_schema and
+            .domain_records.firmware != null and
+            (.completed_phases | index("prove-enrolled-trust") != null) and
+            (all(.firmware_writes[];
+              .readback_status == "verified" or .readback_status == "unchanged")) and
+            [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
+              ["db","KEK","PK"]
+           else true end)
+        ' <<< "$document" >/dev/null || return 1
+        ;;
+      *) return 1 ;;
+    esac
     if [[ "$proof" != null ]]; then
       [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
         || return 1
     fi
     [[ "$status" != completed || "$proof" != null ]] || return 1
   fi
+}
+
+recovery_operation_for_root_manifest() {
+  local document="$1" operation producer
+  jq -e '.kind == "root" and .target_state == "active" and .prior_state == "active"' \
+    <<< "$document" >/dev/null || return 1
+  operation=$(jq -r '.operation' <<< "$document") || return 1
+  producer=$(jq -c '.domain_records.producer' <<< "$document") || return 1
+  if [[ "$producer" != null ]]; then
+    printf 'producer-recovery\n'
+  elif [[ "$operation" == enroll-secure-boot ]]; then
+    printf 'firmware-recovery\n'
+  else
+    return 1
+  fi
+}
+
+validate_recovery_manifest_evolution() {
+  local previous="$1" current="$2" operation="$3"
+  jq -en --arg operation "$operation" --argjson previous "$previous" \
+    --argjson current "$current" '
+    def pending_resolution($old; $new):
+      $new.hierarchy == $old.hierarchy and
+      $new.started_at == $old.started_at and
+      $new.command_exit_code == $old.command_exit_code and
+      ($new.readback_status == "unchanged" or $new.readback_status == "verified" or
+        $new.readback_status == "failed") and $new.completed_at != null;
+    def writes_forward($old; $new):
+      ($new | length) >= ($old | length) and
+      if ($old | length) == 0 then true
+      elif $old[-1].readback_status == "pending" then
+        $new[0:(($old | length) - 1)] == $old[0:-1] and
+        ($new[($old | length) - 1] == $old[-1] or
+          pending_resolution($old[-1]; $new[($old | length) - 1]))
+      else $new[0:($old | length)] == $old end;
+    $current.kind == "recovery-attempt" and $current.operation == $operation and
+    $current.target_state == "active" and $current.prior_state == "recovery-required" and
+    if $operation == "producer-recovery" then
+      $previous.firmware_backup == null and $previous.enrollment_plan == null and
+      $previous.firmware_writes == [] and $current.firmware_backup == null and
+      $current.enrollment_plan == null and $current.firmware_writes == [] and
+      $previous.file_rollback_policy == "preserve" and
+      $current.file_rollback_policy == "preserve"
+    elif $operation == "firmware-recovery" then
+      (($current.firmware_backup == $previous.firmware_backup and
+          $current.enrollment_plan == $previous.enrollment_plan) or
+        ($previous.firmware_backup == null and $previous.enrollment_plan == null and
+          $previous.firmware_writes == [] and $current.firmware_backup != null and
+          $current.enrollment_plan != null)) and
+      writes_forward($previous.firmware_writes; $current.firmware_writes) and
+      ($previous.file_rollback_policy == $current.file_rollback_policy or
+        ($previous.file_rollback_policy == "restore" and
+          $current.file_rollback_policy == "preserve"))
+    else false end
+  ' >/dev/null
 }
 
 read_transaction_manifest() {
@@ -1610,7 +1704,8 @@ validate_incident_reference() {
 validate_incident_chain() {
   local root_reference="$1" latest_reference="$2" attempt_count="$3"
   local resolved="${4:-false}" expected current seal root_document root_service
-  local current_id current_status attempt_service root_producer
+  local current_id current_status attempt_service root_manifest recovery_operation
+  local current_manifest newer_manifest=""
   local -A seen=()
   _recovery_root_service_json=""
   [[ "$attempt_count" =~ ^[0-9]+$ ]] || return 1
@@ -1620,6 +1715,7 @@ validate_incident_chain() {
   fi
   validate_incident_reference "$root_reference" || return 1
   root_document="$_incident_json"
+  root_manifest="$_manifest_json"
   [[ $(jq -r '.kind' <<< "$root_document") == root ]] || return 1
   root_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
     ($unit): {
@@ -1629,7 +1725,6 @@ validate_incident_chain() {
     }
   }' <<< "$_manifest_json") || return 1
   _recovery_root_service_json="$root_service"
-  root_producer=$(jq -c '.domain_records.producer' <<< "$_manifest_json") || return 1
   current="$latest_reference"
   if (( attempt_count == 0 )); then
     [[ "$current" == null && "$resolved" == false ]] || return 1
@@ -1637,6 +1732,7 @@ validate_incident_chain() {
     return 0
   fi
   [[ "$current" != null ]] || return 1
+  recovery_operation=$(recovery_operation_for_root_manifest "$root_manifest") || return 1
 
   expected=$attempt_count
   while (( expected > 0 )); do
@@ -1650,10 +1746,14 @@ validate_incident_chain() {
       && $(jq -r '.ordinal' <<< "$seal") == "$expected" \
       && "$(jq -Sc '.root_incident' <<< "$seal")" == \
         "$(jq -Sc . <<< "$root_reference")" ]] || return 1
-    if [[ "$root_producer" != null ]]; then
-      [[ $(jq -r '.operation' <<< "$seal") == producer-recovery ]] || return 1
-    fi
+    [[ $(jq -r '.operation' <<< "$seal") == "$recovery_operation" ]] || return 1
     current_status=$(jq -r '.incident_status' <<< "$seal") || return 1
+    current_manifest="$_manifest_json"
+    if [[ -n "$newer_manifest" ]]; then
+      validate_recovery_manifest_evolution "$current_manifest" "$newer_manifest" \
+        "$recovery_operation" || return 1
+    fi
+    newer_manifest="$current_manifest"
     attempt_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
       ($unit): {
         load_state: .service_state[$unit].load_state,
@@ -1671,6 +1771,8 @@ validate_incident_chain() {
     expected=$((expected - 1))
   done
   [[ "$current" == null ]] || return 1
+  validate_recovery_manifest_evolution "$root_manifest" "$newer_manifest" \
+    "$recovery_operation" || return 1
   _incident_json="$root_document"
 }
 
@@ -1678,6 +1780,7 @@ validate_lifecycle_document_references() {
   local document="$1" state transaction_id manifest operation kind root latest count
   local reference saved_manifest saved_manifest_id saved_manifest_hash rc
   local attempt_service attempt_number final_attempt_id final_attempt_manifest final_proof
+  local recovery_operation
   state=$(jq -r '.state' <<< "$document") || return 1
 
   while IFS= read -r reference; do
@@ -1720,6 +1823,12 @@ validate_lifecycle_document_references() {
       attempt_number=$(jq -r '.transaction.attempt_number' <<< "$document") || return 1
       validate_incident_chain "$root" "$latest" "$((attempt_number - 1))" false \
         || return $?
+      validate_incident_reference "$root" || return 1
+      recovery_operation=$(recovery_operation_for_root_manifest "$_manifest_json") || return 1
+      [[ $(jq -r '.operation' <<< "$saved_manifest") == "$recovery_operation" ]] \
+        || return 1
+      validate_recovery_manifest_evolution "$_manifest_json" "$saved_manifest" \
+        "$recovery_operation" || return 1
       attempt_service=$(jq -c --arg unit "$TRANSACTION_SERVICE_UNIT" '{
         ($unit): {
           load_state: .service_state[$unit].load_state,
@@ -2024,13 +2133,14 @@ reset_recovery_context() {
   _recovery_root_reference=""
   _recovery_root_manifest_json=""
   _recovery_previous_reference="null"
+  _recovery_previous_manifest_json=""
   _recovery_attempt_count=0
   _recovery_target_state=""
   _recovery_producer_reference="null"
 }
 
-load_producer_recovery_context() {
-  local root_id producer_path producer_document
+load_recovery_context() {
+  local root_id previous_id
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   reset_recovery_context
@@ -2056,8 +2166,23 @@ load_producer_recovery_context() {
     || return 1
   _recovery_producer_reference=$(jq -c '.domain_records.producer' \
     <<< "$_recovery_root_manifest_json") || return 1
+  if (( _recovery_attempt_count == 0 )); then
+    _recovery_previous_manifest_json="$_recovery_root_manifest_json"
+  else
+    previous_id=$(jq -r '.id' <<< "$_recovery_previous_reference") || return 1
+    read_transaction_manifest "$previous_id" || return 1
+    _recovery_previous_manifest_json="$_manifest_json"
+  fi
+}
+
+load_producer_recovery_context() {
+  local root_id producer_path producer_document recovery_operation
+  load_recovery_context || return $?
+  root_id=$(jq -r '.id' <<< "$_recovery_root_reference") || return 1
+  recovery_operation=$(recovery_operation_for_root_manifest \
+    "$_recovery_root_manifest_json") || return 1
   [[ "$_recovery_target_state" == active && "$_recovery_producer_reference" != null ]] \
-    || return 1
+    && [[ "$recovery_operation" == producer-recovery ]] || return 1
   jq -e '
     .kind == "root" and .prior_state == "active" and
     .file_rollback_policy == "preserve" and
@@ -2380,6 +2505,7 @@ write_recovery_attempt_transition_lifecycle() {
     --arg version "$OMASECBOOT_VERSION" \
     --argjson generation "$generation" \
     --arg id "$transaction_id" \
+    --arg operation "$_transaction_operation" \
     --arg manifest "$manifest" \
     --arg timestamp "$timestamp" \
     --argjson attempt "$attempt_number" \
@@ -2392,7 +2518,7 @@ write_recovery_attempt_transition_lifecycle() {
         attempt_number: $attempt,
         id: $id,
         kind: "recovery-attempt",
-        operation: "producer-recovery",
+        operation: $operation,
         manifest: $manifest,
         previous_attempt: $previous,
         root_incident: $root
@@ -2405,12 +2531,20 @@ write_recovery_attempt_transition_lifecycle() {
 }
 
 begin_lifecycle_recovery_attempt() {
-  local transaction_id transaction_dir manifest prior_backup prior_hash backups
+  local operation="$1" transaction_id transaction_dir manifest prior_backup prior_hash backups
   local token token_hash boot_id owner_pid owner_start timestamp captured service_state
-  local attempt_number manifest_document
+  local attempt_number manifest_document file_rollback_policy firmware_backup enrollment_plan
+  local firmware_writes recovery_operation
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
-  load_producer_recovery_context || return $?
+  case "$operation" in
+    producer-recovery) load_producer_recovery_context || return $? ;;
+    firmware-recovery) load_recovery_context || return $? ;;
+    *) return 1 ;;
+  esac
+  recovery_operation=$(recovery_operation_for_root_manifest \
+    "$_recovery_root_manifest_json") || return 1
+  [[ "$operation" == "$recovery_operation" ]] || return 1
   attempt_number=$((_recovery_attempt_count + 1))
   (( attempt_number <= MAX_RECOVERY_ATTEMPT_SEALS )) || return 2
 
@@ -2431,6 +2565,21 @@ begin_lifecycle_recovery_attempt() {
     }
   }' <<< "$_recovery_root_manifest_json") || return 1
   service_state=$(prepare_transaction_service_state "$captured") || return 1
+  if [[ "$operation" == producer-recovery ]]; then
+    file_rollback_policy=preserve
+    firmware_backup=null
+    enrollment_plan=null
+    firmware_writes='[]'
+  else
+    file_rollback_policy=$(jq -r '.file_rollback_policy' \
+      <<< "$_recovery_previous_manifest_json") || return 1
+    firmware_backup=$(jq -c '.firmware_backup' \
+      <<< "$_recovery_previous_manifest_json") || return 1
+    enrollment_plan=$(jq -c '.enrollment_plan' \
+      <<< "$_recovery_previous_manifest_json") || return 1
+    firmware_writes=$(jq -c '.firmware_writes' \
+      <<< "$_recovery_previous_manifest_json") || return 1
+  fi
   transaction_dir="$(transactions_dir_path)/${transaction_id}"
   manifest="${transaction_dir}/manifest.json"
   install -d -m 700 "$transaction_dir" || return 1
@@ -2456,16 +2605,21 @@ begin_lifecycle_recovery_attempt() {
     --argjson owner_pid "$owner_pid" \
     --arg owner_start "$owner_start" \
     --argjson owner_uid "$(control_owner_uid)" \
+    --arg operation "$operation" \
     --argjson attempt "$attempt_number" \
     --argjson root "$_recovery_root_reference" \
     --argjson previous "$_recovery_previous_reference" \
     --argjson backups "$backups" \
-    --argjson service_state "$service_state" '{
+    --argjson service_state "$service_state" \
+    --arg file_rollback_policy "$file_rollback_policy" \
+    --argjson firmware_backup "$firmware_backup" \
+    --argjson enrollment_plan "$enrollment_plan" \
+    --argjson firmware_writes "$firmware_writes" '{
       schema_version: $schema,
       writer_version: $version,
       id: $id,
       kind: "recovery-attempt",
-      operation: "producer-recovery",
+      operation: $operation,
       target_state: "active",
       status: "transition",
       created_at: $timestamp,
@@ -2483,10 +2637,10 @@ begin_lifecycle_recovery_attempt() {
       completed_phases: [],
       backups: $backups,
       service_state: $service_state,
-      file_rollback_policy: "preserve",
-      firmware_backup: null,
-      enrollment_plan: null,
-      firmware_writes: [],
+      file_rollback_policy: $file_rollback_policy,
+      firmware_backup: $firmware_backup,
+      enrollment_plan: $enrollment_plan,
+      firmware_writes: $firmware_writes,
       domain_records: {
         bootnext: null,
         final_proof: null,
@@ -2510,7 +2664,7 @@ begin_lifecycle_recovery_attempt() {
   _transaction_active=true
   _transaction_id="$transaction_id"
   _transaction_token="$token"
-  _transaction_operation="producer-recovery"
+  _transaction_operation="$operation"
   _transaction_target_state=active
   OMASECBOOT_TRANSACTION_ID="$transaction_id"
   OMASECBOOT_TRANSACTION_TOKEN="$token"
@@ -2856,7 +3010,12 @@ apply_transaction_service_policy() {
 
 apply_recovery_transaction_service_policy() {
   local producer_path producer_document root_id
-  [[ "$_recovery_producer_reference" != null ]] || return 1
+  if [[ "$_transaction_operation" == firmware-recovery ]]; then
+    quiesce_transaction_service
+    return
+  fi
+  [[ "$_transaction_operation" == producer-recovery \
+    && "$_recovery_producer_reference" != null ]] || return 1
   root_id=$(jq -r '.id' <<< "$_recovery_root_reference") || return 1
   validate_producer_record_reference "$root_id" "$_recovery_producer_reference" || return 1
   producer_path=$(jq -r '.path' <<< "$_recovery_producer_reference") || return 1
@@ -3532,6 +3691,10 @@ finalize_recovery_attempt_incident() {
       [[ $(jq -r '.current_phase == null' <<< "$_manifest_json") == true \
         && $(jq -r '.domain_records.final_proof != null' <<< "$_manifest_json") == true ]] \
         || return 1
+      if [[ $(jq -r '.operation' <<< "$_manifest_json") == firmware-recovery ]]; then
+        [[ $(jq -r '.domain_records.firmware != null' <<< "$_manifest_json") == true ]] \
+          || return 1
+      fi
       transaction_service_outcomes_are_complete || return 1
       manifest_document=$(jq -c --arg timestamp "$timestamp" '
         .status = "completed" | .completed_at = $timestamp | .failure = null
