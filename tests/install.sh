@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-install.XXXXXX")
 PREFIX=/opt/omasecboot-test
+MAKE_INSTALL_PATHS=(
+  "BINDIR=${PREFIX}/bin"
+  "LIBDIR=${PREFIX}/lib/omasecboot"
+  "HOOKDIR=/etc/pacman.d/hooks"
+  "LIMINEPREHOOKDIR=/etc/boot/hooks/pre.d"
+  "LIMINEPOSTHOOKDIR=/etc/boot/hooks/post.d"
+  "STATEDIR=/var/lib/omasecboot"
+)
 
 cleanup() {
   rm -rf "$STAGE_DIR"
@@ -22,13 +30,15 @@ windows_state_file="${canonical_state}/windows-enabled"
 cleanup_hook_name=zz-omasecboot-cleanup.hook
 sbctl_hook_name=zz-sbctl.hook
 repair_hook_name=zzz-omasecboot.hook
+removal_guard="${STAGE_DIR}/etc/pacman.d/hooks/00-omasecboot-removal-guard.hook"
 guard_hook="${STAGE_DIR}/etc/pacman.d/hooks/00-omasecboot-transition-guard.hook"
 cleanup_hook="${STAGE_DIR}/etc/pacman.d/hooks/${cleanup_hook_name}"
 repair_hook="${STAGE_DIR}/etc/pacman.d/hooks/${repair_hook_name}"
 limine_pre_hook="${STAGE_DIR}/etc/boot/hooks/pre.d/000-omasecboot-guard"
 limine_post_hook="${STAGE_DIR}/etc/boot/hooks/post.d/zzz-omasecboot-sign"
 
-make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
+make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
+  "${MAKE_INSTALL_PATHS[@]}" >/dev/null
 
 [[ -x "$canonical" ]] || fail "canonical command was not installed"
 for version_arg in version --version -v; do
@@ -36,6 +46,8 @@ for version_arg in version --version -v; do
     || fail "version form returned the wrong contract: ${version_arg}"
 done
 
+grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet guard removal" "$removal_guard" \
+  || fail "removal guard does not target the canonical command"
 grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet guard transaction" "$guard_hook" \
   || fail "transition guard does not target the canonical command"
 grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet cleanup" "$cleanup_hook" \
@@ -54,9 +66,11 @@ fi
 
 [[ -x "${STAGE_DIR}${PREFIX}/bin/omasecboot" ]] \
   || fail "rendered hook target is not executable in the stage"
-grep -Fq "$STAGE_DIR" "$guard_hook" "$cleanup_hook" "$repair_hook" \
+grep -Fq "$STAGE_DIR" "$removal_guard" "$guard_hook" "$cleanup_hook" "$repair_hook" \
   "$limine_pre_hook" "$limine_post_hook" \
   && fail "DESTDIR leaked into a runtime hook target"
+[[ $(stat -Lc '%a' "$removal_guard") == 644 ]] \
+  || fail "removal guard has the wrong installed mode"
 
 [[ -d "$canonical_lib" ]] || fail "canonical library path is missing"
 [[ -d "$canonical_state" ]] || fail "canonical state path is missing"
@@ -68,6 +82,8 @@ grep -Fq "$STAGE_DIR" "$guard_hook" "$cleanup_hook" "$repair_hook" \
   || fail "cleanup hook no longer sorts before sbctl"
 [[ "$sbctl_hook_name" < "$repair_hook_name" ]] \
   || fail "repair hook no longer sorts after sbctl"
+printf '%s\n' "${removal_guard##*/}" "${guard_hook##*/}" | LC_ALL=C sort -C \
+  || fail "removal guard no longer sorts before the producer guard"
 
 jq -n '{
   schema_version: 1,
@@ -84,7 +100,8 @@ mkdir -p "${canonical_state}/transactions/fixture" "${canonical_state}/firmware-
 printf '{}\n' > "${canonical_state}/lifecycle.json"
 printf '{}\n' > "${canonical_state}/transactions/fixture/manifest.json"
 printf 'raw\n' > "${canonical_state}/firmware-backup/dbx.bin"
-make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
+make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
+  "${MAKE_INSTALL_PATHS[@]}" >/dev/null
 [[ -f "$windows_state_file" && ! -L "$windows_state_file" \
   && "$(sha256sum "$windows_state_file")" == "$windows_state_checksum" \
   && "$(stat -Lc '%d:%i:%u:%g:%a:%h' "$windows_state_file")" == \
@@ -92,15 +109,15 @@ make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
   || fail "idempotent install replaced canonical Windows opt-in state"
 
 if make -s -C "$ROOT_DIR" uninstall DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
-  > "${STAGE_DIR}/uninstall.out" 2>&1; then
+  "${MAKE_INSTALL_PATHS[@]}" > "${STAGE_DIR}/uninstall.out" 2>&1; then
   fail "uninstall succeeded without lifecycle removal verification"
 fi
-grep -Fq 'Refusing uninstall until lifecycle removal verification is available' \
+grep -Fq 'Refusing uninstall until concurrency-safe package removal is available' \
   "${STAGE_DIR}/uninstall.out" || fail "blocked uninstall omitted its safety reason"
 
 [[ -x "$canonical" && -d "$canonical_lib" ]] \
   || fail "blocked uninstall removed the command or recovery library"
-[[ -f "$guard_hook" && -f "$cleanup_hook" && -f "$repair_hook" \
+[[ -f "$removal_guard" && -f "$guard_hook" && -f "$cleanup_hook" && -f "$repair_hook" \
   && -x "$limine_pre_hook" && -x "$limine_post_hook" ]] \
   || fail "blocked uninstall removed a lifecycle guard or repair hook"
 [[ -f "$windows_state_file" && ! -L "$windows_state_file" \

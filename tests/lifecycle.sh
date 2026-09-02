@@ -32,6 +32,10 @@ snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$TEST_DIR"
 }
 
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$TEST_DIR"
+}
+
 control_owner_uid() {
   id -u
 }
@@ -1316,6 +1320,16 @@ if transaction_phase_start "one-shot" >/dev/null 2>&1; then
 fi
 [[ $(sha256_file "$writer_manifest") == "$completed_phase_hash" ]] \
   || fail_test "rejected phase restart changed durable bytes"
+writer_limine_lock_mode=$_OMASECBOOT_LIMINE_LOCK_OWNED
+_OMASECBOOT_LIMINE_LOCK_OWNED=false
+if rollback_and_mark_recovery 19 "unlocked writer validation" failed; then
+  _OMASECBOOT_LIMINE_LOCK_OWNED=$writer_limine_lock_mode
+  release_boot_repair_lock
+  fail_test "rollback wrote state without the Limine lock"
+fi
+_OMASECBOOT_LIMINE_LOCK_OWNED=$writer_limine_lock_mode
+[[ $(sha256_file "$writer_manifest") == "$completed_phase_hash" ]] \
+  || fail_test "unlocked rollback changed durable bytes"
 rollback_and_mark_recovery 19 "writer validation complete" failed \
   || fail_test "writer-validation transaction did not seal"
 release_boot_repair_lock
@@ -1527,6 +1541,27 @@ if lifecycle_removal_is_allowed; then
 fi
 reset_state
 lifecycle_removal_is_allowed || fail_test "pristine state blocked removal"
+package_lock=$(pacman_database_lock_path)
+: > "$package_lock"
+chmod 644 "$package_lock"
+if adopt_lifecycle : "no" "no" "yes" "no" \
+  "absent" "absent" "absent" "absent" >/dev/null 2>&1; then
+  fail_test "active package transaction admitted lifecycle adoption"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "package-transaction rejection wrote lifecycle state"
+rm -f "$package_lock"
+create_package_lock_preflight() {
+  : > "$package_lock"
+  chmod 644 "$package_lock"
+}
+if adopt_lifecycle create_package_lock_preflight "no" "no" "yes" "no" \
+  "absent" "absent" "absent" "absent" >/dev/null 2>&1; then
+  fail_test "package transaction starting during adoption was not rechecked"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "late package-transaction rejection wrote lifecycle state"
+rm -f "$package_lock"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \

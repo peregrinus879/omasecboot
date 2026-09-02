@@ -29,6 +29,10 @@ if [[ ${1:-} == _hook_child ]]; then
     printf '%s/limine-snapper-restore.lock\n' "$TEST_DIR"
   }
 
+  pacman_database_lock_path() {
+    printf '%s/pacman-db.lck\n' "$TEST_DIR"
+  }
+
   control_owner_uid() {
     id -u
   }
@@ -43,6 +47,12 @@ if [[ ${1:-} == _hook_child ]]; then
 
   capture_service_state() {
     printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
+  }
+
+  systemctl() {
+    [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
+      || return 1
+    printf 'inactive\n'
   }
 
   lifecycle_repair_is_available() {
@@ -112,6 +122,10 @@ snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$TEST_DIR"
 }
 
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$TEST_DIR"
+}
+
 control_owner_uid() {
   id -u
 }
@@ -126,6 +140,12 @@ durable_sync() {
 
 capture_service_state() {
   printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
+}
+
+systemctl() {
+  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
+    || return 1
+  printf 'inactive\n'
 }
 
 run_child_without_fd() {

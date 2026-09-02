@@ -1,0 +1,38 @@
+# OmaSecBoot: preserve recovery dependencies while lifecycle state is managed.
+
+[Trigger]
+Type = Package
+Operation = Remove
+Target = omasecboot
+Target = bash
+Target = b3sum
+Target = coreutils
+Target = findutils
+Target = gawk
+Target = grep
+Target = inotify-tools
+Target = libnotify
+Target = pacman
+Target = systemd
+Target = tar
+Target = sbctl
+Target = jq
+Target = openssl
+Target = efibootmgr
+Target = util-linux
+Target = sbsigntools
+Target = limine
+Target = limine-mkinitcpio-hook
+Target = limine-snapper-sync
+Target = mkinitcpio
+Target = snapper
+Target = btrfs-progs
+Target = omarchy
+Target = omarchy-settings
+Target = xxhash
+
+[Action]
+Description = Secure Boot: validate lifecycle before dependency removal
+When = PreTransaction
+Exec = @BINDIR@/omasecboot --quiet guard removal
+AbortOnFail

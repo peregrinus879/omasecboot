@@ -41,6 +41,7 @@ qheader() { [[ "$QUIET" == true ]] || header "$@"; }
 
 _OMASECBOOT_LIMINE_LOCK_OWNED=false
 _OMASECBOOT_REPAIR_LOCK_OWNED=false
+_OMASECBOOT_REPAIR_LOCK_MODE=false
 
 state_dir_path() {
   printf '%s\n' "$STATE_DIR"
@@ -157,6 +158,19 @@ lock_inherited_limine_fd() {
   _OMASECBOOT_LIMINE_LOCK_OWNED=inherited
 }
 
+inherited_repair_fd_is_valid() {
+  local path parent_uid self_identity parent_identity
+  path="$(state_dir_path)/repair.lock"
+  validate_control_file "$path" || return 1
+  fd_matches_path 201 "$path" || return 1
+  parent_uid=$(process_effective_uid "$PPID") || return 1
+  [[ "$parent_uid" == "$(control_owner_uid)" && -e "/proc/${PPID}/fd/201" ]] \
+    || return 1
+  self_identity=$(control_file_identity /proc/self/fd/201) || return 1
+  parent_identity=$(control_file_identity "/proc/${PPID}/fd/201") || return 1
+  [[ "$self_identity" == "$parent_identity" ]]
+}
+
 with_repair_lock() {
   [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] && return 0
   command -v flock >/dev/null 2>&1 || {
@@ -165,7 +179,16 @@ with_repair_lock() {
   }
   ensure_state_layout || return 1
 
+  if inherited_repair_fd_is_valid \
+    && flock -n 201 \
+    && inherited_repair_fd_is_valid; then
+    _OMASECBOOT_REPAIR_LOCK_OWNED=true
+    _OMASECBOOT_REPAIR_LOCK_MODE=inherited
+    return 0
+  fi
+
   local lock_file
+  exec 201>&- || true
   lock_file="$(state_dir_path)/repair.lock"
   prepare_control_lock_file "$lock_file" 644 || {
     fail "Unsafe repair lock path: ${lock_file}"
@@ -186,6 +209,7 @@ with_repair_lock() {
     return 1
   }
   _OMASECBOOT_REPAIR_LOCK_OWNED=true
+  _OMASECBOOT_REPAIR_LOCK_MODE=local
 }
 
 with_limine_lock() {
@@ -245,10 +269,13 @@ with_delegated_limine_lock() {
 
 release_repair_lock() {
   if [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]]; then
-    flock -u 201 2>/dev/null || true
+    if [[ "$_OMASECBOOT_REPAIR_LOCK_MODE" == local ]]; then
+      flock -u 201 2>/dev/null || true
+    fi
     exec 201>&- || true
   fi
   _OMASECBOOT_REPAIR_LOCK_OWNED=false
+  _OMASECBOOT_REPAIR_LOCK_MODE=false
 }
 
 release_limine_lock() {

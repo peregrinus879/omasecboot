@@ -6,7 +6,7 @@ Labels: FACT is directly verified; JUDGMENT is the engineering decision applied 
 
 ## 1. Delivery Shape
 
-- JUDGMENT: Keep Secure Boot mechanics in OmaSecBoot, package a tagged release in omarchy-pkgs, and add thin setup, removal, menu, test, and manual integration to basecamp/omarchy.
+- JUDGMENT: Keep Secure Boot mechanics in OmaSecBoot, package a tagged release in omarchy-pkgs, and add thin setup, removal, menu, test, and manual integration to omacom/omarchy.
 - JUDGMENT: Deliver in this order: OmaSecBoot T-1 through T-9, the `v1.0.0` tag, omarchy-pkgs P-1, then Omarchy O-1 through O-3.
 - JUDGMENT: Install only `omasecboot` from the Omarchy Package Repository. Its package dependency supplies the audited `sbctl=0.18` line; removal drops only `omasecboot`.
 - JUDGMENT: Base Omarchy integration on `upstream/quattro` and keep tags, pushes, pull requests, and branch deletion maintainer-owned.
@@ -33,11 +33,11 @@ JUDGMENT: Lifecycle schema 2 uses exact-key validation for lifecycle state, tran
 
 JUDGMENT: Generic artifact references and transaction backups validate their current files and hashes. Firmware-backup and enrollment-plan fields retain historical transaction bindings because rollback can intentionally restore a different current plan file; firmware mutation boundaries validate those live artifacts directly before use.
 
-JUDGMENT: T-6.1 validates future attempt manifests and seals as a chain linked to the immutable root and immediately preceding attempt, with root-captured service identity preserved throughout. The reader accepts at most 32 attempts, and the read-only capacity check rejects another attempt before any recovery writer is called. Incident reads classify evidence as `absent`, `supported`, `unsupported-schema`, `attempt-limit`, `malformed`, or `control-state-ambiguous`. Attempt creation, recovery dispatch, and stable-state recovery capability remain unavailable until their later T-6 units.
+JUDGMENT: T-6.1 validates attempt manifests and seals as a chain linked to the immutable root and immediately preceding attempt, with root-captured service identity preserved throughout. The reader accepts at most 32 attempts, and the read-only capacity check rejects another attempt before any recovery writer is called. Incident reads classify evidence as `absent`, `supported`, `unsupported-schema`, `attempt-limit`, `malformed`, or `control-state-ambiguous`. T-6.2 permits attempt creation and fixed-registry dispatch only for validated producer incidents; consolidated stable-state recovery remains unavailable until every recovery domain is implemented.
 
 JUDGMENT: The retained recovery draft contributes root-first publication ordering and failure-injection points. Schema 2 replaces mutable-manifest sealing and prepared attempt records with separate terminal seal documents and exact references. Generic callback recovery runners and stable-state recovery activation are removed.
 
-JUDGMENT: Existing installations require an explicit adoption flow. It displays the existing managed settings and records either a user-confirmed original value or `unknown`; it never invents the pre-OmaSecBoot state. Automatic `unconfigure` refuses an unknown original value.
+JUDGMENT: Existing installations require an explicit adoption flow. It displays the existing managed settings and records either a user-confirmed original value or `unknown`; it never invents the pre-OmaSecBoot state. Automatic `unconfigure` refuses an unknown original value. The public adoption command remains gated until lifecycle repair is available so it cannot publish `active` before producer recovery and unconfiguration provide safe continuation paths.
 
 ## 3. Locking And Hook Protocol
 
@@ -47,18 +47,20 @@ FACT: `limine-snapper-restore` 1.31.0 invokes `limine-snapper-sync --restore --n
 
 JUDGMENT: Replace the environment-only hook bypass with a pre-hook and post-hook protocol:
 
-1. A root-owned transition token must match the durable manifest, current boot ID, owner process start time, and process ancestry before a nested hook treats a transition as its own.
+1. For a top-level OmaSecBoot transition, a root-owned token must match the durable manifest, current boot ID, owner process start time, and process ancestry before a nested hook treats the transition as its own.
 2. An inherited FD 200 must resolve to the same device and inode as the current lock pathname.
 3. The hook runs `flock` on inherited FD 200. This retains a valid parent lock and can acquire the parent's open descriptor when the parent ignored its own lock failure.
 4. A post-hook without a valid inherited descriptor acquires the shared lock itself before repair.
 5. An external hook-aware mutation exits fatally from the pre-hook during an OmaSecBoot transition.
 6. A nested post-hook owned by the transaction does not run repair; the top-level transaction performs the final repair and proof.
 
-JUDGMENT: Add ALPM PreTransaction hooks with `AbortOnFail` to block boot-mutating package transactions during `transition` or `recovery-required`, and to block removal unless state is verified `disabled` or pristine.
+JUDGMENT: Add ALPM PreTransaction hooks with `AbortOnFail` to block boot-mutating package transactions during `transition` or `recovery-required`, and to block removal unless state is verified `disabled` or pristine. The removal classifier runs under both boot locks. Generic lifecycle mutation checks the canonical pacman database lock after acquiring those locks and again immediately before transition publication, so removal authorization and lifecycle activation cannot cross after the PreTransaction hook returns.
 
 JUDGMENT: Enforcing the captured active or inactive state of `limine-snapper-sync.service` after transition publication and restoring that state before stable commit is an auxiliary quiescing step. Indeterminate pre-transaction service state aborts before publication. Quiescing is not the concurrency boundary because Snapper plugins and cleanup can launch independent syncs.
 
-JUDGMENT: Permit full snapshot restore only in stable state, serialize its post-repair, reject it during OmaSecBoot transitions, and document that upstream's mutation window itself is not serialized until upstream removes the `--no-mutex` path.
+JUDGMENT: Permit full snapshot restore only in stable state, bind the upstream runtime marker's device and inode into the producer record, serialize post-repair, and reject it during OmaSecBoot transitions. A stale restore transition may remove only the pathname still matching that recorded marker under both boot locks after exact wrapper and native-worker inspection proves the restore quiescent; reconstruction remains marker-blocked to close a new admission race. Same-boot reconciliation requires that marker identity, while cross-boot reconciliation accepts its absence because `/run` is ephemeral. An existing validated recovery incident may resume after marker removal when another exact process scan remains clear. Upstream's mutation window itself is not serialized until upstream removes the `--no-mutex` path.
+
+JUDGMENT: Independent hooks under an external package or Limine coordinator authorize producer suppression and completion through the immutable producer record, exact coordinator identity, process start time, boot ID, and current ancestry. A producer lease binds that coordinator, invocation class, pre-mutation artifact inventory, service policy, and fixed registry subtype before mutation. Nested reconstruction may inherit FD 201 only when the current pathname and parent descriptor identity agree; child release closes its inherited descriptor without unlocking the parent's open file description. Exit and signal handlers reacquire delegated locks before durable rollback or incident publication.
 
 ## 4. Limine And EFI Proof
 
@@ -77,6 +79,10 @@ JUDGMENT: Every proof operation performs this sequence:
 7. Print enrollment or Secure Boot enablement instructions only after the read-only proof passes.
 
 JUDGMENT: Preserve `ENABLE_VERIFICATION=no` and `ENABLE_ENROLL_LIMINE_CONFIG=yes`. Do not add Limine path hashes while Omarchy boots UKIs through `protocol: efi`.
+
+JUDGMENT: New artifact proofs use final-proof schema 2. It binds one immutable obligation object to the fresh discovered, signed, and tracked artifact set. Historical schema-1 proofs remain readable, but a completed producer transaction requires schema 2. `not-applicable` has no paths; `uki-inventory` contains every UKI required by the pinned producer; `snapshot-manifest` contains every hashed EFI filename referenced recursively by the pinned manifest schema. Paths are bounded, sorted, unique, and case-insensitively unique.
+
+JUDGMENT: The `limine-mkinitcpio-hook` producer is version-pinned and derives UKI names from package ownership of each `/usr/lib/modules/*/modules.builtin`, effective Limine config precedence, the selected UKI prefix, and fallback policy. Package obligations are identical before reconstruction, after reconstruction, and after final proof. Snapshot and restore obligations are derived from `${ESP_PATH}/${machine-id}/limine_history/snapshots.json` schema 1.3.0 after the upstream operation and again after final proof. Missing outputs, malformed manifests, unsupported producer versions, or an obligation race leave recovery required.
 
 ## 5. Firmware Backup And Enrollment
 
@@ -192,7 +198,7 @@ JUDGMENT: Borrowing another distribution's dual-signed shim is technically viabl
 4. **T-4 `feat: add the Windows encryption preflight`**: edition and management gate, Home decryption, Pro and higher suspension, advisory signer inspection, and no-NTFS tests.
 5. **T-5 `feat: make setup and enrollment state-aware`**: raw firmware backup, planned-set comparison, five setup states, dormant enrollment proof, producer quiescing, and failure injection; production mutation remains blocked.
 6. **T-6.1 `feat: seal lifecycle recovery incidents`**: schema-2 exact validators, create-once root seals, exact attempt-seal schemas, bounded read validation, publication-uncertainty evidence, and the exact read-only legacy-disabled removal classifier; attempt mutation and production recovery gates remain closed.
-7. **T-6.2 `feat: recover boot artifact producers`**: registry-selected producer recovery, ancestor-bound producer leases, failed-package handling, and serialized repair coverage for package, Limine, snapshot, and restore producers.
+7. **T-6.2 `feat: recover boot artifact producers`**: registry-selected producer recovery, ancestor-bound producer leases, failed-package handling, inherited repair-lock safety, immutable expected-EFI proof, and serialized repair coverage for package, Limine, snapshot, and restore producers.
 8. **T-6.3 `feat: recover firmware trust mutations`**: phase-aware continuation for firmware backup binding, preservation-policy publication, write-attempt records, direct readback, and the supported PK-only trust plan.
 9. **T-6.4 `feat: add dormant Windows BootNext mutation`**: direct target revalidation and BootNext write/readback behind a closed production gate.
 10. **T-6.5 `feat: recover Windows handoff mutations`**: boot-ID-bound Windows handoff recovery and the `consumed-unknown` outcome without claiming that Windows booted.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC1091,SC2034,SC2154 # Fixtures source the checkout and inspect lifecycle globals.
+# shellcheck disable=SC1091,SC2034,SC2154,SC2329 # Fixtures source and override checkout functions.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -37,6 +37,10 @@ limine_lock_path() {
 
 snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$CASE_DIR"
+}
+
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$CASE_DIR"
 }
 
 esp_path() {
@@ -86,6 +90,12 @@ durable_sync() {
 
 capture_service_state() {
   printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
+}
+
+systemctl() {
+  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
+    || return 1
+  printf 'inactive\n'
 }
 
 limine_enrollment_hooks_present() {
@@ -462,8 +472,12 @@ test_staged_limine_install() {
 }
 
 test_successful_repair() {
-  local checksum manifest last_enroll first_sign artifact
-  run_artifact_repair "artifact-success" || fail_test "artifact repair failed"
+  local checksum manifest last_enroll first_sign artifact proof legacy obligations
+  local original transaction_id legacy_reference root_manifest recovery_manifest
+  obligations=$(jq -cn --arg path "$SNAPSHOT" \
+    '{kind: "snapshot-manifest", paths: [$path]}')
+  run_artifact_repair "artifact-success" "$obligations" \
+    || fail_test "artifact repair failed"
   checksum=$(current_limine_config_checksum) || fail_test "config checksum failed"
   verify_limine_embedded_checksum "$PRIMARY" "$checksum" \
     || fail_test "primary Limine checksum was not proved"
@@ -512,12 +526,59 @@ test_successful_repair() {
     "prove-artifacts"
   ] and .status == "completed"' "$manifest" >/dev/null \
     || fail_test "repair phases were not committed in the required order"
+  proof=$(jq -r '.domain_records.final_proof.path' "$manifest")
+  jq -e --arg path "$SNAPSHOT" --argjson schema "$FINAL_PROOF_SCHEMA_VERSION" '
+    .schema_version == $schema and
+    .obligations == {kind: "snapshot-manifest", paths: [$path]} and
+    any(.artifacts[]; .path == $path)
+  ' "$proof" >/dev/null || fail_test "final proof omitted producer obligations"
+  legacy=$(jq ".schema_version = ${LEGACY_FINAL_PROOF_SCHEMA_VERSION} | del(.obligations)" \
+    "$proof")
+  transaction_id=$(jq -r '.transaction_id' "$proof")
+  validate_final_proof_json "$transaction_id" "$legacy" \
+    || fail_test "historical schema-1 final proof became unreadable"
+  original=$(< "$proof")
+  printf '%s\n' "$legacy" | atomic_write_control_file "$proof" 600
+  legacy_reference=$(transaction_artifact_reference "$proof" \
+    "$LEGACY_FINAL_PROOF_SCHEMA_VERSION")
+  root_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
+    kind: "root",
+    status: "completed",
+    domain_records: {producer: null, final_proof: $proof}
+  }')
+  validate_transaction_domain_records "$transaction_id" "$root_manifest" \
+    || fail_test "historical schema-1 root final proof became unreadable"
+  recovery_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
+    kind: "recovery-attempt",
+    status: "transition",
+    domain_records: {producer: null, final_proof: $proof}
+  }')
+  if validate_transaction_domain_records "$transaction_id" "$recovery_manifest"; then
+    fail_test "producer recovery accepted a schema-1 final proof"
+  fi
+  printf '%s\n' "$original" | atomic_write_control_file "$proof" 600
+  if validate_efi_obligations_json \
+    '{"kind":"uki-inventory","paths":["/boot/EFI/Linux/A.efi","/boot/EFI/Linux/a.efi"]}'; then
+    fail_test "case-insensitive duplicate EFI obligations were accepted"
+  fi
 
   : > "$ARTIFACT_LOG"
   run_artifact_repair "artifact-current-config" \
     || fail_test "current config enrollment repair failed"
   [[ $(grep -Fc 'enroll:' "$ARTIFACT_LOG") -eq 2 ]] \
     || fail_test "current config was not enrolled into both Limine binaries"
+}
+
+test_missing_obligation_rollback() {
+  local missing obligations
+  missing="$(esp_path)/EFI/Linux/expected-kernel.efi"
+  obligations=$(jq -cn --arg path "$missing" \
+    '{kind: "uki-inventory", paths: [$path]}')
+  if run_artifact_repair "artifact-missing-obligation" "$obligations" \
+    >/dev/null 2>&1; then
+    fail_test "missing expected UKI reported a complete final proof"
+  fi
+  assert_recovery_rollback "prove-artifacts"
 }
 
 test_empty_database_repair() {
@@ -587,6 +648,25 @@ test_final_proof_failure_rollback() {
   assert_recovery_rollback "prove-artifacts"
 }
 
+test_final_proof_drift_rollback() {
+  local mixed_hash persist_definition
+  mixed_hash=$(sha256_file "$MIXED")
+  persist_definition=$(declare -f persist_final_artifact_proof)
+  persist_definition=${persist_definition/persist_final_artifact_proof/real_persist_final_artifact_proof}
+  eval "$persist_definition"
+  persist_final_artifact_proof() {
+    printf 'DRIFT\n' >> "$MIXED"
+    real_persist_final_artifact_proof "$@"
+  }
+
+  if run_artifact_repair "artifact-proof-drift" >/dev/null 2>&1; then
+    fail_test "artifact drift during final-proof persistence reported success"
+  fi
+  assert_hash "$mixed_hash" "$MIXED" \
+    "artifact drift during final-proof persistence was not rolled back"
+  assert_recovery_rollback "prove-artifacts"
+}
+
 test_signing_failure_rollback() {
   local primary_hash fallback_hash mixed_hash defaults_hash db_hash
   primary_hash=$(sha256_file "$PRIMARY")
@@ -653,5 +733,7 @@ run_case signing-failure test_signing_failure_rollback
 run_case sign-sync-failure test_sign_sync_failure_rollback
 run_case final-mapping-failure test_final_mapping_failure_rollback
 run_case proof-failure test_final_proof_failure_rollback
+run_case proof-drift test_final_proof_drift_rollback
+run_case missing-obligation test_missing_obligation_rollback
 
 printf 'artifact tests passed\n'

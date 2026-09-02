@@ -54,6 +54,10 @@ snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$CASE_DIR"
 }
 
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$CASE_DIR"
+}
+
 windows_limine_config_path() {
   printf '%s\n' "$CONFIG_FILE"
 }
@@ -77,6 +81,12 @@ durable_sync() {
 
 capture_service_state() {
   printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
+}
+
+systemctl() {
+  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
+    || return 1
+  printf 'inactive\n'
 }
 
 resolve_windows_target() {

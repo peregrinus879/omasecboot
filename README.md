@@ -2,14 +2,14 @@
 
 **[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, and dormant enrollment failure proof. Public mutation and automatic repair remain blocked until interrupted recovery is available.
+The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, a tested artifact-proof transaction, bounded producer recovery with expected-EFI obligations, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, and dormant enrollment failure proof. Public boot, firmware, signing, cleanup, and Windows mutations plus active producer automation remain blocked until consolidated interrupted recovery is available.
 
 > [!CAUTION]
-> **Development status, 2026-08-30:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, producer quiescing, transition guards, explicit adoption, hermetic Limine/EFI proof, validated Windows target identity, the read-only Windows encryption preflight, raw firmware backup, strict trust planning, and dormant db/KEK/PK enrollment proof are implemented. Interrupted recovery, unconfiguration, safe removal, public firmware instructions, and producer activation remain release gates. Public mutation commands fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, adopt a production setup, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-09-02:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, producer quiescing, transition guards, explicit adoption, bounded package/Limine/snapshot/restore recovery, immutable expected-EFI proof, validated Windows target identity, the read-only Windows encryption preflight, raw firmware backup, strict trust planning, and dormant db/KEK/PK enrollment proof are implemented. Recovery for the remaining mutation domains, unconfiguration, safe removal, public firmware instructions, and producer activation remain release gates. Public adoption, boot, firmware, signing, cleanup, and Windows mutation commands fail closed. Do not use this branch to enter Setup Mode, enroll or reset keys, configure Windows, or remove an existing Secure Boot setup. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
 
 ## Why This Tool
 
-[Omarchy Quattro](https://github.com/basecamp/omarchy/releases/tag/v4.0.0) supports installation into free space alongside Windows, and its [dual-boot guide](https://omarchy.org/manual/dual-boot-install/) documents `limine-scan` for adding Windows to Limine. The current scanner creates a generic `protocol: efi` chainload entry. OmaSecBoot builds on that native dual-boot foundation with a firmware BootNext path designed for Secure Boot and BitLocker-sensitive systems.
+[Omarchy Quattro](https://github.com/omacom/omarchy/releases/tag/v4.0.0) supports installation into free space alongside Windows, and its [dual-boot guide](https://omarchy.org/manual/dual-boot-install/) documents `limine-scan` for adding Windows to Limine. The current scanner creates a generic `protocol: efi` chainload entry. OmaSecBoot builds on that native dual-boot foundation with a firmware BootNext path designed for Secure Boot and BitLocker-sensitive systems.
 
 Omarchy uses Limine with Unified Kernel Images (UKIs) and Snapper snapshots. That stack still has Secure Boot lifecycle gaps:
 
@@ -50,7 +50,7 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 
 ## Development Status
 
-The package-first release uses five durable lifecycle states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before mutation, commits stable state last, validates owned nested hooks, restores captured watcher state, and rejects unsafe Limine and package producers. Hermetic transactions prove both Limine checksums, local signatures, sbctl tracking, raw firmware backup, exact trust planning, five setup states, dormant enrollment ordering and readback, and validated Windows firmware target identity. The read-only Windows preflight detects firmware, BitLocker-format, and ESP-loader signals without mounting Windows volumes. Public repair and safe package removal remain blocked until recovery and unconfiguration land.
+The package-first release uses five durable lifecycle states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. The current lifecycle writes root-owned transaction manifests and file backups before mutation, commits stable state last, validates owned nested hooks, restores captured watcher state, and rejects unsafe Limine and package producers. Bounded recovery validates ancestor-owned producer records, reconstructs only fixed package, Limine, snapshot, or restore cases, and requires schema-2 final proof with immutable expected-EFI obligations. Hermetic transactions also prove both Limine checksums, local signatures, sbctl tracking, raw firmware backup, exact trust planning, five setup states, dormant enrollment ordering and readback, and validated Windows firmware target identity. The read-only Windows preflight detects firmware, BitLocker-format, and ESP-loader signals without mounting Windows volumes. Public consolidated repair and safe package removal remain blocked until the remaining recovery and unconfiguration units land.
 
 The remaining firmware gate is interrupted recovery for every db, KEK, and post-PK boundary. T-5 deliberately keeps its production predicate false, preserves the proved boot-artifact set after the first possible firmware write, and exposes no Setup Mode or Secure Boot instruction. Software unconfiguration and firmware factory restoration remain separate unfinished paths. Until those gates and their tests land, this README is a development reference rather than an operational setup guide.
 
@@ -117,7 +117,7 @@ The audited workflow is not publicly available. Its backup, planning, classifica
 
 ## Commands
 
-The current implementation exposes `version`, read-only status, Windows discovery and encryption preflight, and explicit adoption. Boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until interrupted recovery and their remaining audited units land. Do not adopt a production configuration yet: `active` deliberately blocks boot-mutating package, Limine, and snapshot producers.
+The current implementation exposes `version`, read-only status, and Windows discovery and encryption preflight. Adoption, boot, firmware, signing, cleanup, Windows handoff, and uninstall mutations fail closed until interrupted recovery and their remaining audited units land.
 
 ### `setup`
 
@@ -129,7 +129,7 @@ Blocked until interrupted recovery is available. The dormant path binds raw PK/K
 
 ### `adopt`
 
-Records an existing untracked configuration as an `active` lifecycle after displaying managed Limine settings and collecting confirmed original values or `unknown`. It revalidates the observations under the shared boot lock and lifecycle lock before committing. Adoption does not claim firmware enrollment or activate producer repair.
+Blocked until interrupted recovery is available. The implemented dormant transaction records an existing untracked configuration as an `active` lifecycle after displaying managed Limine settings and collecting confirmed original values or `unknown`. It revalidates the observations under the shared boot lock and lifecycle lock before committing. Adoption does not claim firmware enrollment or activate producer repair.
 
 ### `windows`
 
@@ -194,18 +194,19 @@ Tracking reads use `sbctl list-files` first, then fall back to the on-disk sbctl
 
 ### Lifecycle Guards
 
-Package and Limine hooks currently enforce the lifecycle boundary rather than running the dormant artifact transaction:
+Package and Limine hooks implement producer admission and completion behind the closed consolidated-recovery gate:
 
 | Trigger | Scope | Purpose |
 |---|---|---|
-| `00-omasecboot-transition-guard.hook` (ours) | Boot paths and producer packages | Aborts before boot mutation during unsafe lifecycle states or while interrupted recovery is unavailable |
-| `zz-omasecboot-cleanup.hook` (ours) | Boot paths and producer packages | Records a bypassed external mutation before sbctl runs |
+| `00-omasecboot-removal-guard.hook` (ours) | Recovery dependencies | Blocks removal unless lifecycle state is verified `disabled` or pristine |
+| `00-omasecboot-transition-guard.hook` (ours) | Boot paths and producer packages | Consumes `NeedsTargets`, validates lifecycle state, and publishes an immutable package-producer lease when automation is available |
+| `zz-omasecboot-cleanup.hook` (ours) | Boot paths and producer packages | Validates the owned package lease and records the pre-sbctl checkpoint |
 | `zz-sbctl.hook` (sbctl built-in) | Boot/EFI path changes | Re-signs files already in sbctl's database |
-| `zzz-omasecboot.hook` (ours) | Boot paths and producer packages | Records a bypassed external mutation after sbctl runs |
-| `000-omasecboot-guard` (ours) | Limine pre-hook | Validates lifecycle ownership, ancestry, and inherited FD 200 before mutation |
-| `zzz-omasecboot-sign` (ours) | Limine post-hook | Suppresses only owned nested work or records `recovery-required` after a bypassed mutation |
+| `zzz-omasecboot.hook` (ours) | Boot paths and producer packages | Completes fixed-registry reconstruction, artifact repair, and final producer proof |
+| `000-omasecboot-guard` (ours) | Limine pre-hook | Resolves the fixed producer class and validates lifecycle ownership, ancestry, FD 200, and the durable lease |
+| `zzz-omasecboot-sign` (ours) | Limine post-hook | Suppresses matching nested work or completes the matching Limine, snapshot, or restore producer lease |
 
-Pacman hook ordering remains `zz-omasecboot-cleanup` < `zz-sbctl` < `zzz-omasecboot`. All repo hooks cover matching boot paths and kernel, Limine, snapshot, and mkinitcpio producer packages without dependency-based skip conditions. The Limine pre/post protocol validates the root-owned manifest, token, boot ID, owner process start time, ancestry, parent descriptor, and current lock-path inode. Full snapshot restore uses its root-owned runtime marker plus the lifecycle lock to close the admission race; its upstream mutation window remains lockless and is blocked from `active` until complete post-repair lands.
+Pacman hook ordering remains `zz-omasecboot-cleanup` < `zz-sbctl` < `zzz-omasecboot`. The three producer hooks use the same exact boot-path and producer-package registry without dependency-based skip conditions; only the transition guard consumes `NeedsTargets`, while both post hooks rely on the durable target set. The separate removal guard evaluates verified `disabled` or pristine state under both boot locks, while generic lifecycle mutation checks pacman's database lock before publication so concurrent activation cannot cross an allowed removal. Active lifecycle rejects direct changes to the two pinned producer packages. Nested hooks under an OmaSecBoot top-level transition validate the root-owned token, boot ID, owner process start time, ancestry, manifest, parent descriptor, and current lock-path inode. Independent producer hooks validate the external coordinator's immutable producer record, exact identity, boot ID, process start time, and current ancestry. Full snapshot restore binds its root-owned runtime marker inode into the producer record to close the admission race; stale recovery removes the marker pathname only while it still matches that inode under both locks and no exact restore wrapper or native worker remains. The upstream mutation window remains lockless and is admitted only through the specialized stable-state path.
 
 **Why this matters:** The current Omarchy stack works with three separate pieces:
 
@@ -235,20 +236,26 @@ The tracked `omarchy/omarchy-menu.jsonc` fragment is a pre-contract reference fo
 
 Do not install or invoke the current menu fragment. The audited action first revalidates the recorded target, requests BootNext in a visible terminal, then returns to user context for `omarchy system reboot`. If reboot is cancelled after BootNext is armed, firmware retains a one-attempt request; that does not guarantee the target will boot successfully.
 
-### Current Guard Flow
+### Current Producer Flow
 
 ```
 Boot-mutating package transaction
-  -> 00-omasecboot-transition-guard checks lifecycle before mutation
+  -> dependency removal guard requires verified disabled or pristine state
+  -> 00-omasecboot-transition-guard consumes targets and checks lifecycle
   -> unmanaged or disabled: automation remains inactive
-  -> active: transaction aborts while interrupted recovery is unavailable
+  -> active: transaction currently aborts while consolidated recovery is unavailable
   -> transition or recovery-required: transaction aborts
+  -> after activation: publish ancestor-bound lease and immutable target/baseline records
+  -> cleanup checkpoint runs before sbctl
+  -> final hook reconstructs expected outputs, repairs artifacts, and proves obligations
 
 Hook-aware Limine or snapshot mutation
-  -> 000-omasecboot-guard validates stable state or owned transition plus FD 200
-  -> active: mutation aborts while interrupted recovery is unavailable
+  -> 000-omasecboot-guard resolves a fixed producer and validates FD 200 plus FD 201 policy
+  -> active: mutation currently aborts while consolidated recovery is unavailable
+  -> after activation: publish an ancestor-bound Limine, snapshot, or restore lease
   -> owned nested transition: mutation may proceed and nested post-repair is suppressed
   -> external transition or recovery-required: mutation aborts fatally
+  -> matching post-hook completes fixed-registry repair and schema-2 proof
 ```
 
 ### Code Structure
@@ -257,6 +264,7 @@ Single dispatcher (`bin/omasecboot`) sources modular libraries:
 
 - `common.sh` -- output helpers, quiet mode, backup/restore
 - `lifecycle.sh` -- versioned lifecycle state, manifests, locks, hook ownership, and transaction guards
+- `producers.sh` -- ancestor-bound producer leases, fixed recovery registry, and expected-EFI obligations
 - `checks.sh` -- prerequisite validation (root, deps, EFI mount)
 - `discover.sh` -- EFI file discovery and sbctl database queries
 - `sign.sh` -- key creation, signing, Limine config management
@@ -297,7 +305,7 @@ Do not re-enable Secure Boot from the current branch's status result alone. The 
 
 ### Full rollback
 
-The current branch has no verified full rollback. `make uninstall` fails closed until disabled-or-pristine removal verification lands. Do not remove installed files manually or treat package removal as unconfiguration.
+The current branch has no verified full rollback. `make uninstall` fails closed until lifecycle unconfiguration, concurrency-safe package removal, and package removal tests land. Do not remove installed files manually or treat package removal as unconfiguration.
 
 The audited release provides a separate `unconfigure` transaction. It requires Secure Boot off, restores only settings whose current values still match OmaSecBoot's recorded values, removes the managed Windows block, resets config enrollment, rebuilds and verifies stock boot state, and commits `disabled` last. Package removal is allowed only from verified `disabled` or pristine state; it removes package trigger hooks and only the `omasecboot` package while preserving lifecycle, transaction, recovery, firmware-backup, Windows-opt-in, lock-path, and local-key state.
 

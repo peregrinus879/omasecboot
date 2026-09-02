@@ -9,7 +9,7 @@ LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
 # Fallback for development (running from repo checkout)
 [[ -d "$LIB_DIR" ]] || LIB_DIR="${SCRIPT_DIR}/../lib"
 
-for lib in common lifecycle checks discover sign enroll windows status; do
+for lib in common lifecycle checks discover sign producers enroll windows status; do
   # shellcheck source=/dev/null
   source "${LIB_DIR}/${lib}.sh"
 done
@@ -79,6 +79,12 @@ cmd_adopt() {
   local observed_verification observed_enrollment
   local observed_before_save observed_after_save
 
+  header "Adopt Existing Configuration"
+  lifecycle_repair_is_available || {
+    fail "Adoption is blocked until interrupted recovery is available"
+    return 1
+  }
+
   while (( $# > 0 )); do
     case "$1" in
       --verification-original)
@@ -107,7 +113,6 @@ cmd_adopt() {
     esac
   done
 
-  header "Adopt Existing Configuration"
   check_root "adopt"
   command -v jq >/dev/null 2>&1 || die "jq not installed. Run: ${BOLD}sudo pacman -S jq${NC}"
   command -v flock >/dev/null 2>&1 \
@@ -250,45 +255,36 @@ cmd_version() {
   printf 'omasecboot %s\n' "$OMASECBOOT_VERSION"
 }
 
-external_mutation_requires_repair() {
-  transaction_phase_start "repair-required" || return 1
-  return 1
-}
-
-record_external_mutation() {
-  local operation="$1"
-  run_lifecycle_transaction "$operation" "active" "active" \
-    external_mutation_requires_repair
-}
-
-record_limine_external_mutation() {
-  record_external_mutation "limine-post-repair"
-}
-
-cmd_hook_external_mutation() {
-  local operation="$1" rc=0
-  lifecycle_automation_is_active || rc=$?
-  case "$rc" in
-    0) record_external_mutation "$operation" ;;
-    1) return 0 ;;
-    *) return "$rc" ;;
-  esac
-}
-
 cmd_hook() {
   [[ $# -eq 1 ]] || return 2
   case "$1" in
-    pre) lifecycle_hook_pre ;;
-    post) lifecycle_hook_post record_limine_external_mutation ;;
-    package-cleanup) cmd_hook_external_mutation "package-cleanup-repair" ;;
-    package-sign) cmd_hook_external_mutation "package-sign-repair" ;;
+    pre) producer_limine_hook_pre ;;
+    post) producer_limine_hook_post ;;
+    package-cleanup) producer_package_checkpoint ;;
+    package-sign) producer_package_post ;;
     *) return 2 ;;
   esac
 }
 
 cmd_guard() {
-  [[ $# -eq 1 && $1 == transaction ]] || return 2
-  guard_boot_transaction
+  local rc=0
+  [[ $# -eq 1 ]] || return 2
+  case "$1" in
+    transaction)
+      producer_package_pre
+      ;;
+    removal)
+      require_control_root || return 1
+      with_boot_repair_lock || return 1
+      if ! lifecycle_removal_is_allowed; then
+        fail "Package removal requires verified disabled or pristine lifecycle state"
+        rc=1
+      fi
+      release_boot_repair_lock
+      return "$rc"
+      ;;
+    *) return 2 ;;
+  esac
 }
 
 cmd_help() {
@@ -300,7 +296,7 @@ cmd_help() {
   echo
   echo -e "  ${BOLD}Commands${NC}"
   echo "    setup       Blocked until interrupted recovery is available"
-  echo "    adopt       Explicitly adopt an existing OmaSecBoot configuration"
+  echo "    adopt       Blocked until interrupted recovery is available"
   echo "    enroll      Blocked until interrupted recovery is available"
   echo "    windows     Probe Windows or run its read-only encryption preflight"
   echo "    status      Show Secure Boot status and file verification"

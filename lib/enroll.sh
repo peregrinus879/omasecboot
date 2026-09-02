@@ -1347,7 +1347,7 @@ state_aware_setup_is_available() {
 }
 
 firmware_enrollment_is_available() {
-  lifecycle_repair_is_available
+  firmware_recovery_is_available
 }
 
 secure_boot_windows_gate() {

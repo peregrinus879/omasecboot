@@ -27,6 +27,10 @@ source "${ROOT_DIR}/lib/sign.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/enroll.sh"
 
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$TEST_DIR"
+}
+
 test_sbctl_boundary_implementation() (
   local boundary_config="${TEST_DIR}/boundary.conf"
   local boundary_package="sbctl 0.18-2"

@@ -226,6 +226,13 @@ show_status() {
 
   # Hook status
   echo
+  if [[ -f /etc/pacman.d/hooks/00-omasecboot-removal-guard.hook ]]; then
+    pass "00-omasecboot-removal-guard.hook present (dependency removal guard)"
+  else
+    warn "00-omasecboot-removal-guard.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
+  fi
+
   if [[ -f /etc/pacman.d/hooks/00-omasecboot-transition-guard.hook ]]; then
     pass "00-omasecboot-transition-guard.hook present (transaction guard)"
   else

@@ -1,5 +1,5 @@
-# OmaSecBoot: checkpoint lifecycle state before sbctl's package repair.
-# Runs before zz-sbctl.hook so an external package mutation is durable first.
+# OmaSecBoot: checkpoint the owned package producer before sbctl repair.
+# Runs before zz-sbctl.hook so the durable producer lease records this boundary first.
 # Mirrors zz-sbctl.hook's Path triggers to fire in the same transactions.
 
 [Trigger]
@@ -15,6 +15,26 @@ Target = usr/lib/**/efi/*.efi*
 Target = usr/share/**/*.efi*
 
 [Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/initcpio/*
+Target = usr/lib/firmware/*
+Target = usr/lib/modules/*/extramodules/
+Target = usr/src/*/dkms.conf
+Target = usr/lib/systemd/systemd
+Target = usr/bin/cryptsetup
+Target = usr/bin/lvm
+
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/modules.builtin
+
+[Trigger]
 Type = Package
 Operation = Install
 Operation = Upgrade
@@ -23,8 +43,11 @@ Target = linux*
 Target = limine*
 Target = snapper*
 Target = mkinitcpio*
+Target = sbctl
+Target = omarchy
+Target = omarchy-settings
 
 [Action]
-Description = Secure Boot: record package mutation before sbctl
+Description = Secure Boot: checkpoint package producer before sbctl
 When = PostTransaction
 Exec = @BINDIR@/omasecboot --quiet hook package-cleanup

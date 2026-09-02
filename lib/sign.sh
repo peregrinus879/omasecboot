@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154 # Transaction globals come from the sourced lifecycle module.
 # OmaSecBoot: key creation, EFI signing, database cleanup
 
 readonly LIMINE_DEFAULT_CONF="/etc/default/limine"
@@ -753,6 +754,38 @@ artifact_repair_preflight() {
   }
 }
 
+producer_reconstruction_preflight() {
+  local source
+  for command in b2sum chmod chown cp dd find grep limine ln mktemp mountpoint \
+    findmnt mv sbctl sync jq; do
+    command -v "$command" >/dev/null 2>&1 || {
+      fail "Required producer recovery command not found: ${command}"
+      return 1
+    }
+  done
+  artifact_esp_is_mounted || {
+    fail "$(esp_path) is not the mounted FAT32 ESP"
+    return 1
+  }
+  validate_no_limine_shadow_configs || return 1
+  validate_control_file "$(limine_default_config_path)" || return 1
+  validate_control_file "$(limine_config_path)" || return 1
+  source=$(limine_unsigned_binary_path) || return 1
+  validate_control_file "$source" || {
+    fail "Unsigned Limine package binary is unavailable or unsafe: ${source}"
+    return 1
+  }
+  read_limine_embedded_checksum "$source" >/dev/null || {
+    fail "Unsigned Limine package binary has no unique config checksum slot"
+    return 1
+  }
+  current_limine_config_checksum >/dev/null || return 1
+  sbctl_tracking_preflight || {
+    fail "sbctl tracking state is unavailable or unsafe"
+    return 1
+  }
+}
+
 cleanup_tracking_transaction() {
   transaction_phase_start "clean-tracking" || return 1
   clean_stale_entries || return 1
@@ -829,14 +862,29 @@ sign_all_efi() {
 }
 
 verify_all_efi_artifacts() {
-  local expected="$1" enrolled_raw file signature_rc
+  local expected="$1" persist_proof="${2:-false}"
+  local obligations="${3:-}"
+  local enrolled_raw file signature_rc config config_hash config_identity
+  local current_hash current_identity
+  local proved_artifacts='[]'
   local -a enrolled=() proved_files=()
-  local -A enrolled_map=() proved_hash=() proved_identity=()
+  local -A enrolled_map=() proved_map=() proved_hash=() proved_identity=()
 
+  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
+  validate_efi_obligations_json "$obligations" || return 1
   verify_limine_config_targets "$expected" || return 1
   collect_discovered_efi_files || return 1
   validate_discovered_sbctl_mappings || return 1
   proved_files=("${_discovered_efi_files[@]}")
+  for file in "${proved_files[@]}"; do
+    proved_map["$file"]=1
+  done
+  while IFS= read -r file; do
+    [[ -n "${proved_map[$file]:-}" ]] || {
+      fail "Expected EFI artifact is missing from discovery: ${file}"
+      return 1
+    }
+  done < <(jq -r '.paths[]' <<< "$obligations")
   enrolled_raw=$(list_enrolled_paths) || {
     fail "Could not read final sbctl tracking state"
     return 1
@@ -868,6 +916,10 @@ verify_all_efi_artifacts() {
     [[ "${proved_files[$file]}" == "${_discovered_efi_files[$file]}" ]] || return 1
   done
   verify_limine_config_targets "$expected" || return 1
+  config=$(limine_config_path) || return 1
+  validate_control_file "$config" || return 1
+  config_hash=$(sha256_file "$config") || return 1
+  config_identity=$(control_file_identity "$config") || return 1
   enrolled=()
   enrolled_map=()
   enrolled_raw=$(list_enrolled_paths) || return 1
@@ -876,17 +928,115 @@ verify_all_efi_artifacts() {
     enrolled_map["$file"]=1
   done
   for file in "${proved_files[@]}"; do
-    [[ "$(sha256_file "$file")" == "${proved_hash[$file]}" \
-      && "$(control_file_identity "$file")" == "${proved_identity[$file]}" \
+    current_hash=$(sha256_file "$file") || return 1
+    current_identity=$(control_file_identity "$file") || return 1
+    [[ "$current_hash" == "${proved_hash[$file]}" \
+      && "$current_identity" == "${proved_identity[$file]}" \
       && -n "${enrolled_map[$file]:-}" ]] || return 1
     signature_rc=0
     sbctl_file_signature_state "$file" || signature_rc=$?
     [[ $signature_rc -eq 0 ]] || return 1
+    proved_artifacts=$(jq -c \
+      --arg path "$file" \
+      --arg hash "${proved_hash[$file]}" \
+      --arg identity "${proved_identity[$file]}" '
+        . + [{
+          identity: $identity,
+          path: $path,
+          sha256: $hash,
+          signature: "local",
+          tracking: "tracked"
+        }]
+      ' <<< "$proved_artifacts") || return 1
   done
+  if [[ "$persist_proof" == true ]]; then
+    persist_final_artifact_proof "$expected" "$obligations" "$config" "$config_hash" \
+      "$config_identity" "$proved_artifacts" || return 1
+  elif [[ "$persist_proof" != false ]]; then
+    return 1
+  fi
   qpass "All discovered EFI artifacts are locally signed and tracked"
 }
 
+persist_final_artifact_proof() {
+  local expected="$1" obligations="$2" config="$3" config_hash="$4"
+  local config_identity="$5" artifacts="$6"
+  local transaction_dir path timestamp artifact_rows artifact file expected_hash
+  local expected_identity
+  local document existing reference current_reference
+  [[ "$_transaction_active" == true && "$expected" =~ ^[0-9a-f]{128}$ \
+    && "$config_hash" =~ ^[0-9a-f]{64}$ \
+    && "$config_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  validate_efi_obligations_json "$obligations" || return 1
+  jq -e 'type == "array" and length > 0' <<< "$artifacts" >/dev/null || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/final-proof.json"
+  [[ "$config" == "$(limine_config_path)" ]] || return 1
+  validate_control_file "$config" || return 1
+  [[ $(sha256_file "$config") == "$config_hash" \
+    && $(control_file_identity "$config") == "$config_identity" ]] || return 1
+  artifact_rows=$(jq -c '.[]' <<< "$artifacts") || return 1
+  while IFS= read -r artifact; do
+    file=$(jq -r '.path' <<< "$artifact") || return 1
+    expected_hash=$(jq -r '.sha256' <<< "$artifact") || return 1
+    expected_identity=$(jq -r '.identity' <<< "$artifact") || return 1
+    validate_control_file "$file" || return 1
+    [[ $(sha256_file "$file") == "$expected_hash" \
+      && $(control_file_identity "$file") == "$expected_identity" ]] || return 1
+  done <<< "$artifact_rows"
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$FINAL_PROOF_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" \
+    --arg config "$config" \
+    --arg checksum "$expected" \
+    --arg config_hash "$config_hash" \
+    --arg config_identity "$config_identity" \
+    --argjson obligations "$obligations" \
+    --argjson artifacts "$artifacts" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      proved_at: $timestamp,
+      config: {
+        path: $config,
+        checksum: $checksum,
+        sha256: $config_hash,
+        identity: $config_identity
+      },
+      obligations: $obligations,
+      artifacts: $artifacts
+    }') || return 1
+  validate_final_proof_json "$_transaction_id" "$document" || return 1
+
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_final_proof_json "$_transaction_id" "$existing" || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      $existing.config == $candidate.config and
+      $existing.obligations == $candidate.obligations and
+      $existing.artifacts == $candidate.artifacts
+    ' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  reference=$(transaction_artifact_reference "$path" "$FINAL_PROOF_SCHEMA_VERSION") \
+    || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record final_proof "$reference"
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
+  fi
+}
+
 repair_boot_artifacts() {
+  local obligations="${1:-}"
+  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
+  validate_efi_obligations_json "$obligations" || return 1
   transaction_phase_start "backup-artifacts" || return 1
   transaction_backup_file "$(limine_default_config_path)" || return 1
   transaction_backup_file "$(limine_primary_binary_path)" || return 1
@@ -915,12 +1065,13 @@ repair_boot_artifacts() {
   transaction_phase_complete "sign-efi" || return 1
 
   transaction_phase_start "prove-artifacts" || return 1
-  verify_all_efi_artifacts "$_repair_config_checksum" || return 1
+  verify_all_efi_artifacts "$_repair_config_checksum" true "$obligations" || return 1
   transaction_phase_complete "prove-artifacts"
 }
 
 run_artifact_repair() {
-  local operation="$1"
+  local operation="$1" obligations="${2:-}"
+  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
   run_lifecycle_transaction_with_preflight "$operation" "active" "active" \
-    artifact_repair_preflight repair_boot_artifacts
+    artifact_repair_preflight repair_boot_artifacts "$obligations"
 }

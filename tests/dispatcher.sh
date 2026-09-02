@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2154 # Assertions read globals set by lifecycle functions.
+# shellcheck disable=SC2154,SC2329 # Tests read globals and override sourced functions.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,6 +31,10 @@ snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$TEST_DIR"
 }
 
+pacman_database_lock_path() {
+  printf '%s/pacman-db.lck\n' "$TEST_DIR"
+}
+
 control_owner_uid() {
   id -u
 }
@@ -59,6 +63,12 @@ capture_service_state() {
   printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
 }
 
+systemctl() {
+  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
+    || return 1
+  printf 'inactive\n'
+}
+
 noop_transaction() {
   transaction_phase_start "noop"
   transaction_phase_complete "noop"
@@ -83,7 +93,7 @@ replace_limine_default_entry_in_file "$settings_fixture" \
 grep -Fxq 'UNRELATED=value' "$settings_fixture" \
   || fail_test "Limine setting replacement changed an unrelated entry"
 
-for command in setup enroll sign cleanup; do
+for command in setup adopt enroll sign cleanup; do
   if "cmd_${command}" > "${TEST_DIR}/${command}.out" 2>&1; then
     fail_test "blocked ${command} command succeeded"
   fi
@@ -118,6 +128,13 @@ fi
 [[ $(cmd_version) == 'omasecboot 1.0.0' ]] || fail_test "version contract changed"
 
 cmd_hook package-cleanup || fail_test "unmanaged package automation did not no-op"
+cmd_guard removal || fail_test "pristine lifecycle blocked dependency removal"
+REAL_REQUIRE_CONTROL_ROOT=$(declare -f require_control_root)
+require_control_root() { return 1; }
+if cmd_guard removal >/dev/null 2>&1; then
+  fail_test "dependency removal guard did not require root"
+fi
+eval "$REAL_REQUIRE_CONTROL_ROOT"
 [[ ! -e "$(lifecycle_file_path)" ]] \
   || fail_test "unmanaged automation created lifecycle state"
 
@@ -129,30 +146,32 @@ if cmd_sign >/dev/null 2>&1; then
 fi
 read_lifecycle || fail_test "active state became unreadable after blocked sign"
 [[ $_lifecycle_state == active ]] || fail_test "blocked sign changed active state"
+if cmd_guard removal > "${TEST_DIR}/removal-active.out" 2>&1; then
+  fail_test "active lifecycle permitted dependency removal"
+fi
+grep -Fq 'requires verified disabled or pristine lifecycle state' \
+  "${TEST_DIR}/removal-active.out" \
+  || fail_test "dependency removal guard omitted its lifecycle reason"
 
+active_generation=$_lifecycle_generation
+active_lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
 if cmd_hook package-cleanup > "${TEST_DIR}/external.out" 2>&1; then
   fail_test "unrepaired external package mutation reported success"
 else
   external_rc=$?
 fi
 [[ $external_rc -eq 1 ]] || fail_test "external package mutation lost its failure status"
-read_lifecycle || fail_test "external mutation state became unreadable"
-[[ $_lifecycle_state == recovery-required ]] \
-  || fail_test "external mutation did not require recovery"
-external_manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
-jq -e '
-  .operation == "package-cleanup-repair" and
-  .status == "failed" and
-  .failure.phase == "repair-required"
-' "$external_manifest" >/dev/null || fail_test "external mutation failure was not durable"
-
-recovery_generation=$_lifecycle_generation
 if cmd_hook package-sign >/dev/null 2>&1; then
-  fail_test "package automation ran during recovery-required"
+  fail_test "closed production gate admitted package signing"
 fi
-read_lifecycle || fail_test "recovery state became unreadable"
-[[ $_lifecycle_generation -eq recovery_generation ]] \
-  || fail_test "blocked recovery automation changed lifecycle state"
+if printf 'usr/lib/modules/6.18.0/modules.builtin\n' \
+  | cmd_guard transaction >/dev/null 2>&1; then
+  fail_test "closed production gate admitted the package guard"
+fi
+read_lifecycle || fail_test "blocked producer state became unreadable"
+[[ $_lifecycle_state == active && $_lifecycle_generation -eq active_generation \
+  && $(sha256_file "$(lifecycle_file_path)") == "$active_lifecycle_hash" ]] \
+  || fail_test "blocked producer automation changed lifecycle state"
 
 release_boot_repair_lock
 rm -rf "$(state_dir_path)"
@@ -162,7 +181,32 @@ adopt_lifecycle : "no" "no" "yes" "yes" \
 run_lifecycle_transaction "disable-test" "disabled" "active" noop_transaction \
   || fail_test "disabled fixture did not commit"
 cmd_hook package-cleanup || fail_test "disabled package automation did not no-op"
+cmd_guard removal || fail_test "disabled lifecycle blocked dependency removal"
 read_lifecycle || fail_test "disabled state became unreadable"
 [[ $_lifecycle_state == disabled ]] || fail_test "disabled automation changed lifecycle state"
+
+route_log="${TEST_DIR}/routes"
+producer_limine_hook_pre() { printf 'limine-pre\n' >> "$route_log"; }
+producer_limine_hook_post() { printf 'limine-post\n' >> "$route_log"; }
+producer_package_checkpoint() { printf 'package-checkpoint\n' >> "$route_log"; }
+producer_package_post() { printf 'package-post\n' >> "$route_log"; }
+producer_package_pre() { printf 'package-pre\n' >> "$route_log"; }
+lifecycle_removal_is_allowed() {
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  printf 'removal\n' >> "$route_log"
+}
+cmd_hook pre || fail_test "Limine pre-hook route failed"
+cmd_hook post || fail_test "Limine post-hook route failed"
+cmd_hook package-cleanup || fail_test "package checkpoint route failed"
+cmd_hook package-sign || fail_test "package post route failed"
+cmd_guard transaction || fail_test "package pre-guard route failed"
+cmd_guard removal || fail_test "package removal guard route failed"
+[[ $(<"$route_log") == $'limine-pre\nlimine-post\npackage-checkpoint\npackage-post\npackage-pre\nremoval' ]] \
+  || fail_test "internal producer routes selected the wrong handlers"
+if cmd_hook unknown >/dev/null 2>&1 || cmd_guard unknown >/dev/null 2>&1 \
+  || cmd_guard removal extra >/dev/null 2>&1; then
+  fail_test "internal dispatcher accepted an unknown phase"
+fi
 
 printf 'dispatcher tests passed\n'

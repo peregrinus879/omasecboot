@@ -13,6 +13,8 @@ install:
 	install -d -m 755 $(DESTDIR)$(STATEDIR)
 	install -Dm755 bin/omasecboot $(DESTDIR)$(BINDIR)/omasecboot
 	install -d $(DESTDIR)$(HOOKDIR)
+	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/00-omasecboot-removal-guard.hook > $(DESTDIR)$(HOOKDIR)/00-omasecboot-removal-guard.hook
+	chmod 644 $(DESTDIR)$(HOOKDIR)/00-omasecboot-removal-guard.hook
 	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/00-omasecboot-transition-guard.hook > $(DESTDIR)$(HOOKDIR)/00-omasecboot-transition-guard.hook
 	chmod 644 $(DESTDIR)$(HOOKDIR)/00-omasecboot-transition-guard.hook
 	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/zz-omasecboot-cleanup.hook > $(DESTDIR)$(HOOKDIR)/zz-omasecboot-cleanup.hook
@@ -30,11 +32,12 @@ install:
 	@echo "Run: sudo omasecboot help"
 
 uninstall:
-	@echo "Refusing uninstall until lifecycle removal verification is available" >&2
+	@echo "Refusing uninstall until concurrency-safe package removal is available" >&2
 	@false
 
 test:
 	bash tests/lifecycle.sh
+	bash tests/producers.sh
 	bash tests/artifacts.sh
 	bash tests/hooks.sh
 	bash tests/guards.sh
