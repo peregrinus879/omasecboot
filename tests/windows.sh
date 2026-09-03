@@ -187,6 +187,10 @@ control_owner_uid() {
   id -u
 }
 
+windows_efibootmgr_executable_path() {
+  printf '%s/efibootmgr\n' "$BIN_DIR"
+}
+
 windows_runtime_dir_path() {
   printf '%s/omasecboot\n' "$RUNTIME_PARENT"
 }
@@ -916,9 +920,25 @@ done
   "${TEST_DIR}/bootnext.out" || fail_test "blocked BootNext omitted its safety reason"
 
 if /usr/bin/grep -RE 'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
-  "${ROOT_DIR}/lib" "${ROOT_DIR}/bin" >/dev/null; then
-  fail_test "production code retained a firmware mutation command"
+  "${ROOT_DIR}/bin" "${ROOT_DIR}/lib/common.sh" "${ROOT_DIR}/lib/lifecycle.sh" \
+  "${ROOT_DIR}/lib/checks.sh" "${ROOT_DIR}/lib/discover.sh" "${ROOT_DIR}/lib/sign.sh" \
+  "${ROOT_DIR}/lib/enroll.sh" "${ROOT_DIR}/lib/producers.sh" \
+  "${ROOT_DIR}/lib/status.sh" >/dev/null; then
+  fail_test "production code outside the dormant Windows boundary retained a firmware mutation command"
 fi
+[[ $(/usr/bin/grep -Ec \
+  'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
+  "${ROOT_DIR}/lib/windows.sh") -eq 1 ]] \
+  || fail_test "dormant Windows code does not contain exactly one bounded BootNext write"
+/usr/bin/grep -Fxq "  run_windows_efibootmgr -n \"\$target_number\" || command_rc=\$?" \
+  "${ROOT_DIR}/lib/windows.sh" \
+  || fail_test "dormant Windows code bypassed its validated efibootmgr wrapper"
+/usr/bin/grep -Fq "owner=\$(/usr/bin/pacman -Qqo \"\$path\" 2>/dev/null)" \
+  "${ROOT_DIR}/lib/windows.sh" \
+  || fail_test "dormant Windows code does not verify efibootmgr package ownership"
+/usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_efibootmgr_fd}\" \"\$@\"" \
+  "${ROOT_DIR}/lib/windows.sh" \
+  || fail_test "dormant Windows code does not execute the validated efibootmgr inode"
 if /usr/bin/grep -RE 'systemctl[[:space:]]+reboot' \
   "${ROOT_DIR}/lib" "${ROOT_DIR}/bin" >/dev/null; then
   fail_test "production code retained a direct reboot command"
@@ -926,7 +946,8 @@ fi
 for source in "${ROOT_DIR}/bin/omasecboot" "${ROOT_DIR}"/lib/*.sh; do
   [[ "$source" == "${ROOT_DIR}/lib/windows.sh" ]] && continue
   if /usr/bin/grep -Eq \
-    'suppress_stale_windows_entry|add_windows_boot_entry' "$source"; then
+      'suppress_stale_windows_entry|add_windows_boot_entry|run_dormant_windows_bootnext|record_and_set_windows_bootnext' \
+      "$source"; then
     fail_test "production path outside windows.sh can invoke a dormant Windows mutation"
   fi
 done

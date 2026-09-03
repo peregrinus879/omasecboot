@@ -181,6 +181,7 @@ fi
 expected_targets=$(sort <<'EOF'
 boot/*
 efi/*
+efibootmgr
 linux*
 limine*
 mkinitcpio*

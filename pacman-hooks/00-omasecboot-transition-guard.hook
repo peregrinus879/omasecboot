@@ -42,6 +42,7 @@ Target = limine*
 Target = snapper*
 Target = mkinitcpio*
 Target = sbctl
+Target = efibootmgr
 Target = omarchy
 Target = omarchy-settings
 

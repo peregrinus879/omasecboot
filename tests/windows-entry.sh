@@ -6,10 +6,23 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-windows-entry.XXXXXX")
 
 cleanup() {
+  local pid
+  trap - EXIT INT TERM HUP
+  if declare -p run_case_pids >/dev/null 2>&1; then
+    for pid in "${run_case_pids[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in "${run_case_pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
   release_boot_repair_lock 2>/dev/null || true
   rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 fail_test() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -33,6 +46,7 @@ TARGET_PARTUUID='11111111-2222-3333-4444-555555555555'
 RESOLVE_CALLS=0
 RESOLVE_FAIL_AT=0
 RESOLVE_ALWAYS_FAIL=false
+RESOLVE_BOOTNEXT_CHANGE_AT=0
 ARTIFACT_FAIL=false
 PREFLIGHT_FAIL=false
 CONFIG_SYNC_FAIL=false
@@ -41,6 +55,20 @@ REPAIR_BODY_CALLS=0
 PREFLIGHT_CONFIG_CHECKSUM=""
 REPAIR_CONFIG_CHECKSUM=""
 _repair_config_checksum=""
+BOOTNEXT_CAPABILITY=true
+BOOTNEXT_TOOL_VALID=true
+BOOTNEXT_TOOL_HASH='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+BOOTNEXT_COMMAND_RC=0
+BOOTNEXT_COMMAND_EFFECT=true
+BOOTNEXT_EFFECT_NUMBER=""
+BOOTNEXT_COMMAND_CALLS=0
+BOOTNEXT_FAILPOINT=""
+BOOTNEXT_FAIL_ACTION=""
+BOOTNEXT_CALL_LOG=""
+BOOTNEXT_MOUNT_VALIDATIONS=0
+BOOTNEXT_MOUNT_FAIL_AT=0
+TEST_BOOT_ID='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+LIFECYCLE_FAILPOINT=""
 
 state_dir_path() {
   printf '%s/state\n' "$CASE_DIR"
@@ -70,6 +98,14 @@ require_control_root() {
   :
 }
 
+boot_id_value() {
+  printf '%s\n' "$TEST_BOOT_ID"
+}
+
+lifecycle_failpoint() {
+  [[ "$LIFECYCLE_FAILPOINT" != "$1" ]]
+}
+
 durable_sync() {
   local path="$1"
   if [[ "$CONFIG_SYNC_FAIL" == true \
@@ -77,6 +113,75 @@ durable_sync() {
     CONFIG_SYNC_FAIL=false
     return 1
   fi
+}
+
+windows_bootnext_efivars_dir() {
+  printf '%s/efivars\n' "$CASE_DIR"
+}
+
+windows_validate_efivarfs_mount() {
+  local directory
+  BOOTNEXT_MOUNT_VALIDATIONS=$((BOOTNEXT_MOUNT_VALIDATIONS + 1))
+  (( BOOTNEXT_MOUNT_FAIL_AT == 0 \
+    || BOOTNEXT_MOUNT_VALIDATIONS != BOOTNEXT_MOUNT_FAIL_AT )) || return 1
+  directory=$(windows_bootnext_efivars_dir) || return 1
+  [[ -d "$directory" && ! -L "$directory" ]]
+}
+
+windows_bootnext_mutation_is_available() {
+  [[ "$BOOTNEXT_CAPABILITY" == true ]]
+}
+
+validate_windows_efibootmgr_boundary() {
+  [[ "$BOOTNEXT_TOOL_VALID" == true \
+    && "$BOOTNEXT_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
+  _windows_efibootmgr_hash="$BOOTNEXT_TOOL_HASH"
+}
+
+hash_bound_windows_efibootmgr() {
+  [[ "$BOOTNEXT_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$BOOTNEXT_TOOL_HASH"
+}
+
+write_bootnext_variable() {
+  local number="$1" attributes="${2:-7}" path value encoded
+  [[ "$number" =~ ^[0-9A-F]{4}$ && "$attributes" =~ ^[0-9]+$ ]] || return 1
+  path=$(windows_bootnext_variable_path) || return 1
+  value=$((16#$number))
+  printf -v encoded '\\x%02x\\x%02x\\x%02x\\x%02x\\x%02x\\x%02x' \
+    "$((attributes & 255))" "$(((attributes >> 8) & 255))" \
+    "$(((attributes >> 16) & 255))" "$(((attributes >> 24) & 255))" \
+    "$((value & 255))" "$(((value >> 8) & 255))"
+  printf '%b' "$encoded" > "$path"
+  chmod 600 "$path"
+}
+
+run_windows_efibootmgr() {
+  local target
+  [[ $# -eq 2 && "$1" == -n && "$2" =~ ^[0-9A-F]{4}$ ]] || return 64
+  target="$2"
+  BOOTNEXT_COMMAND_CALLS=$((BOOTNEXT_COMMAND_CALLS + 1))
+  printf '%s\n' "$*" >> "$BOOTNEXT_CALL_LOG"
+  if [[ "$BOOTNEXT_COMMAND_EFFECT" == true ]]; then
+    write_bootnext_variable "${BOOTNEXT_EFFECT_NUMBER:-$target}" || return 1
+  fi
+  return "$BOOTNEXT_COMMAND_RC"
+}
+
+windows_bootnext_failpoint() {
+  local point="$1"
+  [[ "$BOOTNEXT_FAILPOINT" == "$point" ]] || return 0
+  case "$BOOTNEXT_FAIL_ACTION" in
+    change-prior) write_bootnext_variable 0009 ;;
+    change-target) TARGET_BOOT=0008 ;;
+    change-tool) BOOTNEXT_TOOL_HASH='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ;;
+    change-boot) TEST_BOOT_ID='11111111-2222-4333-8444-555555555555' ;;
+    disable-capability) BOOTNEXT_CAPABILITY=false ;;
+    corrupt-attributes) write_bootnext_variable 0007 3 ;;
+    signal-term) kill -TERM "$BASHPID" ;;
+    fail) return 75 ;;
+    *) return 1 ;;
+  esac
 }
 
 capture_service_state() {
@@ -94,6 +199,10 @@ resolve_windows_target() {
   if [[ "$RESOLVE_ALWAYS_FAIL" == true ]] \
     || (( RESOLVE_FAIL_AT > 0 && RESOLVE_CALLS == RESOLVE_FAIL_AT )); then
     return 1
+  fi
+  if (( RESOLVE_BOOTNEXT_CHANGE_AT > 0 \
+    && RESOLVE_CALLS == RESOLVE_BOOTNEXT_CHANGE_AT )); then
+    write_bootnext_variable 0008 || return 1
   fi
   _windows_boot_number="$TARGET_BOOT"
   _windows_label="$TARGET_LABEL"
@@ -158,16 +267,19 @@ setup_fixture() {
   CASE_DIR="${TEST_DIR}/${name}"
   CONFIG_FILE="${CASE_DIR}/boot/limine.conf"
   ARTIFACT_FILE="${CASE_DIR}/artifact"
+  BOOTNEXT_CALL_LOG="${CASE_DIR}/bootnext-calls"
   rm -rf "$CASE_DIR"
-  mkdir -p "$(dirname "$CONFIG_FILE")"
-  chmod 755 "$CASE_DIR" "$(dirname "$CONFIG_FILE")"
+  mkdir -p "$(dirname "$CONFIG_FILE")" "${CASE_DIR}/efivars"
+  chmod 755 "$CASE_DIR" "$(dirname "$CONFIG_FILE")" "${CASE_DIR}/efivars"
   printf 'original\n' > "$ARTIFACT_FILE"
+  : > "$BOOTNEXT_CALL_LOG"
   TARGET_BOOT=0007
   TARGET_LABEL='Windows Boot Manager'
   TARGET_PARTUUID='11111111-2222-3333-4444-555555555555'
   RESOLVE_CALLS=0
   RESOLVE_FAIL_AT=0
   RESOLVE_ALWAYS_FAIL=false
+  RESOLVE_BOOTNEXT_CHANGE_AT=0
   ARTIFACT_FAIL=false
   PREFLIGHT_FAIL=false
   CONFIG_SYNC_FAIL=false
@@ -176,12 +288,74 @@ setup_fixture() {
   PREFLIGHT_CONFIG_CHECKSUM=""
   REPAIR_CONFIG_CHECKSUM=""
   _repair_config_checksum=""
+  BOOTNEXT_CAPABILITY=true
+  BOOTNEXT_TOOL_VALID=true
+  BOOTNEXT_TOOL_HASH='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  BOOTNEXT_COMMAND_RC=0
+  BOOTNEXT_COMMAND_EFFECT=true
+  BOOTNEXT_EFFECT_NUMBER=""
+  BOOTNEXT_COMMAND_CALLS=0
+  BOOTNEXT_FAILPOINT=""
+  BOOTNEXT_FAIL_ACTION=""
+  BOOTNEXT_MOUNT_VALIDATIONS=0
+  BOOTNEXT_MOUNT_FAIL_AT=0
+  TEST_BOOT_ID='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  LIFECYCLE_FAILPOINT=""
+  _windows_bootnext_record_json=""
+  _windows_bootnext_record_path=""
   write_legacy_config
   adopt_lifecycle : "no" "no" "yes" "yes" \
     "absent" "absent" "absent" "absent" \
     || fail_test "${name}: active lifecycle fixture failed"
   : > "$(windows_target_state_path)"
   chmod 644 "$(windows_target_state_path)"
+}
+
+write_windows_target_fixture() {
+  local state_file
+  state_file=$(windows_target_state_path) || return 1
+  jq -cn \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg boot_number "$TARGET_BOOT" \
+    --arg label "$TARGET_LABEL" \
+    --arg partuuid "$TARGET_PARTUUID" \
+    --arg loader "$WINDOWS_LOADER_UEFI" '{
+      schema_version: 1,
+      writer_version: $version,
+      enabled: true,
+      boot_number: $boot_number,
+      label: $label,
+      partuuid: $partuuid,
+      loader_path: $loader
+    }' > "$state_file"
+  chmod 644 "$state_file"
+}
+
+setup_bootnext_fixture() {
+  local name="$1"
+  setup_fixture "$name"
+  write_windows_target_fixture || fail_test "${name}: target fixture could not be written"
+}
+
+assert_bootnext_recovery() {
+  local expected_phase="$1" manifest reference
+  read_lifecycle || fail_test "failed BootNext transaction damaged lifecycle state"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "uncertain BootNext transaction did not require recovery"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e --arg phase "$expected_phase" '
+    .operation == "windows-bootnext" and
+    .status == "failed" and
+    .failure.phase == $phase and
+    .rollback.status == "completed" and
+    .rollback.failures == [] and
+    .domain_records.bootnext != null
+  ' "$manifest" >/dev/null || fail_test "BootNext failure manifest is incomplete"
+  reference=$(jq -c '.domain_records.bootnext' "$manifest") \
+    || fail_test "BootNext record reference is unreadable"
+  validate_bootnext_record_reference "$_lifecycle_transaction_id" "$reference" \
+    "$(read_control_document "$manifest")" \
+    || fail_test "BootNext recovery evidence is invalid"
 }
 
 assert_recovery_rollback() {
@@ -778,30 +952,362 @@ test_suppression_final_proof_rollback() {
     || fail_test "final suppression proof rollback manifest is incomplete"
 }
 
-run_case() {
-  local test_function="$1"
-  ("$test_function")
+test_bootnext_success_and_schema() {
+  local lifecycle manifest transaction_id reference record state tampered
+  setup_bootnext_fixture bootnext-success
+  run_dormant_windows_bootnext || fail_test "dormant BootNext transaction failed"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 1 \
+    && $(<"$BOOTNEXT_CALL_LOG") == '-n 0007' ]] \
+    || fail_test "BootNext transaction did not issue exactly one bounded write"
+  state=$(read_windows_bootnext_state) || fail_test "BootNext readback became unreadable"
+  jq -e '.present == true and .boot_number == "0007"' <<< "$state" >/dev/null \
+    || fail_test "BootNext transaction did not retain the requested readback"
+
+  read_lifecycle || fail_test "successful BootNext transaction damaged lifecycle"
+  [[ "$_lifecycle_state" == active ]] || fail_test "BootNext transaction did not commit active state"
+  transaction_id=$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")
+  manifest=$(lifecycle_manifest_path "$transaction_id")
+  jq -e '
+    .operation == "windows-bootnext" and .status == "completed" and
+    .completed_phases == ["record-bootnext","set-bootnext"] and
+    .domain_records.bootnext != null and
+    .domain_records.final_proof == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and .domain_records.producer == null and
+    .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+    .domain_records.windows == null
+  ' "$manifest" >/dev/null || fail_test "completed BootNext manifest is invalid"
+  reference=$(jq -c '.domain_records.bootnext' "$manifest")
+  validate_bootnext_record_reference "$transaction_id" "$reference" \
+    "$(read_control_document "$manifest")" \
+    || fail_test "completed BootNext record reference is invalid"
+  record=$(jq -r '.path' <<< "$reference")
+  [[ $(stat -Lc '%a' "$record") == 600 ]] \
+    || fail_test "BootNext record mode is unsafe"
+  jq -e \
+    --arg hash "$BOOTNEXT_TOOL_HASH" \
+    --arg package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" '
+    .operation == "windows-bootnext" and
+    .prior == {boot_number:null,present:false} and
+    .target == {
+      boot_number:"0007",
+      label:"Windows Boot Manager",
+      loader_path:"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+      partuuid:"11111111-2222-3333-4444-555555555555"
+    } and
+    .efibootmgr.package == $package and .efibootmgr.executable_sha256 == $hash
+  ' "$record" >/dev/null || fail_test "BootNext pre-write evidence is incomplete"
+
+  tampered=$(jq '.unexpected = true' "$record")
+  if validate_bootnext_record_json "$transaction_id" "$tampered" \
+    "$(read_control_document "$manifest")"; then
+    fail_test "BootNext record accepted an unknown field"
+  fi
+  tampered=$(jq '.target.label = "Windows ${unsafe}"' "$record")
+  if validate_bootnext_record_json "$transaction_id" "$tampered" \
+    "$(read_control_document "$manifest")"; then
+    fail_test "BootNext record accepted an unsafe target label"
+  fi
 }
 
-run_case test_successful_setup
-run_case test_label_round_trip
-run_case test_config_boundaries
-run_case test_state_schema_rejection
-run_case test_artifact_failure_rollback
-run_case test_config_failure_rollback
-run_case test_final_proof_failure_rollback
-run_case test_non_active_refusal
-run_case test_setup_ownership_consistency
-run_case test_legacy_state_without_block_migration
-run_case test_stale_suppression
-run_case test_valid_target_suppression_refusal
-run_case test_suppression_preflight_failure
-run_case test_legacy_block_suppression
-run_case test_malformed_block_suppression_refusal
-run_case test_unprovable_target_suppression
-run_case test_in_transaction_proof_failure_suppression
-run_case test_valid_again_suppression_rollback
-run_case test_suppression_artifact_failure_rollback
-run_case test_suppression_final_proof_rollback
+test_bootnext_prior_value() {
+  local manifest record
+  setup_bootnext_fixture bootnext-prior
+  write_bootnext_variable 0042
+  run_dormant_windows_bootnext || fail_test "BootNext replacement transaction failed"
+  manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+  record=$(jq -r '.domain_records.bootnext.path' "$manifest")
+  jq -e '.prior == {boot_number:"0042",present:true}' "$record" >/dev/null \
+    || fail_test "BootNext transaction did not preserve the prior exact value"
+}
+
+test_bootnext_preflight_boundaries() {
+  local lifecycle_hash variable
+  setup_bootnext_fixture bootnext-gate
+  lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+  BOOTNEXT_CAPABILITY=false
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "closed BootNext capability opened a transaction"
+  fi
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
+    && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "closed BootNext capability changed durable state"
+
+  setup_bootnext_fixture bootnext-attributes
+  write_bootnext_variable 0009 3
+  lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "unsupported BootNext attributes passed preflight"
+  fi
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
+    && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "BootNext attribute uncertainty opened a transaction"
+
+  setup_bootnext_fixture bootnext-tool
+  BOOTNEXT_TOOL_VALID=false
+  lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "unverified efibootmgr passed BootNext preflight"
+  fi
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
+    && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "efibootmgr uncertainty opened a transaction"
+
+  setup_bootnext_fixture bootnext-truncated
+  variable=$(windows_bootnext_variable_path)
+  printf '\x07\x00\x00\x00\x09' > "$variable"
+  chmod 600 "$variable"
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "truncated BootNext payload passed preflight"
+  fi
+  read_lifecycle || fail_test "truncated BootNext preflight damaged lifecycle"
+  [[ "$_lifecycle_state" == active && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "truncated BootNext payload opened a transaction"
+
+  setup_bootnext_fixture bootnext-symlink
+  variable=$(windows_bootnext_variable_path)
+  ln -s "$(windows_target_state_path)" "$variable"
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "symlink BootNext variable passed preflight"
+  fi
+  read_lifecycle || fail_test "symlink BootNext preflight damaged lifecycle"
+  [[ "$_lifecycle_state" == active && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "symlink BootNext variable opened a transaction"
+
+  setup_bootnext_fixture bootnext-mount-race
+  BOOTNEXT_MOUNT_FAIL_AT=2
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "efivarfs mount race passed BootNext preflight"
+  fi
+  read_lifecycle || fail_test "efivarfs mount race damaged lifecycle"
+  [[ "$_lifecycle_state" == active && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "efivarfs mount race opened a transaction"
+}
+
+test_bootnext_prewrite_races() {
+  setup_bootnext_fixture bootnext-prior-race
+  BOOTNEXT_FAILPOINT=after-bootnext-record
+  BOOTNEXT_FAIL_ACTION=change-prior
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "BootNext prior-value race reported success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "prior-value race reached efibootmgr"
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-target-race
+  BOOTNEXT_FAILPOINT=before-target-revalidation
+  BOOTNEXT_FAIL_ACTION=change-target
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "Windows target race reported BootNext success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "target race reached efibootmgr"
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-tool-race
+  BOOTNEXT_FAILPOINT=after-bootnext-record
+  BOOTNEXT_FAIL_ACTION=change-tool
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "efibootmgr identity race reported BootNext success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "efibootmgr identity race reached mutation"
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-boot-race
+  BOOTNEXT_FAILPOINT=after-bootnext-record
+  BOOTNEXT_FAIL_ACTION=change-boot
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "boot-ID race reported BootNext success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "boot-ID race reached efibootmgr"
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-capability-race
+  BOOTNEXT_FAILPOINT=before-target-revalidation
+  BOOTNEXT_FAIL_ACTION=disable-capability
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "closed second BootNext gate reported success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "closed second gate reached efibootmgr"
+  assert_bootnext_recovery set-bootnext
+}
+
+test_bootnext_command_failures() {
+  local state
+  setup_bootnext_fixture bootnext-command-no-effect
+  BOOTNEXT_COMMAND_EFFECT=false
+  BOOTNEXT_COMMAND_RC=23
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "failed no-effect efibootmgr command reported success"
+  fi
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 1 ]] || fail_test "failed efibootmgr command was not bounded"
+  state=$(read_windows_bootnext_state)
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "no-effect efibootmgr failure changed BootNext"
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-command-effect
+  BOOTNEXT_COMMAND_RC=23
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "failed after-effect efibootmgr command reported success"
+  fi
+  state=$(read_windows_bootnext_state)
+  jq -e '.present == true and .boot_number == "0007"' <<< "$state" >/dev/null \
+    || fail_test "after-effect efibootmgr failure lost its observable state"
+  assert_bootnext_recovery set-bootnext
+}
+
+test_bootnext_readback_and_interruption() {
+  local state signal_rc
+  setup_bootnext_fixture bootnext-mismatch
+  BOOTNEXT_EFFECT_NUMBER=0008
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "mismatched BootNext readback reported success"
+  fi
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-unreadable-readback
+  BOOTNEXT_FAILPOINT=after-bootnext-command
+  BOOTNEXT_FAIL_ACTION=corrupt-attributes
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "malformed post-write BootNext readback reported success"
+  fi
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-postwrite-target
+  BOOTNEXT_FAILPOINT=after-bootnext-command
+  BOOTNEXT_FAIL_ACTION=change-target
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "post-write Windows target drift reported success"
+  fi
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-final-readback-race
+  RESOLVE_BOOTNEXT_CHANGE_AT=4
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "BootNext change during final target proof reported success"
+  fi
+  assert_bootnext_recovery set-bootnext
+
+  setup_bootnext_fixture bootnext-interruption
+  BOOTNEXT_FAILPOINT=after-bootnext-command
+  BOOTNEXT_FAIL_ACTION=signal-term
+  signal_rc=0
+  { (run_dormant_windows_bootnext >/dev/null 2>&1) || signal_rc=$?; } 2>/dev/null
+  [[ $signal_rc -eq 143 ]] || fail_test "post-write TERM did not propagate"
+  state=$(read_windows_bootnext_state)
+  jq -e '.present == true and .boot_number == "0007"' <<< "$state" >/dev/null \
+    || fail_test "post-write interruption did not preserve observable BootNext"
+  assert_bootnext_recovery set-bootnext
+}
+
+test_bootnext_commit_failure() {
+  local manifest state
+  setup_bootnext_fixture bootnext-commit-failure
+  LIFECYCLE_FAILPOINT=before-stable-state-write
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "BootNext stable-state publication failure reported success"
+  fi
+  state=$(read_windows_bootnext_state)
+  jq -e '.present == true and .boot_number == "0007"' <<< "$state" >/dev/null \
+    || fail_test "stable-state failure lost the verified BootNext value"
+  read_lifecycle || fail_test "BootNext stable-state failure damaged lifecycle"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "BootNext stable-state failure did not require recovery"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '
+    .operation == "windows-bootnext" and .status == "completed" and
+    .completed_phases == ["record-bootnext","set-bootnext"] and
+    .domain_records.bootnext != null
+  ' "$manifest" >/dev/null \
+    || fail_test "BootNext stable-state failure lost completed transaction evidence"
+}
+
+run_case() {
+  local name="$1" function="$2" log pid registration_signal=""
+  log="${TEST_DIR}/case-${name}.log"
+  trap 'registration_signal=INT' INT
+  trap 'registration_signal=TERM' TERM
+  trap 'registration_signal=HUP' HUP
+  (
+    trap - EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    "$function"
+  ) > "$log" 2>&1 &
+  pid=$!
+  run_case_pids+=("$pid")
+  run_case_names+=("$name")
+  run_case_logs+=("$log")
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  case "$registration_signal" in
+    INT) return 130 ;;
+    TERM) return 143 ;;
+    HUP) return 129 ;;
+  esac
+  if (( ${#run_case_pids[@]} >= windows_entry_test_jobs )); then
+    wait_for_cases || fail_test "Windows entry test batch failed"
+  fi
+}
+
+replay_case_log() {
+  local log="$1" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line" >&2
+  done < "$log"
+}
+
+wait_for_cases() {
+  local index rc failed=false
+  for index in "${!run_case_pids[@]}"; do
+    rc=0
+    wait "${run_case_pids[$index]}" || rc=$?
+    replay_case_log "${run_case_logs[$index]}"
+    if (( rc != 0 )); then
+      printf 'FAIL: case failed: %s\n' "${run_case_names[$index]}" >&2
+      failed=true
+    fi
+  done
+  run_case_pids=()
+  run_case_names=()
+  run_case_logs=()
+  [[ "$failed" == false ]]
+}
+
+windows_entry_test_jobs=${WINDOWS_ENTRY_TEST_JOBS:-4}
+[[ "$windows_entry_test_jobs" =~ ^[1-9][0-9]*$ && $windows_entry_test_jobs -le 16 ]] \
+  || fail_test "WINDOWS_ENTRY_TEST_JOBS must be between 1 and 16"
+declare -a run_case_pids=() run_case_names=() run_case_logs=()
+
+run_case successful-setup test_successful_setup
+run_case label-round-trip test_label_round_trip
+run_case config-boundaries test_config_boundaries
+run_case state-schema test_state_schema_rejection
+run_case artifact-failure test_artifact_failure_rollback
+run_case config-failure test_config_failure_rollback
+run_case final-proof-failure test_final_proof_failure_rollback
+run_case non-active-refusal test_non_active_refusal
+run_case ownership-consistency test_setup_ownership_consistency
+run_case legacy-migration test_legacy_state_without_block_migration
+run_case stale-suppression test_stale_suppression
+run_case valid-suppression-refusal test_valid_target_suppression_refusal
+run_case suppression-preflight test_suppression_preflight_failure
+run_case legacy-suppression test_legacy_block_suppression
+run_case malformed-suppression test_malformed_block_suppression_refusal
+run_case unprovable-suppression test_unprovable_target_suppression
+run_case suppression-revalidation test_in_transaction_proof_failure_suppression
+run_case valid-again-rollback test_valid_again_suppression_rollback
+run_case suppression-artifact-rollback test_suppression_artifact_failure_rollback
+run_case suppression-proof-rollback test_suppression_final_proof_rollback
+run_case bootnext-success test_bootnext_success_and_schema
+run_case bootnext-prior test_bootnext_prior_value
+run_case bootnext-preflight test_bootnext_preflight_boundaries
+run_case bootnext-races test_bootnext_prewrite_races
+run_case bootnext-command-failures test_bootnext_command_failures
+run_case bootnext-readback test_bootnext_readback_and_interruption
+run_case bootnext-commit-failure test_bootnext_commit_failure
+wait_for_cases || fail_test "Windows entry test batch failed"
 
 printf 'windows entry tests passed\n'

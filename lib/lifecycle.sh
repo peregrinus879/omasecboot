@@ -8,6 +8,10 @@ readonly PRODUCER_BASELINE_SCHEMA_VERSION=1
 readonly LEGACY_FINAL_PROOF_SCHEMA_VERSION=1
 readonly FINAL_PROOF_SCHEMA_VERSION=2
 readonly FIRMWARE_PROOF_SCHEMA_VERSION=1
+readonly BOOTNEXT_RECORD_SCHEMA_VERSION=1
+readonly WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY="efibootmgr 18-4"
+readonly WINDOWS_EFIBOOTMGR_EXECUTABLE="/usr/bin/efibootmgr"
+readonly WINDOWS_BOOTNEXT_LOADER_PATH='\EFI\Microsoft\Boot\bootmgfw.efi'
 readonly MAX_RECOVERY_ATTEMPT_SEALS=32
 readonly MAX_TRANSACTION_BACKUPS=4096
 readonly MAX_CONTROL_DOCUMENT_BYTES=1048576
@@ -119,6 +123,60 @@ transaction_artifact_reference() {
       schema_version: $schema,
       sha256: $hash
     }'
+}
+
+validate_bootnext_record_json() {
+  local transaction_id="$1" document="$2" manifest="$3"
+  jq -e --arg id "$transaction_id" \
+    --argjson schema "$BOOTNEXT_RECORD_SCHEMA_VERSION" \
+    --arg package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
+    --arg executable "$WINDOWS_EFIBOOTMGR_EXECUTABLE" \
+    --arg loader "$WINDOWS_BOOTNEXT_LOADER_PATH" \
+    --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def boot_number: type == "string" and test("^[0-9A-F]{4}$");
+    def safe_label:
+      type == "string" and length >= 1 and length <= 127 and
+      test("^[A-Za-z0-9][A-Za-z0-9 ._()+&-]{0,126}$") and
+      (endswith(" ") | not) and (contains("${") | not);
+    type == "object" and
+    keys == ["boot_id","efibootmgr","operation","prior","recorded_at","schema_version",
+      "target","transaction_id","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "windows-bootnext" and (.boot_id | uuid) and
+    .boot_id == $manifest.boot_id and (.recorded_at | timestamp) and
+    (.efibootmgr | type == "object" and
+      keys == ["executable","executable_sha256","package"] and
+      .package == $package and .executable == $executable and
+      (.executable_sha256 | digest)) and
+    (.target | type == "object" and
+      keys == ["boot_number","label","loader_path","partuuid"] and
+      (.boot_number | boot_number) and (.label | safe_label) and
+      (.partuuid | type == "string" and
+        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+      .loader_path == $loader) and
+    (.prior | type == "object" and keys == ["boot_number","present"] and
+      (.present | type == "boolean") and
+      (if .present then (.boot_number | boot_number) else .boot_number == null end))
+  ' <<< "$document" >/dev/null
+}
+
+validate_bootnext_record_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$BOOTNEXT_RECORD_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/bootnext.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_bootnext_record_json "$transaction_id" "$document" "$manifest"
 }
 
 validate_producer_baseline_json() {
@@ -1273,24 +1331,33 @@ validate_artifact_reference_file() {
 }
 
 validate_transaction_domain_records() {
-  local transaction_id="$1" document="$2" producer proof firmware path producer_document
+  local transaction_id="$1" document="$2" bootnext producer proof firmware
+  local path producer_document
   local kind status operation
   local extracted
   local -a fields
   extracted=$(jq -er '
+    (.domain_records.bootnext | tojson),
     (.domain_records.producer | tojson),
     (.domain_records.final_proof | tojson),
     (.domain_records.firmware | tojson),
     .kind, .status, .operation
   ' <<< "$document") || return 1
   mapfile -t fields <<< "$extracted"
-  [[ ${#fields[@]} -eq 6 ]] || return 1
-  producer=${fields[0]}
-  proof=${fields[1]}
-  firmware=${fields[2]}
-  kind=${fields[3]}
-  status=${fields[4]}
-  operation=${fields[5]}
+  [[ ${#fields[@]} -eq 7 ]] || return 1
+  bootnext=${fields[0]}
+  producer=${fields[1]}
+  proof=${fields[2]}
+  firmware=${fields[3]}
+  kind=${fields[4]}
+  status=${fields[5]}
+  operation=${fields[6]}
+
+  if [[ "$bootnext" != null ]]; then
+    [[ "$kind" == root && "$operation" == windows-bootnext \
+      && "$producer" == null ]] || return 1
+    validate_bootnext_record_reference "$transaction_id" "$bootnext" "$document" || return 1
+  fi
 
   if [[ "$producer" != null ]]; then
     [[ "$kind" == root ]] || return 1
@@ -1358,6 +1425,33 @@ validate_transaction_domain_records() {
           .readback_status == "verified" or .readback_status == "unchanged")) and
         [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
           ["db","KEK","PK"]
+       else true end)
+    ' <<< "$document" >/dev/null || return 1
+  fi
+  if [[ "$operation" == windows-bootnext ]]; then
+    [[ "$kind" == root && "$producer" == null && "$proof" == null \
+      && "$firmware" == null ]] || return 1
+    jq -e '
+      .target_state == "active" and .prior_state == "active" and
+      .file_rollback_policy == "restore" and
+      .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
+      .domain_records.final_proof == null and .domain_records.firmware == null and
+      .domain_records.managed_settings == null and
+      .domain_records.tracking_ownership == null and
+      .domain_records.unconfigure == null and .domain_records.windows == null and
+      (if .domain_records.bootnext == null then
+        .completed_phases == [] and
+        (.current_phase == null or .current_phase == "record-bootnext")
+       else
+        ((.completed_phases == [] and .current_phase == "record-bootnext") or
+         (.completed_phases == ["record-bootnext"] and
+           (.current_phase == null or .current_phase == "set-bootnext")) or
+         (.completed_phases == ["record-bootnext","set-bootnext"] and
+           .current_phase == null))
+       end) and
+      (if .status == "completed" then
+        .domain_records.bootnext != null and
+        .completed_phases == ["record-bootnext","set-bootnext"]
        else true end)
     ' <<< "$document" >/dev/null || return 1
   fi

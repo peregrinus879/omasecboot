@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154 # Transaction globals come from the sourced lifecycle module.
 # OmaSecBoot: validated Windows firmware handoff identity
 
 readonly WINDOWS_ENTRY_MARKER="# omasecboot:windows begin"
@@ -46,6 +47,10 @@ _windows_preflight_bitlocker_unknown=false
 _windows_preflight_loader_seen=false
 _windows_preflight_loader_unknown=false
 _windows_preflight_gum=""
+_windows_bootnext_record_json=""
+_windows_bootnext_record_path=""
+_windows_efibootmgr_fd=""
+_windows_efibootmgr_hash=""
 
 declare -ag _windows_order=()
 declare -Ag _windows_inventory_label=()
@@ -60,6 +65,34 @@ declare -ag _windows_preflight_bitlocker_devices=()
 declare -ag _windows_preflight_esp_candidates=()
 declare -ag _windows_preflight_signer_records=()
 declare -ag _windows_preflight_unknown_reasons=()
+
+windows_bootnext_failpoint() {
+  return 0
+}
+
+windows_bootnext_mutation_is_available() {
+  return 1
+}
+
+windows_efibootmgr_executable_path() {
+  printf '%s\n' "$WINDOWS_EFIBOOTMGR_EXECUTABLE"
+}
+
+windows_efibootmgr_query_path() {
+  if [[ "${_windows_efibootmgr_fd:-}" =~ ^[0-9]+$ ]]; then
+    printf '/proc/self/fd/%s\n' "$_windows_efibootmgr_fd"
+  else
+    windows_efibootmgr_executable_path
+  fi
+}
+
+close_windows_efibootmgr_boundary() {
+  if [[ "${_windows_efibootmgr_fd:-}" =~ ^[0-9]+$ ]]; then
+    exec {_windows_efibootmgr_fd}<&-
+  fi
+  _windows_efibootmgr_fd=""
+  _windows_efibootmgr_hash=""
+}
 
 windows_reject() {
   _windows_error="$1"
@@ -352,7 +385,7 @@ windows_parse_firmware_inventory() {
   local boot_pattern='^Boot([0-9A-F]{4})([* ]) (.*)$'
   local order_pattern='^([0-9A-F]{4})(,[0-9A-F]{4})*$'
   local data_pattern='^([0-9A-Fa-f]{2})( [0-9A-Fa-f]{2})*$'
-  local diagnostics_file old_umask command_rc=0 diagnostics=false
+  local diagnostics_file executable old_umask command_rc=0 diagnostics=false
   local -a raw_order=()
   local -A order_numbers=() dp_seen=()
   local LC_ALL=C
@@ -360,7 +393,8 @@ windows_parse_firmware_inventory() {
   _windows_error=""
   windows_reset_target
   windows_reset_inventory
-  command -v efibootmgr >/dev/null 2>&1 || {
+  executable=$(windows_efibootmgr_query_path) || return 1
+  [[ -x "$executable" ]] || {
     windows_reject "efibootmgr is required for Windows target discovery"
     return 1
   }
@@ -373,7 +407,7 @@ windows_parse_firmware_inventory() {
     return 1
   }
   umask "$old_umask"
-  inventory=$(LC_ALL=C efibootmgr -v 2> "$diagnostics_file") || command_rc=$?
+  inventory=$(LC_ALL=C "$executable" -v 2> "$diagnostics_file") || command_rc=$?
   [[ ! -s "$diagnostics_file" ]] || diagnostics=true
   rm -f "$diagnostics_file" 2>/dev/null || {
     windows_reject "Could not remove EFI boot-entry diagnostics"
@@ -1854,6 +1888,459 @@ revalidate_windows_target_state() {
     windows_reject "Persisted Windows target identity is stale"
     return 2
   }
+}
+
+windows_bootnext_efivars_dir() {
+  printf '/sys/firmware/efi/efivars\n'
+}
+
+windows_bootnext_variable_path() {
+  printf '%s/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' \
+    "$(windows_bootnext_efivars_dir)"
+}
+
+windows_validate_efivarfs_mount() {
+  local directory mount_info target fstype extra
+  directory=$(windows_bootnext_efivars_dir) || return 1
+  [[ -d "$directory" && ! -L "$directory" ]] || {
+    windows_reject "EFI variable filesystem is unavailable"
+    return 1
+  }
+  mount_info=$(findmnt --noheadings --raw --target "$directory" \
+    --output TARGET,FSTYPE 2>/dev/null) || {
+    windows_reject "Cannot resolve the EFI variable filesystem"
+    return 1
+  }
+  read -r target fstype extra <<< "$mount_info"
+  [[ -z "$extra" && "$target" == "$directory" && "$fstype" == efivarfs ]] || {
+    windows_reject "EFI variables are not backed by the expected efivarfs mount"
+    return 1
+  }
+}
+
+read_windows_bootnext_state() {
+  local directory path basename directory_identity matches owner uid mode size device inode
+  local extra mode_value fd bytes_text
+  local post_uid post_mode post_size post_device post_inode post_extra number
+  local -a bytes=()
+  windows_validate_efivarfs_mount || return 1
+  directory=$(windows_bootnext_efivars_dir) || return 1
+  path=$(windows_bootnext_variable_path) || return 1
+  basename=${path##*/}
+  [[ "$path" == "${directory}/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c" ]] \
+    || return 1
+  validate_control_directory "$directory" || {
+    windows_reject "EFI variable filesystem permissions are unsafe"
+    return 1
+  }
+  directory_identity=$(stat -Lc '%d:%i' "$directory" 2>/dev/null) || return 1
+  matches=$(find -P "$directory" -mindepth 1 -maxdepth 1 -name "$basename" \
+    -printf '%p\n' 2>/dev/null) || {
+      windows_reject "Cannot scan the EFI variable filesystem"
+      return 1
+    }
+  windows_validate_efivarfs_mount || return 1
+  [[ $(stat -Lc '%d:%i' "$directory" 2>/dev/null) == "$directory_identity" ]] || {
+    windows_reject "EFI variable filesystem changed while it was scanned"
+    return 1
+  }
+  if [[ -z "$matches" ]]; then
+    jq -cn '{boot_number:null,present:false}'
+    return
+  fi
+  [[ "$matches" == "$path" ]] || {
+    windows_reject "BootNext EFI variable lookup is ambiguous"
+    return 1
+  }
+  [[ -f "$path" && ! -L "$path" ]] || {
+    windows_reject "BootNext EFI variable is not a safe regular file"
+    return 1
+  }
+  owner=$(control_owner_uid) || return 1
+  read -r uid mode size device inode extra \
+    < <(stat -Lc '%u %a %s %d %i' "$path" 2>/dev/null) || {
+      windows_reject "Cannot inspect the BootNext EFI variable"
+      return 1
+    }
+  [[ -z "$extra" && "$uid" == "$owner" && "$mode" =~ ^[0-7]{3,4}$ \
+    && "$size" == 6 && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || {
+    windows_reject "BootNext EFI variable metadata is invalid"
+    return 1
+  }
+  mode_value=$((8#$mode))
+  (( (mode_value & 0022) == 0 )) || {
+    windows_reject "BootNext EFI variable permissions are unsafe"
+    return 1
+  }
+  exec {fd}< "$path" || {
+    windows_reject "Cannot open the BootNext EFI variable"
+    return 1
+  }
+  if ! bytes_text=$(od -An -v -tu1 -N 6 "/proc/self/fd/${fd}" 2>/dev/null); then
+    exec {fd}<&-
+    windows_reject "Cannot read the BootNext EFI variable"
+    return 1
+  fi
+  read -r -a bytes <<< "$bytes_text"
+  read -r post_uid post_mode post_size post_device post_inode post_extra \
+    < <(stat -Lc '%u %a %s %d %i' "/proc/self/fd/${fd}" 2>/dev/null) || {
+      exec {fd}<&-
+      windows_reject "Cannot revalidate the BootNext EFI variable"
+      return 1
+    }
+  exec {fd}<&-
+  [[ -z "$post_extra" && "$post_uid" == "$uid" && "$post_mode" == "$mode" \
+    && "$post_size" == "$size" && "$post_device" == "$device" \
+    && "$post_inode" == "$inode" \
+    && $(stat -Lc '%d:%i' "$path" 2>/dev/null) == "${device}:${inode}" \
+    && ${#bytes[@]} -eq 6 ]] || {
+    windows_reject "BootNext EFI variable changed while it was read"
+    return 1
+  }
+  (( bytes[0] == 7 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0 )) || {
+    windows_reject "BootNext EFI variable attributes are unsupported"
+    return 1
+  }
+  number=$((bytes[4] + (bytes[5] << 8)))
+  printf -v number '%04X' "$number"
+  jq -cn --arg number "$number" '{boot_number:$number,present:true}'
+}
+
+validate_windows_efibootmgr_boundary() {
+  local package owner path path_uid path_mode path_device path_inode
+  local fd_path fd_uid fd_mode fd_device fd_inode executable_hash
+  close_windows_efibootmgr_boundary
+  path=$(windows_efibootmgr_executable_path) || return 1
+  [[ "$path" == "$WINDOWS_EFIBOOTMGR_EXECUTABLE" ]] || return 1
+  package=$(/usr/bin/pacman -Q efibootmgr 2>/dev/null) || {
+    windows_reject "Cannot verify the installed efibootmgr package"
+    return 1
+  }
+  [[ "$package" == "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" ]] || {
+    windows_reject "Unsupported efibootmgr package: ${package}"
+    return 1
+  }
+  owner=$(/usr/bin/pacman -Qqo "$path" 2>/dev/null) || {
+    windows_reject "Cannot verify ownership of the efibootmgr executable"
+    return 1
+  }
+  [[ "$owner" == efibootmgr && -x "$path" ]] || {
+    windows_reject "The supported package does not own the efibootmgr executable"
+    return 1
+  }
+  validate_control_file "$path" || {
+    windows_reject "The efibootmgr executable is unsafe"
+    return 1
+  }
+  read -r path_uid path_mode path_device path_inode \
+    < <(stat -Lc '%u %a %d %i' "$path" 2>/dev/null) || return 1
+  exec {_windows_efibootmgr_fd}< "$path" || {
+    windows_reject "Cannot bind the efibootmgr executable"
+    return 1
+  }
+  fd_path="/proc/self/fd/${_windows_efibootmgr_fd}"
+  read -r fd_uid fd_mode fd_device fd_inode \
+    < <(stat -Lc '%u %a %d %i' "$fd_path" 2>/dev/null) || {
+      close_windows_efibootmgr_boundary
+      return 1
+    }
+  [[ "$fd_uid" == "$path_uid" && "$fd_mode" == "$path_mode" \
+    && "$fd_device" == "$path_device" && "$fd_inode" == "$path_inode" ]] || {
+      close_windows_efibootmgr_boundary
+      windows_reject "The efibootmgr executable changed while it was opened"
+      return 1
+    }
+  executable_hash=$(sha256_file "$fd_path") || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  [[ "$executable_hash" =~ ^[0-9a-f]{64}$ \
+    && $(stat -Lc '%d:%i' "$path" 2>/dev/null) == "${fd_device}:${fd_inode}" ]] || {
+      close_windows_efibootmgr_boundary
+      windows_reject "The efibootmgr executable changed while it was validated"
+      return 1
+    }
+  _windows_efibootmgr_hash="$executable_hash"
+}
+
+run_windows_efibootmgr() {
+  [[ "${_windows_efibootmgr_fd:-}" =~ ^[0-9]+$ ]] || return 1
+  "/proc/self/fd/${_windows_efibootmgr_fd}" "$@"
+}
+
+hash_bound_windows_efibootmgr() {
+  [[ "${_windows_efibootmgr_fd:-}" =~ ^[0-9]+$ ]] || return 1
+  sha256_file "/proc/self/fd/${_windows_efibootmgr_fd}"
+}
+
+windows_bootnext_exact_target_is_current() {
+  local record="$1"
+  read_windows_target_state || return 1
+  resolve_windows_target || {
+    windows_report_error
+    return 1
+  }
+  windows_state_matches_resolved_target || {
+    windows_reject "Persisted Windows target identity is stale"
+    return 1
+  }
+  jq -e \
+    --arg boot_number "$_windows_state_boot_number" \
+    --arg label "$_windows_state_label" \
+    --arg partuuid "$_windows_state_partuuid" \
+    --arg loader_path "$_windows_state_loader_path" '
+      .target == {
+        boot_number: $boot_number,
+        label: $label,
+        loader_path: $loader_path,
+        partuuid: $partuuid
+      }
+    ' <<< "$record" >/dev/null || {
+      windows_reject "The persisted Windows target does not match the BootNext record"
+      return 1
+    }
+}
+
+windows_bootnext_preflight() {
+  windows_bootnext_mutation_is_available || {
+    fail "Windows BootNext mutation is not available in this build"
+    return 1
+  }
+  read_windows_target_state || return 1
+  resolve_windows_target || {
+    windows_report_error
+    return 1
+  }
+  windows_state_matches_resolved_target || {
+    windows_reject "Persisted Windows target identity is stale"
+    return 1
+  }
+  read_windows_bootnext_state >/dev/null || {
+    windows_report_error
+    return 1
+  }
+  validate_windows_efibootmgr_boundary || {
+    windows_report_error
+    return 1
+  }
+  close_windows_efibootmgr_boundary
+}
+
+persist_windows_bootnext_record() {
+  local prior="$1" executable_hash="$2" transaction_dir path boot_id timestamp
+  local document reference
+  [[ "$WINDOWS_BOOTNEXT_LOADER_PATH" == "$WINDOWS_LOADER_UEFI" ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/bootnext.json"
+  boot_id=$(boot_id_value) || return 1
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$BOOTNEXT_RECORD_SCHEMA_VERSION" \
+    --arg transaction_id "$_transaction_id" \
+    --arg writer_version "$OMASECBOOT_VERSION" \
+    --arg boot_id "$boot_id" \
+    --arg recorded_at "$timestamp" \
+    --arg executable "$WINDOWS_EFIBOOTMGR_EXECUTABLE" \
+    --arg executable_sha256 "$executable_hash" \
+    --arg package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
+    --arg boot_number "$_windows_state_boot_number" \
+    --arg label "$_windows_state_label" \
+    --arg loader_path "$_windows_state_loader_path" \
+    --arg partuuid "$_windows_state_partuuid" \
+    --argjson prior "$prior" '{
+      schema_version: $schema,
+      transaction_id: $transaction_id,
+      writer_version: $writer_version,
+      operation: "windows-bootnext",
+      boot_id: $boot_id,
+      recorded_at: $recorded_at,
+      efibootmgr: {
+        package: $package,
+        executable: $executable,
+        executable_sha256: $executable_sha256
+      },
+      target: {
+        boot_number: $boot_number,
+        label: $label,
+        partuuid: $partuuid,
+        loader_path: $loader_path
+      },
+      prior: $prior
+    }') || return 1
+  validate_bootnext_record_json "$_transaction_id" "$document" "$_manifest_json" || return 1
+  printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  reference=$(transaction_artifact_reference "$path" "$BOOTNEXT_RECORD_SCHEMA_VERSION") \
+    || return 1
+  transaction_set_domain_record bootnext "$reference" || return 1
+  _windows_bootnext_record_json="$document"
+  _windows_bootnext_record_path="$path"
+}
+
+load_windows_bootnext_record() {
+  local reference path
+  read_transaction_manifest "$_transaction_id" || return 1
+  reference=$(jq -c '.domain_records.bootnext' <<< "$_manifest_json") || return 1
+  [[ "$reference" != null ]] || return 1
+  validate_bootnext_record_reference "$_transaction_id" "$reference" "$_manifest_json" \
+    || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  _windows_bootnext_record_json=$(read_control_document "$path") || return 1
+  _windows_bootnext_record_path="$path"
+}
+
+record_and_set_windows_bootnext() {
+  local prior executable_hash boot_id current_hash target_number command_rc observed
+  transaction_phase_start "record-bootnext" || return 1
+  read_windows_target_state || return 1
+  resolve_windows_target || {
+    windows_report_error
+    return 1
+  }
+  windows_state_matches_resolved_target || {
+    windows_reject "Persisted Windows target identity is stale"
+    return 1
+  }
+  prior=$(read_windows_bootnext_state) || {
+    windows_report_error
+    return 1
+  }
+  validate_windows_efibootmgr_boundary || {
+    windows_report_error
+    return 1
+  }
+  executable_hash="$_windows_efibootmgr_hash"
+  close_windows_efibootmgr_boundary
+  persist_windows_bootnext_record "$prior" "$executable_hash" || return 1
+  windows_bootnext_failpoint "after-bootnext-record" || return 1
+  transaction_phase_complete "record-bootnext" || return 1
+
+  transaction_phase_start "set-bootnext" || return 1
+  load_windows_bootnext_record || return 1
+  boot_id=$(boot_id_value) || return 1
+  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
+    windows_reject "The system boot changed before the BootNext write"
+    return 1
+  }
+  validate_windows_efibootmgr_boundary || {
+    windows_report_error
+    return 1
+  }
+  windows_bootnext_failpoint "before-target-revalidation" || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  windows_bootnext_exact_target_is_current "$_windows_bootnext_record_json" || {
+    close_windows_efibootmgr_boundary
+    windows_report_error
+    return 1
+  }
+  current_hash=$(hash_bound_windows_efibootmgr) || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
+    <<< "$_windows_bootnext_record_json" >/dev/null || {
+      close_windows_efibootmgr_boundary
+      windows_reject "The efibootmgr executable changed before the BootNext write"
+      return 1
+    }
+  boot_id=$(boot_id_value) || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
+    close_windows_efibootmgr_boundary
+    windows_reject "The system boot changed before the BootNext write"
+    return 1
+  }
+  prior=$(read_windows_bootnext_state) || {
+    close_windows_efibootmgr_boundary
+    windows_report_error
+    return 1
+  }
+  jq -e --argjson prior "$prior" '.prior == $prior' \
+    <<< "$_windows_bootnext_record_json" >/dev/null || {
+      close_windows_efibootmgr_boundary
+      windows_reject "BootNext changed after its prior value was recorded"
+      return 1
+    }
+  windows_bootnext_mutation_is_available || {
+    close_windows_efibootmgr_boundary
+    fail "Windows BootNext mutation is not available in this build"
+    return 1
+  }
+  target_number=$(jq -r '.target.boot_number' <<< "$_windows_bootnext_record_json") \
+    || {
+      close_windows_efibootmgr_boundary
+      return 1
+    }
+  command_rc=0
+  run_windows_efibootmgr -n "$target_number" || command_rc=$?
+  windows_bootnext_failpoint "after-bootnext-command" || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  observed=$(read_windows_bootnext_state) || {
+    close_windows_efibootmgr_boundary
+    windows_report_error
+    return 1
+  }
+  [[ $command_rc -eq 0 ]] || {
+    close_windows_efibootmgr_boundary
+    fail "efibootmgr failed while setting BootNext"
+    return "$command_rc"
+  }
+  jq -e --arg target "$target_number" \
+    '.present == true and .boot_number == $target' <<< "$observed" >/dev/null || {
+      close_windows_efibootmgr_boundary
+      windows_reject "BootNext readback does not match the requested Windows target"
+      windows_report_error
+      return 1
+    }
+  windows_bootnext_exact_target_is_current "$_windows_bootnext_record_json" || {
+    close_windows_efibootmgr_boundary
+    windows_report_error
+    return 1
+  }
+  current_hash=$(hash_bound_windows_efibootmgr) || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
+    <<< "$_windows_bootnext_record_json" >/dev/null || {
+      close_windows_efibootmgr_boundary
+      windows_reject "The efibootmgr executable changed after the BootNext write"
+      return 1
+    }
+  boot_id=$(boot_id_value) || {
+    close_windows_efibootmgr_boundary
+    return 1
+  }
+  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
+    close_windows_efibootmgr_boundary
+    windows_reject "The system boot changed after the BootNext write"
+    return 1
+  }
+  observed=$(read_windows_bootnext_state) || {
+    close_windows_efibootmgr_boundary
+    windows_report_error
+    return 1
+  }
+  jq -e --arg target "$target_number" \
+    '.present == true and .boot_number == $target' <<< "$observed" >/dev/null || {
+      close_windows_efibootmgr_boundary
+      windows_reject "BootNext changed during final target verification"
+      windows_report_error
+      return 1
+    }
+  close_windows_efibootmgr_boundary
+  transaction_phase_complete "set-bootnext"
+}
+
+run_dormant_windows_bootnext() {
+  run_lifecycle_transaction_with_preflight "windows-bootnext" "active" "active" \
+    windows_bootnext_preflight record_and_set_windows_bootnext
 }
 
 windows_managed_block_state() {

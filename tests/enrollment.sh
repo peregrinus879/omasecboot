@@ -6,10 +6,23 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-enrollment.XXXXXX")
 
 cleanup() {
+  local pid
+  trap - EXIT INT TERM HUP
+  if declare -p run_case_pids >/dev/null 2>&1; then
+    for pid in "${run_case_pids[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in "${run_case_pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
   release_boot_repair_lock 2>/dev/null || true
   rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 fail_test() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -1493,12 +1506,63 @@ test_firmware_recovery_leaves_unreadable_pending() {
 }
 
 run_case() {
-  local name="$1" function="$2"
+  local name="$1" function="$2" log pid registration_signal=""
+  log="${TEST_DIR}/case-${name}.log"
+  trap 'registration_signal=INT' INT
+  trap 'registration_signal=TERM' TERM
+  trap 'registration_signal=HUP' HUP
   (
     trap - EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
     "$function"
-  ) || fail_test "case failed: ${name}"
+  ) > "$log" 2>&1 &
+  pid=$!
+  run_case_pids+=("$pid")
+  run_case_names+=("$name")
+  run_case_logs+=("$log")
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  case "$registration_signal" in
+    INT) return 130 ;;
+    TERM) return 143 ;;
+    HUP) return 129 ;;
+  esac
+  if (( ${#run_case_pids[@]} >= enrollment_test_jobs )); then
+    wait_for_cases || fail_test "enrollment test batch failed"
+  fi
 }
+
+replay_case_log() {
+  local log="$1" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "$line" >&2
+  done < "$log"
+}
+
+wait_for_cases() {
+  local index rc failed=false
+  for index in "${!run_case_pids[@]}"; do
+    rc=0
+    wait "${run_case_pids[$index]}" || rc=$?
+    replay_case_log "${run_case_logs[$index]}"
+    if (( rc != 0 )); then
+      printf 'FAIL: case failed: %s\n' "${run_case_names[$index]}" >&2
+      failed=true
+    fi
+  done
+  run_case_pids=()
+  run_case_names=()
+  run_case_logs=()
+  [[ "$failed" == false ]]
+}
+
+enrollment_test_jobs=${ENROLLMENT_TEST_JOBS:-4}
+[[ "$enrollment_test_jobs" =~ ^[1-9][0-9]*$ && $enrollment_test_jobs -le 16 ]] \
+  || fail_test "ENROLLMENT_TEST_JOBS must be between 1 and 16"
+declare -a run_case_pids=() run_case_names=() run_case_logs=()
 
 run_case parser test_esl_parser
 run_case classifier test_setup_classifier
@@ -1530,5 +1594,6 @@ run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry
 run_case recovery-retry-limit test_firmware_recovery_retry_limit_is_cumulative
 run_case recovery-post-pk-effect test_firmware_recovery_completes_post_pk_effect
 run_case recovery-unreadable-pending test_firmware_recovery_leaves_unreadable_pending
+wait_for_cases || fail_test "enrollment test batch failed"
 
 printf 'enrollment tests passed\n'

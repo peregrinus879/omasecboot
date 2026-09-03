@@ -87,7 +87,8 @@ package_targets_change_pinned_producer() {
   local state
   state=$(jq -er '
     if index("limine-mkinitcpio-hook") != null or
-      index("limine-snapper-sync") != null
+      index("limine-snapper-sync") != null or
+      index("efibootmgr") != null
     then "blocked" else "clear" end
   ' <<< "$_producer_targets_json") || return 2
   [[ "$state" == blocked ]]

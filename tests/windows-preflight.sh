@@ -310,6 +310,10 @@ control_owner_uid() {
   id -u
 }
 
+windows_efibootmgr_executable_path() {
+  printf '%s/efibootmgr\n' "$BIN_DIR"
+}
+
 check_root() {
   :
 }

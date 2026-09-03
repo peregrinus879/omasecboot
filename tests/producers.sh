@@ -590,16 +590,18 @@ set -e
   || fail_test "active malformed package targets were not drained before rejection"
 grep -Fq 'package targets are invalid' "$invalid_targets_output" \
   || fail_test "malformed package targets omitted their rejection reason"
-pinned_targets_output="$CASE_DIR/pinned-targets.out"
-if producer_package_pre <<< 'limine-snapper-sync' \
-  > "$pinned_targets_output" 2>&1; then
-  fail_test "active lifecycle admitted a pinned producer package change"
-fi
-grep -Fq 'disable lifecycle before changing pinned producers' "$pinned_targets_output" \
-  || fail_test "pinned producer package change omitted its rejection reason"
-read_lifecycle || fail_test "pinned producer rejection damaged lifecycle state"
-[[ "$_lifecycle_state" == active ]] \
-  || fail_test "pinned producer package rejection changed lifecycle state"
+for pinned_target in limine-snapper-sync efibootmgr; do
+  pinned_targets_output="${CASE_DIR}/pinned-targets-${pinned_target}.out"
+  if producer_package_pre <<< "$pinned_target" \
+    > "$pinned_targets_output" 2>&1; then
+    fail_test "active lifecycle admitted pinned package change: ${pinned_target}"
+  fi
+  grep -Fq 'disable lifecycle before changing pinned producers' "$pinned_targets_output" \
+    || fail_test "pinned package change omitted its rejection reason: ${pinned_target}"
+  read_lifecycle || fail_test "pinned package rejection damaged lifecycle state"
+  [[ "$_lifecycle_state" == active ]] \
+    || fail_test "pinned package rejection changed lifecycle state: ${pinned_target}"
+done
 producer_package_pre <<'EOF' || fail_test "package producer lease was not published"
 usr/lib/modules/6.18.0/modules.builtin
 usr/lib/initcpio/install/base
