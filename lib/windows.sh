@@ -51,6 +51,12 @@ _windows_bootnext_record_json=""
 _windows_bootnext_record_path=""
 _windows_efibootmgr_fd=""
 _windows_efibootmgr_hash=""
+_windows_unlink_fd=""
+_windows_unlink_hash=""
+_windows_recovery_plan_json=""
+_windows_recovery_record_json=""
+_windows_recovery_record_path=""
+_windows_recovery_command_rc="null"
 
 declare -ag _windows_order=()
 declare -Ag _windows_inventory_label=()
@@ -70,12 +76,24 @@ windows_bootnext_failpoint() {
   return 0
 }
 
+windows_recovery_failpoint() {
+  return 0
+}
+
 windows_bootnext_mutation_is_available() {
   return 1
 }
 
+windows_recovery_is_available() {
+  return 0
+}
+
 windows_efibootmgr_executable_path() {
   printf '%s\n' "$WINDOWS_EFIBOOTMGR_EXECUTABLE"
+}
+
+windows_unlink_executable_path() {
+  printf '%s\n' "$WINDOWS_UNLINK_EXECUTABLE"
 }
 
 windows_efibootmgr_query_path() {
@@ -92,6 +110,14 @@ close_windows_efibootmgr_boundary() {
   fi
   _windows_efibootmgr_fd=""
   _windows_efibootmgr_hash=""
+}
+
+close_windows_unlink_boundary() {
+  if [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ ]]; then
+    exec {_windows_unlink_fd}<&-
+  fi
+  _windows_unlink_fd=""
+  _windows_unlink_hash=""
 }
 
 windows_reject() {
@@ -1890,15 +1916,6 @@ revalidate_windows_target_state() {
   }
 }
 
-windows_bootnext_efivars_dir() {
-  printf '/sys/firmware/efi/efivars\n'
-}
-
-windows_bootnext_variable_path() {
-  printf '%s/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' \
-    "$(windows_bootnext_efivars_dir)"
-}
-
 windows_validate_efivarfs_mount() {
   local directory mount_info target fstype extra
   directory=$(windows_bootnext_efivars_dir) || return 1
@@ -2071,6 +2088,564 @@ run_windows_efibootmgr() {
 hash_bound_windows_efibootmgr() {
   [[ "${_windows_efibootmgr_fd:-}" =~ ^[0-9]+$ ]] || return 1
   sha256_file "/proc/self/fd/${_windows_efibootmgr_fd}"
+}
+
+validate_windows_unlink_boundary() {
+  local package owner path path_uid path_mode path_device path_inode
+  local fd_path fd_uid fd_mode fd_device fd_inode executable_hash
+  close_windows_unlink_boundary
+  path=$(windows_unlink_executable_path) || return 1
+  [[ "$path" == "$WINDOWS_UNLINK_EXECUTABLE" ]] || return 1
+  package=$(/usr/bin/pacman -Q coreutils 2>/dev/null) || {
+    windows_reject "Cannot verify the installed coreutils package"
+    return 1
+  }
+  [[ "$package" == "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]] || {
+    windows_reject "Unsupported coreutils package: ${package}"
+    return 1
+  }
+  owner=$(/usr/bin/pacman -Qqo "$path" 2>/dev/null) || {
+    windows_reject "Cannot verify ownership of the unlink executable"
+    return 1
+  }
+  [[ "$owner" == coreutils && -x "$path" ]] || {
+    windows_reject "The supported package does not own the unlink executable"
+    return 1
+  }
+  validate_control_file "$path" || {
+    windows_reject "The unlink executable is unsafe"
+    return 1
+  }
+  read -r path_uid path_mode path_device path_inode \
+    < <(stat -Lc '%u %a %d %i' "$path" 2>/dev/null) || return 1
+  exec {_windows_unlink_fd}< "$path" || {
+    windows_reject "Cannot bind the unlink executable"
+    return 1
+  }
+  fd_path="/proc/self/fd/${_windows_unlink_fd}"
+  read -r fd_uid fd_mode fd_device fd_inode \
+    < <(stat -Lc '%u %a %d %i' "$fd_path" 2>/dev/null) || {
+      close_windows_unlink_boundary
+      return 1
+    }
+  [[ "$fd_uid" == "$path_uid" && "$fd_mode" == "$path_mode" \
+    && "$fd_device" == "$path_device" && "$fd_inode" == "$path_inode" ]] || {
+      close_windows_unlink_boundary
+      windows_reject "The unlink executable changed while it was opened"
+      return 1
+    }
+  executable_hash=$(sha256_file "$fd_path") || {
+    close_windows_unlink_boundary
+    return 1
+  }
+  [[ "$executable_hash" =~ ^[0-9a-f]{64}$ \
+    && $(stat -Lc '%d:%i' "$path" 2>/dev/null) == "${fd_device}:${fd_inode}" ]] || {
+      close_windows_unlink_boundary
+      windows_reject "The unlink executable changed while it was validated"
+      return 1
+    }
+  _windows_unlink_hash="$executable_hash"
+}
+
+run_windows_unlink() {
+  local path="$1"
+  [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ \
+    && "$path" == "$(windows_bootnext_variable_path)" ]] || return 1
+  "/proc/self/fd/${_windows_unlink_fd}" "$path"
+}
+
+hash_bound_windows_unlink() {
+  [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ ]] || return 1
+  sha256_file "/proc/self/fd/${_windows_unlink_fd}"
+}
+
+capture_windows_bootnext_variable_evidence() {
+  local path state before_identity after_identity before_hash after_hash
+  path=$(windows_bootnext_variable_path) || return 1
+  state=$(read_windows_bootnext_state) || return 1
+  [[ $(jq -r '.present' <<< "$state") == true ]] || return 1
+  before_identity=$(stat -Lc '%d:%i' "$path" 2>/dev/null) || return 1
+  before_hash=$(sha256_file "$path") || return 1
+  after_identity=$(stat -Lc '%d:%i' "$path" 2>/dev/null) || return 1
+  after_hash=$(sha256_file "$path") || return 1
+  [[ "$before_identity" == "$after_identity" && "$before_hash" == "$after_hash" ]] \
+    || return 1
+  jq -cn --arg path "$path" --arg identity "$before_identity" --arg hash "$before_hash" '{
+    path: $path,
+    identity: $identity,
+    sha256: $hash
+  }'
+}
+
+load_windows_recovery_context() {
+  local root_id reference path record root_boot_id recovery_boot_id relation prior observed
+  local target action outcome write_frontier tool=null variable=null current_hash
+  local first_state second_state
+  windows_recovery_is_available || return 1
+  load_recovery_context || return $?
+  [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
+    windows-recovery ]] || return 1
+  jq -e '
+    .kind == "root" and .operation == "windows-bootnext" and
+    .target_state == "active" and .prior_state == "active" and
+    .file_rollback_policy == "restore" and .domain_records.producer == null and
+    .domain_records.final_proof == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and
+    .domain_records.tracking_ownership == null and
+    .domain_records.unconfigure == null and .domain_records.windows == null and
+    .firmware_backup == null and .enrollment_plan == null and .firmware_writes == []
+  ' <<< "$_recovery_root_manifest_json" >/dev/null || return 1
+  root_id=$(jq -r '.id' <<< "$_recovery_root_reference") || return 1
+  reference=$(jq -c '.domain_records.bootnext' <<< "$_recovery_root_manifest_json") \
+    || return 1
+  recovery_boot_id=$(boot_id_value) || return 1
+  if [[ "$reference" == null ]]; then
+    _windows_recovery_plan_json=$(jq -cn \
+      --arg recovery_boot_id "$recovery_boot_id" \
+      --argjson root_incident "$_recovery_root_reference" '{
+        action: "none",
+        bootnext_record: null,
+        observed: null,
+        planned_outcome: "not-published",
+        prior: null,
+        recovery_boot_id: $recovery_boot_id,
+        relation: null,
+        root_boot_id: null,
+        root_incident: $root_incident,
+        target: null,
+        tool: null,
+        variable: null,
+        write_frontier: "not-published"
+      }') || return 1
+    return 0
+  fi
+
+  validate_bootnext_record_reference "$root_id" "$reference" \
+    "$_recovery_root_manifest_json" || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  record=$(read_control_document "$path") || return 1
+  root_boot_id=$(jq -r '.boot_id' <<< "$record") || return 1
+  if [[ "$root_boot_id" == "$recovery_boot_id" ]]; then
+    relation=same-boot
+  else
+    relation=later-boot
+  fi
+  prior=$(jq -c '.prior' <<< "$record") || return 1
+  target=$(jq -r '.target.boot_number' <<< "$record") || return 1
+  if jq -e '.completed_phases | index("record-bootnext") != null' \
+    <<< "$_recovery_root_manifest_json" >/dev/null; then
+    write_frontier=write-possible
+  else
+    write_frontier=not-reached
+  fi
+  observed=$(read_windows_bootnext_state) || {
+    windows_reject "BootNext is unreadable during Windows recovery classification"
+    windows_report_error
+    return 1
+  }
+  if [[ "$write_frontier" == not-reached ]]; then
+    jq -e --argjson prior "$prior" '. == $prior' <<< "$observed" >/dev/null || {
+      windows_reject "BootNext changed after a root transaction that never reached its write phase"
+      windows_report_error
+      return 1
+    }
+    action=none
+    outcome="prior-unchanged"
+  elif [[ "$relation" == later-boot \
+    && $(jq -r '.present' <<< "$observed") == false ]]; then
+    action=none
+    outcome=consumed-unknown
+  elif jq -e --argjson prior "$prior" '. == $prior' <<< "$observed" >/dev/null; then
+    action=none
+    outcome="prior-unchanged"
+  elif jq -e --arg target "$target" \
+    '.present == true and .boot_number == $target' <<< "$observed" >/dev/null; then
+    outcome="prior-restored"
+    if [[ $(jq -r '.present' <<< "$prior") == true ]]; then
+      action=set-prior
+      validate_windows_efibootmgr_boundary || {
+        windows_report_error
+        return 1
+      }
+      current_hash=$(hash_bound_windows_efibootmgr) || {
+        close_windows_efibootmgr_boundary
+        return 1
+      }
+      jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
+        <<< "$record" >/dev/null || {
+          close_windows_efibootmgr_boundary
+          windows_reject "The recorded efibootmgr executable is no longer available"
+          windows_report_error
+          return 1
+        }
+      tool=$(jq -c '.efibootmgr' <<< "$record") || {
+        close_windows_efibootmgr_boundary
+        return 1
+      }
+      close_windows_efibootmgr_boundary
+    else
+      action=delete
+      first_state="$observed"
+      variable=$(capture_windows_bootnext_variable_evidence) || return 1
+      second_state=$(read_windows_bootnext_state) || return 1
+      jq -e --argjson expected "$first_state" '. == $expected' \
+        <<< "$second_state" >/dev/null || return 1
+      validate_windows_unlink_boundary || {
+        windows_report_error
+        return 1
+      }
+      current_hash=$(hash_bound_windows_unlink) || {
+        close_windows_unlink_boundary
+        return 1
+      }
+      tool=$(jq -cn \
+        --arg package "$WINDOWS_UNLINK_PACKAGE_IDENTITY" \
+        --arg executable "$WINDOWS_UNLINK_EXECUTABLE" \
+        --arg hash "$current_hash" '{
+          package: $package,
+          executable: $executable,
+          executable_sha256: $hash
+        }') || {
+          close_windows_unlink_boundary
+          return 1
+        }
+      close_windows_unlink_boundary
+    fi
+  else
+    windows_reject "BootNext no longer matches the recorded prior state or Windows target"
+    windows_report_error
+    return 1
+  fi
+  _windows_recovery_plan_json=$(jq -cn \
+    --arg action "$action" \
+    --arg outcome "$outcome" \
+    --arg recovery_boot_id "$recovery_boot_id" \
+    --arg relation "$relation" \
+    --arg root_boot_id "$root_boot_id" \
+    --arg target "$target" \
+    --arg write_frontier "$write_frontier" \
+    --argjson bootnext_record "$reference" \
+    --argjson observed "$observed" \
+    --argjson prior "$prior" \
+    --argjson root_incident "$_recovery_root_reference" \
+    --argjson tool "$tool" \
+    --argjson variable "$variable" '{
+      action: $action,
+      bootnext_record: $bootnext_record,
+      observed: $observed,
+      planned_outcome: $outcome,
+      prior: $prior,
+      recovery_boot_id: $recovery_boot_id,
+      relation: $relation,
+      root_boot_id: $root_boot_id,
+      root_incident: $root_incident,
+      target: $target,
+      tool: $tool,
+      variable: $variable,
+      write_frontier: $write_frontier
+    }')
+}
+
+persist_windows_recovery_record() {
+  local transaction_dir path timestamp document reference
+  [[ -n "$_windows_recovery_plan_json" ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/windows-recovery.json"
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION" \
+    --arg transaction_id "$_transaction_id" \
+    --arg writer_version "$OMASECBOOT_VERSION" \
+    --arg recorded_at "$timestamp" \
+    --argjson plan "$_windows_recovery_plan_json" '
+      $plan + {
+        schema_version: $schema,
+        transaction_id: $transaction_id,
+        writer_version: $writer_version,
+        operation: "windows-recovery",
+        recorded_at: $recorded_at
+      }
+    ') || return 1
+  validate_windows_recovery_record_json "$_transaction_id" "$document" "$_manifest_json" \
+    || return 1
+  printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  reference=$(transaction_artifact_reference "$path" \
+    "$WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION") || return 1
+  transaction_set_domain_record windows "$reference" || return 1
+  _windows_recovery_record_json="$document"
+  _windows_recovery_record_path="$path"
+}
+
+load_windows_recovery_record() {
+  local reference path
+  read_transaction_manifest "$_transaction_id" || return 1
+  reference=$(jq -c '.domain_records.windows' <<< "$_manifest_json") || return 1
+  [[ "$reference" != null ]] || return 1
+  validate_windows_recovery_record_reference "$_transaction_id" "$reference" \
+    "$_manifest_json" || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  _windows_recovery_record_json=$(read_control_document "$path") || return 1
+  _windows_recovery_record_path="$path"
+}
+
+execute_windows_recovery_action() {
+  local action recovery_boot_id observed expected_hash prior_number variable current_variable
+  local current_state
+  local command_rc=0
+  load_windows_recovery_record || return 1
+  action=$(jq -r '.action' <<< "$_windows_recovery_record_json") || return 1
+  recovery_boot_id=$(jq -r '.recovery_boot_id' <<< "$_windows_recovery_record_json") \
+    || return 1
+  [[ "$recovery_boot_id" == "$(boot_id_value)" ]] || {
+    windows_reject "The system boot changed during Windows recovery"
+    return 1
+  }
+  windows_recovery_is_available || return 1
+  if [[ "$action" == none ]]; then
+    _windows_recovery_command_rc=null
+    return 0
+  fi
+  observed=$(jq -c '.observed' <<< "$_windows_recovery_record_json") || return 1
+  case "$action" in
+    set-prior)
+      validate_windows_efibootmgr_boundary || return 1
+      expected_hash=$(jq -r '.tool.executable_sha256' \
+        <<< "$_windows_recovery_record_json") || {
+          close_windows_efibootmgr_boundary
+          return 1
+        }
+      [[ "$(hash_bound_windows_efibootmgr)" == "$expected_hash" \
+        && "$recovery_boot_id" == "$(boot_id_value)" ]] || {
+          close_windows_efibootmgr_boundary
+          return 1
+        }
+      windows_recovery_is_available || {
+        close_windows_efibootmgr_boundary
+        return 1
+      }
+      current_state=$(read_windows_bootnext_state) || {
+        close_windows_efibootmgr_boundary
+        windows_reject "BootNext became unreadable before Windows recovery mutation"
+        windows_report_error
+        return 1
+      }
+      jq -e --argjson expected "$observed" '. == $expected' \
+        <<< "$current_state" >/dev/null || {
+        close_windows_efibootmgr_boundary
+        windows_reject "BootNext changed after Windows recovery evidence was recorded"
+        windows_report_error
+        return 1
+      }
+      prior_number=$(jq -r '.prior.boot_number' <<< "$_windows_recovery_record_json") \
+        || {
+          close_windows_efibootmgr_boundary
+          return 1
+        }
+      run_windows_efibootmgr -n "$prior_number" || command_rc=$?
+      windows_recovery_failpoint "after-recovery-command" || {
+        close_windows_efibootmgr_boundary
+        return 1
+      }
+      close_windows_efibootmgr_boundary
+      ;;
+    delete)
+      validate_windows_unlink_boundary || return 1
+      expected_hash=$(jq -r '.tool.executable_sha256' \
+        <<< "$_windows_recovery_record_json") || {
+          close_windows_unlink_boundary
+          return 1
+        }
+      [[ "$(hash_bound_windows_unlink)" == "$expected_hash" \
+        && "$recovery_boot_id" == "$(boot_id_value)" ]] || {
+          close_windows_unlink_boundary
+          return 1
+        }
+      windows_recovery_is_available || {
+        close_windows_unlink_boundary
+        return 1
+      }
+      current_state=$(read_windows_bootnext_state) || {
+        close_windows_unlink_boundary
+        windows_reject "BootNext became unreadable before Windows recovery mutation"
+        windows_report_error
+        return 1
+      }
+      jq -e --argjson expected "$observed" '. == $expected' \
+        <<< "$current_state" >/dev/null || {
+        close_windows_unlink_boundary
+        windows_reject "BootNext changed after Windows recovery evidence was recorded"
+        windows_report_error
+        return 1
+      }
+      variable=$(jq -c '.variable' <<< "$_windows_recovery_record_json") || {
+        close_windows_unlink_boundary
+        return 1
+      }
+      current_variable=$(capture_windows_bootnext_variable_evidence) || {
+        close_windows_unlink_boundary
+        return 1
+      }
+      [[ "$(jq -Sc . <<< "$current_variable")" == "$(jq -Sc . <<< "$variable")" ]] \
+        || {
+          close_windows_unlink_boundary
+          return 1
+        }
+      run_windows_unlink "$(windows_bootnext_variable_path)" || command_rc=$?
+      windows_recovery_failpoint "after-recovery-command" || {
+        close_windows_unlink_boundary
+        return 1
+      }
+      close_windows_unlink_boundary
+      ;;
+    *) return 1 ;;
+  esac
+  _windows_recovery_command_rc="$command_rc"
+  current_state=$(read_windows_bootnext_state) || {
+    windows_reject "BootNext recovery readback is unreadable"
+    windows_report_error
+    return 1
+  }
+  jq -e --argjson expected "$(jq -c '.prior' <<< "$_windows_recovery_record_json")" \
+    '. == $expected' <<< "$current_state" >/dev/null || {
+      windows_reject "BootNext recovery readback does not match the recorded prior state"
+      windows_report_error
+      return 1
+    }
+}
+
+persist_windows_recovery_proof() {
+  local transaction_dir path timestamp outcome final_state document reference record_reference
+  load_windows_recovery_record || return 1
+  [[ $(jq -r '.recovery_boot_id' <<< "$_windows_recovery_record_json") == \
+    "$(boot_id_value)" ]] || return 1
+  outcome=$(jq -r '.planned_outcome' <<< "$_windows_recovery_record_json") || return 1
+  if [[ "$outcome" == not-published ]]; then
+    final_state=null
+  else
+    final_state=$(read_windows_bootnext_state) || {
+      windows_reject "BootNext proof readback is unreadable"
+      windows_report_error
+      return 1
+    }
+  fi
+  case "$outcome" in
+    not-published) [[ "$final_state" == null ]] || return 1 ;;
+    consumed-unknown)
+      jq -e '.present == false and .boot_number == null' \
+        <<< "$final_state" >/dev/null || return 1
+      ;;
+    prior-unchanged|prior-restored)
+      jq -e --argjson expected "$(jq -c '.prior' \
+        <<< "$_windows_recovery_record_json")" '. == $expected' \
+        <<< "$final_state" >/dev/null || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  read_transaction_manifest "$_transaction_id" || return 1
+  record_reference=$(jq -c '.domain_records.windows' <<< "$_manifest_json") || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/windows-recovery-proof.json"
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" \
+    --arg transaction_id "$_transaction_id" \
+    --arg writer_version "$OMASECBOOT_VERSION" \
+    --arg proved_at "$timestamp" \
+    --arg outcome "$outcome" \
+    --argjson command_exit_code "$_windows_recovery_command_rc" \
+    --argjson final_state "$final_state" \
+    --argjson record "$record_reference" '{
+      schema_version: $schema,
+      transaction_id: $transaction_id,
+      writer_version: $writer_version,
+      operation: "windows-recovery",
+      proved_at: $proved_at,
+      record: $record,
+      outcome: $outcome,
+      command_exit_code: $command_exit_code,
+      final_state: $final_state
+    }') || return 1
+  validate_windows_recovery_proof_json "$_transaction_id" "$document" "$_manifest_json" \
+    || return 1
+  printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  reference=$(transaction_artifact_reference "$path" \
+    "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION") || return 1
+  transaction_set_domain_record final_proof "$reference"
+}
+
+windows_recovery_transaction() {
+  windows_recovery_is_available || return 1
+  transaction_phase_start "classify-bootnext" || return 1
+  persist_windows_recovery_record || return 1
+  windows_recovery_failpoint "after-recovery-record" || return 1
+  transaction_phase_complete "classify-bootnext" || return 1
+
+  transaction_phase_start "restore-bootnext" || return 1
+  execute_windows_recovery_action || return 1
+  transaction_phase_complete "restore-bootnext" || return 1
+
+  transaction_phase_start "prove-bootnext" || return 1
+  persist_windows_recovery_proof || return 1
+  transaction_phase_complete "prove-bootnext"
+}
+
+run_windows_recovery_locked() {
+  local callback_rc=0 commit_rc=0 begin_rc=0 stale_attempt_id="" failure_reason
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  windows_recovery_is_available || return 1
+  _windows_error=""
+  read_lifecycle || return 1
+  if [[ "$_lifecycle_state" == transition ]]; then
+    read_transaction_manifest "$_lifecycle_transaction_id" || return 1
+    jq -e '.kind == "recovery-attempt" and .operation == "windows-recovery"' \
+      <<< "$_manifest_json" >/dev/null || return 1
+    stale_attempt_id="$_lifecycle_transaction_id"
+    if ! reconcile_stale_lifecycle; then
+      detach_transaction_context
+      return 1
+    fi
+    read_lifecycle || return 1
+    if [[ "$_lifecycle_state" == active \
+      && $(jq -r '.last_recovery.final_attempt.id // ""' <<< "$_lifecycle_json") == \
+        "$stale_attempt_id" ]]; then
+      return 0
+    fi
+  fi
+  load_windows_recovery_context || return $?
+  arm_transaction_traps
+  begin_lifecycle_recovery_attempt windows-recovery || begin_rc=$?
+  if [[ $begin_rc -ne 0 ]]; then
+    if [[ "$_transaction_active" == true ]]; then
+      if read_lifecycle && [[ "$_lifecycle_state" == transition \
+        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
+        rollback_and_mark_recovery "$begin_rc" \
+          "Windows recovery attempt initialization failed" failed || true
+      else
+        detach_transaction_context
+      fi
+    fi
+    restore_transaction_traps
+    return "$begin_rc"
+  fi
+  windows_recovery_transaction || callback_rc=$?
+  close_windows_efibootmgr_boundary
+  close_windows_unlink_boundary
+  if [[ $callback_rc -eq 0 ]]; then
+    commit_lifecycle_recovery_attempt || commit_rc=$?
+    if [[ $commit_rc -ne 0 ]]; then
+      rollback_and_mark_recovery "$commit_rc" \
+        "stable Windows recovery publication failed" failed || true
+      callback_rc=$commit_rc
+    fi
+  else
+    failure_reason=${_windows_error:-Windows BootNext recovery failed}
+    rollback_and_mark_recovery "$callback_rc" "$failure_reason" failed \
+      || true
+  fi
+  restore_transaction_traps
+  return "$callback_rc"
 }
 
 windows_bootnext_exact_target_is_current() {

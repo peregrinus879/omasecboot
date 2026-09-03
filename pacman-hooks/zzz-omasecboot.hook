@@ -12,6 +12,7 @@ Target = snapper*
 Target = mkinitcpio*
 Target = sbctl
 Target = efibootmgr
+Target = coreutils
 Target = omarchy
 Target = omarchy-settings
 

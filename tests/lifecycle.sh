@@ -20,6 +20,10 @@ source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/lifecycle.sh"
 
+[[ $(windows_bootnext_variable_path) == \
+  /sys/firmware/efi/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c ]] \
+  || fail_test "lifecycle does not own the canonical BootNext variable path"
+
 state_dir_path() {
   printf '%s/state\n' "$TEST_DIR"
 }

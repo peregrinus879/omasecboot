@@ -180,9 +180,9 @@ cmd_windows_help() {
   echo -e "  ${BOLD}Commands${NC}"
   echo "    available   Check for Windows Boot Manager without root or output"
   echo "    preflight   Run the read-only Windows encryption preparation gate"
-  echo "    setup       Blocked until interrupted recovery is available"
-  echo "    bootnext    Blocked until prior BootNext state can be recovered"
-  echo "    reboot      Blocked until prior BootNext state can be recovered"
+  echo "    setup       Blocked until recoverable Windows commands are integrated"
+  echo "    bootnext    Blocked until Windows recovery is integrated"
+  echo "    reboot      Blocked until Windows recovery is integrated"
   echo
 }
 
@@ -207,15 +207,15 @@ cmd_windows() {
       cmd_windows_preflight
       ;;
     setup)
-      fail "Windows setup is blocked until interrupted recovery is available"
+      fail "Windows setup is blocked until recoverable Windows commands are integrated"
       return 1
       ;;
     bootnext)
-      fail "BootNext is blocked until prior firmware BootNext state can be recovered"
+      fail "BootNext is blocked until Windows recovery is integrated"
       return 1
       ;;
     reboot)
-      fail "Windows reboot is blocked until prior firmware BootNext state can be recovered"
+      fail "Windows reboot is blocked until Windows recovery is integrated"
       return 1
       ;;
     help|--help|-h)

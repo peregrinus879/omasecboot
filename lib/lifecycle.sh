@@ -9,8 +9,12 @@ readonly LEGACY_FINAL_PROOF_SCHEMA_VERSION=1
 readonly FINAL_PROOF_SCHEMA_VERSION=2
 readonly FIRMWARE_PROOF_SCHEMA_VERSION=1
 readonly BOOTNEXT_RECORD_SCHEMA_VERSION=1
+readonly WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION=1
+readonly WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION=1
 readonly WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY="efibootmgr 18-4"
 readonly WINDOWS_EFIBOOTMGR_EXECUTABLE="/usr/bin/efibootmgr"
+readonly WINDOWS_UNLINK_PACKAGE_IDENTITY="coreutils 9.11-2"
+readonly WINDOWS_UNLINK_EXECUTABLE="/usr/bin/unlink"
 readonly WINDOWS_BOOTNEXT_LOADER_PATH='\EFI\Microsoft\Boot\bootmgfw.efi'
 readonly MAX_RECOVERY_ATTEMPT_SEALS=32
 readonly MAX_TRANSACTION_BACKUPS=4096
@@ -22,6 +26,15 @@ readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 readonly MAX_FIRMWARE_WRITE_ATTEMPTS=6
 readonly MAX_FIRMWARE_HIERARCHY_ATTEMPTS=2
 readonly TRANSACTION_SERVICE_UNIT="limine-snapper-sync.service"
+
+windows_bootnext_efivars_dir() {
+  printf '/sys/firmware/efi/efivars\n'
+}
+
+windows_bootnext_variable_path() {
+  printf '%s/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' \
+    "$(windows_bootnext_efivars_dir)"
+}
 
 _lifecycle_state=unmanaged
 _lifecycle_generation=0
@@ -177,6 +190,200 @@ validate_bootnext_record_reference() {
   validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
   document=$(read_control_document "$path") || return 1
   validate_bootnext_record_json "$transaction_id" "$document" "$manifest"
+}
+
+validate_windows_recovery_record_json() {
+  local transaction_id="$1" document="$2" manifest="$3"
+  local root_id root_manifest_path root_manifest bootnext_reference bootnext_path
+  local bootnext_document
+  jq -e --arg id "$transaction_id" \
+    --argjson schema "$WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION" \
+    --arg efibootmgr_package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
+    --arg efibootmgr_executable "$WINDOWS_EFIBOOTMGR_EXECUTABLE" \
+    --arg unlink_package "$WINDOWS_UNLINK_PACKAGE_IDENTITY" \
+    --arg unlink_executable "$WINDOWS_UNLINK_EXECUTABLE" \
+    --arg variable_path "$(windows_bootnext_variable_path)" \
+    --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def boot_number: type == "string" and test("^[0-9A-F]{4}$");
+    def identity: type == "string" and test("^[0-9]+:[0-9]+$");
+    def state:
+      type == "object" and keys == ["boot_number","present"] and
+      (.present | type == "boolean") and
+      (if .present then (.boot_number | boot_number) else .boot_number == null end);
+    def reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | type == "string" and startswith("/")) and .schema_version == 1 and
+      (.sha256 | digest);
+    def incident:
+      type == "object" and
+      keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+      (.id | uuid) and .kind == "root" and .operation == "windows-bootnext" and
+      .ordinal == 0 and (.path | type == "string" and startswith("/")) and
+      (.sha256 | digest) and
+      (.status == "failed" or .status == "stale" or .status == "publication-uncertain");
+    def tool:
+      type == "object" and keys == ["executable","executable_sha256","package"] and
+      (.executable_sha256 | digest);
+    type == "object" and
+    keys == ["action","bootnext_record","observed","operation","planned_outcome","prior",
+      "recorded_at","recovery_boot_id","relation","root_boot_id","root_incident",
+      "schema_version","target","tool","transaction_id","variable","write_frontier",
+      "writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "windows-recovery" and (.recorded_at | timestamp) and
+    (.recovery_boot_id | uuid) and .recovery_boot_id == $manifest.boot_id and
+    (.root_incident | incident) and .root_incident == $manifest.recovery.root_incident and
+    if .bootnext_record == null then
+      .root_boot_id == null and .relation == null and .prior == null and .target == null and
+      .observed == null and .action == "none" and
+      .planned_outcome == "not-published" and .tool == null and .variable == null and
+      .write_frontier == "not-published"
+    else
+      (.bootnext_record | reference) and (.root_boot_id | uuid) and
+      (.relation == "same-boot" or .relation == "later-boot") and
+      .relation == (if .root_boot_id == .recovery_boot_id then "same-boot" else "later-boot" end) and
+      (.prior | state) and (.target | boot_number) and (.observed | state) and
+      (.write_frontier == "not-reached" or .write_frontier == "write-possible") and
+      (if .write_frontier == "not-reached" then
+        .observed == .prior and .action == "none" and
+        .planned_outcome == "prior-unchanged" and .tool == null and .variable == null
+       elif .relation == "later-boot" and .observed.present == false then
+        .action == "none" and .planned_outcome == "consumed-unknown" and
+        .tool == null and .variable == null
+       elif .observed == .prior then
+        .action == "none" and .planned_outcome == "prior-unchanged" and
+        .tool == null and .variable == null
+       elif .observed.present and .observed.boot_number == .target and
+           (.observed != .prior) then
+        .planned_outcome == "prior-restored" and
+        if .prior.present then
+          .action == "set-prior" and .variable == null and (.tool | tool) and
+          .tool.package == $efibootmgr_package and
+          .tool.executable == $efibootmgr_executable
+        else
+          .action == "delete" and (.tool | tool) and
+          .tool.package == $unlink_package and .tool.executable == $unlink_executable and
+          (.variable | type == "object" and keys == ["identity","path","sha256"] and
+            .path == $variable_path and (.identity | identity) and (.sha256 | digest))
+        end
+       else false end)
+    end
+  ' <<< "$document" >/dev/null || return 1
+
+  root_id=$(jq -r '.root_incident.id' <<< "$document") || return 1
+  root_manifest_path=$(lifecycle_manifest_path "$root_id") || return 1
+  root_manifest=$(read_control_document "$root_manifest_path") || return 1
+  validate_transaction_manifest_json "$root_id" "$root_manifest" false || return 1
+  jq -e '
+    .kind == "root" and .operation == "windows-bootnext" and
+    .target_state == "active" and .prior_state == "active" and
+    .domain_records.producer == null
+  ' <<< "$root_manifest" >/dev/null || return 1
+  bootnext_reference=$(jq -c '.domain_records.bootnext' <<< "$root_manifest") || return 1
+  jq -e --argjson reference "$bootnext_reference" --argjson root "$root_manifest" '
+    .bootnext_record == $reference and
+    .write_frontier ==
+      (if $reference == null then "not-published"
+       elif ($root.completed_phases | index("record-bootnext")) == null then "not-reached"
+       else "write-possible" end)
+  ' \
+    <<< "$document" >/dev/null || return 1
+  if [[ "$bootnext_reference" == null ]]; then
+    return 0
+  fi
+  validate_bootnext_record_reference "$root_id" "$bootnext_reference" "$root_manifest" \
+    || return 1
+  bootnext_path=$(jq -r '.path' <<< "$bootnext_reference") || return 1
+  bootnext_document=$(read_control_document "$bootnext_path") || return 1
+  jq -e --argjson recovery "$document" '
+    .boot_id == $recovery.root_boot_id and .prior == $recovery.prior and
+    .target.boot_number == $recovery.target and
+    (if $recovery.action == "set-prior" then
+      .efibootmgr == $recovery.tool
+     else true end)
+  ' <<< "$bootnext_document" >/dev/null
+}
+
+validate_windows_recovery_record_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == \
+      "$WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/windows-recovery.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_windows_recovery_record_json "$transaction_id" "$document" "$manifest"
+}
+
+validate_windows_recovery_proof_json() {
+  local transaction_id="$1" document="$2" manifest="$3" reference path record
+  jq -e --arg id "$transaction_id" \
+    --argjson schema "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" \
+    --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def boot_number: type == "string" and test("^[0-9A-F]{4}$");
+    def state:
+      type == "object" and keys == ["boot_number","present"] and
+      (.present | type == "boolean") and
+      (if .present then (.boot_number | boot_number) else .boot_number == null end);
+    def reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | type == "string" and startswith("/")) and .schema_version == 1 and
+      (.sha256 | digest);
+    type == "object" and
+    keys == ["command_exit_code","final_state","operation","outcome","proved_at","record",
+      "schema_version","transaction_id","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "windows-recovery" and (.proved_at | timestamp) and
+    (.record | reference) and .record == $manifest.domain_records.windows and
+    (.outcome == "not-published" or .outcome == "prior-unchanged" or
+      .outcome == "prior-restored" or .outcome == "consumed-unknown") and
+    (.final_state == null or (.final_state | state)) and
+    (.command_exit_code == null or
+      (.command_exit_code | type == "number" and . >= 0 and . <= 255 and floor == .))
+  ' <<< "$document" >/dev/null || return 1
+  reference=$(jq -c '.record' <<< "$document") || return 1
+  validate_windows_recovery_record_reference "$transaction_id" "$reference" "$manifest" \
+    || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  record=$(read_control_document "$path") || return 1
+  jq -e --argjson record "$record" '
+    .outcome == $record.planned_outcome and
+    (if $record.action == "none" then .command_exit_code == null
+     else .command_exit_code != null end) and
+    (if .outcome == "not-published" then .final_state == null
+     elif .outcome == "consumed-unknown" then
+       .final_state == {boot_number:null,present:false}
+     else .final_state == $record.prior end)
+  ' <<< "$document" >/dev/null
+}
+
+validate_windows_recovery_proof_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == \
+      "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/windows-recovery-proof.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_windows_recovery_proof_json "$transaction_id" "$document" "$manifest"
 }
 
 validate_producer_baseline_json() {
@@ -1331,7 +1538,7 @@ validate_artifact_reference_file() {
 }
 
 validate_transaction_domain_records() {
-  local transaction_id="$1" document="$2" bootnext producer proof firmware
+  local transaction_id="$1" document="$2" bootnext producer proof firmware windows
   local path producer_document
   local kind status operation
   local extracted
@@ -1341,17 +1548,19 @@ validate_transaction_domain_records() {
     (.domain_records.producer | tojson),
     (.domain_records.final_proof | tojson),
     (.domain_records.firmware | tojson),
+    (.domain_records.windows | tojson),
     .kind, .status, .operation
   ' <<< "$document") || return 1
   mapfile -t fields <<< "$extracted"
-  [[ ${#fields[@]} -eq 7 ]] || return 1
+  [[ ${#fields[@]} -eq 8 ]] || return 1
   bootnext=${fields[0]}
   producer=${fields[1]}
   proof=${fields[2]}
   firmware=${fields[3]}
-  kind=${fields[4]}
-  status=${fields[5]}
-  operation=${fields[6]}
+  windows=${fields[4]}
+  kind=${fields[5]}
+  status=${fields[6]}
+  operation=${fields[7]}
 
   if [[ "$bootnext" != null ]]; then
     [[ "$kind" == root && "$operation" == windows-bootnext \
@@ -1388,8 +1597,20 @@ validate_transaction_domain_records() {
     ' >/dev/null || return 1
   fi
 
+  if [[ "$windows" != null ]]; then
+    [[ "$kind" == recovery-attempt && "$operation" == windows-recovery \
+      && "$bootnext" == null && "$producer" == null && "$firmware" == null ]] || return 1
+    validate_windows_recovery_record_reference "$transaction_id" "$windows" "$document" \
+      || return 1
+  fi
+
   if [[ "$proof" != null ]]; then
-    validate_final_proof_reference "$transaction_id" "$proof" || return 1
+    if [[ "$kind" == recovery-attempt && "$operation" == windows-recovery ]]; then
+      validate_windows_recovery_proof_reference "$transaction_id" "$proof" "$document" \
+        || return 1
+    else
+      validate_final_proof_reference "$transaction_id" "$proof" || return 1
+    fi
   fi
   if [[ "$firmware" != null ]]; then
     [[ "$producer" == null && "$proof" != null \
@@ -1490,11 +1711,47 @@ validate_transaction_domain_records() {
            else true end)
         ' <<< "$document" >/dev/null || return 1
         ;;
+      windows-recovery)
+        jq -e '
+          .target_state == "active" and .prior_state == "recovery-required" and
+          .file_rollback_policy == "restore" and
+          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
+          .domain_records.bootnext == null and .domain_records.firmware == null and
+          .domain_records.managed_settings == null and .domain_records.producer == null and
+          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+          (if .domain_records.windows == null then
+            .domain_records.final_proof == null and .completed_phases == [] and
+            (.current_phase == null or .current_phase == "classify-bootnext")
+           elif .domain_records.final_proof == null then
+            ((.completed_phases == [] and .current_phase == "classify-bootnext") or
+             (.completed_phases == ["classify-bootnext"] and
+               (.current_phase == null or .current_phase == "restore-bootnext")) or
+             (.completed_phases == ["classify-bootnext","restore-bootnext"] and
+               (.current_phase == null or .current_phase == "prove-bootnext")))
+           else
+            ((.completed_phases == ["classify-bootnext","restore-bootnext"] and
+                .current_phase == "prove-bootnext") or
+             (.completed_phases ==
+                ["classify-bootnext","restore-bootnext","prove-bootnext"] and
+                .current_phase == null))
+           end) and
+          (if .status == "completed" then
+            .domain_records.windows != null and .domain_records.final_proof != null and
+            .completed_phases ==
+              ["classify-bootnext","restore-bootnext","prove-bootnext"]
+           else true end)
+        ' <<< "$document" >/dev/null || return 1
+        ;;
       *) return 1 ;;
     esac
     if [[ "$proof" != null ]]; then
-      [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
-        || return 1
+      if [[ "$operation" == windows-recovery ]]; then
+        [[ $(jq -r '.schema_version' <<< "$proof") == \
+          "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" ]] || return 1
+      else
+        [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
+          || return 1
+      fi
     fi
     [[ "$status" != completed || "$proof" != null ]] || return 1
   fi
@@ -1510,6 +1767,8 @@ recovery_operation_for_root_manifest() {
     printf 'producer-recovery\n'
   elif [[ "$operation" == enroll-secure-boot ]]; then
     printf 'firmware-recovery\n'
+  elif [[ "$operation" == windows-bootnext ]]; then
+    printf 'windows-recovery\n'
   else
     return 1
   fi
@@ -1551,6 +1810,12 @@ validate_recovery_manifest_evolution() {
       ($previous.file_rollback_policy == $current.file_rollback_policy or
         ($previous.file_rollback_policy == "restore" and
           $current.file_rollback_policy == "preserve"))
+    elif $operation == "windows-recovery" then
+      $previous.firmware_backup == null and $previous.enrollment_plan == null and
+      $previous.firmware_writes == [] and $current.firmware_backup == null and
+      $current.enrollment_plan == null and $current.firmware_writes == [] and
+      $previous.file_rollback_policy == "restore" and
+      $current.file_rollback_policy == "restore"
     else false end
   ' >/dev/null
 }
@@ -2634,6 +2899,7 @@ begin_lifecycle_recovery_attempt() {
   case "$operation" in
     producer-recovery) load_producer_recovery_context || return $? ;;
     firmware-recovery) load_recovery_context || return $? ;;
+    windows-recovery) load_recovery_context || return $? ;;
     *) return 1 ;;
   esac
   recovery_operation=$(recovery_operation_for_root_manifest \
@@ -2664,7 +2930,7 @@ begin_lifecycle_recovery_attempt() {
     firmware_backup=null
     enrollment_plan=null
     firmware_writes='[]'
-  else
+  elif [[ "$operation" == firmware-recovery ]]; then
     file_rollback_policy=$(jq -r '.file_rollback_policy' \
       <<< "$_recovery_previous_manifest_json") || return 1
     firmware_backup=$(jq -c '.firmware_backup' \
@@ -2673,6 +2939,11 @@ begin_lifecycle_recovery_attempt() {
       <<< "$_recovery_previous_manifest_json") || return 1
     firmware_writes=$(jq -c '.firmware_writes' \
       <<< "$_recovery_previous_manifest_json") || return 1
+  else
+    file_rollback_policy=restore
+    firmware_backup=null
+    enrollment_plan=null
+    firmware_writes='[]'
   fi
   transaction_dir="$(transactions_dir_path)/${transaction_id}"
   manifest="${transaction_dir}/manifest.json"
@@ -3104,7 +3375,8 @@ apply_transaction_service_policy() {
 
 apply_recovery_transaction_service_policy() {
   local producer_path producer_document root_id
-  if [[ "$_transaction_operation" == firmware-recovery ]]; then
+  if [[ "$_transaction_operation" == firmware-recovery \
+    || "$_transaction_operation" == windows-recovery ]]; then
     quiesce_transaction_service
     return
   fi

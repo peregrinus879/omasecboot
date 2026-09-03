@@ -180,6 +180,7 @@ if grep -Eq '^(Depends =|NeedsTargets$)' "$removal_hook"; then
 fi
 expected_targets=$(sort <<'EOF'
 boot/*
+coreutils
 efi/*
 efibootmgr
 linux*

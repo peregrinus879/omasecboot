@@ -515,7 +515,7 @@ show_status() {
     done <<< "$unmanaged_windows_chainloads"
     echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
-    echo -e "  ${DIM}Managed Windows setup remains blocked until interrupted recovery is available.${NC}"
+    echo -e "  ${DIM}Managed Windows setup remains blocked until recoverable commands are integrated.${NC}"
   fi
 
   # Tracked files (root only)

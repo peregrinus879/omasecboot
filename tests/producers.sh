@@ -590,7 +590,7 @@ set -e
   || fail_test "active malformed package targets were not drained before rejection"
 grep -Fq 'package targets are invalid' "$invalid_targets_output" \
   || fail_test "malformed package targets omitted their rejection reason"
-for pinned_target in limine-snapper-sync efibootmgr; do
+for pinned_target in limine-snapper-sync efibootmgr coreutils; do
   pinned_targets_output="${CASE_DIR}/pinned-targets-${pinned_target}.out"
   if producer_package_pre <<< "$pinned_target" \
     > "$pinned_targets_output" 2>&1; then

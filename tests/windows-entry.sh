@@ -65,6 +65,15 @@ BOOTNEXT_COMMAND_CALLS=0
 BOOTNEXT_FAILPOINT=""
 BOOTNEXT_FAIL_ACTION=""
 BOOTNEXT_CALL_LOG=""
+WINDOWS_RECOVERY_CAPABILITY=true
+WINDOWS_RECOVERY_FAILPOINT=""
+WINDOWS_RECOVERY_FAIL_ACTION=""
+UNLINK_TOOL_VALID=true
+UNLINK_TOOL_HASH='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+UNLINK_COMMAND_RC=0
+UNLINK_COMMAND_EFFECT=true
+UNLINK_COMMAND_CALLS=0
+UNLINK_CALL_LOG=""
 BOOTNEXT_MOUNT_VALIDATIONS=0
 BOOTNEXT_MOUNT_FAIL_AT=0
 TEST_BOOT_ID='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -132,6 +141,10 @@ windows_bootnext_mutation_is_available() {
   [[ "$BOOTNEXT_CAPABILITY" == true ]]
 }
 
+windows_recovery_is_available() {
+  [[ "$WINDOWS_RECOVERY_CAPABILITY" == true ]]
+}
+
 validate_windows_efibootmgr_boundary() {
   [[ "$BOOTNEXT_TOOL_VALID" == true \
     && "$BOOTNEXT_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
@@ -141,6 +154,28 @@ validate_windows_efibootmgr_boundary() {
 hash_bound_windows_efibootmgr() {
   [[ "$BOOTNEXT_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "$BOOTNEXT_TOOL_HASH"
+}
+
+validate_windows_unlink_boundary() {
+  [[ "$UNLINK_TOOL_VALID" == true \
+    && "$UNLINK_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
+  _windows_unlink_hash="$UNLINK_TOOL_HASH"
+}
+
+hash_bound_windows_unlink() {
+  [[ "$UNLINK_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$UNLINK_TOOL_HASH"
+}
+
+run_windows_unlink() {
+  local path="$1"
+  [[ "$path" == "$(windows_bootnext_variable_path)" ]] || return 64
+  UNLINK_COMMAND_CALLS=$((UNLINK_COMMAND_CALLS + 1))
+  printf '%s\n' "$path" >> "$UNLINK_CALL_LOG"
+  if [[ "$UNLINK_COMMAND_EFFECT" == true ]]; then
+    rm -f "$path"
+  fi
+  return "$UNLINK_COMMAND_RC"
 }
 
 write_bootnext_variable() {
@@ -179,6 +214,27 @@ windows_bootnext_failpoint() {
     disable-capability) BOOTNEXT_CAPABILITY=false ;;
     corrupt-attributes) write_bootnext_variable 0007 3 ;;
     signal-term) kill -TERM "$BASHPID" ;;
+    fail) return 75 ;;
+    *) return 1 ;;
+  esac
+}
+
+windows_recovery_failpoint() {
+  local point="$1" path
+  [[ "$WINDOWS_RECOVERY_FAILPOINT" == "$point" ]] || return 0
+  case "$WINDOWS_RECOVERY_FAIL_ACTION" in
+    change-boot) TEST_BOOT_ID='11111111-2222-4333-8444-555555555555' ;;
+    change-state) write_bootnext_variable 0008 ;;
+    change-tool)
+      BOOTNEXT_TOOL_HASH='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      UNLINK_TOOL_HASH='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+      ;;
+    corrupt-attributes) write_bootnext_variable 0007 3 ;;
+    replace-variable)
+      path=$(windows_bootnext_variable_path) || return 1
+      rm -f "$path"
+      write_bootnext_variable 0007
+      ;;
     fail) return 75 ;;
     *) return 1 ;;
   esac
@@ -268,11 +324,13 @@ setup_fixture() {
   CONFIG_FILE="${CASE_DIR}/boot/limine.conf"
   ARTIFACT_FILE="${CASE_DIR}/artifact"
   BOOTNEXT_CALL_LOG="${CASE_DIR}/bootnext-calls"
+  UNLINK_CALL_LOG="${CASE_DIR}/unlink-calls"
   rm -rf "$CASE_DIR"
   mkdir -p "$(dirname "$CONFIG_FILE")" "${CASE_DIR}/efivars"
   chmod 755 "$CASE_DIR" "$(dirname "$CONFIG_FILE")" "${CASE_DIR}/efivars"
   printf 'original\n' > "$ARTIFACT_FILE"
   : > "$BOOTNEXT_CALL_LOG"
+  : > "$UNLINK_CALL_LOG"
   TARGET_BOOT=0007
   TARGET_LABEL='Windows Boot Manager'
   TARGET_PARTUUID='11111111-2222-3333-4444-555555555555'
@@ -297,12 +355,24 @@ setup_fixture() {
   BOOTNEXT_COMMAND_CALLS=0
   BOOTNEXT_FAILPOINT=""
   BOOTNEXT_FAIL_ACTION=""
+  WINDOWS_RECOVERY_CAPABILITY=true
+  WINDOWS_RECOVERY_FAILPOINT=""
+  WINDOWS_RECOVERY_FAIL_ACTION=""
+  UNLINK_TOOL_VALID=true
+  UNLINK_TOOL_HASH='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+  UNLINK_COMMAND_RC=0
+  UNLINK_COMMAND_EFFECT=true
+  UNLINK_COMMAND_CALLS=0
   BOOTNEXT_MOUNT_VALIDATIONS=0
   BOOTNEXT_MOUNT_FAIL_AT=0
   TEST_BOOT_ID='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
   LIFECYCLE_FAILPOINT=""
   _windows_bootnext_record_json=""
   _windows_bootnext_record_path=""
+  _windows_recovery_plan_json=""
+  _windows_recovery_record_json=""
+  _windows_recovery_record_path=""
+  _windows_recovery_command_rc=null
   write_legacy_config
   adopt_lifecycle : "no" "no" "yes" "yes" \
     "absent" "absent" "absent" "absent" \
@@ -1222,6 +1292,513 @@ test_bootnext_commit_failure() {
     || fail_test "BootNext stable-state failure lost completed transaction evidence"
 }
 
+recover_windows_incident() {
+  local rc=0
+  with_boot_repair_lock || return 1
+  run_windows_recovery_locked || rc=$?
+  release_boot_repair_lock
+  return "$rc"
+}
+
+create_bootnext_effect_incident() {
+  BOOTNEXT_COMMAND_RC=23
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "BootNext recovery fixture reported root success"
+  fi
+  BOOTNEXT_COMMAND_RC=0
+  BOOTNEXT_COMMAND_CALLS=0
+  : > "$BOOTNEXT_CALL_LOG"
+}
+
+assert_windows_recovery_result() {
+  local expected_outcome="$1" expected_action="$2" lifecycle recovery_id manifest record proof
+  read_lifecycle || fail_test "Windows recovery result was unreadable"
+  [[ "$_lifecycle_state" == active ]] || fail_test "Windows recovery did not restore active state"
+  lifecycle="$_lifecycle_json"
+  recovery_id=$(jq -r '.last_recovery.final_attempt.id' <<< "$lifecycle")
+  manifest=$(lifecycle_manifest_path "$recovery_id")
+  jq -e --arg outcome "$expected_outcome" --arg action "$expected_action" '
+    .kind == "recovery-attempt" and .operation == "windows-recovery" and
+    .status == "completed" and .completed_phases ==
+      ["classify-bootnext","restore-bootnext","prove-bootnext"] and
+    .domain_records.windows != null and .domain_records.final_proof != null and
+    .domain_records.firmware == null and .domain_records.producer == null
+  ' "$manifest" >/dev/null || fail_test "completed Windows recovery manifest is incomplete"
+  record=$(jq -r '.domain_records.windows.path' "$manifest")
+  proof=$(jq -r '.domain_records.final_proof.path' "$manifest")
+  jq -e --arg outcome "$expected_outcome" --arg action "$expected_action" '
+    .planned_outcome == $outcome and .action == $action
+  ' "$record" >/dev/null || fail_test "Windows recovery record has the wrong classification"
+  jq -e --arg outcome "$expected_outcome" \
+    '.outcome == $outcome' "$proof" >/dev/null \
+    || fail_test "Windows recovery proof has the wrong outcome"
+  validate_windows_recovery_record_reference "$recovery_id" \
+    "$(jq -c '.domain_records.windows' "$manifest")" \
+    "$(read_control_document "$manifest")" \
+    || fail_test "Windows recovery record reference is invalid"
+  validate_windows_recovery_proof_reference "$recovery_id" \
+    "$(jq -c '.domain_records.final_proof' "$manifest")" \
+    "$(read_control_document "$manifest")" \
+    || fail_test "Windows recovery proof reference is invalid"
+}
+
+test_windows_recovery_restores_absence() {
+  local root_id root_manifest_hash root_incident_hash state proof
+  setup_bootnext_fixture recovery-absence
+  create_bootnext_effect_incident
+  read_lifecycle || fail_test "absence recovery root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  root_manifest_hash=$(sha256_file "$(lifecycle_manifest_path "$root_id")")
+  root_incident_hash=$(sha256_file "$(lifecycle_incident_path "$root_id")")
+  UNLINK_COMMAND_RC=23
+  recover_windows_incident || fail_test "recorded absence was not restored"
+  [[ $UNLINK_COMMAND_CALLS -eq 1 && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "absence recovery used the wrong mutation boundary"
+  state=$(read_windows_bootnext_state) || fail_test "restored absence was unreadable"
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "Windows recovery did not restore BootNext absence"
+  assert_windows_recovery_result prior-restored delete
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '.command_exit_code == 23 and
+    .final_state == {boot_number:null,present:false}' "$proof" >/dev/null \
+    || fail_test "absence recovery proof omitted direct readback"
+  [[ $(sha256_file "$(lifecycle_manifest_path "$root_id")") == "$root_manifest_hash" \
+    && $(sha256_file "$(lifecycle_incident_path "$root_id")") == "$root_incident_hash" ]] \
+    || fail_test "Windows recovery rewrote root evidence"
+}
+
+test_windows_recovery_restores_value() {
+  local state proof
+  setup_bootnext_fixture recovery-value
+  write_bootnext_variable 0042
+  create_bootnext_effect_incident
+  BOOTNEXT_COMMAND_RC=23
+  recover_windows_incident \
+    || fail_test "recorded BootNext value was not restored from direct readback"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 1 && $(<"$BOOTNEXT_CALL_LOG") == '-n 0042' \
+    && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "value recovery did not issue one exact efibootmgr restoration"
+  state=$(read_windows_bootnext_state) || fail_test "restored BootNext value was unreadable"
+  jq -e '.present == true and .boot_number == "0042"' <<< "$state" >/dev/null \
+    || fail_test "Windows recovery did not restore the prior BootNext value"
+  assert_windows_recovery_result prior-restored set-prior
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '.command_exit_code == 23 and
+    .final_state == {boot_number:"0042",present:true}' "$proof" >/dev/null \
+    || fail_test "readback-authoritative value recovery proof is incomplete"
+}
+
+test_windows_recovery_prior_unchanged() {
+  local state
+  setup_bootnext_fixture recovery-unchanged
+  BOOTNEXT_COMMAND_EFFECT=false
+  BOOTNEXT_COMMAND_RC=23
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "unchanged recovery fixture reported root success"
+  fi
+  BOOTNEXT_COMMAND_RC=0
+  BOOTNEXT_COMMAND_EFFECT=true
+  BOOTNEXT_COMMAND_CALLS=0
+  recover_windows_incident || fail_test "unchanged prior state did not recover"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "unchanged prior state caused a recovery write"
+  state=$(read_windows_bootnext_state) || fail_test "unchanged prior state was unreadable"
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "unchanged recovery altered BootNext"
+  assert_windows_recovery_result prior-unchanged none
+}
+
+test_windows_recovery_consumed_unknown() {
+  local state proof
+  setup_bootnext_fixture recovery-consumed
+  create_bootnext_effect_incident
+  rm -f "$(windows_bootnext_variable_path)"
+  TEST_BOOT_ID='11111111-2222-4333-8444-555555555555'
+  recover_windows_incident || fail_test "cross-boot absence did not resolve"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "cross-boot consumed state caused a write"
+  state=$(read_windows_bootnext_state) || fail_test "consumed BootNext state was unreadable"
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "consumed-unknown recovery changed BootNext"
+  assert_windows_recovery_result consumed-unknown none
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '.command_exit_code == null and
+    .final_state == {boot_number:null,present:false}' "$proof" >/dev/null \
+    || fail_test "consumed-unknown proof made an unsupported claim"
+}
+
+test_windows_recovery_cross_boot_before_write() {
+  local manifest state
+  setup_bootnext_fixture recovery-cross-boot-before-write
+  BOOTNEXT_FAILPOINT=after-bootnext-record
+  BOOTNEXT_FAIL_ACTION=fail
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "pre-write cross-boot fixture reported success"
+  fi
+  read_lifecycle || fail_test "pre-write cross-boot root was unreadable"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  jq -e '.domain_records.bootnext != null and
+    (.completed_phases | index("record-bootnext")) == null' "$manifest" >/dev/null \
+    || fail_test "pre-write root did not preserve its exact frontier"
+  TEST_BOOT_ID='11111111-2222-4333-8444-555555555555'
+  BOOTNEXT_FAILPOINT=""
+  BOOTNEXT_FAIL_ACTION=""
+  recover_windows_incident || fail_test "proved pre-write incident did not recover"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "proved pre-write incident caused a recovery write"
+  state=$(read_windows_bootnext_state) || fail_test "pre-write prior state was unreadable"
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "pre-write cross-boot recovery changed BootNext"
+  assert_windows_recovery_result prior-unchanged none
+  manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '.write_frontier == "not-reached"' \
+    "$(jq -r '.domain_records.windows.path' "$manifest")" >/dev/null \
+    || fail_test "pre-write recovery record lost the no-write frontier"
+}
+
+test_windows_recovery_refuses_changed_before_write() {
+  local root_id attempt_count
+  setup_bootnext_fixture recovery-changed-before-write
+  BOOTNEXT_FAILPOINT=after-bootnext-record
+  BOOTNEXT_FAIL_ACTION=fail
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "changed pre-write fixture reported root success"
+  fi
+  read_lifecycle || fail_test "changed pre-write root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  write_bootnext_variable 0008
+  TEST_BOOT_ID='11111111-2222-4333-8444-555555555555'
+  BOOTNEXT_FAILPOINT=""
+  BOOTNEXT_FAIL_ACTION=""
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "changed state before the write frontier reported recovery success"
+  fi
+  read_lifecycle || fail_test "changed pre-write refusal damaged lifecycle"
+  attempt_count=$(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json")
+  [[ "$_lifecycle_state" == recovery-required && "$_lifecycle_transaction_id" == "$root_id" \
+    && $attempt_count -eq 0 && $BOOTNEXT_COMMAND_CALLS -eq 0 \
+    && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "changed pre-write state acquired unauthorized recovery authority"
+}
+
+test_windows_recovery_without_published_record() {
+  local root_id manifest
+  setup_bootnext_fixture recovery-not-published
+  RESOLVE_FAIL_AT=2
+  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+    fail_test "recordless BootNext fixture reported success"
+  fi
+  read_lifecycle || fail_test "recordless root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  manifest=$(lifecycle_manifest_path "$root_id")
+  jq -e '.domain_records.bootnext == null and .current_phase == "record-bootnext"' \
+    "$manifest" >/dev/null || fail_test "recordless root published mutation authority"
+  BOOTNEXT_MOUNT_FAIL_AT=1
+  recover_windows_incident || fail_test "recordless BootNext incident did not resolve"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "recordless recovery reached a mutation boundary"
+  assert_windows_recovery_result not-published none
+}
+
+test_windows_recovery_refuses_unrelated_state() {
+  local root_id attempt_count
+  setup_bootnext_fixture recovery-unrelated
+  create_bootnext_effect_incident
+  write_bootnext_variable 0008
+  read_lifecycle || fail_test "unrelated-state root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "unrelated BootNext state reported recovery success"
+  fi
+  read_lifecycle || fail_test "unrelated-state refusal damaged lifecycle"
+  attempt_count=$(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json")
+  [[ "$_lifecycle_state" == recovery-required && "$_lifecycle_transaction_id" == "$root_id" \
+    && $attempt_count -eq 0 && $BOOTNEXT_COMMAND_CALLS -eq 0 \
+    && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "unrelated-state refusal published an unauthorized attempt"
+}
+
+test_windows_recovery_refuses_unreadable_state() {
+  local root_id attempt_count
+  setup_bootnext_fixture recovery-unreadable
+  create_bootnext_effect_incident
+  write_bootnext_variable 0007 3
+  read_lifecycle || fail_test "unreadable-state root was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "unsupported BootNext attributes reported recovery success"
+  fi
+  read_lifecycle || fail_test "unreadable-state refusal damaged lifecycle"
+  attempt_count=$(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json")
+  [[ "$_lifecycle_state" == recovery-required && "$_lifecycle_transaction_id" == "$root_id" \
+    && $attempt_count -eq 0 && $BOOTNEXT_COMMAND_CALLS -eq 0 \
+    && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "unreadable-state refusal published an unauthorized attempt"
+}
+
+test_windows_recovery_refuses_execute_time_unreadable_state() {
+  local point expected_unlink_calls manifest
+  for point in after-recovery-record after-recovery-command; do
+    setup_bootnext_fixture "recovery-execute-unreadable-${point}"
+    create_bootnext_effect_incident
+    WINDOWS_RECOVERY_FAILPOINT="$point"
+    WINDOWS_RECOVERY_FAIL_ACTION=corrupt-attributes
+    if recover_windows_incident >/dev/null 2>&1; then
+      fail_test "${point} unreadable BootNext state reported recovery success"
+    fi
+    read_lifecycle || fail_test "${point} unreadable-state attempt was unreadable"
+    if [[ "$point" == after-recovery-record ]]; then
+      expected_unlink_calls=0
+    else
+      expected_unlink_calls=1
+    fi
+    [[ "$_lifecycle_state" == recovery-required \
+      && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 1 \
+      && $UNLINK_COMMAND_CALLS -eq expected_unlink_calls ]] \
+      || fail_test "${point} unreadable state did not fail at the expected boundary"
+    manifest=$(lifecycle_manifest_path \
+      "$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")")
+    jq -e '.failure.reason | startswith("BootNext") and contains("unreadable")' \
+      "$manifest" >/dev/null \
+      || fail_test "${point} unreadable state did not preserve its failure reason"
+  done
+}
+
+test_windows_recovery_restores_cross_boot_target() {
+  local state
+  setup_bootnext_fixture recovery-cross-boot-target
+  create_bootnext_effect_incident
+  TEST_BOOT_ID='11111111-2222-4333-8444-555555555555'
+  recover_windows_incident || fail_test "cross-boot exact target was not restored"
+  [[ $UNLINK_COMMAND_CALLS -eq 1 && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "cross-boot exact target used the wrong restoration boundary"
+  state=$(read_windows_bootnext_state) || fail_test "cross-boot restoration was unreadable"
+  jq -e '.present == false and .boot_number == null' <<< "$state" >/dev/null \
+    || fail_test "cross-boot target was not restored to recorded absence"
+  assert_windows_recovery_result prior-restored delete
+}
+
+test_windows_recovery_restores_cross_boot_present_prior() {
+  local state
+  setup_bootnext_fixture recovery-cross-boot-present-prior
+  write_bootnext_variable 0042
+  create_bootnext_effect_incident
+  TEST_BOOT_ID='11111111-2222-4333-8444-555555555555'
+  recover_windows_incident || fail_test "cross-boot present prior was not restored"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 1 && $(<"$BOOTNEXT_CALL_LOG") == '-n 0042' \
+    && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "cross-boot present prior used the wrong restoration boundary"
+  state=$(read_windows_bootnext_state) \
+    || fail_test "cross-boot present-prior restoration was unreadable"
+  jq -e '.present == true and .boot_number == "0042"' <<< "$state" >/dev/null \
+    || fail_test "cross-boot target was not restored to the recorded prior value"
+  assert_windows_recovery_result prior-restored set-prior
+}
+
+test_windows_recovery_retries_failed_delete() {
+  local first_attempt first_manifest first_hash state
+  setup_bootnext_fixture recovery-delete-retry
+  create_bootnext_effect_incident
+  UNLINK_COMMAND_EFFECT=false
+  UNLINK_COMMAND_RC=23
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "no-effect unlink failure reported recovery success"
+  fi
+  read_lifecycle || fail_test "failed delete attempt was unreadable"
+  [[ "$_lifecycle_state" == recovery-required \
+    && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 1 ]] \
+    || fail_test "failed delete did not preserve the recovery incident"
+  first_attempt=$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")
+  first_manifest=$(lifecycle_manifest_path "$first_attempt")
+  first_hash=$(sha256_file "$first_manifest")
+  jq -e '.operation == "windows-recovery" and .status == "failed" and
+    .failure.phase == "restore-bootnext" and
+    .failure.reason == "BootNext recovery readback does not match the recorded prior state" and
+    .domain_records.windows != null and
+    .domain_records.final_proof == null' "$first_manifest" >/dev/null \
+    || fail_test "failed delete attempt evidence is incomplete"
+  UNLINK_COMMAND_EFFECT=true
+  UNLINK_COMMAND_RC=0
+  recover_windows_incident || fail_test "failed delete retry did not recover"
+  [[ $UNLINK_COMMAND_CALLS -eq 2 \
+    && $(sha256_file "$first_manifest") == "$first_hash" ]] \
+    || fail_test "delete retry rewrote prior attempt evidence"
+  state=$(read_windows_bootnext_state) || fail_test "delete retry state was unreadable"
+  jq -e '.present == false' <<< "$state" >/dev/null \
+    || fail_test "delete retry did not restore absence"
+  assert_windows_recovery_result prior-restored delete
+}
+
+test_windows_recovery_retries_failed_value_restore() {
+  local state first_manifest
+  setup_bootnext_fixture recovery-value-retry
+  write_bootnext_variable 0042
+  create_bootnext_effect_incident
+  BOOTNEXT_COMMAND_EFFECT=false
+  BOOTNEXT_COMMAND_RC=23
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "no-effect value restoration reported recovery success"
+  fi
+  read_lifecycle || fail_test "failed value restoration was unreadable"
+  [[ "$_lifecycle_state" == recovery-required \
+    && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 1 \
+    && $BOOTNEXT_COMMAND_CALLS -eq 1 ]] \
+    || fail_test "failed value restoration did not preserve the recovery incident"
+  first_manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '.failure.reason ==
+    "BootNext recovery readback does not match the recorded prior state"' \
+    "$first_manifest" >/dev/null \
+    || fail_test "failed value restoration did not preserve its failure reason"
+  BOOTNEXT_COMMAND_EFFECT=true
+  BOOTNEXT_COMMAND_RC=0
+  recover_windows_incident || fail_test "failed value restoration did not retry"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 2 ]] \
+    || fail_test "value restoration retry did not use one fresh write"
+  state=$(read_windows_bootnext_state) || fail_test "value restoration retry was unreadable"
+  jq -e '.present == true and .boot_number == "0042"' <<< "$state" >/dev/null \
+    || fail_test "value restoration retry did not restore the recorded prior"
+  assert_windows_recovery_result prior-restored set-prior
+}
+
+test_windows_recovery_resolves_interrupted_delete() {
+  local state proof
+  setup_bootnext_fixture recovery-delete-interruption
+  create_bootnext_effect_incident
+  WINDOWS_RECOVERY_FAILPOINT=after-recovery-command
+  WINDOWS_RECOVERY_FAIL_ACTION=fail
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "post-delete interruption reported recovery success"
+  fi
+  state=$(read_windows_bootnext_state) || fail_test "post-delete state was unreadable"
+  jq -e '.present == false' <<< "$state" >/dev/null \
+    || fail_test "post-delete interruption lost the observed deletion"
+  WINDOWS_RECOVERY_FAILPOINT=""
+  WINDOWS_RECOVERY_FAIL_ACTION=""
+  UNLINK_COMMAND_CALLS=0
+  recover_windows_incident || fail_test "post-delete retry did not resolve"
+  [[ $UNLINK_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "post-delete retry replayed an already observed deletion"
+  assert_windows_recovery_result prior-unchanged none
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '.command_exit_code == null' "$proof" >/dev/null \
+    || fail_test "post-delete retry invented a command result"
+}
+
+test_windows_recovery_resolves_interrupted_value_restore() {
+  local state
+  setup_bootnext_fixture recovery-value-interruption
+  write_bootnext_variable 0042
+  create_bootnext_effect_incident
+  WINDOWS_RECOVERY_FAILPOINT=after-recovery-command
+  WINDOWS_RECOVERY_FAIL_ACTION=fail
+  if recover_windows_incident >/dev/null 2>&1; then
+    fail_test "post-value-restore interruption reported recovery success"
+  fi
+  state=$(read_windows_bootnext_state) || fail_test "post-value-restore state was unreadable"
+  jq -e '.present == true and .boot_number == "0042"' <<< "$state" >/dev/null \
+    || fail_test "post-value-restore interruption lost the observed restoration"
+  WINDOWS_RECOVERY_FAILPOINT=""
+  WINDOWS_RECOVERY_FAIL_ACTION=""
+  BOOTNEXT_COMMAND_CALLS=0
+  : > "$BOOTNEXT_CALL_LOG"
+  recover_windows_incident || fail_test "post-value-restore retry did not resolve"
+  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
+    || fail_test "post-value-restore retry replayed an observed restoration"
+  assert_windows_recovery_result prior-unchanged none
+}
+
+test_windows_recovery_reconciles_completed_transition() {
+  local attempt_id attempt_manifest attempt_hash child_rc=0
+  setup_bootnext_fixture recovery-completed-transition
+  create_bootnext_effect_incident
+  LIFECYCLE_FAILPOINT=before-recovery-resolved-state-write
+  (recover_windows_incident >/dev/null 2>&1) || child_rc=$?
+  [[ $child_rc -ne 0 ]] || fail_test "failed stable recovery publication reported success"
+  LIFECYCLE_FAILPOINT=""
+  read_lifecycle || fail_test "completed recovery transition was unreadable"
+  [[ "$_lifecycle_state" == transition ]] \
+    || fail_test "failed stable recovery publication did not retain its transition"
+  attempt_id="$_lifecycle_transaction_id"
+  attempt_manifest=$(lifecycle_manifest_path "$attempt_id")
+  jq -e '.kind == "recovery-attempt" and .operation == "windows-recovery" and
+    .status == "completed" and .domain_records.final_proof != null' \
+    "$attempt_manifest" >/dev/null \
+    || fail_test "completed Windows recovery transition lost its proof"
+  attempt_hash=$(sha256_file "$attempt_manifest")
+  recover_windows_incident || fail_test "completed Windows recovery transition did not reconcile"
+  read_lifecycle || fail_test "reconciled Windows recovery was unreadable"
+  [[ "$_lifecycle_state" == active \
+    && $(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json") == "$attempt_id" \
+    && $(sha256_file "$attempt_manifest") == "$attempt_hash" ]] \
+    || fail_test "stale reconciliation replayed or rewrote completed Windows recovery"
+}
+
+test_windows_recovery_prewrite_races() {
+  local action manifest
+  for action in change-boot change-state change-tool replace-variable; do
+    setup_bootnext_fixture "recovery-race-${action}"
+    create_bootnext_effect_incident
+    WINDOWS_RECOVERY_FAILPOINT=after-recovery-record
+    WINDOWS_RECOVERY_FAIL_ACTION="$action"
+    if recover_windows_incident >/dev/null 2>&1; then
+      fail_test "${action} Windows recovery race reported success"
+    fi
+    read_lifecycle || fail_test "${action} recovery race damaged lifecycle"
+    [[ "$_lifecycle_state" == recovery-required && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+      || fail_test "${action} recovery race reached unlink"
+    if [[ "$action" == change-state ]]; then
+      manifest=$(lifecycle_manifest_path \
+        "$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")")
+      jq -e '.failure.reason ==
+        "BootNext changed after Windows recovery evidence was recorded"' \
+        "$manifest" >/dev/null \
+        || fail_test "changed-state race did not preserve its failure reason"
+    fi
+  done
+}
+
+test_windows_recovery_set_prior_prewrite_races() {
+  local action
+  for action in change-boot change-state change-tool; do
+    setup_bootnext_fixture "recovery-set-prior-race-${action}"
+    write_bootnext_variable 0042
+    create_bootnext_effect_incident
+    WINDOWS_RECOVERY_FAILPOINT=after-recovery-record
+    WINDOWS_RECOVERY_FAIL_ACTION="$action"
+    if recover_windows_incident >/dev/null 2>&1; then
+      fail_test "${action} set-prior recovery race reported success"
+    fi
+    read_lifecycle || fail_test "${action} set-prior race damaged lifecycle"
+    [[ "$_lifecycle_state" == recovery-required && $BOOTNEXT_COMMAND_CALLS -eq 0 \
+      && $UNLINK_COMMAND_CALLS -eq 0 ]] \
+      || fail_test "${action} set-prior race reached a mutation boundary"
+  done
+}
+
+test_windows_recovery_schema_tamper() {
+  local manifest transaction_id record proof tampered
+  setup_bootnext_fixture recovery-schema
+  create_bootnext_effect_incident
+  recover_windows_incident || fail_test "schema fixture recovery failed"
+  read_lifecycle || fail_test "schema fixture lifecycle was unreadable"
+  transaction_id=$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")
+  manifest=$(lifecycle_manifest_path "$transaction_id")
+  record=$(jq -r '.domain_records.windows.path' "$manifest")
+  proof=$(jq -r '.domain_records.final_proof.path' "$manifest")
+  tampered=$(jq '.planned_outcome = "consumed-unknown"' "$record")
+  if validate_windows_recovery_record_json "$transaction_id" "$tampered" \
+    "$(read_control_document "$manifest")"; then
+    fail_test "Windows recovery record accepted a contradictory outcome"
+  fi
+  tampered=$(jq '.unexpected = true' "$proof")
+  if validate_windows_recovery_proof_json "$transaction_id" "$tampered" \
+    "$(read_control_document "$manifest")"; then
+    fail_test "Windows recovery proof accepted an unknown field"
+  fi
+}
+
 run_case() {
   local name="$1" function="$2" log pid registration_signal=""
   log="${TEST_DIR}/case-${name}.log"
@@ -1308,6 +1885,26 @@ run_case bootnext-races test_bootnext_prewrite_races
 run_case bootnext-command-failures test_bootnext_command_failures
 run_case bootnext-readback test_bootnext_readback_and_interruption
 run_case bootnext-commit-failure test_bootnext_commit_failure
+run_case recovery-absence test_windows_recovery_restores_absence
+run_case recovery-value test_windows_recovery_restores_value
+run_case recovery-unchanged test_windows_recovery_prior_unchanged
+run_case recovery-consumed test_windows_recovery_consumed_unknown
+run_case recovery-cross-boot-before-write test_windows_recovery_cross_boot_before_write
+run_case recovery-changed-before-write test_windows_recovery_refuses_changed_before_write
+run_case recovery-not-published test_windows_recovery_without_published_record
+run_case recovery-unrelated test_windows_recovery_refuses_unrelated_state
+run_case recovery-unreadable test_windows_recovery_refuses_unreadable_state
+run_case recovery-execute-unreadable test_windows_recovery_refuses_execute_time_unreadable_state
+run_case recovery-cross-boot-target test_windows_recovery_restores_cross_boot_target
+run_case recovery-cross-boot-present-prior test_windows_recovery_restores_cross_boot_present_prior
+run_case recovery-delete-retry test_windows_recovery_retries_failed_delete
+run_case recovery-value-retry test_windows_recovery_retries_failed_value_restore
+run_case recovery-delete-interruption test_windows_recovery_resolves_interrupted_delete
+run_case recovery-value-interruption test_windows_recovery_resolves_interrupted_value_restore
+run_case recovery-completed-transition test_windows_recovery_reconciles_completed_transition
+run_case recovery-races test_windows_recovery_prewrite_races
+run_case recovery-set-prior-races test_windows_recovery_set_prior_prewrite_races
+run_case recovery-schema test_windows_recovery_schema_tamper
 wait_for_cases || fail_test "Windows entry test batch failed"
 
 printf 'windows entry tests passed\n'
