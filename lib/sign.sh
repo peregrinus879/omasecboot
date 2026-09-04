@@ -21,6 +21,18 @@ limine_unsigned_binary_path() {
   printf '%s\n' /usr/share/limine/BOOTX64.EFI
 }
 
+limine_install_path() {
+  printf '%s\n' /usr/bin/limine-install
+}
+
+limine_mkinitcpio_path() {
+  printf '%s\n' /usr/bin/limine-mkinitcpio
+}
+
+limine_reset_enroll_path() {
+  printf '%s\n' /usr/bin/limine-reset-enroll
+}
+
 list_limine_default_entries() {
   local file="$1" key="$2"
   awk -v key="$key" '
@@ -102,12 +114,28 @@ set_limine_default_value() {
   replace_limine_default_entry "$key" "$desired"
 }
 
-# Ensure a space-delimited command is present in COMMANDS_* without
+parse_limine_default_commands() {
+  local raw="$1" current word
+  _limine_command_words=()
+  current="$raw"
+  if [[ "$current" == \"* || "$current" == *\" ]]; then
+    [[ "$current" == \"*\" && ${#current} -ge 2 ]] || return 1
+    current=${current:1:${#current}-2}
+  fi
+  [[ "$current" != *$'\n'* && "$current" != *$'\r'* ]] || return 1
+  [[ -z "$current" ]] && return 0
+  read -r -a _limine_command_words <<< "$current" || return 1
+  for word in "${_limine_command_words[@]}"; do
+    [[ "$word" =~ ^[A-Za-z0-9_./:+,@%=-]+$ ]] || return 1
+  done
+}
+
+# Ensure a whitespace-delimited command is present in COMMANDS_* without
 # overwriting other upstream-managed commands.
 # Returns 0 if the file changed, 1 if already correct, 2 on failure.
 ensure_limine_default_command() {
   local key="$1" command="$2"
-  local raw current desired
+  local raw current desired word found=0
 
   load_limine_default_entry "$key" || return 2
   raw=${_limine_default_raw:-}
@@ -117,12 +145,14 @@ ensure_limine_default_command() {
     return $?
   fi
 
-  current="$raw"
-  if [[ "$current" == \"*\" && "$current" == *\" ]]; then
-    current=${current:1:${#current}-2}
-  fi
+  parse_limine_default_commands "$raw" || return 2
+  current="${_limine_command_words[*]}"
+  for word in "${_limine_command_words[@]}"; do
+    [[ "$word" == "$command" ]] && found=$((found + 1))
+  done
+  (( found <= 1 )) || return 2
 
-  if [[ " $current " == *" $command "* ]]; then
+  if (( found == 1 )); then
     [[ ${_limine_default_count:-0} -eq 1 ]] && return 1
     desired="${key}=\"${current}\""
   elif [[ -n "$current" ]]; then
@@ -138,19 +168,16 @@ ensure_limine_default_command() {
 # mechanism is available. Returns 0 if changed, 1 if already clean, 2 on failure.
 remove_limine_default_command() {
   local key="$1" command="$2"
-  local raw current word desired="" changed=1
+  local raw word desired="" changed=1 found=0
 
   load_limine_default_entry "$key" || return 2
   raw=${_limine_default_raw:-}
   [[ ${_limine_default_count:-0} -gt 0 ]] || return 1
 
-  current="$raw"
-  if [[ "$current" == \"*\" && "$current" == *\" ]]; then
-    current=${current:1:${#current}-2}
-  fi
-
-  for word in $current; do
+  parse_limine_default_commands "$raw" || return 2
+  for word in "${_limine_command_words[@]}"; do
     if [[ "$word" == "$command" ]]; then
+      found=$((found + 1))
       changed=0
       continue
     fi
@@ -160,6 +187,7 @@ remove_limine_default_command() {
       desired="$word"
     fi
   done
+  (( found <= 1 )) || return 2
 
   if [[ $changed -ne 0 && ${_limine_default_count:-0} -eq 1 ]]; then
     return 1
@@ -700,6 +728,624 @@ sbctl_tracking_preflight() {
   validate_sbctl_tracking_store
 }
 
+limine_managed_setting_state() {
+  local key="$1" raw
+  load_limine_default_entry "$key" || return 1
+  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
+  if [[ ${_limine_default_count:-0} -eq 0 ]]; then
+    printf 'unset\n'
+    return 0
+  fi
+  raw=${_limine_default_raw:-}
+  if [[ "$raw" == \"*\" && "$raw" == *\" ]]; then
+    raw=${raw:1:${#raw}-2}
+  fi
+  [[ "$raw" == yes || "$raw" == no ]] || return 1
+  printf '%s\n' "$raw"
+}
+
+limine_managed_token_state() {
+  local key="$1" token="$2" raw word found=0
+  load_limine_default_entry "$key" || return 1
+  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
+  raw=${_limine_default_raw:-}
+  parse_limine_default_commands "$raw" || return 1
+  for word in "${_limine_command_words[@]}"; do
+    [[ "$word" == "$token" ]] && found=$((found + 1))
+  done
+  (( found <= 1 )) || return 1
+  if (( found == 1 )); then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+current_limine_managed_settings_record() {
+  local verification enrollment before_save after_save
+  local managed_before=present managed_after=present
+  verification=$(limine_managed_setting_state ENABLE_VERIFICATION) || return 1
+  enrollment=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG) || return 1
+  before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll) \
+    || return 1
+  after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config) \
+    || return 1
+  if limine_enrollment_hooks_present; then
+    managed_before=absent
+    managed_after=absent
+  fi
+  jq -cn \
+    --arg verification "$verification" --arg enrollment "$enrollment" \
+    --arg before_save "$before_save" --arg after_save "$after_save" \
+    --arg managed_before "$managed_before" --arg managed_after "$managed_after" \
+    --arg before_token limine-reset-enroll \
+    --arg after_token limine-enroll-config '[
+      {
+        path: "/etc/default/limine", key: "ENABLE_VERIFICATION",
+        managed: "no", original: $verification
+      },
+      {
+        path: "/etc/default/limine", key: "ENABLE_ENROLL_LIMINE_CONFIG",
+        managed: "yes", original: $enrollment
+      },
+      {
+        path: "/etc/default/limine", key: "COMMANDS_BEFORE_SAVE",
+        token: $before_token, managed: $managed_before,
+        original: $before_save
+      },
+      {
+        path: "/etc/default/limine", key: "COMMANDS_AFTER_SAVE",
+        token: $after_token, managed: $managed_after,
+        original: $after_save
+      }
+    ]'
+}
+
+current_limine_settings_match_record() {
+  local settings="$1" setting key token expected current
+  while IFS= read -r setting; do
+    key=$(jq -r '.key' <<< "$setting") || return 1
+    expected=$(jq -r '.managed' <<< "$setting") || return 1
+    token=$(jq -r '.token // ""' <<< "$setting") || return 1
+    if [[ -n "$token" ]]; then
+      current=$(limine_managed_token_state "$key" "$token") || return 1
+    else
+      current=$(limine_managed_setting_state "$key") || return 1
+    fi
+    [[ "$current" == "$expected" ]] || return 1
+  done < <(jq -c '.[]' <<< "$settings")
+}
+
+load_latest_recovery_ownership_records() {
+  local manifest="$_recovery_previous_manifest_json" kind previous owner_id
+  local managed_reference tracking_reference managed_path tracking_path
+  _recovery_ownership_found=false
+  _recovery_managed_reference_json=null
+  _recovery_tracking_reference_json=null
+  while [[ -n "$manifest" ]]; do
+    managed_reference=$(jq -c '.domain_records.managed_settings' <<< "$manifest") || return 1
+    tracking_reference=$(jq -c '.domain_records.tracking_ownership' <<< "$manifest") \
+      || return 1
+    [[ "$tracking_reference" == null || "$managed_reference" != null ]] || return 1
+    if [[ "$managed_reference" != null && "$tracking_reference" != null ]]; then
+      owner_id=$(jq -r '.id' <<< "$manifest") || return 1
+      validate_managed_settings_record_reference "$owner_id" "$managed_reference" || return 1
+      validate_tracking_ownership_record_reference "$owner_id" "$tracking_reference" \
+        || return 1
+      managed_path=$(jq -r '.path' <<< "$managed_reference") || return 1
+      tracking_path=$(jq -r '.path' <<< "$tracking_reference") || return 1
+      _managed_settings_record_json=$(read_control_document "$managed_path") || return 1
+      _tracking_ownership_record_json=$(read_control_document "$tracking_path") || return 1
+      _recovery_managed_reference_json="$managed_reference"
+      _recovery_tracking_reference_json="$tracking_reference"
+      _recovery_ownership_found=true
+      return 0
+    fi
+    kind=$(jq -r '.kind' <<< "$manifest") || return 1
+    [[ "$kind" == recovery-attempt ]] || {
+      [[ "$kind" == root ]] || return 1
+      return 0
+    }
+    previous=$(jq -c '.recovery.previous_attempt' <<< "$manifest") || return 1
+    if [[ "$previous" == null ]]; then
+      manifest="$_recovery_root_manifest_json"
+    else
+      validate_incident_reference "$previous" || return 1
+      manifest="$_manifest_json"
+    fi
+  done
+}
+
+prepare_artifact_ownership() {
+  local managed_reference tracking_reference tracked_raw file settings paths
+  local previous_ownership=false
+  local managed_before=present managed_after=present
+  local -A tracked=()
+  read_lifecycle || return 1
+  managed_reference=$(jq -c '.managed_settings' <<< "$_lifecycle_json") || return 1
+  tracking_reference=$(jq -c '.tracking_ownership' <<< "$_lifecycle_json") || return 1
+  if [[ ( "$_lifecycle_state" == recovery-required \
+      || ( "$_lifecycle_state" == transition \
+        && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == recovery-attempt ) ) \
+    && -n "${_recovery_previous_manifest_json:-}" ]]; then
+    load_latest_recovery_ownership_records || return 1
+    if [[ "$_recovery_ownership_found" == true ]]; then
+      managed_reference="$_recovery_managed_reference_json"
+      tracking_reference="$_recovery_tracking_reference_json"
+      previous_ownership=true
+    fi
+  fi
+  if [[ "$managed_reference" != null || "$tracking_reference" != null ]]; then
+    [[ "$managed_reference" != null && "$tracking_reference" != null ]] || return 1
+    [[ "$previous_ownership" == true ]] || load_lifecycle_ownership_records || return 1
+    settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
+    current_limine_settings_match_record "$settings" || {
+      fail "Managed Limine settings conflict with recorded OmaSecBoot ownership"
+      return 1
+    }
+    if limine_enrollment_hooks_present; then
+      managed_before=absent
+      managed_after=absent
+    fi
+    settings=$(jq -c \
+      --arg managed_before "$managed_before" --arg managed_after "$managed_after" '
+        .[0].managed = "no" |
+        .[1].managed = "yes" |
+        .[2].managed = $managed_before |
+        .[3].managed = $managed_after
+      ' <<< "$settings") || return 1
+    paths=$(jq -c '.paths' <<< "$_tracking_ownership_record_json") || return 1
+    _repair_ownership_source=repair
+  else
+    [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled \
+      || ( "$_lifecycle_state" == transition \
+        && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == root \
+        && $(jq -r '.transaction.operation' <<< "$_lifecycle_json") == \
+          activate-secure-boot-plan ) ]] || return 1
+    settings=$(current_limine_managed_settings_record) || return 1
+    paths='[]'
+    _repair_ownership_source=setup
+  fi
+
+  tracked_raw=$(list_enrolled_paths) || return 1
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && tracked["$file"]=1
+  done <<< "$tracked_raw"
+  for file in "${_discovered_efi_files[@]}"; do
+    [[ -n "${tracked[$file]:-}" ]] && continue
+    paths=$(jq -c --arg path "$file" '. + [$path] | unique | sort' <<< "$paths") || return 1
+  done
+  validate_managed_settings_record_json "00000000-0000-0000-0000-000000000000" \
+    "$(jq -cn --argjson schema "$MANAGED_SETTINGS_SCHEMA_VERSION" \
+      --arg version "$OMASECBOOT_VERSION" \
+      --arg id '00000000-0000-0000-0000-000000000000' \
+      --arg timestamp '2000-01-01T00:00:00Z' --arg source "$_repair_ownership_source" \
+      --argjson settings "$settings" '{schema_version:$schema,writer_version:$version,
+        transaction_id:$id,recorded_at:$timestamp,source:$source,settings:$settings}')" \
+    || return 1
+  jq -e 'length == (unique | length)' <<< "$paths" >/dev/null || return 1
+  _repair_managed_settings_json="$settings"
+  _repair_tracking_paths_json="$paths"
+}
+
+managed_settings_have_known_originals() {
+  local settings="$1"
+  jq -e 'type == "array" and length == 4 and all(.[]; .original != "unknown")' \
+    <<< "$settings" >/dev/null
+}
+
+limine_managed_settings_are_restorable() {
+  local settings="$1" setting key token managed original current
+  managed_settings_have_known_originals "$settings" || return 1
+  while IFS= read -r setting; do
+    key=$(jq -r '.key' <<< "$setting") || return 1
+    token=$(jq -r '.token // ""' <<< "$setting") || return 1
+    managed=$(jq -r '.managed' <<< "$setting") || return 1
+    original=$(jq -r '.original' <<< "$setting") || return 1
+    if [[ -n "$token" ]]; then
+      current=$(limine_managed_token_state "$key" "$token") || return 1
+    else
+      current=$(limine_managed_setting_state "$key") || return 1
+    fi
+    [[ "$current" == "$managed" || "$current" == "$original" ]] || return 1
+  done < <(jq -c '.[]' <<< "$settings")
+}
+
+restore_limine_managed_settings() {
+  local settings="$1" setting key token managed original current rc
+  limine_managed_settings_are_restorable "$settings" || return 1
+  while IFS= read -r setting; do
+    key=$(jq -r '.key' <<< "$setting") || return 1
+    token=$(jq -r '.token // ""' <<< "$setting") || return 1
+    managed=$(jq -r '.managed' <<< "$setting") || return 1
+    original=$(jq -r '.original' <<< "$setting") || return 1
+    if [[ -n "$token" ]]; then
+      current=$(limine_managed_token_state "$key" "$token") || return 1
+      [[ "$current" == "$original" ]] && continue
+      [[ "$current" == "$managed" ]] || return 1
+      rc=0
+      if [[ "$original" == present ]]; then
+        ensure_limine_default_command "$key" "$token" || rc=$?
+      else
+        remove_limine_default_command "$key" "$token" || rc=$?
+      fi
+    else
+      current=$(limine_managed_setting_state "$key") || return 1
+      [[ "$current" == "$original" ]] && continue
+      [[ "$current" == "$managed" ]] || return 1
+      rc=0
+      if [[ "$original" == unset ]]; then
+        replace_limine_default_entry "$key" || rc=$?
+      else
+        set_limine_default_value "$key" "$original" || rc=$?
+      fi
+    fi
+    [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
+  done < <(jq -c '.[]' <<< "$settings")
+  limine_managed_settings_are_original "$settings"
+}
+
+limine_managed_settings_are_original() {
+  local settings="$1" setting key token original current
+  managed_settings_have_known_originals "$settings" || return 1
+  while IFS= read -r setting; do
+    key=$(jq -r '.key' <<< "$setting") || return 1
+    token=$(jq -r '.token // ""' <<< "$setting") || return 1
+    original=$(jq -r '.original' <<< "$setting") || return 1
+    if [[ -n "$token" ]]; then
+      current=$(limine_managed_token_state "$key" "$token") || return 1
+    else
+      current=$(limine_managed_setting_state "$key") || return 1
+    fi
+    [[ "$current" == "$original" ]] || return 1
+  done < <(jq -c '.[]' <<< "$settings")
+}
+
+owned_tracking_state_is_safe() {
+  local paths="$1" rows path file output count
+  rows=$(list_enrolled_entries_for_cleanup) || return 1
+  while IFS= read -r path; do
+    count=0
+    while IFS=$'\t' read -r file output; do
+      [[ -n "$file" ]] || continue
+      output=${output:-$file}
+      if [[ "$file" == "$path" || "$output" == "$path" ]]; then
+        [[ "$file" == "$path" && "$output" == "$path" ]] || return 1
+        count=$((count + 1))
+      fi
+    done <<< "$rows"
+    (( count <= 1 )) || return 1
+  done < <(jq -r '.[]' <<< "$paths")
+}
+
+owned_tracking_is_absent() {
+  local paths="$1" rows path file output
+  rows=$(list_enrolled_entries_for_cleanup) || return 1
+  while IFS= read -r path; do
+    while IFS=$'\t' read -r file output; do
+      [[ -n "$file" ]] || continue
+      output=${output:-$file}
+      [[ "$file" != "$path" && "$output" != "$path" ]] || return 1
+    done <<< "$rows"
+  done < <(jq -r '.[]' <<< "$paths")
+}
+
+remove_owned_tracking_entries() {
+  local paths="$1" rows path file output present
+  owned_tracking_state_is_safe "$paths" || return 1
+  rows=$(list_enrolled_entries_for_cleanup) || return 1
+  while IFS= read -r path; do
+    present=false
+    while IFS=$'\t' read -r file output; do
+      [[ -n "$file" ]] || continue
+      output=${output:-$file}
+      [[ "$file" == "$path" && "$output" == "$path" ]] && present=true
+    done <<< "$rows"
+    [[ "$present" == false ]] || sbctl remove-file "$path" >/dev/null || return 1
+  done < <(jq -r '.[]' <<< "$paths")
+  local files_db
+  files_db=$(resolve_sbctl_files_db_path) || return 1
+  [[ ! -f "$files_db" ]] || durable_sync "$files_db" || return 1
+  owned_tracking_is_absent "$paths"
+}
+
+limine_targets_are_unenrolled() {
+  local reset_checksum primary fallback
+  reset_checksum=$(printf '0%.0s' {1..128})
+  primary=$(read_limine_embedded_checksum "$(limine_primary_binary_path)") || return 1
+  fallback=$(read_limine_embedded_checksum "$(limine_fallback_binary_path)") || return 1
+  [[ "$primary" == "$reset_checksum" && "$fallback" == "$reset_checksum" ]]
+}
+
+capture_unconfigure_limine_source() {
+  local source checksum identity current_identity hash current_hash zero_checksum
+  source=$(limine_unsigned_binary_path) || return 1
+  validate_control_file "$source" || return 1
+  zero_checksum=$(printf '0%.0s' {1..128})
+  checksum=$(read_limine_embedded_checksum "$source") || return 1
+  [[ "$checksum" == "$zero_checksum" ]] || return 1
+  identity=$(control_file_identity "$source") || return 1
+  hash=$(sha256_file "$source") || return 1
+  current_identity=$(control_file_identity "$source") || return 1
+  current_hash=$(sha256_file "$source") || return 1
+  [[ "$current_identity" == "$identity" && "$current_hash" == "$hash" ]] || return 1
+  _unconfigure_limine_source_identity="$identity"
+  _unconfigure_limine_source_hash="$hash"
+}
+
+unconfigure_limine_source_is_unchanged() {
+  local source
+  source=$(limine_unsigned_binary_path) || return 1
+  validate_control_file "$source" || return 1
+  [[ "$(control_file_identity "$source")" == "$_unconfigure_limine_source_identity" \
+    && "$(sha256_file "$source")" == "$_unconfigure_limine_source_hash" ]]
+}
+
+unconfigured_limine_targets_match_source() {
+  local target checksum identity current_identity hash current_hash zero_checksum
+  unconfigure_limine_source_is_unchanged || return 1
+  zero_checksum=$(printf '0%.0s' {1..128})
+  for target in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
+    validate_control_file "$target" || return 1
+    checksum=$(read_limine_embedded_checksum "$target") || return 1
+    identity=$(control_file_identity "$target") || return 1
+    hash=$(sha256_file "$target") || return 1
+    current_identity=$(control_file_identity "$target") || return 1
+    current_hash=$(sha256_file "$target") || return 1
+    [[ "$checksum" == "$zero_checksum" && "$identity" == "$current_identity" \
+      && "$hash" == "$current_hash" && "$hash" == "$_unconfigure_limine_source_hash" ]] \
+      || return 1
+    if [[ "$target" == "$(limine_primary_binary_path)" ]]; then
+      _unconfigure_primary_hash="$hash"
+    else
+      _unconfigure_fallback_hash="$hash"
+    fi
+  done
+  unconfigure_limine_source_is_unchanged
+}
+
+unconfigure_windows_state_identity() {
+  local path identity current_identity hash
+  path=$(windows_target_state_path) || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    validate_control_file "$path" || return 1
+    identity=$(control_file_identity "$path") || return 1
+    hash=$(sha256_file "$path") || return 1
+    current_identity=$(control_file_identity "$path") || return 1
+    [[ "$current_identity" == "$identity" ]] || return 1
+    printf 'present:%s:%s\n' "$identity" "$hash"
+  else
+    printf 'absent\n'
+  fi
+}
+
+unconfigure_validate_all_conflicts() {
+  local settings paths managed_reference tracking_reference
+  load_lifecycle_ownership_records || return 1
+  settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
+  paths=$(jq -c '.paths' <<< "$_tracking_ownership_record_json") || return 1
+  managed_reference=$(jq -c '.managed_settings' <<< "$_lifecycle_json") || return 1
+  tracking_reference=$(jq -c '.tracking_ownership' <<< "$_lifecycle_json") || return 1
+  [[ "$(jq -Sc . <<< "$settings")" == \
+      "$(jq -Sc . <<< "$_unconfigure_managed_settings_json")" \
+    && "$(jq -Sc . <<< "$paths")" == \
+      "$(jq -Sc . <<< "$_unconfigure_tracking_paths_json")" \
+    && "$(jq -Sc . <<< "$managed_reference")" == \
+      "$(jq -Sc . <<< "$_unconfigure_managed_reference_json")" \
+    && "$(jq -Sc . <<< "$tracking_reference")" == \
+      "$(jq -Sc . <<< "$_unconfigure_tracking_reference_json")" ]] || return 1
+  read_current_firmware_modes || return 1
+  [[ "$_secure_boot_mode" == 0 ]] || return 1
+  limine_managed_settings_are_restorable "$settings" || return 1
+  owned_tracking_state_is_safe "$paths" || return 1
+  windows_unconfigure_preflight || return 1
+  [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
+    || return 1
+  unconfigure_limine_source_is_unchanged
+}
+
+unconfigure_limine_tools_are_pinned() {
+  local path version
+  version=$(producer_package_version limine-mkinitcpio-hook) || return 1
+  [[ "$version" == "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ]] || return 1
+  for path in "$(limine_install_path)" "$(limine_mkinitcpio_path)" \
+    "$(limine_reset_enroll_path)"; do
+    validate_control_file "$path" || return 1
+    [[ $(producer_file_owner_package "$path") == limine-mkinitcpio-hook ]] || return 1
+  done
+}
+
+unconfigure_preflight() {
+  local command
+  for command in b2sum find findmnt jq mountpoint sbctl sha256sum; do
+    command -v "$command" >/dev/null 2>&1 || {
+      fail "Required unconfiguration command not found: ${command}"
+      return 1
+    }
+  done
+  unconfigure_limine_tools_are_pinned || {
+    fail "Required Limine tools do not match the supported package"
+    return 1
+  }
+  artifact_esp_is_mounted || return 1
+  validate_control_file "$(limine_default_config_path)" || return 1
+  validate_control_file "$(limine_config_path)" || return 1
+  validate_control_file "$(limine_primary_binary_path)" || return 1
+  validate_control_file "$(limine_fallback_binary_path)" || return 1
+  read_limine_embedded_checksum "$(limine_primary_binary_path)" >/dev/null || return 1
+  read_limine_embedded_checksum "$(limine_fallback_binary_path)" >/dev/null || return 1
+  capture_unconfigure_limine_source || return 1
+  collect_discovered_efi_files || return 1
+  sbctl_tracking_preflight || return 1
+  validate_discovered_sbctl_mappings || return 1
+  load_lifecycle_ownership_records || return 1
+  _unconfigure_managed_settings_json=$(jq -c '.settings' \
+    <<< "$_managed_settings_record_json") || return 1
+  _unconfigure_tracking_paths_json=$(jq -c '.paths' \
+    <<< "$_tracking_ownership_record_json") || return 1
+  _unconfigure_managed_reference_json=$(jq -c '.managed_settings' \
+    <<< "$_lifecycle_json") || return 1
+  _unconfigure_tracking_reference_json=$(jq -c '.tracking_ownership' \
+    <<< "$_lifecycle_json") || return 1
+  _unconfigure_rebuild_obligations_json=$(derive_uki_inventory_obligations) || return 1
+  validate_efi_obligations_json "$_unconfigure_rebuild_obligations_json" || return 1
+  _unconfigure_windows_identity=$(unconfigure_windows_state_identity) || return 1
+  unconfigure_validate_all_conflicts || {
+    fail "Unconfiguration found an unknown original value or a managed-state conflict"
+    return 1
+  }
+}
+
+run_checked_stock_limine_rebuild() {
+  local final_obligations install mkinitcpio reset
+  install=$(limine_install_path) || return 1
+  mkinitcpio=$(limine_mkinitcpio_path) || return 1
+  reset=$(limine_reset_enroll_path) || return 1
+  if [[ "$QUIET" == true ]]; then
+    with_limine_lock_handoff "$install" --no-efi-register --fallback >/dev/null || return 1
+    with_limine_lock_handoff "$mkinitcpio" >/dev/null || return 1
+    "$reset" >/dev/null || return 1
+  else
+    with_limine_lock_handoff "$install" --no-efi-register --fallback || return 1
+    with_limine_lock_handoff "$mkinitcpio" || return 1
+    "$reset" || return 1
+  fi
+  durable_sync "$(esp_path)" || return 1
+  final_obligations=$(derive_uki_inventory_obligations) || return 1
+  [[ "$(jq -Sc . <<< "$final_obligations")" == \
+    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
+  verify_obligated_efi_artifacts_exist "$final_obligations" || return 1
+  unconfigured_limine_targets_match_source
+}
+
+persist_unconfigure_proof() {
+  local transaction_dir path timestamp document existing reference current_reference
+  local primary fallback primary_hash fallback_hash zero_checksum
+  local source source_hash
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/unconfigure.json"
+  timestamp=$(utc_timestamp) || return 1
+  primary=$(limine_primary_binary_path) || return 1
+  fallback=$(limine_fallback_binary_path) || return 1
+  source=$(limine_unsigned_binary_path) || return 1
+  unconfigured_limine_targets_match_source || return 1
+  primary_hash="$_unconfigure_primary_hash"
+  fallback_hash="$_unconfigure_fallback_hash"
+  source_hash="$_unconfigure_limine_source_hash"
+  zero_checksum=$(printf '0%.0s' {1..128})
+  document=$(jq -cn \
+    --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" \
+    --arg primary "$primary" --arg primary_hash "$primary_hash" \
+    --arg fallback "$fallback" --arg fallback_hash "$fallback_hash" \
+    --arg source "$source" --arg source_hash "$source_hash" \
+    --arg zero_checksum "$zero_checksum" \
+    --argjson managed_settings "$_unconfigure_managed_reference_json" \
+    --argjson tracking_ownership "$_unconfigure_tracking_reference_json" \
+    --argjson obligations "$_unconfigure_rebuild_obligations_json" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      operation: "unconfigure",
+      proved_at: $timestamp,
+      secure_boot: 0,
+      settings: "original",
+      windows: "managed-block-absent",
+      managed_settings: $managed_settings,
+      tracking_ownership: $tracking_ownership,
+      rebuild_obligations: $obligations,
+      limine: {
+        source: {path: $source, sha256: $source_hash},
+        primary: {path: $primary, config_checksum: $zero_checksum, sha256: $primary_hash},
+        fallback: {path: $fallback, config_checksum: $zero_checksum, sha256: $fallback_hash}
+      }
+    }') || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  validate_unconfigure_proof_json "$_transaction_id" "$document" "$_manifest_json" \
+    || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_unconfigure_proof_json "$_transaction_id" "$existing" "$_manifest_json" \
+      || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      ($existing | del(.proved_at)) == ($candidate | del(.proved_at))
+    ' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  unconfigured_limine_targets_match_source || return 1
+  [[ "$_unconfigure_primary_hash" == "$primary_hash" \
+    && "$_unconfigure_fallback_hash" == "$fallback_hash" ]] || return 1
+  reference=$(transaction_artifact_reference "$path" "$UNCONFIGURE_PROOF_SCHEMA_VERSION") \
+    || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.unconfigure' <<< "$_manifest_json") || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record unconfigure "$reference"
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
+  fi
+}
+
+unconfigure_software_state() {
+  local file
+  transaction_phase_start backup-software-state || return 1
+  transaction_backup_file "$(limine_default_config_path)" || return 1
+  transaction_backup_file "$(limine_config_path)" || return 1
+  transaction_backup_file "$(limine_primary_binary_path)" || return 1
+  transaction_backup_file "$(limine_fallback_binary_path)" || return 1
+  for file in "${_discovered_efi_files[@]}"; do
+    transaction_backup_file "$file" || return 1
+  done
+  backup_sbctl_tracking_stores || return 1
+  transaction_phase_complete backup-software-state || return 1
+
+  unconfigure_validate_all_conflicts || return 1
+  transaction_phase_start restore-managed-settings || return 1
+  restore_limine_managed_settings "$_unconfigure_managed_settings_json" || return 1
+  transaction_phase_complete restore-managed-settings || return 1
+
+  transaction_phase_start remove-windows-entry || return 1
+  remove_windows_managed_block_for_unconfigure || return 1
+  transaction_phase_complete remove-windows-entry || return 1
+
+  transaction_phase_start remove-owned-tracking || return 1
+  remove_owned_tracking_entries "$_unconfigure_tracking_paths_json" || return 1
+  transaction_phase_complete remove-owned-tracking || return 1
+
+  transaction_phase_start reset-config-enrollment || return 1
+  preserve_transaction_files_on_failure || return 1
+  if [[ "$QUIET" == true ]]; then
+    "$(limine_reset_enroll_path)" >/dev/null || return 1
+  else
+    "$(limine_reset_enroll_path)" || return 1
+  fi
+  transaction_phase_complete reset-config-enrollment || return 1
+
+  transaction_phase_start rebuild-stock-limine || return 1
+  run_checked_stock_limine_rebuild || return 1
+  transaction_phase_complete rebuild-stock-limine || return 1
+
+  transaction_phase_start prove-unconfigured || return 1
+  read_current_firmware_modes || return 1
+  [[ "$_secure_boot_mode" == 0 ]] || return 1
+  limine_managed_settings_are_original "$_unconfigure_managed_settings_json" || return 1
+  owned_tracking_is_absent "$_unconfigure_tracking_paths_json" || return 1
+  windows_unconfigure_preflight || return 1
+  [[ "$_windows_block_state" == absent \
+    && "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
+    || return 1
+  unconfigured_limine_targets_match_source || return 1
+  persist_unconfigure_proof || return 1
+  transaction_phase_complete prove-unconfigured
+}
+
+run_dormant_unconfigure() {
+  run_lifecycle_transaction_with_preflight unconfigure disabled active \
+    unconfigure_preflight unconfigure_software_state
+}
+
 artifact_repair_preflight() {
   local file embedded source primary_found=false fallback_found=false
   for command in b2sum chmod chown cp dd find grep limine ln mktemp mountpoint \
@@ -750,6 +1396,10 @@ artifact_repair_preflight() {
   }
   validate_discovered_sbctl_mappings || {
     fail "sbctl source and output mappings are ambiguous for EFI repair"
+    return 1
+  }
+  prepare_artifact_ownership || {
+    fail "Could not establish managed-setting and sbctl ownership for artifact repair"
     return 1
   }
 }
@@ -1043,6 +1693,10 @@ repair_boot_artifacts() {
   transaction_backup_file "$(limine_fallback_binary_path)" || return 1
   backup_sbctl_tracking_stores || return 1
   transaction_phase_complete "backup-artifacts" || return 1
+
+  persist_managed_settings_record "$_repair_ownership_source" \
+    "$_repair_managed_settings_json" || return 1
+  persist_tracking_ownership_record "$_repair_tracking_paths_json" || return 1
 
   transaction_phase_start "configure-limine" || return 1
   ensure_limine_secure_boot_settings || return 1

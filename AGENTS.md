@@ -23,7 +23,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `pacman-hooks/zzz-omasecboot.hook` - Post-sbctl lifecycle checkpoint for boot paths and producer packages
 - `limine-hooks/000-omasecboot-guard` - Limine pre-hook for lifecycle and FD 200 ownership validation
 - `limine-hooks/zzz-omasecboot-sign` - Limine post-hook for owned suppression or serialized recovery recording
-- `tests/lifecycle.sh`, `tests/producers.sh`, `tests/artifacts.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, producer-recovery, artifact-proof, and failure-injection checks
+- `tests/lifecycle.sh`, `tests/producers.sh`, `tests/producer-ownership.sh`, `tests/recovery-publication.sh`, `tests/unconfigure.sh`, `tests/unconfigure-tools.sh`, `tests/artifacts.sh`, `tests/hooks.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, producer-recovery, ownership-lineage, recovery-publication, unconfiguration, artifact-proof, and failure-injection checks
 - `tests/install.sh` - Staged install, upgrade, hook-target, and uninstall contract checks
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-preflight.sh` - Hermetic Windows signal, encryption guidance, advisory signer, privilege-drop, and no-NTFS checks

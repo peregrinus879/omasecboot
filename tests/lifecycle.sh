@@ -1581,10 +1581,19 @@ read_lifecycle || fail_test "sealed incident lifecycle unreadable"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
-  || fail_test "legacy-disabled fixture adoption failed"
-run_lifecycle_transaction "disable-test" "disabled" "active" noop_transaction \
+  || fail_test "active disable-refusal fixture adoption failed"
+if run_lifecycle_transaction "disable-test" "disabled" "active" noop_transaction; then
+  fail_test "generic active transaction committed disabled state"
+fi
+read_lifecycle || fail_test "blocked generic disable damaged lifecycle state"
+[[ "$_lifecycle_state" == active ]] || fail_test "blocked generic disable changed stable state"
+
+reset_state
+run_lifecycle_transaction "disable-test" "disabled" "unmanaged" noop_transaction \
   || fail_test "schema-2 disabled fixture failed"
-lifecycle_removal_is_allowed || fail_test "schema-2 disabled state blocked removal"
+if lifecycle_removal_is_allowed; then
+  fail_test "schema-2 disabled state without unconfiguration proof allowed removal"
+fi
 legacy_state_file=$(lifecycle_file_path)
 legacy_transaction_id=$(jq -r '.last_transaction.id' "$legacy_state_file")
 legacy_manifest=$(lifecycle_manifest_path "$legacy_transaction_id")
@@ -1623,8 +1632,9 @@ printf '%s\n' "$schema2_disabled_manifest" \
   | atomic_write_control_file "$legacy_manifest" 600
 printf '%s\n' "$schema2_disabled_state" \
   | atomic_write_control_file "$legacy_state_file" 644
-lifecycle_removal_is_allowed \
-  || fail_test "schema-2 disabled state did not restore after rejection tests"
+if lifecycle_removal_is_allowed; then
+  fail_test "restored schema-2 disabled state bypassed unconfiguration proof"
+fi
 legacy_manifest_document=$(jq -c '{
   schema_version: 1,
   writer_version,

@@ -667,7 +667,9 @@ test_final_proof_failure_rollback() {
 test_non_active_refusal() {
   local config_hash state_hash
   setup_fixture disabled
-  run_lifecycle_transaction "disable-windows-test" "disabled" "active" : \
+  rm -f "$(lifecycle_file_path)"
+  rm -rf "$(transactions_dir_path)"
+  run_lifecycle_transaction "disable-windows-test" "disabled" "unmanaged" : \
     || fail_test "disabled lifecycle fixture failed"
   config_hash=$(sha256_file "$CONFIG_FILE")
   state_hash=$(sha256_file "$(windows_target_state_path)")

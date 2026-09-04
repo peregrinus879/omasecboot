@@ -272,8 +272,8 @@ setup_fixture() {
   printf 'files_db: %s\n' "$SBCTL_FILES_DB" > "$SBCTL_CONFIG"
   : > "$ARTIFACT_LOG"
 
-  adopt_lifecycle : "no" "no" "yes" "yes" \
-    "absent" "absent" "absent" "absent" \
+  adopt_lifecycle : "yes" "no" "no" "yes" \
+    "present" "absent" "present" "absent" \
     || fail_test "${name}: active fixture adoption failed"
 }
 

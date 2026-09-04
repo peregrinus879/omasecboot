@@ -3072,6 +3072,79 @@ windows_rewrite_managed_block() {
   fi
 }
 
+windows_legacy_managed_block_label() {
+  local config index legacy_index=-1 legacy_count=0 suspicious_count=0 next_index
+  local comment label entry
+  local -a lines=()
+  config=$(windows_limine_config_path) || return 1
+  [[ -f "$config" && ! -L "$config" ]] || return 1
+  mapfile -t lines < "$config" || return 1
+  for ((index=0; index < ${#lines[@]}; index++)); do
+    case "${lines[$index]}" in
+      "$WINDOWS_LEGACY_ENTRY_MARKER")
+        legacy_count=$((legacy_count + 1))
+        legacy_index=$index
+        ;;
+      "$WINDOWS_ENTRY_MARKER"|"$WINDOWS_ENTRY_END_MARKER"|\
+      "$WINDOWS_ENTRY_MARKER"*|"$WINDOWS_ENTRY_END_MARKER"*|\
+      "$WINDOWS_LEGACY_ENTRY_MARKER"*)
+        suspicious_count=$((suspicious_count + 1))
+        ;;
+    esac
+  done
+  (( legacy_count == 1 && suspicious_count == 0 \
+    && legacy_index + 4 < ${#lines[@]} )) || return 1
+  [[ "${lines[legacy_index + 1]}" == /Windows \
+    && "${lines[legacy_index + 2]}" == '    comment: '* \
+    && "${lines[legacy_index + 3]}" == '    protocol: efi_boot_entry' \
+    && "${lines[legacy_index + 4]}" == '    entry: '* ]] || return 1
+  comment=${lines[legacy_index + 2]#'    comment: '}
+  entry=${lines[legacy_index + 4]#'    entry: '}
+  [[ "$comment" == "$entry" ]] || return 1
+  label="$comment"
+  windows_label_is_safe "$label" || return 1
+  next_index=$((legacy_index + 5))
+  if (( next_index < ${#lines[@]} )); then
+    [[ -z "${lines[$next_index]}" || "${lines[$next_index]}" != [[:space:]]* ]] \
+      || return 1
+  fi
+  printf '%s\n' "$label"
+}
+
+windows_unconfigure_preflight() {
+  local label=""
+  windows_classify_target_state || return 1
+  if [[ "$_windows_state_kind" == current ]]; then
+    label="$_windows_state_label"
+  elif [[ "$_windows_state_kind" == legacy-empty ]]; then
+    if ! label=$(windows_legacy_managed_block_label); then
+      windows_managed_block_state "" || return 1
+      [[ "$_windows_block_state" == absent ]]
+      return
+    fi
+    _windows_state_label="$label"
+  elif [[ "$_windows_state_kind" != absent ]]; then
+    return 1
+  fi
+  windows_managed_block_state "$label" || return 1
+  if [[ "$_windows_state_kind" == absent ]]; then
+    [[ "$_windows_block_state" == absent ]]
+  else
+    [[ "$_windows_block_state" == absent || "$_windows_block_state" == canonical \
+      || "$_windows_block_state" == legacy ]]
+  fi
+}
+
+remove_windows_managed_block_for_unconfigure() {
+  local label=""
+  windows_unconfigure_preflight || return 1
+  [[ "$_windows_block_state" == absent ]] && return 0
+  label="$_windows_state_label"
+  windows_rewrite_managed_block remove "$label" || return 1
+  windows_managed_block_state "$label" || return 1
+  [[ "$_windows_block_state" == absent ]]
+}
+
 update_windows_boot_entry() {
   local label="$1"
   revalidate_windows_target_state || return 1

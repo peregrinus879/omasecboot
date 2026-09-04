@@ -175,13 +175,12 @@ read_lifecycle || fail_test "blocked producer state became unreadable"
 
 release_boot_repair_lock
 rm -rf "$(state_dir_path)"
-adopt_lifecycle : "no" "no" "yes" "yes" \
-  "absent" "absent" "absent" "absent" \
-  || fail_test "disabled fixture adoption failed"
-run_lifecycle_transaction "disable-test" "disabled" "active" noop_transaction \
+run_lifecycle_transaction "disable-test" "disabled" "unmanaged" noop_transaction \
   || fail_test "disabled fixture did not commit"
 cmd_hook package-cleanup || fail_test "disabled package automation did not no-op"
-cmd_guard removal || fail_test "disabled lifecycle blocked dependency removal"
+if cmd_guard removal >/dev/null 2>&1; then
+  fail_test "disabled lifecycle without unconfiguration proof permitted dependency removal"
+fi
 read_lifecycle || fail_test "disabled state became unreadable"
 [[ $_lifecycle_state == disabled ]] || fail_test "disabled automation changed lifecycle state"
 

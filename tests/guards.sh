@@ -104,9 +104,7 @@ grep -Fq 'recovery-required' "${TEST_DIR}/recovery.out" \
   || fail_test "recovery guard omitted the lifecycle state"
 
 rm -rf "$(state_dir_path)"
-adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \
-  || fail_test "disabled fixture adoption failed"
-run_lifecycle_transaction "disable-test" "disabled" "active" noop_transaction \
+run_lifecycle_transaction "disable-test" "disabled" "unmanaged" noop_transaction \
   || fail_test "disabled fixture did not commit"
 guard_boot_transaction || fail_test "disabled lifecycle blocked a package transaction"
 

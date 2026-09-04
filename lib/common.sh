@@ -267,6 +267,32 @@ with_delegated_limine_lock() {
   return "$child_rc"
 }
 
+with_limine_lock_handoff() {
+  local child_rc=0 lock_rc=0
+  [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == local ]]; then
+    with_delegated_limine_lock "$@" || child_rc=$?
+    if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false ]]; then
+      with_limine_lock || return 1
+    fi
+    return "$child_rc"
+  fi
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == inherited ]] || return 1
+  inherited_limine_fd_is_valid || return 1
+  flock -u 200 || return 1
+  _OMASECBOOT_LIMINE_LOCK_OWNED=false
+  "$@" || child_rc=$?
+  flock -w 30 200 || lock_rc=$?
+  if [[ $lock_rc -eq 0 ]] && inherited_limine_fd_is_valid; then
+    _OMASECBOOT_LIMINE_LOCK_OWNED=inherited
+  else
+    _OMASECBOOT_LIMINE_LOCK_OWNED=false
+    with_limine_lock || return 1
+    return 1
+  fi
+  return "$child_rc"
+}
+
 release_repair_lock() {
   if [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]]; then
     if [[ "$_OMASECBOOT_REPAIR_LOCK_MODE" == local ]]; then

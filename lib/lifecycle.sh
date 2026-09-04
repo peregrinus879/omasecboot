@@ -11,6 +11,9 @@ readonly FIRMWARE_PROOF_SCHEMA_VERSION=1
 readonly BOOTNEXT_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION=1
+readonly MANAGED_SETTINGS_SCHEMA_VERSION=1
+readonly TRACKING_OWNERSHIP_SCHEMA_VERSION=1
+readonly UNCONFIGURE_PROOF_SCHEMA_VERSION=1
 readonly WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY="efibootmgr 18-4"
 readonly WINDOWS_EFIBOOTMGR_EXECUTABLE="/usr/bin/efibootmgr"
 readonly WINDOWS_UNLINK_PACKAGE_IDENTITY="coreutils 9.11-2"
@@ -136,6 +139,204 @@ transaction_artifact_reference() {
       schema_version: $schema,
       sha256: $hash
     }'
+}
+
+validate_managed_settings_record_json() {
+  local transaction_id="$1" document="$2"
+  jq -e --arg id "$transaction_id" --argjson schema "$MANAGED_SETTINGS_SCHEMA_VERSION" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    type == "object" and
+    keys == ["recorded_at","schema_version","settings","source","transaction_id",
+      "writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    (.recorded_at | timestamp) and
+    (.source == "adoption" or .source == "repair" or .source == "setup") and
+    (.settings | type == "array" and length == 4) and
+    (.settings[0] |
+      keys == ["key","managed","original","path"] and
+      .path == "/etc/default/limine" and .key == "ENABLE_VERIFICATION" and
+      (.managed == "yes" or .managed == "no" or .managed == "unset") and
+      (.original == "yes" or .original == "no" or .original == "unset" or
+        .original == "unknown")) and
+    (.settings[1] |
+      keys == ["key","managed","original","path"] and
+      .path == "/etc/default/limine" and .key == "ENABLE_ENROLL_LIMINE_CONFIG" and
+      (.managed == "yes" or .managed == "no" or .managed == "unset") and
+      (.original == "yes" or .original == "no" or .original == "unset" or
+        .original == "unknown")) and
+    (.settings[2] |
+      keys == ["key","managed","original","path","token"] and
+      .path == "/etc/default/limine" and .key == "COMMANDS_BEFORE_SAVE" and
+      .token == "limine-reset-enroll" and
+      (.managed == "present" or .managed == "absent") and
+      (.original == "present" or .original == "absent" or .original == "unknown")) and
+    (.settings[3] |
+      keys == ["key","managed","original","path","token"] and
+      .path == "/etc/default/limine" and .key == "COMMANDS_AFTER_SAVE" and
+      .token == "limine-enroll-config" and
+      (.managed == "present" or .managed == "absent") and
+      (.original == "present" or .original == "absent" or .original == "unknown"))
+  ' <<< "$document" >/dev/null
+}
+
+validate_managed_settings_record_reference() {
+  local transaction_id="$1" reference="$2" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$MANAGED_SETTINGS_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/managed-settings.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_managed_settings_record_json "$transaction_id" "$document"
+}
+
+validate_tracking_ownership_record_json() {
+  local transaction_id="$1" document="$2"
+  jq -e --arg id "$transaction_id" --argjson schema "$TRACKING_OWNERSHIP_SCHEMA_VERSION" \
+    --argjson maximum "$MAX_EXPECTED_EFI_ARTIFACTS" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    type == "object" and
+    keys == ["paths","recorded_at","schema_version","transaction_id","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    (.recorded_at | timestamp) and
+    (.paths | type == "array" and length <= $maximum and all(.[]; absolute_path) and
+      . == sort and length == (unique | length) and
+      (map(ascii_downcase) | length == (unique | length)))
+  ' <<< "$document" >/dev/null
+}
+
+validate_tracking_ownership_record_reference() {
+  local transaction_id="$1" reference="$2" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$TRACKING_OWNERSHIP_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/tracking-ownership.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_tracking_ownership_record_json "$transaction_id" "$document"
+}
+
+reference_transaction_id() {
+  local reference="$1" filename="$2" path transaction_dir transaction_id
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  transaction_dir=$(dirname "$path") || return 1
+  [[ "$(dirname "$transaction_dir")" == "$(transactions_dir_path)" \
+    && "$(basename "$path")" == "$filename" ]] || return 1
+  transaction_id=$(basename "$transaction_dir") || return 1
+  lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
+  printf '%s\n' "$transaction_id"
+}
+
+validate_lifecycle_managed_settings_reference() {
+  local reference="$1" transaction_id
+  transaction_id=$(reference_transaction_id "$reference" managed-settings.json) || return 1
+  validate_managed_settings_record_reference "$transaction_id" "$reference"
+}
+
+validate_lifecycle_tracking_ownership_reference() {
+  local reference="$1" transaction_id
+  transaction_id=$(reference_transaction_id "$reference" tracking-ownership.json) || return 1
+  validate_tracking_ownership_record_reference "$transaction_id" "$reference"
+}
+
+validate_lifecycle_ownership_pair() {
+  local managed="$1" tracking="$2" managed_id tracking_id
+  if [[ "$managed" == null || "$tracking" == null ]]; then
+    [[ "$managed" == null && "$tracking" == null ]]
+    return
+  fi
+  managed_id=$(reference_transaction_id "$managed" managed-settings.json) || return 1
+  tracking_id=$(reference_transaction_id "$tracking" tracking-ownership.json) || return 1
+  [[ "$managed_id" == "$tracking_id" ]] || return 1
+  validate_managed_settings_record_reference "$managed_id" "$managed" || return 1
+  validate_tracking_ownership_record_reference "$tracking_id" "$tracking"
+}
+
+validate_unconfigure_proof_json() {
+  local transaction_id="$1" document="$2" manifest="$3" zero_checksum
+  zero_checksum=$(printf '0%.0s' {1..128})
+  jq -e --arg id "$transaction_id" --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    --arg zero "$zero_checksum" --arg primary "$(limine_primary_binary_path)" \
+    --arg fallback "$(limine_fallback_binary_path)" \
+    --arg source "$(limine_unsigned_binary_path)" --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def artifact_reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | absolute_path) and (.schema_version | type == "number" and . >= 1 and floor == .) and
+      (.sha256 | digest);
+    def target($path):
+      type == "object" and keys == ["config_checksum","path","sha256"] and
+      .path == $path and .config_checksum == $zero and (.sha256 | digest);
+    def source:
+      type == "object" and keys == ["path","sha256"] and
+      .path == $source and (.sha256 | digest);
+    type == "object" and
+    keys == ["limine","managed_settings","operation","proved_at","rebuild_obligations",
+      "schema_version","secure_boot","settings","tracking_ownership","transaction_id",
+      "windows","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "unconfigure" and (.proved_at | timestamp) and .secure_boot == 0 and
+    .settings == "original" and .windows == "managed-block-absent" and
+    (.managed_settings | artifact_reference) and
+    (.tracking_ownership | artifact_reference) and
+    (.limine | type == "object" and keys == ["fallback","primary","source"] and
+      (.source | source) and (.primary | target($primary)) and
+      (.fallback | target($fallback)) and
+      .primary.sha256 == .source.sha256 and .fallback.sha256 == .source.sha256) and
+    $manifest.kind == "root" and $manifest.operation == "unconfigure" and
+    $manifest.prior_state == "active" and $manifest.target_state == "disabled" and
+    $manifest.file_rollback_policy == "preserve"
+  ' <<< "$document" >/dev/null || return 1
+  validate_efi_obligations_json "$(jq -c '.rebuild_obligations' <<< "$document")"
+}
+
+validate_unconfigure_proof_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3"
+  local transaction_dir path document prior_path prior_lifecycle managed tracking
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/unconfigure.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_unconfigure_proof_json "$transaction_id" "$document" "$manifest" || return 1
+  prior_path=$(jq -r '.backups[0].path' <<< "$manifest") || return 1
+  prior_lifecycle=$(read_control_document "$prior_path") || return 1
+  validate_lifecycle_json "$prior_lifecycle" || return 1
+  jq -e '.state == "active" and .managed_settings != null and
+    .tracking_ownership != null' <<< "$prior_lifecycle" >/dev/null || return 1
+  managed=$(jq -c '.managed_settings' <<< "$prior_lifecycle") || return 1
+  tracking=$(jq -c '.tracking_ownership' <<< "$prior_lifecycle") || return 1
+  validate_lifecycle_ownership_pair "$managed" "$tracking" || return 1
+  jq -en --argjson proof "$document" --argjson managed "$managed" \
+    --argjson tracking "$tracking" '
+      $proof.managed_settings == $managed and $proof.tracking_ownership == $tracking
+    ' >/dev/null
 }
 
 validate_bootnext_record_json() {
@@ -1539,6 +1740,7 @@ validate_artifact_reference_file() {
 
 validate_transaction_domain_records() {
   local transaction_id="$1" document="$2" bootnext producer proof firmware windows
+  local managed_settings tracking_ownership unconfigure
   local path producer_document
   local kind status operation
   local extracted
@@ -1548,19 +1750,43 @@ validate_transaction_domain_records() {
     (.domain_records.producer | tojson),
     (.domain_records.final_proof | tojson),
     (.domain_records.firmware | tojson),
+    (.domain_records.managed_settings | tojson),
+    (.domain_records.tracking_ownership | tojson),
+    (.domain_records.unconfigure | tojson),
     (.domain_records.windows | tojson),
     .kind, .status, .operation
   ' <<< "$document") || return 1
   mapfile -t fields <<< "$extracted"
-  [[ ${#fields[@]} -eq 8 ]] || return 1
+  [[ ${#fields[@]} -eq 11 ]] || return 1
   bootnext=${fields[0]}
   producer=${fields[1]}
   proof=${fields[2]}
   firmware=${fields[3]}
-  windows=${fields[4]}
-  kind=${fields[5]}
-  status=${fields[6]}
-  operation=${fields[7]}
+  managed_settings=${fields[4]}
+  tracking_ownership=${fields[5]}
+  unconfigure=${fields[6]}
+  windows=${fields[7]}
+  kind=${fields[8]}
+  status=${fields[9]}
+  operation=${fields[10]}
+
+  if [[ "$managed_settings" != null ]]; then
+    validate_managed_settings_record_reference "$transaction_id" "$managed_settings" \
+      || return 1
+  fi
+  if [[ "$tracking_ownership" != null ]]; then
+    validate_tracking_ownership_record_reference "$transaction_id" "$tracking_ownership" \
+      || return 1
+  fi
+  [[ "$tracking_ownership" == null || "$managed_settings" != null ]] || return 1
+  if [[ "$status" == completed ]]; then
+    [[ ( "$managed_settings" == null && "$tracking_ownership" == null ) \
+      || ( "$managed_settings" != null && "$tracking_ownership" != null ) ]] || return 1
+  fi
+  if [[ "$unconfigure" != null ]]; then
+    validate_unconfigure_proof_reference "$transaction_id" "$unconfigure" "$document" \
+      || return 1
+  fi
 
   if [[ "$bootnext" != null ]]; then
     [[ "$kind" == root && "$operation" == windows-bootnext \
@@ -1586,8 +1812,12 @@ validate_transaction_domain_records() {
        $manifest.firmware_writes == [] and
        $manifest.domain_records.bootnext == null and
        $manifest.domain_records.firmware == null and
-       $manifest.domain_records.managed_settings == null and
-      $manifest.domain_records.tracking_ownership == null and
+       (if $manifest.status == "completed" then
+          (($manifest.domain_records.managed_settings == null and
+            $manifest.domain_records.tracking_ownership == null) or
+           ($manifest.domain_records.managed_settings != null and
+            $manifest.domain_records.tracking_ownership != null))
+        else true end) and
       $manifest.domain_records.unconfigure == null and
       $manifest.domain_records.windows == null and
       (if $manifest.status == "completed" then
@@ -1626,8 +1856,12 @@ validate_transaction_domain_records() {
     jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
       .target_state == "active" and .prior_state == "active" and
       .domain_records.bootnext == null and
-      .domain_records.managed_settings == null and
-      .domain_records.tracking_ownership == null and
+      (if .status == "completed" then
+        ((.domain_records.managed_settings == null and
+          .domain_records.tracking_ownership == null) or
+         (.domain_records.managed_settings != null and
+          .domain_records.tracking_ownership != null))
+       else true end) and
       .domain_records.unconfigure == null and .domain_records.windows == null and
       (if .firmware_backup == null then
         .enrollment_plan == null and .firmware_writes == [] and
@@ -1676,6 +1910,37 @@ validate_transaction_domain_records() {
        else true end)
     ' <<< "$document" >/dev/null || return 1
   fi
+  if [[ "$operation" == unconfigure ]]; then
+    [[ "$kind" == root && "$producer" == null && "$proof" == null \
+      && "$firmware" == null && "$managed_settings" == null \
+      && "$tracking_ownership" == null && "$windows" == null ]] || return 1
+    jq -e '
+      ["backup-software-state","restore-managed-settings","remove-windows-entry",
+       "remove-owned-tracking","reset-config-enrollment","rebuild-stock-limine",
+       "prove-unconfigured"] as $phases |
+      .target_state == "disabled" and .prior_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
+      .domain_records.bootnext == null and .domain_records.final_proof == null and
+      .domain_records.firmware == null and .domain_records.managed_settings == null and
+      .domain_records.producer == null and .domain_records.tracking_ownership == null and
+       .domain_records.windows == null and
+       (.completed_phases == $phases[0:(.completed_phases | length)]) and
+       (if .current_phase == null then true
+        else .current_phase == $phases[(.completed_phases | length)] end) and
+       ((.completed_phases | length) as $done |
+        if $done < 4 or ($done == 4 and .current_phase == null) then
+          .file_rollback_policy == "restore"
+        elif $done == 4 and .current_phase == "reset-config-enrollment" then
+          (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve")
+        else .file_rollback_policy == "preserve" end) and
+       (if .status == "completed" then
+         .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
+        .completed_phases == $phases and .current_phase == null
+       else true end)
+    ' <<< "$document" >/dev/null || return 1
+  elif [[ "$unconfigure" != null ]]; then
+    return 1
+  fi
   if [[ "$kind" == recovery-attempt ]]; then
     [[ "$producer" == null ]] || return 1
     case "$operation" in
@@ -1689,8 +1954,12 @@ validate_transaction_domain_records() {
         jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
           .target_state == "active" and .prior_state == "recovery-required" and
           .domain_records.bootnext == null and
-          .domain_records.managed_settings == null and
-          .domain_records.tracking_ownership == null and
+          (if .status == "completed" then
+            ((.domain_records.managed_settings == null and
+              .domain_records.tracking_ownership == null) or
+             (.domain_records.managed_settings != null and
+              .domain_records.tracking_ownership != null))
+           else true end) and
           .domain_records.unconfigure == null and .domain_records.windows == null and
           (if .firmware_backup == null then
             .enrollment_plan == null and .firmware_writes == []
@@ -2137,15 +2406,15 @@ validate_incident_chain() {
 
 validate_lifecycle_document_references() {
   local document="$1" state transaction_id manifest operation kind root latest count
-  local reference saved_manifest saved_manifest_id saved_manifest_hash rc
+  local reference managed_settings tracking_ownership
+  local saved_manifest saved_manifest_id saved_manifest_hash rc
   local attempt_service attempt_number final_attempt_id final_attempt_manifest final_proof
   local recovery_operation
   state=$(jq -r '.state' <<< "$document") || return 1
 
-  while IFS= read -r reference; do
-    [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" || return 1
-  done < <(jq -c '.managed_settings, .tracking_ownership | select(. != null)' \
-    <<< "$document")
+  managed_settings=$(jq -c '.managed_settings' <<< "$document") || return 1
+  tracking_ownership=$(jq -c '.tracking_ownership' <<< "$document") || return 1
+  validate_lifecycle_ownership_pair "$managed_settings" "$tracking_ownership" || return 1
 
   if [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]]; then
     transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
@@ -2165,6 +2434,10 @@ validate_lifecycle_document_references() {
     read_transaction_manifest "$transaction_id" || return 1
     [[ $(jq -r '.operation' <<< "$_manifest_json") == "$operation" \
       && $(jq -r '.kind' <<< "$_manifest_json") == "$kind" ]] || return 1
+    if [[ $(jq -r '.prior_state' <<< "$_manifest_json") == active \
+      && $(jq -r '.target_state' <<< "$_manifest_json") == disabled ]]; then
+      [[ "$operation" == unconfigure ]] || return 1
+    fi
     if [[ "$kind" == root ]]; then
       [[ $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || return 1
     else
@@ -2254,6 +2527,21 @@ validate_lifecycle_document_references() {
   fi
 }
 
+load_lifecycle_ownership_records() {
+  local managed_reference tracking_reference managed_path tracking_path
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == active || "$_lifecycle_state" == transition \
+    || "$_lifecycle_state" == recovery-required ]] || return 1
+  managed_reference=$(jq -c '.managed_settings' <<< "$_lifecycle_json") || return 1
+  tracking_reference=$(jq -c '.tracking_ownership' <<< "$_lifecycle_json") || return 1
+  [[ "$managed_reference" != null && "$tracking_reference" != null ]] || return 1
+  validate_lifecycle_ownership_pair "$managed_reference" "$tracking_reference" || return 1
+  managed_path=$(jq -r '.path' <<< "$managed_reference") || return 1
+  tracking_path=$(jq -r '.path' <<< "$tracking_reference") || return 1
+  _managed_settings_record_json=$(read_control_document "$managed_path") || return 1
+  _tracking_ownership_record_json=$(read_control_document "$tracking_path") || return 1
+}
+
 validate_completed_transaction_reference() {
   local document="$1" transaction_id state
   [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]] || return 0
@@ -2267,6 +2555,10 @@ validate_completed_transaction_reference() {
       "$(jq -r '.last_transaction.completed_at' <<< "$document")" ]] || return 1
   if [[ "$state" == active || "$state" == disabled ]]; then
     [[ $(jq -r '.target_state' <<< "$_manifest_json") == "$state" ]] || return 1
+  fi
+  if [[ "$state" == disabled \
+    && $(jq -r '.prior_state' <<< "$_manifest_json") == active ]]; then
+    [[ $(jq -r '.operation' <<< "$_manifest_json") == unconfigure ]] || return 1
   fi
 }
 
@@ -2458,7 +2750,15 @@ lifecycle_removal_is_allowed() {
   if [[ "$schema" == "$LIFECYCLE_SCHEMA_VERSION" ]]; then
     if validate_lifecycle_json "$document" \
       && [[ $(jq -r '.state' <<< "$document") == disabled ]] \
-      && validate_lifecycle_document_references "$document"; then
+      && validate_lifecycle_document_references "$document" \
+      && [[ $(jq -r '.last_transaction.operation' <<< "$document") == unconfigure ]] \
+      && read_transaction_manifest "$(jq -r '.last_transaction.id' <<< "$document")" \
+      && jq -e '
+        .kind == "root" and .operation == "unconfigure" and
+        .status == "completed" and .target_state == "disabled" and
+        .file_rollback_policy == "preserve" and
+        .domain_records.unconfigure != null
+      ' <<< "$_manifest_json" >/dev/null; then
       result=0
     fi
   elif [[ "$schema" == "$LEGACY_LIFECYCLE_SCHEMA_VERSION" ]]; then
@@ -2547,8 +2847,7 @@ load_producer_recovery_context() {
     .file_rollback_policy == "preserve" and
     .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
     .domain_records.bootnext == null and .domain_records.firmware == null and
-    .domain_records.managed_settings == null and
-    .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+    .domain_records.unconfigure == null and
     .domain_records.windows == null
   ' <<< "$_recovery_root_manifest_json" >/dev/null || return 1
   validate_producer_record_reference "$root_id" "$_recovery_producer_reference" || return 1
@@ -2639,6 +2938,9 @@ begin_lifecycle_transaction() {
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == active \
     || "$_lifecycle_state" == disabled ]] || return 1
+  if [[ "$_lifecycle_state" == active && "$target_state" == disabled ]]; then
+    [[ "$operation" == unconfigure ]] || return 1
+  fi
 
   transaction_id=$(new_transaction_id) || return 1
   token=$(new_transaction_token) || return 1
@@ -3698,6 +4000,91 @@ transaction_set_domain_record() {
   write_transaction_manifest_json "$document"
 }
 
+persist_managed_settings_record() {
+  local source="$1" settings="$2" transaction_dir path timestamp document existing
+  local reference current_reference
+  [[ "$_transaction_active" == true ]] || return 1
+  [[ "$source" == adoption || "$source" == repair || "$source" == setup ]] || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/managed-settings.json"
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$MANAGED_SETTINGS_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" \
+    --arg source "$source" \
+    --argjson settings "$settings" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      recorded_at: $timestamp,
+      source: $source,
+      settings: $settings
+    }') || return 1
+  validate_managed_settings_record_json "$_transaction_id" "$document" || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_managed_settings_record_json "$_transaction_id" "$existing" || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      $existing.source == $candidate.source and $existing.settings == $candidate.settings
+    ' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  reference=$(transaction_artifact_reference "$path" "$MANAGED_SETTINGS_SCHEMA_VERSION") \
+    || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.managed_settings' <<< "$_manifest_json") \
+    || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record managed_settings "$reference"
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
+  fi
+}
+
+persist_tracking_ownership_record() {
+  local paths="$1" transaction_dir path timestamp document existing reference
+  local current_reference
+  [[ "$_transaction_active" == true ]] || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/tracking-ownership.json"
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -cn \
+    --argjson schema "$TRACKING_OWNERSHIP_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" \
+    --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" \
+    --argjson paths "$paths" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      recorded_at: $timestamp,
+      paths: $paths
+    }') || return 1
+  validate_tracking_ownership_record_json "$_transaction_id" "$document" || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_tracking_ownership_record_json "$_transaction_id" "$existing" || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      $existing.paths == $candidate.paths
+    ' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  reference=$(transaction_artifact_reference "$path" "$TRACKING_OWNERSHIP_SCHEMA_VERSION") \
+    || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.tracking_ownership' <<< "$_manifest_json") \
+    || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record tracking_ownership "$reference"
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
+  fi
+}
+
 transaction_set_adoption() {
   local observed_verification="$1" original_verification="$2"
   local observed_enrollment="$3" original_enrollment="$4"
@@ -3771,6 +4158,7 @@ transaction_set_adoption() {
 commit_lifecycle_transaction() {
   local manifest_document state_document timestamp manifest manifest_hash
   local manifest_operation manifest_target lifecycle_operation
+  local managed_settings tracking_ownership
   [[ "$_transaction_active" == true ]] || return 1
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == transition \
@@ -3800,6 +4188,9 @@ commit_lifecycle_transaction() {
   write_transaction_manifest_status_json transition completed "$manifest_document" || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   manifest_hash=$(sha256_file "$manifest") || return 1
+  managed_settings=$(jq -c '.domain_records.managed_settings' <<< "$_manifest_json") || return 1
+  tracking_ownership=$(jq -c '.domain_records.tracking_ownership' <<< "$_manifest_json") \
+    || return 1
   lifecycle_failpoint "after-completed-manifest-write" || return 1
 
   state_document=$(jq -c \
@@ -3809,7 +4200,9 @@ commit_lifecycle_transaction() {
     --arg operation "$manifest_operation" \
     --arg manifest "$manifest" \
     --arg manifest_hash "$manifest_hash" \
-    --arg timestamp "$timestamp" '
+    --arg timestamp "$timestamp" \
+    --argjson managed_settings "$managed_settings" \
+    --argjson tracking_ownership "$tracking_ownership" '
       .writer_version = $version |
       .generation += 1 |
       .state = $state |
@@ -3821,6 +4214,13 @@ commit_lifecycle_transaction() {
         manifest_sha256: $manifest_hash,
         completed_at: $timestamp
       } |
+      if $operation == "unconfigure" then
+        .managed_settings = null |
+        .tracking_ownership = null
+      elif $managed_settings != null and $tracking_ownership != null then
+        .managed_settings = $managed_settings |
+        .tracking_ownership = $tracking_ownership
+      else . end |
       .updated_at = $timestamp
     ' <<< "$_lifecycle_json") || return 1
   validate_lifecycle_json "$state_document" || return 1
@@ -4165,6 +4565,8 @@ publish_failed_recovery_attempt() {
         .transaction.last_recovery_attempt == $reference and
         .transaction.attempt_count == $ordinal
       ' <<< "$_lifecycle_json" >/dev/null || return 1
+    durable_sync "$(lifecycle_file_path)" || return 1
+    durable_sync "$(dirname "$(lifecycle_file_path)")" || return 1
     _transaction_active=false
     unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
     return 0
@@ -4206,7 +4608,7 @@ publish_failed_recovery_attempt() {
 
 publish_resolved_recovery_attempt() {
   local seal reference root proof manifest manifest_hash completed_at timestamp state_document
-  local ordinal
+  local ordinal managed_settings tracking_ownership
   [[ "$_transaction_active" == true ]] || return 1
   read_incident_seal "$_transaction_id" || return 1
   seal="$_incident_json"
@@ -4219,13 +4621,18 @@ publish_resolved_recovery_attempt() {
   read_transaction_manifest "$_transaction_id" || return 1
   proof=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
   [[ "$proof" != null ]] || return 1
+  managed_settings=$(jq -c '.domain_records.managed_settings' <<< "$_manifest_json") || return 1
+  tracking_ownership=$(jq -c '.domain_records.tracking_ownership' <<< "$_manifest_json") \
+    || return 1
   manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
   manifest_hash=$(sha256_file "$manifest") || return 1
   completed_at=$(jq -r '.completed_at' <<< "$_manifest_json") || return 1
   read_lifecycle || return 1
   if [[ "$_lifecycle_state" == active \
     && $(jq -r '.last_recovery.final_attempt.id // ""' <<< "$_lifecycle_json") == \
-      "$_transaction_id" ]]; then
+       "$_transaction_id" ]]; then
+    durable_sync "$(lifecycle_file_path)" || return 1
+    durable_sync "$(dirname "$(lifecycle_file_path)")" || return 1
     _transaction_active=false
     unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
     return 0
@@ -4246,7 +4653,9 @@ publish_resolved_recovery_attempt() {
     --argjson root "$root" \
     --argjson reference "$reference" \
     --argjson ordinal "$ordinal" \
-    --argjson proof "$proof" '
+    --argjson proof "$proof" \
+    --argjson managed_settings "$managed_settings" \
+    --argjson tracking_ownership "$tracking_ownership" '
       .writer_version = $version |
       .generation += 1 |
       .state = "active" |
@@ -4265,6 +4674,10 @@ publish_resolved_recovery_attempt() {
         resolved_at: $timestamp,
         root_incident: $root
       } |
+      if $managed_settings != null and $tracking_ownership != null then
+        .managed_settings = $managed_settings |
+        .tracking_ownership = $tracking_ownership
+      else . end |
       .updated_at = $timestamp
     ' <<< "$_lifecycle_json") || return 1
   validate_lifecycle_json "$state_document" || return 1
@@ -4529,8 +4942,37 @@ run_lifecycle_transaction() {
 }
 
 record_adoption_transaction() {
+  local settings
   transaction_phase_start "record-adoption" || return 1
   transaction_set_adoption "$@" || return 1
+  settings=$(jq -cn \
+    --arg managed_verification "$1" --arg original_verification "$2" \
+    --arg managed_enrollment "$3" --arg original_enrollment "$4" \
+    --arg managed_before_save "$5" --arg original_before_save "$6" \
+    --arg managed_after_save "$7" --arg original_after_save "$8" \
+    --arg before_token limine-reset-enroll \
+    --arg after_token limine-enroll-config '[
+      {
+        path: "/etc/default/limine", key: "ENABLE_VERIFICATION",
+        managed: $managed_verification, original: $original_verification
+      },
+      {
+        path: "/etc/default/limine", key: "ENABLE_ENROLL_LIMINE_CONFIG",
+        managed: $managed_enrollment, original: $original_enrollment
+      },
+      {
+        path: "/etc/default/limine", key: "COMMANDS_BEFORE_SAVE",
+        token: $before_token, managed: $managed_before_save,
+        original: $original_before_save
+      },
+      {
+        path: "/etc/default/limine", key: "COMMANDS_AFTER_SAVE",
+        token: $after_token, managed: $managed_after_save,
+        original: $original_after_save
+      }
+    ]') || return 1
+  persist_managed_settings_record adoption "$settings" || return 1
+  persist_tracking_ownership_record '[]' || return 1
   transaction_phase_complete "record-adoption"
 }
 

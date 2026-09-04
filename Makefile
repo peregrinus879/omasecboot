@@ -38,7 +38,11 @@ uninstall:
 test:
 	bash tests/lifecycle.sh
 	bash tests/producers.sh
+	bash tests/producer-ownership.sh
+	bash tests/recovery-publication.sh
 	bash tests/artifacts.sh
+	bash tests/unconfigure.sh
+	bash tests/unconfigure-tools.sh
 	bash tests/hooks.sh
 	bash tests/guards.sh
 	bash tests/dispatcher.sh
