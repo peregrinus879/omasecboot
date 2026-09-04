@@ -565,6 +565,11 @@ fail_before_enrollment_binding() {
   return 44
 }
 
+record_intervening_cleanup() {
+  transaction_phase_start clean-tracking || return 1
+  transaction_phase_complete clean-tracking
+}
+
 test_esl_parser() {
   local output truncated unknown trailing_certificate trailing_esl
   setup_fixture parser
@@ -969,6 +974,13 @@ test_enrollment_guard_and_success() {
   backup_id=$(prepare_and_activate)
   [[ "$(observe_setup_state "$backup_id")" == 3 ]] \
     || fail_test "observed state 3 mismatch"
+  validate_setup_instruction_boundary "$backup_id" 3 \
+    || fail_test "proved state 3 instruction boundary was rejected"
+  WINDOWS_RC=2
+  if validate_setup_instruction_boundary "$backup_id" 3; then
+    fail_test "uncertain Windows state admitted a Setup Mode instruction"
+  fi
+  WINDOWS_RC=0
   enter_setup_mode
   [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
     || fail_test "observed state 2 mismatch"
@@ -996,6 +1008,8 @@ test_enrollment_guard_and_success() {
   [[ "$_lifecycle_state" == active ]] || fail_test "enrollment did not commit active"
   [[ "$(observe_setup_state "$backup_id")" == 4 ]] \
     || fail_test "observed state 4 mismatch"
+  validate_setup_instruction_boundary "$backup_id" 4 \
+    || fail_test "proved state 4 instruction boundary was rejected"
   transaction_id=$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")
   manifest=$(lifecycle_manifest_path "$transaction_id")
   jq -e --arg backup_id "$backup_id" '
@@ -1295,6 +1309,10 @@ test_firmware_recovery_from_unbound_root() {
   local recovery_id recovery_manifest
   setup_fixture recovery-unbound-root
   backup_id=$(prepare_and_activate)
+  run_lifecycle_transaction cleanup active active record_intervening_cleanup \
+    || fail_test "intervening cleanup fixture failed"
+  [[ $(current_setup_backup_id) == "$backup_id" ]] \
+    || fail_test "intervening transaction hid the current setup plan"
   enter_setup_mode
   ALLOW_ENROLL=true
   if run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
@@ -1339,6 +1357,49 @@ test_firmware_recovery_from_unbound_root() {
     || fail_test "unbound recovery used the wrong enrollment order"
   [[ $(grep -Fxc artifact-proof "$ARTIFACT_LOG") -eq 1 ]] \
     || fail_test "firmware recovery omitted its second EFI verification"
+}
+
+test_setup_lineage_stops_at_unconfigure() {
+  local unconfigure_id="11111111-1111-1111-1111-111111111111"
+  local activation_id="22222222-2222-2222-2222-222222222222"
+  local backup_id="33333333-3333-3333-3333-333333333333"
+  local prior_path prior_hash lifecycle boundary_operation
+  setup_fixture setup-lineage-boundary
+  prior_path="${CASE_DIR}/prior-active-lifecycle.json"
+  jq -cn --arg id "$activation_id" \
+    '{state:"active",last_transaction:{id:$id}}' > "$prior_path"
+  prior_hash=$(sha256_file "$prior_path") || fail_test "could not hash lineage fixture"
+  lifecycle=$(jq -cn --arg id "$unconfigure_id" \
+    '{state:"disabled",last_transaction:{id:$id}}') || return 1
+  validate_lifecycle_document_references() { return 0; }
+  validate_firmware_backup() { [[ "$1" == "$backup_id" ]]; }
+  validate_enrollment_plan() { [[ "$1" == "$backup_id" ]]; }
+  read_transaction_manifest() {
+    if [[ "$1" == "$unconfigure_id" ]]; then
+      _manifest_json=$(jq -cn --arg path "$prior_path" --arg hash "$prior_hash" \
+        --arg operation "$boundary_operation" '{
+        status:"completed",
+        operation:$operation,
+        firmware_backup:null,
+        backups:[{kind:"prior-lifecycle",path:$path,sha256:$hash}]
+      }')
+    elif [[ "$1" == "$activation_id" ]]; then
+      _manifest_json=$(jq -cn --arg id "$backup_id" '{
+        status:"completed",
+        operation:"activate-secure-boot-plan",
+        firmware_backup:{id:$id,status:"complete"},
+        backups:[]
+      }')
+    else
+      return 1
+    fi
+    _manifest_id="$1"
+  }
+  for boundary_operation in unconfigure unconfigure-recovery; do
+    if setup_backup_id_from_lifecycle_json "$lifecycle"; then
+      fail_test "completed ${boundary_operation} retained an obsolete setup plan"
+    fi
+  done
 }
 
 test_firmware_recovery_resolves_pending_effect() {
@@ -1507,6 +1568,10 @@ test_firmware_recovery_leaves_unreadable_pending() {
 
 run_case() {
   local name="$1" function="$2" log pid registration_signal=""
+  if [[ "$enrollment_test_case" != all && "$enrollment_test_case" != "$name" ]]; then
+    return 0
+  fi
+  enrollment_test_case_matched=true
   log="${TEST_DIR}/case-${name}.log"
   trap 'registration_signal=INT' INT
   trap 'registration_signal=TERM' TERM
@@ -1560,6 +1625,8 @@ wait_for_cases() {
 }
 
 enrollment_test_jobs=${ENROLLMENT_TEST_JOBS:-4}
+enrollment_test_case=${ENROLLMENT_TEST_CASE:-all}
+enrollment_test_case_matched=false
 [[ "$enrollment_test_jobs" =~ ^[1-9][0-9]*$ && $enrollment_test_jobs -le 16 ]] \
   || fail_test "ENROLLMENT_TEST_JOBS must be between 1 and 16"
 declare -a run_case_pids=() run_case_names=() run_case_logs=()
@@ -1589,11 +1656,14 @@ run_case guard-flip test_guard_flip_blocks_write
 run_case plan-tamper test_plan_manifest_tamper_blocks
 run_case windows-gate test_windows_gate_blocks_preparation
 run_case recovery-unbound-root test_firmware_recovery_from_unbound_root
+run_case setup-lineage-boundary test_setup_lineage_stops_at_unconfigure
 run_case recovery-pending-effect test_firmware_recovery_resolves_pending_effect
 run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry
 run_case recovery-retry-limit test_firmware_recovery_retry_limit_is_cumulative
 run_case recovery-post-pk-effect test_firmware_recovery_completes_post_pk_effect
 run_case recovery-unreadable-pending test_firmware_recovery_leaves_unreadable_pending
+[[ "$enrollment_test_case_matched" == true ]] \
+  || fail_test "unknown ENROLLMENT_TEST_CASE: ${enrollment_test_case}"
 wait_for_cases || fail_test "enrollment test batch failed"
 
 printf 'enrollment tests passed\n'

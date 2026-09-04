@@ -18,6 +18,7 @@ fail_test() {
 
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/bin/omasecboot"
+REAL_RECOVER_LIFECYCLE_IF_REQUIRED=$(declare -f recover_lifecycle_if_required)
 
 state_dir_path() {
   printf '%s/state\n' "$TEST_DIR"
@@ -93,7 +94,7 @@ replace_limine_default_entry_in_file "$settings_fixture" \
 grep -Fxq 'UNRELATED=value' "$settings_fixture" \
   || fail_test "Limine setting replacement changed an unrelated entry"
 
-for command in setup adopt enroll sign cleanup; do
+for command in setup adopt enroll sign cleanup unconfigure repair; do
   if "cmd_${command}" > "${TEST_DIR}/${command}.out" 2>&1; then
     fail_test "blocked ${command} command succeeded"
   fi
@@ -108,7 +109,7 @@ grep -Fq 'Windows Encryption Preflight' "${TEST_DIR}/windows-preflight.out" \
 if cmd_windows preflight unexpected >/dev/null 2>&1; then
   fail_test "Windows preflight accepted an extra argument"
 fi
-for command in setup bootnext reboot; do
+for command in setup suppress bootnext; do
   if cmd_windows "$command" > "${TEST_DIR}/windows-${command}.out" 2>&1; then
     fail_test "blocked Windows ${command} command succeeded"
   fi
@@ -207,5 +208,138 @@ if cmd_hook unknown >/dev/null 2>&1 || cmd_guard unknown >/dev/null 2>&1 \
   || cmd_guard removal extra >/dev/null 2>&1; then
   fail_test "internal dispatcher accepted an unknown phase"
 fi
+
+mutation_log="${TEST_DIR}/mutation-routes"
+setup_marker="${TEST_DIR}/setup-prepared"
+SETUP_STATE=3
+RECOVERY_OCCURRED=false
+PLAN_CONFIRMED=false
+lifecycle_repair_is_available() { return 0; }
+check_deps() { :; }
+check_core_deps() { :; }
+check_recovery_deps() { :; }
+check_efi_mode() { :; }
+check_root() { :; }
+require_gum() { :; }
+gum() { [[ "$1" == confirm ]]; }
+recover_lifecycle_if_required() {
+  printf 'recover\n' >> "$mutation_log"
+  _lifecycle_recovery_performed="$RECOVERY_OCCURRED"
+}
+current_setup_backup_id() {
+  [[ -e "$setup_marker" ]] || return 1
+  printf '11111111-1111-1111-1111-111111111111\n'
+}
+prepare_state_aware_setup() {
+  [[ "$1" == true ]] || return 1
+  : > "$setup_marker"
+  printf 'prepare\n' >> "$mutation_log"
+}
+validate_enrollment_plan() { [[ "$PLAN_CONFIRMED" == true ]]; }
+load_enrollment_pk_fingerprints() {
+  _enrollment_current_pk_hash=$(printf 'a%.0s' {1..64})
+  _enrollment_planned_pk_hash=$(printf 'b%.0s' {1..64})
+}
+firmware_plan_path() { printf '%s/plan\n' "$TEST_DIR"; }
+activate_confirmed_enrollment_plan() {
+  [[ "$*" == '11111111-1111-1111-1111-111111111111 true true true' ]] || return 1
+  PLAN_CONFIRMED=true
+  printf 'activate\n' >> "$mutation_log"
+}
+observe_setup_state() { printf '%s\n' "$SETUP_STATE"; }
+secure_boot_windows_gate() { printf 'windows-gate\n' >> "$mutation_log"; }
+validate_setup_instruction_boundary() { printf 'windows-gate\n' >> "$mutation_log"; }
+run_dormant_enrollment() { printf 'enroll\n' >> "$mutation_log"; }
+run_artifact_repair() {
+  [[ "$1" == sign ]] || return 1
+  printf 'sign\n' >> "$mutation_log"
+}
+run_tracking_cleanup() {
+  [[ "$1" == cleanup ]] || return 1
+  printf 'cleanup\n' >> "$mutation_log"
+}
+run_dormant_unconfigure() { printf 'unconfigure\n' >> "$mutation_log"; }
+add_windows_boot_entry() { printf 'windows-setup\n' >> "$mutation_log"; }
+suppress_stale_windows_entry() { printf 'windows-suppress\n' >> "$mutation_log"; }
+run_dormant_windows_bootnext() { printf 'windows-bootnext\n' >> "$mutation_log"; }
+
+cmd_setup >/dev/null || fail_test "enabled setup route failed"
+cmd_setup >/dev/null || fail_test "enabled setup repair route failed"
+SETUP_STATE=2
+cmd_enroll >/dev/null || fail_test "enabled enrollment route failed"
+cmd_sign >/dev/null || fail_test "enabled signing route failed"
+cmd_cleanup >/dev/null || fail_test "enabled cleanup route failed"
+cmd_unconfigure >/dev/null || fail_test "enabled unconfigure route failed"
+cmd_repair >/dev/null || fail_test "enabled recovery route failed"
+cmd_windows setup >/dev/null || fail_test "enabled Windows setup route failed"
+cmd_windows suppress >/dev/null || fail_test "enabled Windows suppression route failed"
+cmd_windows bootnext >/dev/null || fail_test "enabled BootNext route failed"
+expected_mutations=$'recover\nprepare\nactivate\nwindows-gate\nrecover\nsign\nwindows-gate\nrecover\nenroll\nwindows-gate\nrecover\nsign\nrecover\ncleanup\nrecover\nunconfigure\nrecover\nrecover\nwindows-setup\nrecover\nwindows-suppress\nrecover\nwindows-bootnext'
+[[ $(<"$mutation_log") == "$expected_mutations" ]] \
+  || fail_test "enabled commands selected the wrong recoverable mutations"
+
+RECOVERY_OCCURRED=true
+check_deps() { fail_test "command-specific dependencies ran before recovery"; }
+check_core_deps() { fail_test "command-specific dependencies ran before recovery"; }
+check_efi_mode() { fail_test "command-specific EFI checks ran before recovery"; }
+require_gum() { fail_test "interactive dependencies ran before recovery"; }
+cmd_setup >/dev/null || fail_test "setup recovery-only route failed"
+cmd_windows bootnext >/dev/null || fail_test "BootNext recovery-only route failed"
+[[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover' ]] \
+  || fail_test "a recovered command started an unintended second mutation"
+cmd_adopt --verification-original yes --enrollment-original no \
+  --before-save-original absent --after-save-original absent >/dev/null \
+  || fail_test "adoption recovery-only route failed"
+[[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover\nrecover' ]] \
+  || fail_test "recovered adoption started an unintended second mutation"
+for command in setup enroll sign cleanup unconfigure repair; do
+  if "cmd_${command}" unexpected >/dev/null 2>&1; then
+    fail_test "enabled ${command} command accepted an extra argument"
+  fi
+done
+if cmd_windows bootnext unexpected >/dev/null 2>&1; then
+  fail_test "enabled Windows command accepted an extra argument"
+fi
+for command in status version help; do
+  if main "$command" unexpected >/dev/null 2>&1; then
+    fail_test "${command} accepted an extra argument"
+  fi
+done
+
+registry_log="${TEST_DIR}/recovery-registry"
+RECOVERY_OPERATION=""
+_OMASECBOOT_LIMINE_LOCK_OWNED=true
+_OMASECBOOT_REPAIR_LOCK_OWNED=true
+reconcile_stale_lifecycle() { :; }
+prepare_registered_stale_recovery_runtime_locked() { :; }
+prepare_registered_recovery_runtime_locked() { :; }
+read_lifecycle() { _lifecycle_state=recovery-required; }
+load_recovery_context() { _recovery_root_manifest_json='{}'; }
+recovery_operation_for_root_manifest() { printf '%s\n' "$RECOVERY_OPERATION"; }
+run_registered_producer_recovery_locked() { printf 'producer\n' >> "$registry_log"; }
+run_firmware_recovery_locked() { printf 'firmware\n' >> "$registry_log"; }
+run_windows_recovery_locked() { printf 'windows\n' >> "$registry_log"; }
+run_software_recovery_locked() { printf 'software\n' >> "$registry_log"; }
+run_unconfigure_recovery_locked() { printf 'unconfigure\n' >> "$registry_log"; }
+for RECOVERY_OPERATION in producer-recovery firmware-recovery windows-recovery \
+  software-recovery unconfigure-recovery; do
+  run_registered_recovery_locked || fail_test "registered ${RECOVERY_OPERATION} was rejected"
+done
+RECOVERY_OPERATION=arbitrary-recovery
+if run_registered_recovery_locked; then
+  fail_test "unregistered recovery operation reached an executor"
+fi
+[[ $(<"$registry_log") == $'producer\nfirmware\nwindows\nsoftware\nunconfigure' ]] \
+  || fail_test "recovery registry selected the wrong executor"
+
+eval "$REAL_RECOVER_LIFECYCLE_IF_REQUIRED"
+with_boot_repair_lock() { :; }
+release_boot_repair_lock() { :; }
+lifecycle_package_boundary_is_clear() { :; }
+read_lifecycle() { _lifecycle_state=transition; }
+run_registered_recovery_locked() { :; }
+recover_lifecycle_if_required || fail_test "stale completed recovery route failed"
+[[ "$_lifecycle_recovery_performed" == true ]] \
+  || fail_test "stale completed recovery was not treated as recovery-only"
 
 printf 'dispatcher tests passed\n'

@@ -123,8 +123,13 @@ systemctl() {
 FAILPOINT=""
 FAILPOINT_USED=false
 FAILPOINT_KILL=false
+PACKAGE_LOCK_FAILPOINT=""
 
 lifecycle_failpoint() {
+  if [[ -n "$PACKAGE_LOCK_FAILPOINT" && "$PACKAGE_LOCK_FAILPOINT" == "$1" ]]; then
+    : > "$(pacman_database_lock_path)"
+    PACKAGE_LOCK_FAILPOINT=""
+  fi
   if [[ -n "$FAILPOINT" && "$FAILPOINT" == "$1" && "$FAILPOINT_USED" == false ]]; then
     FAILPOINT_USED=true
     if [[ "$FAILPOINT_KILL" == true ]]; then
@@ -139,6 +144,8 @@ reset_state() {
   release_boot_repair_lock
   rm -rf "$(state_dir_path)"
   rm -f "$(limine_lock_path)"
+  rm -f "$(pacman_database_lock_path)"
+  PACKAGE_LOCK_FAILPOINT=""
   SYNC_FAIL_PATH=""
   SYNC_FAIL_REQUIRE_PATH=""
   rm -f "$SYNC_FAIL_MARKER"
@@ -921,6 +928,17 @@ FAILPOINT=""
 read_lifecycle || fail_test "manifest-write failure damaged lifecycle readability"
 [[ $_lifecycle_state == unmanaged ]] \
   || fail_test "pre-publication failure created durable lifecycle state"
+
+reset_state
+PACKAGE_LOCK_FAILPOINT=after-manifest-write
+if adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent"; then
+  fail_test "late package boundary succeeded"
+fi
+read_lifecycle || fail_test "late package boundary damaged lifecycle readability"
+[[ $_lifecycle_state == unmanaged ]] \
+  || fail_test "late package boundary published transition state"
+rm -f "$(pacman_database_lock_path)"
 
 for FAILPOINT in after-transition-write before-adoption-state-write \
   after-completed-manifest-write before-stable-state-write; do

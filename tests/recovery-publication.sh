@@ -45,7 +45,16 @@ attempt_reference=$(jq -cn --arg id "$ATTEMPT_ID" '{
   sha256:("b" * 64),
   status:"failed"
 }')
-root_seal=$(jq -cn --arg manifest "/root-manifest.json" '{manifest:$manifest}')
+root_seal=$(jq -cn --arg manifest "/root-manifest.json" \
+  '{kind:"root",manifest:$manifest}')
+root_manifest_document='{
+  "kind":"root",
+  "operation":"package-producer",
+  "prior_state":"active",
+  "target_state":"active",
+  "file_rollback_policy":"preserve",
+  "domain_records":{"producer":{"schema_version":1}}
+}'
 TEST_PUBLICATION_MODE=failed
 
 read_incident_seal() {
@@ -69,11 +78,13 @@ incident_reference_from_json() {
 
 validate_incident_reference() {
   _incident_json="$root_seal"
+  _manifest_json="$root_manifest_document"
 }
 
 read_transaction_manifest() {
   _manifest_json='{
     "operation":"producer-recovery",
+    "target_state":"active",
     "completed_at":"2026-09-04T00:00:00Z",
     "domain_records":{
       "final_proof":{"path":"/final-proof.json","schema_version":2,"sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
@@ -117,6 +128,8 @@ printf '{}\n' > "$(lifecycle_manifest_path "$ATTEMPT_ID")"
 : > "$SYNC_LOG"
 _transaction_active=true
 _transaction_id="$ATTEMPT_ID"
+_OMASECBOOT_LIMINE_LOCK_OWNED=true
+_OMASECBOOT_REPAIR_LOCK_OWNED=true
 publish_failed_recovery_attempt || fail_test "failed publication retry was rejected"
 assert_lifecycle_resynced failed-publication
 

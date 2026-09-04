@@ -40,6 +40,7 @@ test:
 	bash tests/producers.sh
 	bash tests/producer-ownership.sh
 	bash tests/recovery-publication.sh
+	bash tests/software-recovery.sh
 	bash tests/artifacts.sh
 	bash tests/unconfigure.sh
 	bash tests/unconfigure-tools.sh

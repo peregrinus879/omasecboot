@@ -2,7 +2,6 @@
 # shellcheck disable=SC2154 # Lifecycle globals come from the sourced lifecycle module.
 # OmaSecBoot: boot-artifact producer leases and registry-selected recovery
 
-readonly SUPPORTED_LIMINE_MKINITCPIO_VERSION=1.38.0-1
 readonly SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION=1.31.0-1
 
 _producer_class=""
@@ -1074,6 +1073,37 @@ prepare_recovery_runtime_locked() {
   fi
 }
 
+prepare_registered_stale_recovery_runtime_locked() {
+  local kind reference root
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == transition ]] || return 0
+  read_transaction_manifest "$_lifecycle_transaction_id" || return 1
+  manifest_owner_is_alive && return 0
+  kind=$(jq -r '.kind' <<< "$_manifest_json") || return 1
+  if [[ "$kind" == root ]]; then
+    reference=$(jq -c '.domain_records.producer' <<< "$_manifest_json") || return 1
+  elif [[ "$kind" == recovery-attempt ]]; then
+    root=$(recovery_root_manifest_from_reference \
+      "$(jq -c '.recovery.root_incident' <<< "$_manifest_json")") || return 1
+    reference=$(jq -c '.domain_records.producer' <<< "$root") || return 1
+  else
+    return 1
+  fi
+  [[ "$reference" != null ]] || return 0
+  prepare_stale_transition_reconciliation_locked
+}
+
+prepare_registered_recovery_runtime_locked() {
+  local operation
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == recovery-required ]] || return 0
+  load_recovery_context || return $?
+  operation=$(recovery_operation_for_root_manifest \
+    "$_recovery_root_manifest_json") || return 1
+  [[ "$operation" == producer-recovery ]] || return 0
+  prepare_recovery_runtime_locked
+}
+
 reconcile_and_recover_producer_locked() {
   local marker_path
   marker_path=$(snapshot_restore_lock_path) || return 1
@@ -1135,7 +1165,9 @@ producer_package_pre_locked() {
     if current_transition_is_owned || producer_transition_is_owned; then
       return 0
     fi
+    return 1
   fi
+  [[ "$_lifecycle_state" != recovery-required ]] || return 1
   reconcile_and_recover_producer_locked || return 1
   begin_registered_producer_lease
 }

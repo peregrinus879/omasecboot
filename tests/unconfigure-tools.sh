@@ -34,7 +34,9 @@ source "${ROOT_DIR}/lib/producers.sh"
 INSTALL="${TEST_DIR}/limine-install"
 MKINITCPIO="${TEST_DIR}/limine-mkinitcpio"
 RESET="${TEST_DIR}/limine-reset-enroll"
-touch "$INSTALL" "$MKINITCPIO" "$RESET"
+cp /bin/true "$INSTALL"
+cp /bin/true "$MKINITCPIO"
+cp /bin/true "$RESET"
 PIN_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
 PIN_OWNER=limine-mkinitcpio-hook
 
@@ -55,6 +57,22 @@ PIN_OWNER=limine-mkinitcpio-hook
 PIN_VERSION=1.37.1-1
 if unconfigure_limine_tools_are_pinned; then
   fail_test "unsupported Limine tool package version was accepted"
+fi
+PIN_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
+
+_unconfigure_limine_tools_json=$(capture_unconfigure_limine_tools) \
+  || fail_test "could not capture Limine tool evidence"
+run_bound_unconfigure_limine_tool install false \
+  || fail_test "bound Limine tool inode was not executable"
+printf 'tampered\n' > "$INSTALL"
+chmod 755 "$INSTALL"
+if unconfigure_limine_tools_match_intent; then
+  fail_test "byte-replaced Limine tool matched immutable evidence"
+fi
+cp /bin/true "${TEST_DIR}/replacement"
+mv -f "${TEST_DIR}/replacement" "$INSTALL"
+if unconfigure_limine_tools_match_intent; then
+  fail_test "path-replaced Limine tool matched immutable identity"
 fi
 
 printf 'unconfigure tool tests passed\n'

@@ -1120,7 +1120,7 @@ unconfigure_windows_state_identity() {
 }
 
 unconfigure_validate_all_conflicts() {
-  local settings paths managed_reference tracking_reference
+  local settings paths managed_reference tracking_reference current_obligations
   load_lifecycle_ownership_records || return 1
   settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
   paths=$(jq -c '.paths' <<< "$_tracking_ownership_record_json") || return 1
@@ -1141,7 +1141,11 @@ unconfigure_validate_all_conflicts() {
   windows_unconfigure_preflight || return 1
   [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
     || return 1
-  unconfigure_limine_source_is_unchanged
+  unconfigure_limine_source_is_unchanged || return 1
+  current_obligations=$(derive_uki_inventory_obligations) || return 1
+  validate_efi_obligations_json "$current_obligations" || return 1
+  [[ "$(jq -Sc . <<< "$current_obligations")" == \
+    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]]
 }
 
 unconfigure_limine_tools_are_pinned() {
@@ -1151,8 +1155,80 @@ unconfigure_limine_tools_are_pinned() {
   for path in "$(limine_install_path)" "$(limine_mkinitcpio_path)" \
     "$(limine_reset_enroll_path)"; do
     validate_control_file "$path" || return 1
+    [[ -x "$path" ]] || return 1
     [[ $(producer_file_owner_package "$path") == limine-mkinitcpio-hook ]] || return 1
   done
+}
+
+capture_unconfigure_limine_tools() {
+  local version install mkinitcpio reset
+  local install_identity install_hash mkinitcpio_identity mkinitcpio_hash
+  local reset_identity reset_hash
+  unconfigure_limine_tools_are_pinned || return 1
+  version=$(producer_package_version limine-mkinitcpio-hook) || return 1
+  install=$(limine_install_path) || return 1
+  mkinitcpio=$(limine_mkinitcpio_path) || return 1
+  reset=$(limine_reset_enroll_path) || return 1
+  install_identity=$(control_file_identity "$install") || return 1
+  install_hash=$(sha256_file "$install") || return 1
+  [[ $(control_file_identity "$install") == "$install_identity" ]] || return 1
+  mkinitcpio_identity=$(control_file_identity "$mkinitcpio") || return 1
+  mkinitcpio_hash=$(sha256_file "$mkinitcpio") || return 1
+  [[ $(control_file_identity "$mkinitcpio") == "$mkinitcpio_identity" ]] || return 1
+  reset_identity=$(control_file_identity "$reset") || return 1
+  reset_hash=$(sha256_file "$reset") || return 1
+  [[ $(control_file_identity "$reset") == "$reset_identity" ]] || return 1
+  jq -cn --arg version "$version" \
+    --arg install "$install" --arg install_identity "$install_identity" \
+    --arg install_hash "$install_hash" --arg mkinitcpio "$mkinitcpio" \
+    --arg mkinitcpio_identity "$mkinitcpio_identity" \
+    --arg mkinitcpio_hash "$mkinitcpio_hash" --arg reset "$reset" \
+    --arg reset_identity "$reset_identity" --arg reset_hash "$reset_hash" '{
+      package: "limine-mkinitcpio-hook",
+      version: $version,
+      install: {path: $install, identity: $install_identity, sha256: $install_hash},
+      mkinitcpio: {
+        path: $mkinitcpio,
+        identity: $mkinitcpio_identity,
+        sha256: $mkinitcpio_hash
+      },
+      reset: {path: $reset, identity: $reset_identity, sha256: $reset_hash}
+    }'
+}
+
+unconfigure_limine_tools_match_intent() {
+  local current
+  current=$(capture_unconfigure_limine_tools) || return 1
+  [[ $(jq -Sc . <<< "$current") == $(jq -Sc . <<< "$_unconfigure_limine_tools_json") ]]
+}
+
+run_bound_unconfigure_limine_tool() {
+  local key="$1" handoff="$2" path expected_identity expected_hash
+  local tool_fd fd_path rc=0
+  shift 2
+  [[ "$key" == install || "$key" == mkinitcpio || "$key" == reset ]] || return 1
+  [[ "$handoff" == true || "$handoff" == false ]] || return 1
+  unconfigure_limine_tools_match_intent || return 1
+  path=$(jq -r --arg key "$key" '.[$key].path' \
+    <<< "$_unconfigure_limine_tools_json") || return 1
+  expected_identity=$(jq -r --arg key "$key" '.[$key].identity' \
+    <<< "$_unconfigure_limine_tools_json") || return 1
+  expected_hash=$(jq -r --arg key "$key" '.[$key].sha256' \
+    <<< "$_unconfigure_limine_tools_json") || return 1
+  exec {tool_fd}< "$path" || return 1
+  fd_path="/proc/self/fd/${tool_fd}"
+  if [[ $(control_file_identity "$fd_path") != "$expected_identity" \
+    || $(sha256_file "$fd_path") != "$expected_hash" ]]; then
+    exec {tool_fd}<&-
+    return 1
+  fi
+  if [[ "$handoff" == true ]]; then
+    with_limine_lock_handoff "$fd_path" "$@" || rc=$?
+  else
+    "$fd_path" "$@" || rc=$?
+  fi
+  exec {tool_fd}<&-
+  return "$rc"
 }
 
 unconfigure_preflight() {
@@ -1167,6 +1243,7 @@ unconfigure_preflight() {
     fail "Required Limine tools do not match the supported package"
     return 1
   }
+  _unconfigure_limine_tools_json=$(capture_unconfigure_limine_tools) || return 1
   artifact_esp_is_mounted || return 1
   validate_control_file "$(limine_default_config_path)" || return 1
   validate_control_file "$(limine_config_path)" || return 1
@@ -1196,19 +1273,79 @@ unconfigure_preflight() {
   }
 }
 
-run_checked_stock_limine_rebuild() {
-  local final_obligations install mkinitcpio reset
-  install=$(limine_install_path) || return 1
-  mkinitcpio=$(limine_mkinitcpio_path) || return 1
-  reset=$(limine_reset_enroll_path) || return 1
-  if [[ "$QUIET" == true ]]; then
-    with_limine_lock_handoff "$install" --no-efi-register --fallback >/dev/null || return 1
-    with_limine_lock_handoff "$mkinitcpio" >/dev/null || return 1
-    "$reset" >/dev/null || return 1
+persist_unconfigure_intent() {
+  local transaction_dir path timestamp source document existing reference current_reference
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/unconfigure-intent.json"
+  timestamp=$(utc_timestamp) || return 1
+  source=$(limine_unsigned_binary_path) || return 1
+  unconfigure_validate_all_conflicts || return 1
+  document=$(jq -cn \
+    --argjson schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" --arg source "$source" \
+    --arg source_identity "$_unconfigure_limine_source_identity" \
+    --arg source_hash "$_unconfigure_limine_source_hash" \
+    --arg windows_identity "$_unconfigure_windows_identity" \
+    --argjson managed "$_unconfigure_managed_reference_json" \
+    --argjson tracking "$_unconfigure_tracking_reference_json" \
+    --argjson obligations "$_unconfigure_rebuild_obligations_json" \
+    --argjson tools "$_unconfigure_limine_tools_json" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      operation: "unconfigure",
+      recorded_at: $timestamp,
+      managed_settings: $managed,
+      tracking_ownership: $tracking,
+      windows_state_identity: $windows_identity,
+      limine_source: {
+        path: $source,
+        identity: $source_identity,
+        sha256: $source_hash
+      },
+      limine_tools: $tools,
+      rebuild_obligations: $obligations
+    }') || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  validate_unconfigure_intent_json "$_transaction_id" "$document" "$_manifest_json" \
+    || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_unconfigure_intent_json "$_transaction_id" "$existing" "$_manifest_json" \
+      || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      ($existing | del(.recorded_at)) == ($candidate | del(.recorded_at))
+    ' >/dev/null || return 1
   else
-    with_limine_lock_handoff "$install" --no-efi-register --fallback || return 1
-    with_limine_lock_handoff "$mkinitcpio" || return 1
-    "$reset" || return 1
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  unconfigure_validate_all_conflicts || return 1
+  reference=$(transaction_artifact_reference "$path" "$UNCONFIGURE_INTENT_SCHEMA_VERSION") \
+    || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.unconfigure' <<< "$_manifest_json") || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record unconfigure "$reference" || return 1
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]] \
+      || return 1
+  fi
+  _unconfigure_intent_reference_json="$reference"
+}
+
+run_checked_stock_limine_rebuild() {
+  local final_obligations
+  if [[ "$QUIET" == true ]]; then
+    run_bound_unconfigure_limine_tool install true \
+      --no-efi-register --fallback >/dev/null || return 1
+    run_bound_unconfigure_limine_tool mkinitcpio true >/dev/null || return 1
+    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
+  else
+    run_bound_unconfigure_limine_tool install true \
+      --no-efi-register --fallback || return 1
+    run_bound_unconfigure_limine_tool mkinitcpio true || return 1
+    run_bound_unconfigure_limine_tool reset false || return 1
   fi
   durable_sync "$(esp_path)" || return 1
   final_obligations=$(derive_uki_inventory_obligations) || return 1
@@ -1221,9 +1358,9 @@ run_checked_stock_limine_rebuild() {
 persist_unconfigure_proof() {
   local transaction_dir path timestamp document existing reference current_reference
   local primary fallback primary_hash fallback_hash zero_checksum
-  local source source_hash
+  local source source_hash root_incident operation current_obligations
   transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/unconfigure.json"
+  path="${transaction_dir}/final-proof.json"
   timestamp=$(utc_timestamp) || return 1
   primary=$(limine_primary_binary_path) || return 1
   fallback=$(limine_fallback_binary_path) || return 1
@@ -1232,6 +1369,18 @@ persist_unconfigure_proof() {
   primary_hash="$_unconfigure_primary_hash"
   fallback_hash="$_unconfigure_fallback_hash"
   source_hash="$_unconfigure_limine_source_hash"
+  operation="$_transaction_operation"
+  [[ "$operation" == unconfigure || "$operation" == unconfigure-recovery ]] || return 1
+  current_obligations=$(derive_uki_inventory_obligations) || return 1
+  validate_efi_obligations_json "$current_obligations" || return 1
+  [[ "$(jq -Sc . <<< "$current_obligations")" == \
+    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
+  verify_obligated_efi_artifacts_exist "$current_obligations" || return 1
+  if [[ "$operation" == unconfigure ]]; then
+    root_incident=null
+  else
+    root_incident="$_recovery_root_reference"
+  fi
   zero_checksum=$(printf '0%.0s' {1..128})
   document=$(jq -cn \
     --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
@@ -1241,14 +1390,19 @@ persist_unconfigure_proof() {
     --arg fallback "$fallback" --arg fallback_hash "$fallback_hash" \
     --arg source "$source" --arg source_hash "$source_hash" \
     --arg zero_checksum "$zero_checksum" \
+    --arg operation "$operation" \
+    --argjson intent "$_unconfigure_intent_reference_json" \
+    --argjson root_incident "$root_incident" \
     --argjson managed_settings "$_unconfigure_managed_reference_json" \
     --argjson tracking_ownership "$_unconfigure_tracking_reference_json" \
     --argjson obligations "$_unconfigure_rebuild_obligations_json" '{
       schema_version: $schema,
       writer_version: $version,
       transaction_id: $id,
-      operation: "unconfigure",
+      operation: $operation,
       proved_at: $timestamp,
+      intent: $intent,
+      root_incident: $root_incident,
       secure_boot: 0,
       settings: "original",
       windows: "managed-block-absent",
@@ -1277,19 +1431,175 @@ persist_unconfigure_proof() {
   unconfigured_limine_targets_match_source || return 1
   [[ "$_unconfigure_primary_hash" == "$primary_hash" \
     && "$_unconfigure_fallback_hash" == "$fallback_hash" ]] || return 1
+  current_obligations=$(derive_uki_inventory_obligations) || return 1
+  [[ "$(jq -Sc . <<< "$current_obligations")" == \
+    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
+  verify_obligated_efi_artifacts_exist "$current_obligations" || return 1
   reference=$(transaction_artifact_reference "$path" "$UNCONFIGURE_PROOF_SCHEMA_VERSION") \
     || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c '.domain_records.unconfigure' <<< "$_manifest_json") || return 1
+  current_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
   if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record unconfigure "$reference"
+    transaction_set_domain_record final_proof "$reference"
   else
     [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
   fi
 }
 
+unconfigure_recovery_inputs_are_current() {
+  local current_obligations
+  unconfigure_limine_tools_match_intent || return 1
+  artifact_esp_is_mounted || return 1
+  validate_control_file "$(limine_default_config_path)" || return 1
+  validate_control_file "$(limine_config_path)" || return 1
+  unconfigure_limine_source_is_unchanged || return 1
+  read_current_firmware_modes || return 1
+  [[ "$_secure_boot_mode" == 0 ]] || return 1
+  limine_managed_settings_are_restorable "$_unconfigure_managed_settings_json" || return 1
+  owned_tracking_state_is_safe "$_unconfigure_tracking_paths_json" || return 1
+  windows_unconfigure_preflight || return 1
+  [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
+    || return 1
+  current_obligations=$(derive_uki_inventory_obligations) || return 1
+  [[ "$(jq -Sc . <<< "$current_obligations")" == \
+    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]]
+}
+
+unconfigure_recovery_failpoint() {
+  :
+}
+
+load_unconfigure_recovery_context() {
+  local recovery_operation root_id intent_path intent_document managed_path tracking_path
+  local managed_document tracking_document
+  unconfigure_recovery_is_available || return 1
+  load_recovery_context || return $?
+  recovery_operation=$(recovery_operation_for_root_manifest \
+    "$_recovery_root_manifest_json") || return 1
+  [[ "$recovery_operation" == unconfigure-recovery ]] || return 1
+  _recovery_terminal_state=$(recovery_terminal_state_for_root_manifest \
+    "$_recovery_root_manifest_json" "$recovery_operation") || return 1
+  [[ "$_recovery_terminal_state" == disabled ]] || return 1
+  root_id=$(jq -r '.id' <<< "$_recovery_root_reference") || return 1
+  _unconfigure_intent_reference_json=$(jq -c '.domain_records.unconfigure' \
+    <<< "$_recovery_root_manifest_json") || return 1
+  validate_unconfigure_intent_reference "$root_id" \
+    "$_unconfigure_intent_reference_json" "$_recovery_root_manifest_json" || return 1
+  intent_path=$(jq -r '.path' <<< "$_unconfigure_intent_reference_json") || return 1
+  intent_document=$(read_control_document "$intent_path") || return 1
+
+  _unconfigure_managed_reference_json=$(jq -c '.managed_settings' \
+    <<< "$intent_document") || return 1
+  _unconfigure_tracking_reference_json=$(jq -c '.tracking_ownership' \
+    <<< "$intent_document") || return 1
+  _unconfigure_rebuild_obligations_json=$(jq -c '.rebuild_obligations' \
+    <<< "$intent_document") || return 1
+  _unconfigure_windows_identity=$(jq -r '.windows_state_identity' \
+    <<< "$intent_document") || return 1
+  _unconfigure_limine_source_identity=$(jq -r '.limine_source.identity' \
+    <<< "$intent_document") || return 1
+  _unconfigure_limine_source_hash=$(jq -r '.limine_source.sha256' \
+    <<< "$intent_document") || return 1
+  _unconfigure_limine_tools_json=$(jq -c '.limine_tools' \
+    <<< "$intent_document") || return 1
+
+  managed_path=$(jq -r '.path' <<< "$_unconfigure_managed_reference_json") || return 1
+  tracking_path=$(jq -r '.path' <<< "$_unconfigure_tracking_reference_json") || return 1
+  managed_document=$(read_control_document "$managed_path") || return 1
+  tracking_document=$(read_control_document "$tracking_path") || return 1
+  _unconfigure_managed_settings_json=$(jq -c '.settings' <<< "$managed_document") || return 1
+  _unconfigure_tracking_paths_json=$(jq -c '.paths' <<< "$tracking_document") || return 1
+  unconfigure_recovery_inputs_are_current
+}
+
+unconfigure_recovery_transaction() {
+  unconfigure_recovery_inputs_are_current || return 1
+
+  transaction_phase_start restore-managed-settings || return 1
+  restore_limine_managed_settings "$_unconfigure_managed_settings_json" || return 1
+  unconfigure_recovery_failpoint after-restore-managed-settings || return 1
+  transaction_phase_complete restore-managed-settings || return 1
+
+  transaction_phase_start remove-windows-entry || return 1
+  remove_windows_managed_block_for_unconfigure || return 1
+  unconfigure_recovery_failpoint after-remove-windows-entry || return 1
+  transaction_phase_complete remove-windows-entry || return 1
+
+  transaction_phase_start remove-owned-tracking || return 1
+  remove_owned_tracking_entries "$_unconfigure_tracking_paths_json" || return 1
+  unconfigure_recovery_failpoint after-remove-owned-tracking || return 1
+  transaction_phase_complete remove-owned-tracking || return 1
+
+  transaction_phase_start reset-config-enrollment || return 1
+  if [[ "$QUIET" == true ]]; then
+    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
+  else
+    run_bound_unconfigure_limine_tool reset false || return 1
+  fi
+  unconfigure_recovery_failpoint after-reset-config-enrollment || return 1
+  transaction_phase_complete reset-config-enrollment || return 1
+
+  transaction_phase_start rebuild-stock-limine || return 1
+  run_checked_stock_limine_rebuild || return 1
+  unconfigure_recovery_failpoint after-rebuild-stock-limine || return 1
+  transaction_phase_complete rebuild-stock-limine || return 1
+
+  transaction_phase_start prove-unconfigured || return 1
+  read_current_firmware_modes || return 1
+  [[ "$_secure_boot_mode" == 0 ]] || return 1
+  limine_managed_settings_are_original "$_unconfigure_managed_settings_json" || return 1
+  owned_tracking_is_absent "$_unconfigure_tracking_paths_json" || return 1
+  windows_unconfigure_preflight || return 1
+  [[ "$_windows_block_state" == absent \
+    && "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
+    || return 1
+  unconfigured_limine_targets_match_source || return 1
+  persist_unconfigure_proof || return 1
+  unconfigure_recovery_failpoint after-prove-unconfigured || return 1
+  transaction_phase_complete prove-unconfigured
+}
+
+run_unconfigure_recovery_locked() {
+  local callback_rc=0 commit_rc=0 begin_rc=0
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  load_unconfigure_recovery_context || return $?
+  arm_transaction_traps
+  begin_lifecycle_recovery_attempt unconfigure-recovery || begin_rc=$?
+  if [[ $begin_rc -ne 0 ]]; then
+    if [[ "$_transaction_active" == true ]]; then
+      if read_lifecycle && [[ "$_lifecycle_state" == transition \
+        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
+        rollback_and_mark_recovery "$begin_rc" \
+          "unconfigure recovery attempt initialization failed" failed || true
+      else
+        detach_transaction_context
+      fi
+    fi
+    restore_transaction_traps
+    return "$begin_rc"
+  fi
+  unconfigure_recovery_transaction || callback_rc=$?
+  if [[ $callback_rc -eq 0 ]]; then
+    commit_lifecycle_recovery_attempt || commit_rc=$?
+    if [[ $commit_rc -ne 0 ]]; then
+      rollback_and_mark_recovery "$commit_rc" \
+        "stable unconfigure recovery publication failed" failed || true
+      callback_rc=$commit_rc
+    fi
+  else
+    rollback_and_mark_recovery "$callback_rc" "unconfigure recovery failed" failed || true
+  fi
+  restore_transaction_traps
+  return "$callback_rc"
+}
+
 unconfigure_software_state() {
   local file
+  transaction_phase_start record-unconfigure || return 1
+  persist_unconfigure_intent || return 1
+  transaction_phase_complete record-unconfigure || return 1
+
   transaction_phase_start backup-software-state || return 1
   transaction_backup_file "$(limine_default_config_path)" || return 1
   transaction_backup_file "$(limine_config_path)" || return 1
@@ -1317,9 +1627,9 @@ unconfigure_software_state() {
   transaction_phase_start reset-config-enrollment || return 1
   preserve_transaction_files_on_failure || return 1
   if [[ "$QUIET" == true ]]; then
-    "$(limine_reset_enroll_path)" >/dev/null || return 1
+    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
   else
-    "$(limine_reset_enroll_path)" || return 1
+    run_bound_unconfigure_limine_tool reset false || return 1
   fi
   transaction_phase_complete reset-config-enrollment || return 1
 

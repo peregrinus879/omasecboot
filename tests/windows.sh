@@ -962,9 +962,9 @@ for mutation in setup bootnext reboot; do
   fi
 done
 [[ ! -s "$CALL_LOG" ]] || fail_test "blocked Windows command reached a mutation tool"
-/usr/bin/grep -Fq 'recoverable Windows commands are integrated' "${TEST_DIR}/setup.out" \
+/usr/bin/grep -Fq 'recoverable Secure Boot commands are enabled' "${TEST_DIR}/setup.out" \
   || fail_test "blocked Windows setup omitted its safety reason"
-/usr/bin/grep -Fq 'Windows recovery is integrated' \
+/usr/bin/grep -Fq 'recoverable Secure Boot commands are enabled' \
   "${TEST_DIR}/bootnext.out" || fail_test "blocked BootNext omitted its safety reason"
 
 if /usr/bin/grep -RE 'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
@@ -1004,7 +1004,7 @@ fi
 for source in "${ROOT_DIR}/bin/omasecboot" "${ROOT_DIR}"/lib/*.sh; do
   [[ "$source" == "${ROOT_DIR}/lib/windows.sh" ]] && continue
   if /usr/bin/grep -Eq \
-      'suppress_stale_windows_entry|add_windows_boot_entry|run_dormant_windows_bootnext|record_and_set_windows_bootnext|run_windows_recovery_locked|windows_recovery_transaction|execute_windows_recovery_action|run_windows_unlink' \
+      'record_and_set_windows_bootnext|windows_recovery_transaction|execute_windows_recovery_action|run_windows_unlink' \
       "$source"; then
     fail_test "production path outside windows.sh can invoke a dormant Windows mutation"
   fi

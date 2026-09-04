@@ -12,6 +12,14 @@ check_core_deps() {
     || die "jq not installed. Run: ${BOLD}sudo pacman -S jq${NC}"
 }
 
+check_recovery_deps() {
+  local command
+  for command in flock jq sha256sum stat; do
+    command -v "$command" >/dev/null 2>&1 \
+      || die "Recovery dependency not installed: ${command}"
+  done
+}
+
 check_deps() {
   check_core_deps
   command -v limine-update >/dev/null 2>&1 \

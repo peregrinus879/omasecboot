@@ -707,8 +707,23 @@ read_lifecycle || fail_test "stale package lease was unreadable"
 stale_root_id="$_lifecycle_transaction_id"
 stale_root_incident=$(lifecycle_incident_path "$stale_root_id")
 OWNER_ALIVE=false
+touch "$(pacman_database_lock_path)"
+if producer_package_pre <<< 'usr/lib/modules/6.18.1/modules.builtin'; then
+  fail_test "package guard recovered a stale transaction while pacman was active"
+fi
+rm -f "$(pacman_database_lock_path)"
+read_lifecycle || fail_test "blocked stale package state was unreadable"
+[[ "$_lifecycle_state" == transition \
+  && "$_lifecycle_transaction_id" == "$stale_root_id" ]] \
+  || fail_test "package guard mutated a stale transaction"
+[[ ! -e "$stale_root_incident" ]] \
+  || fail_test "package guard sealed an incident while pacman was active"
+with_boot_repair_lock || fail_test "stale package recovery lock acquisition failed"
+reconcile_and_recover_producer_locked \
+  || fail_test "external stale package recovery failed"
+release_boot_repair_lock
 producer_package_pre <<< 'usr/lib/modules/6.18.1/modules.builtin' \
-  || fail_test "next package admission did not recover the failed transaction"
+  || fail_test "post-recovery package admission failed"
 OWNER_ALIVE=true
 read_lifecycle || fail_test "post-recovery package lease was unreadable"
 [[ "$_lifecycle_state" == transition \
@@ -1115,7 +1130,7 @@ read_lifecycle || fail_test "unsupported-version state became unreadable"
   OWNER_ALIVE=false
   RESTORE_RUNTIME_STATE=running
   with_boot_repair_lock || fail_test "stale-restore running check could not lock"
-  if reconcile_and_recover_producer_locked; then
+  if run_registered_recovery_locked; then
     fail_test "stale restore reconciled while its native worker survived"
   fi
   release_boot_repair_lock
@@ -1135,7 +1150,7 @@ read_lifecycle || fail_test "unsupported-version state became unreadable"
   }
   RESTORE_RUNTIME_STATE=clear
   with_boot_repair_lock || fail_test "stale-restore recovery could not lock"
-  reconcile_and_recover_producer_locked \
+  run_registered_recovery_locked \
     || fail_test "quiescent stale restore did not recover"
   release_boot_repair_lock
   [[ ! -e "$marker_path" && ! -L "$marker_path" ]] \

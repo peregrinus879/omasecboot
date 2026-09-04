@@ -81,7 +81,7 @@ windows_recovery_failpoint() {
 }
 
 windows_bootnext_mutation_is_available() {
-  return 1
+  lifecycle_repair_is_available
 }
 
 windows_recovery_is_available() {

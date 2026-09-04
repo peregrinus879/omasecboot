@@ -11,8 +11,10 @@ readonly FIRMWARE_PROOF_SCHEMA_VERSION=1
 readonly BOOTNEXT_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION=1
+readonly SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION=1
 readonly MANAGED_SETTINGS_SCHEMA_VERSION=1
 readonly TRACKING_OWNERSHIP_SCHEMA_VERSION=1
+readonly UNCONFIGURE_INTENT_SCHEMA_VERSION=1
 readonly UNCONFIGURE_PROOF_SCHEMA_VERSION=1
 readonly WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY="efibootmgr 18-4"
 readonly WINDOWS_EFIBOOTMGR_EXECUTABLE="/usr/bin/efibootmgr"
@@ -56,6 +58,7 @@ _recovery_previous_reference="null"
 _recovery_previous_manifest_json=""
 _recovery_attempt_count=0
 _recovery_target_state=""
+_recovery_terminal_state=""
 _recovery_producer_reference="null"
 _transaction_active=false
 _transaction_id=""
@@ -63,6 +66,7 @@ _transaction_token=""
 _transaction_operation=""
 _transaction_target_state=""
 _recovery_incident_json=""
+_lifecycle_recovery_performed=false
 _OMASECBOOT_FULL_RESTORE_POST=false
 _transaction_previous_exit=""
 _transaction_previous_int=""
@@ -82,6 +86,14 @@ producer_recovery_is_available() {
 }
 
 firmware_recovery_is_available() {
+  return 0
+}
+
+software_recovery_is_available() {
+  return 0
+}
+
+unconfigure_recovery_is_available() {
   return 0
 }
 
@@ -267,13 +279,101 @@ validate_lifecycle_ownership_pair() {
   validate_tracking_ownership_record_reference "$tracking_id" "$tracking"
 }
 
+validate_unconfigure_intent_json() {
+  local transaction_id="$1" document="$2" manifest="$3" prior_path prior_lifecycle
+  local managed tracking
+  jq -e --arg id "$transaction_id" --argjson schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+    --arg source "$(limine_unsigned_binary_path)" \
+    --arg install "$(limine_install_path)" \
+    --arg mkinitcpio "$(limine_mkinitcpio_path)" \
+    --arg reset "$(limine_reset_enroll_path)" \
+    --arg tool_version "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
+    --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def identity: type == "string" and test("^[0-9]+:[0-9]+$");
+    def artifact_reference:
+      type == "object" and keys == ["path","schema_version","sha256"] and
+      (.path | type == "string" and startswith("/")) and
+      (.schema_version | type == "number" and . >= 1 and floor == .) and
+      (.sha256 | digest);
+    type == "object" and
+    keys == ["limine_source","limine_tools","managed_settings","operation","rebuild_obligations",
+      "recorded_at","schema_version","tracking_ownership","transaction_id",
+      "windows_state_identity","writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "unconfigure" and (.recorded_at | timestamp) and
+    (.managed_settings | artifact_reference) and
+    (.tracking_ownership | artifact_reference) and
+    (.limine_source | type == "object" and keys == ["identity","path","sha256"] and
+      .path == $source and (.identity | identity) and (.sha256 | digest)) and
+    (.limine_tools | type == "object" and
+      keys == ["install","mkinitcpio","package","reset","version"] and
+      .package == "limine-mkinitcpio-hook" and
+      .version == $tool_version and
+      (.install | type == "object" and keys == ["identity","path","sha256"] and
+        .path == $install and (.identity | identity) and (.sha256 | digest)) and
+      (.mkinitcpio | type == "object" and keys == ["identity","path","sha256"] and
+        .path == $mkinitcpio and (.identity | identity) and (.sha256 | digest)) and
+      (.reset | type == "object" and keys == ["identity","path","sha256"] and
+        .path == $reset and (.identity | identity) and (.sha256 | digest))) and
+    (.windows_state_identity == "absent" or
+      (.windows_state_identity | test("^present:[0-9]+:[0-9]+:[0-9a-f]{64}$"))) and
+    $manifest.kind == "root" and $manifest.operation == "unconfigure" and
+    $manifest.prior_state == "active" and $manifest.target_state == "disabled"
+  ' <<< "$document" >/dev/null || return 1
+  validate_efi_obligations_json "$(jq -c '.rebuild_obligations' <<< "$document")" \
+    || return 1
+  prior_path=$(jq -r '.backups[0].path' <<< "$manifest") || return 1
+  prior_lifecycle=$(read_control_document "$prior_path") || return 1
+  validate_lifecycle_json "$prior_lifecycle" || return 1
+  managed=$(jq -c '.managed_settings' <<< "$prior_lifecycle") || return 1
+  tracking=$(jq -c '.tracking_ownership' <<< "$prior_lifecycle") || return 1
+  [[ "$managed" != null && "$tracking" != null ]] || return 1
+  validate_lifecycle_ownership_pair "$managed" "$tracking" || return 1
+  jq -en --argjson intent "$document" --argjson managed "$managed" \
+    --argjson tracking "$tracking" '
+      $intent.managed_settings == $managed and $intent.tracking_ownership == $tracking
+    ' >/dev/null
+}
+
+validate_unconfigure_intent_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/unconfigure-intent.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_unconfigure_intent_json "$transaction_id" "$document" "$manifest"
+}
+
 validate_unconfigure_proof_json() {
-  local transaction_id="$1" document="$2" manifest="$3" zero_checksum
+  local transaction_id="$1" document="$2" manifest="$3" zero_checksum root intent
+  local intent_document
   zero_checksum=$(printf '0%.0s' {1..128})
+  if [[ $(jq -r '.kind' <<< "$manifest") == root ]]; then
+    root="$manifest"
+  else
+    root=$(recovery_root_manifest_from_reference \
+      "$(jq -c '.recovery.root_incident' <<< "$manifest")") || return 1
+  fi
+  intent=$(jq -c '.domain_records.unconfigure' <<< "$root") || return 1
+  [[ "$intent" != null ]] || return 1
+  intent_document=$(read_control_document "$(jq -r '.path' <<< "$intent")") || return 1
+  validate_unconfigure_intent_json "$(jq -r '.id' <<< "$root")" "$intent_document" "$root" \
+    || return 1
   jq -e --arg id "$transaction_id" --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
     --arg zero "$zero_checksum" --arg primary "$(limine_primary_binary_path)" \
     --arg fallback "$(limine_fallback_binary_path)" \
-    --arg source "$(limine_unsigned_binary_path)" --argjson manifest "$manifest" '
+    --arg source "$(limine_unsigned_binary_path)" --argjson manifest "$manifest" \
+    --argjson intent "$intent" --argjson intent_document "$intent_document" '
     def uuid:
       type == "string" and
       test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
@@ -295,48 +395,246 @@ validate_unconfigure_proof_json() {
       type == "object" and keys == ["path","sha256"] and
       .path == $source and (.sha256 | digest);
     type == "object" and
-    keys == ["limine","managed_settings","operation","proved_at","rebuild_obligations",
-      "schema_version","secure_boot","settings","tracking_ownership","transaction_id",
-      "windows","writer_version"] and
+    keys == ["intent","limine","managed_settings","operation","proved_at",
+      "rebuild_obligations","root_incident","schema_version","secure_boot","settings",
+      "tracking_ownership","transaction_id","windows","writer_version"] and
     .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
-    .operation == "unconfigure" and (.proved_at | timestamp) and .secure_boot == 0 and
+    (.operation == "unconfigure" or .operation == "unconfigure-recovery") and
+    (.proved_at | timestamp) and .secure_boot == 0 and
     .settings == "original" and .windows == "managed-block-absent" and
-    (.managed_settings | artifact_reference) and
-    (.tracking_ownership | artifact_reference) and
+    .intent == $intent and
+    .managed_settings == $intent_document.managed_settings and
+    .tracking_ownership == $intent_document.tracking_ownership and
+    (.managed_settings | artifact_reference) and (.tracking_ownership | artifact_reference) and
+    .rebuild_obligations == $intent_document.rebuild_obligations and
     (.limine | type == "object" and keys == ["fallback","primary","source"] and
       (.source | source) and (.primary | target($primary)) and
       (.fallback | target($fallback)) and
+      .source.sha256 == $intent_document.limine_source.sha256 and
       .primary.sha256 == .source.sha256 and .fallback.sha256 == .source.sha256) and
-    $manifest.kind == "root" and $manifest.operation == "unconfigure" and
-    $manifest.prior_state == "active" and $manifest.target_state == "disabled" and
-    $manifest.file_rollback_policy == "preserve"
+    (if $manifest.kind == "root" then
+      .operation == "unconfigure" and .root_incident == null and
+      $manifest.operation == "unconfigure" and $manifest.prior_state == "active" and
+      $manifest.target_state == "disabled" and $manifest.file_rollback_policy == "preserve"
+     else
+      .operation == "unconfigure-recovery" and
+      .root_incident == $manifest.recovery.root_incident and
+      $manifest.kind == "recovery-attempt" and
+      $manifest.operation == "unconfigure-recovery" and
+      $manifest.target_state == "disabled" and
+      $manifest.file_rollback_policy == "preserve"
+     end)
   ' <<< "$document" >/dev/null || return 1
   validate_efi_obligations_json "$(jq -c '.rebuild_obligations' <<< "$document")"
 }
 
 validate_unconfigure_proof_reference() {
   local transaction_id="$1" reference="$2" manifest="$3"
-  local transaction_dir path document prior_path prior_lifecycle managed tracking
+  local transaction_dir path document
   transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
   path=$(jq -r '.path' <<< "$reference") || return 1
   [[ $(jq -r '.schema_version' <<< "$reference") == "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
-    && "$path" == "${transaction_dir}/unconfigure.json" ]] || return 1
+    && "$path" == "${transaction_dir}/final-proof.json" ]] || return 1
   validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
   document=$(read_control_document "$path") || return 1
-  validate_unconfigure_proof_json "$transaction_id" "$document" "$manifest" || return 1
-  prior_path=$(jq -r '.backups[0].path' <<< "$manifest") || return 1
-  prior_lifecycle=$(read_control_document "$prior_path") || return 1
-  validate_lifecycle_json "$prior_lifecycle" || return 1
-  jq -e '.state == "active" and .managed_settings != null and
-    .tracking_ownership != null' <<< "$prior_lifecycle" >/dev/null || return 1
-  managed=$(jq -c '.managed_settings' <<< "$prior_lifecycle") || return 1
-  tracking=$(jq -c '.tracking_ownership' <<< "$prior_lifecycle") || return 1
-  validate_lifecycle_ownership_pair "$managed" "$tracking" || return 1
-  jq -en --argjson proof "$document" --argjson managed "$managed" \
-    --argjson tracking "$tracking" '
-      $proof.managed_settings == $managed and $proof.tracking_ownership == $tracking
-    ' >/dev/null
+  validate_unconfigure_proof_json "$transaction_id" "$document" "$manifest"
+}
+
+software_recovery_root_is_supported() {
+  local document="$1"
+  jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
+    def phases_valid($phases):
+      (.completed_phases == $phases[0:(.completed_phases | length)]) and
+      (.completed_phases | length) <= ($phases | length) and
+      (if .current_phase == null then true
+       else (.completed_phases | length) < ($phases | length) and
+         .current_phase == $phases[(.completed_phases | length)] end) and
+      (if .status == "completed" then
+         .completed_phases == $phases and .current_phase == null
+       else true end);
+    .kind == "root" and .file_rollback_policy == "restore" and
+    .firmware_writes == [] and .domain_records.producer == null and
+    .domain_records.bootnext == null and .domain_records.firmware == null and
+    (.operation == "unconfigure" or .domain_records.unconfigure == null) and
+    .domain_records.windows == null and
+    if .operation == "adopt" then
+      .prior_state == "unmanaged" and .target_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and
+      phases_valid(["record-adoption"]) and
+      (if .status == "completed" then
+        .domain_records.managed_settings != null and
+        .domain_records.tracking_ownership != null
+       else true end)
+    elif .operation == "prepare-secure-boot" then
+      (.prior_state == "unmanaged" or .prior_state == "disabled") and
+      .target_state == "disabled" and .enrollment_plan == null and
+      .domain_records.final_proof == null and
+      .domain_records.managed_settings == null and
+      .domain_records.tracking_ownership == null and
+      phases_valid(["backup-firmware","create-keys","build-enrollment-plan"]) and
+      (if .status == "completed" then
+        .firmware_backup != null and .firmware_backup.status == "complete"
+       else true end)
+    elif .operation == "activate-secure-boot-plan" then
+      (.prior_state == "disabled" or .prior_state == "active") and
+      .target_state == "active" and
+      phases_valid(["confirm-enrollment-plan","bind-enrollment-plan",
+        "backup-artifacts","configure-limine","enroll-config","verify-config",
+        "clean-tracking","sign-efi","prove-artifacts"]) and
+      (if .status == "completed" then
+        .firmware_backup != null and .firmware_backup.status == "complete" and
+        .enrollment_plan != null and .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $final_schema and
+        .domain_records.managed_settings != null and
+        .domain_records.tracking_ownership != null
+       else true end)
+    elif .operation == "sign" then
+      .prior_state == "active" and .target_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and
+      phases_valid(["backup-artifacts","configure-limine","enroll-config",
+        "verify-config","clean-tracking","sign-efi","prove-artifacts"]) and
+      (if .status == "completed" then
+        .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $final_schema and
+        .domain_records.managed_settings != null and
+        .domain_records.tracking_ownership != null
+       else true end)
+    elif .operation == "cleanup" then
+      .prior_state == "active" and .target_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and
+      .domain_records.final_proof == null and
+      .domain_records.managed_settings == null and
+      .domain_records.tracking_ownership == null and
+      phases_valid(["clean-tracking"])
+    elif .operation == "windows-setup" then
+      .prior_state == "active" and .target_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and
+      phases_valid(["backup-windows","resolve-windows","persist-windows-target",
+        "configure-windows-entry","backup-artifacts","configure-limine",
+        "enroll-config","verify-config","clean-tracking","sign-efi",
+        "prove-artifacts","prove-windows"]) and
+      (if .status == "completed" then
+        .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $final_schema and
+        .domain_records.managed_settings != null and
+        .domain_records.tracking_ownership != null
+       else true end)
+    elif .operation == "windows-suppress" then
+      .prior_state == "active" and .target_state == "active" and
+      .firmware_backup == null and .enrollment_plan == null and
+      phases_valid(["backup-windows","suppress-windows-entry","backup-artifacts",
+        "configure-limine","enroll-config","verify-config","clean-tracking",
+        "sign-efi","prove-artifacts","prove-windows-suppression"]) and
+      (if .status == "completed" then
+        .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $final_schema and
+        .domain_records.managed_settings != null and
+        .domain_records.tracking_ownership != null
+       else true end)
+    elif .operation == "unconfigure" then
+      .prior_state == "active" and .target_state == "disabled" and
+      .firmware_backup == null and .enrollment_plan == null
+    else false end
+  ' <<< "$document" >/dev/null
+}
+
+recovery_root_manifest_from_reference() {
+  local reference="$1"
+  validate_incident_reference "$reference" || return 1
+  [[ $(jq -r '.kind' <<< "$_incident_json") == root ]] || return 1
+  printf '%s\n' "$_manifest_json"
+}
+
+recovery_terminal_state_for_root_manifest() {
+  local document="$1" recovery_operation="$2" root_status
+  case "$recovery_operation" in
+    producer-recovery|firmware-recovery|windows-recovery)
+      printf 'active\n'
+      ;;
+    unconfigure-recovery)
+      jq -e '.kind == "root" and .operation == "unconfigure" and
+        .prior_state == "active" and .target_state == "disabled" and
+        .file_rollback_policy == "preserve" and
+        .domain_records.unconfigure != null' <<< "$document" >/dev/null || return 1
+      printf 'disabled\n'
+      ;;
+    software-recovery)
+      software_recovery_root_is_supported "$document" || return 1
+      root_status=$(jq -r '.status' <<< "$document") || return 1
+      if [[ "$root_status" == completed ]]; then
+        jq -r '.target_state' <<< "$document"
+      else
+        jq -r '.prior_state' <<< "$document"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_software_recovery_proof_json() {
+  local transaction_id="$1" document="$2" manifest="$3" root terminal resolution
+  local expected_backups
+  root=$(recovery_root_manifest_from_reference \
+    "$(jq -c '.recovery.root_incident' <<< "$manifest")") || return 1
+  [[ $(recovery_operation_for_root_manifest "$root") == software-recovery ]] || return 1
+  terminal=$(recovery_terminal_state_for_root_manifest "$root" software-recovery) || return 1
+  if [[ $(jq -r '.status' <<< "$root") == completed ]]; then
+    resolution=completed
+    expected_backups='[]'
+  else
+    resolution=rolled-back
+    expected_backups=$(jq -c '[.backups[] |
+      select(.kind == "file" or .kind == "absent-file") |
+      {kind, target, sha256}]' <<< "$root") || return 1
+  fi
+  jq -e --arg id "$transaction_id" \
+    --argjson schema "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" \
+    --arg terminal "$terminal" --arg resolution "$resolution" \
+    --arg root_operation "$(jq -r '.operation' <<< "$root")" \
+    --argjson expected_backups "$expected_backups" --argjson manifest "$manifest" '
+    def uuid:
+      type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    def digest: type == "string" and test("^[0-9a-f]{64}$");
+    def timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def absolute_path:
+      type == "string" and length > 1 and length <= 4096 and startswith("/") and
+      (explode | all(.[]; . >= 32 and . != 127));
+    def restored_backup:
+      type == "object" and keys == ["kind","sha256","target"] and
+      (.kind == "file" or .kind == "absent-file") and (.target | absolute_path) and
+      (if .kind == "file" then (.sha256 | digest) else .sha256 == null end);
+    type == "object" and
+    keys == ["operation","proved_at","resolution","restored_backups","root_incident",
+      "root_operation","schema_version","terminal_state","transaction_id",
+      "writer_version"] and
+    .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    (.writer_version | type == "string" and length > 0 and length <= 128) and
+    .operation == "software-recovery" and (.proved_at | timestamp) and
+    .resolution == $resolution and .terminal_state == $terminal and
+    .root_operation == $root_operation and
+    .root_incident == $manifest.recovery.root_incident and
+    (.restored_backups | type == "array" and length <= 4096 and
+      all(.[]; restored_backup)) and .restored_backups == $expected_backups and
+    $manifest.kind == "recovery-attempt" and
+    $manifest.operation == "software-recovery" and
+    $manifest.target_state == $terminal
+  ' <<< "$document" >/dev/null
+}
+
+validate_software_recovery_proof_reference() {
+  local transaction_id="$1" reference="$2" manifest="$3" transaction_dir path document
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  path=$(jq -r '.path' <<< "$reference") || return 1
+  [[ $(jq -r '.schema_version' <<< "$reference") == \
+      "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" \
+    && "$path" == "${transaction_dir}/final-proof.json" ]] || return 1
+  validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
+  document=$(read_control_document "$path") || return 1
+  validate_software_recovery_proof_json "$transaction_id" "$document" "$manifest"
 }
 
 validate_bootnext_record_json() {
@@ -1469,7 +1767,12 @@ validate_transaction_manifest_json() {
     .schema_version == $schema and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     .id == $id and (.operation | operation) and
-    (.target_state == "disabled" or .target_state == "active") and
+    (if .kind == "root" then
+      (.target_state == "disabled" or .target_state == "active")
+     elif .kind == "recovery-attempt" then
+      (.target_state == "disabled" or .target_state == "active" or
+        (.operation == "software-recovery" and .target_state == "unmanaged"))
+     else false end) and
     (.status == "transition" or .status == "completed" or
       .status == "failed" or .status == "stale") and
     (.created_at | timestamp) and
@@ -1784,7 +2087,7 @@ validate_transaction_domain_records() {
       || ( "$managed_settings" != null && "$tracking_ownership" != null ) ]] || return 1
   fi
   if [[ "$unconfigure" != null ]]; then
-    validate_unconfigure_proof_reference "$transaction_id" "$unconfigure" "$document" \
+    validate_unconfigure_intent_reference "$transaction_id" "$unconfigure" "$document" \
       || return 1
   fi
 
@@ -1837,6 +2140,13 @@ validate_transaction_domain_records() {
   if [[ "$proof" != null ]]; then
     if [[ "$kind" == recovery-attempt && "$operation" == windows-recovery ]]; then
       validate_windows_recovery_proof_reference "$transaction_id" "$proof" "$document" \
+        || return 1
+    elif [[ "$kind" == recovery-attempt && "$operation" == software-recovery ]]; then
+      validate_software_recovery_proof_reference "$transaction_id" "$proof" "$document" \
+        || return 1
+    elif [[ ( "$kind" == root && "$operation" == unconfigure ) \
+      || ( "$kind" == recovery-attempt && "$operation" == unconfigure-recovery ) ]]; then
+      validate_unconfigure_proof_reference "$transaction_id" "$proof" "$document" \
         || return 1
     else
       validate_final_proof_reference "$transaction_id" "$proof" || return 1
@@ -1911,32 +2221,42 @@ validate_transaction_domain_records() {
     ' <<< "$document" >/dev/null || return 1
   fi
   if [[ "$operation" == unconfigure ]]; then
-    [[ "$kind" == root && "$producer" == null && "$proof" == null \
+    [[ "$kind" == root && "$producer" == null \
       && "$firmware" == null && "$managed_settings" == null \
       && "$tracking_ownership" == null && "$windows" == null ]] || return 1
-    jq -e '
-      ["backup-software-state","restore-managed-settings","remove-windows-entry",
+    jq -e --argjson intent_schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+      --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" '
+      ["record-unconfigure","backup-software-state","restore-managed-settings","remove-windows-entry",
        "remove-owned-tracking","reset-config-enrollment","rebuild-stock-limine",
        "prove-unconfigured"] as $phases |
       .target_state == "disabled" and .prior_state == "active" and
       .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-      .domain_records.bootnext == null and .domain_records.final_proof == null and
+      .domain_records.bootnext == null and
       .domain_records.firmware == null and .domain_records.managed_settings == null and
       .domain_records.producer == null and .domain_records.tracking_ownership == null and
        .domain_records.windows == null and
        (.completed_phases == $phases[0:(.completed_phases | length)]) and
        (if .current_phase == null then true
         else .current_phase == $phases[(.completed_phases | length)] end) and
+       (if .domain_records.unconfigure == null then
+          .completed_phases == [] and
+          (.current_phase == null or .current_phase == "record-unconfigure")
+        else .domain_records.unconfigure.schema_version == $intent_schema end) and
+       (if .domain_records.final_proof == null then true
+        else .current_phase == "prove-unconfigured" or
+          (.completed_phases == $phases and .current_phase == null) end) and
        ((.completed_phases | length) as $done |
-        if $done < 4 or ($done == 4 and .current_phase == null) then
+        if $done < 5 or ($done == 5 and .current_phase == null) then
           .file_rollback_policy == "restore"
-        elif $done == 4 and .current_phase == "reset-config-enrollment" then
+        elif $done == 5 and .current_phase == "reset-config-enrollment" then
           (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve")
         else .file_rollback_policy == "preserve" end) and
        (if .status == "completed" then
-         .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
-        .completed_phases == $phases and .current_phase == null
-       else true end)
+          .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
+          .domain_records.final_proof != null and
+          .domain_records.final_proof.schema_version == $proof_schema and
+         .completed_phases == $phases and .current_phase == null
+        else true end)
     ' <<< "$document" >/dev/null || return 1
   elif [[ "$unconfigure" != null ]]; then
     return 1
@@ -2011,12 +2331,73 @@ validate_transaction_domain_records() {
            else true end)
         ' <<< "$document" >/dev/null || return 1
         ;;
+      software-recovery)
+        jq -e --argjson proof_schema "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" '
+          .prior_state == "recovery-required" and
+          (.target_state == "active" or .target_state == "disabled" or
+            .target_state == "unmanaged") and
+          .file_rollback_policy == "preserve" and
+          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
+          .domain_records.bootnext == null and .domain_records.firmware == null and
+          .domain_records.managed_settings == null and .domain_records.producer == null and
+          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+          .domain_records.windows == null and
+          (.completed_phases == ["restore-files","prove-restored"] or
+            .completed_phases == ["prove-completed"] or
+            .completed_phases == [] or
+            .completed_phases == ["restore-files"]) and
+          (if .current_phase == null then true
+           elif .completed_phases == [] then
+             (.current_phase == "restore-files" or .current_phase == "prove-completed")
+           elif .completed_phases == ["restore-files"] then
+             .current_phase == "prove-restored"
+           else false end) and
+          (if .status == "completed" then
+            .domain_records.final_proof != null and
+            .domain_records.final_proof.schema_version == $proof_schema and
+            ((.completed_phases == ["restore-files","prove-restored"]) or
+             (.completed_phases == ["prove-completed"])) and .current_phase == null
+           else true end)
+        ' <<< "$document" >/dev/null || return 1
+        ;;
+      unconfigure-recovery)
+        jq -e --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" '
+          .target_state == "disabled" and .prior_state == "recovery-required" and
+          .file_rollback_policy == "preserve" and
+          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
+          .domain_records.bootnext == null and .domain_records.firmware == null and
+          .domain_records.managed_settings == null and .domain_records.producer == null and
+          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+          .domain_records.windows == null and
+          (["restore-managed-settings","remove-windows-entry","remove-owned-tracking",
+            "reset-config-enrollment","rebuild-stock-limine","prove-unconfigured"] as $phases |
+            (.completed_phases | length) as $done |
+            .completed_phases == ($phases[0:$done]) and
+            $done <= ($phases | length) and
+            (if .current_phase == null then true
+             else $done < ($phases | length) and .current_phase == $phases[$done] end) and
+            (if .domain_records.final_proof == null then true
+             else .current_phase == "prove-unconfigured" or
+               (.completed_phases == $phases and .current_phase == null) end) and
+            (if .status == "completed" then
+              .domain_records.final_proof != null and
+              .domain_records.final_proof.schema_version == $proof_schema and
+              .completed_phases == $phases and .current_phase == null
+             else true end))
+        ' <<< "$document" >/dev/null || return 1
+        ;;
       *) return 1 ;;
     esac
     if [[ "$proof" != null ]]; then
       if [[ "$operation" == windows-recovery ]]; then
         [[ $(jq -r '.schema_version' <<< "$proof") == \
           "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" ]] || return 1
+      elif [[ "$operation" == software-recovery ]]; then
+        [[ $(jq -r '.schema_version' <<< "$proof") == \
+          "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" ]] || return 1
+      elif [[ "$operation" == unconfigure-recovery ]]; then
+        [[ $(jq -r '.schema_version' <<< "$proof") == \
+          "$UNCONFIGURE_PROOF_SCHEMA_VERSION" ]] || return 1
       else
         [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
           || return 1
@@ -2027,17 +2408,29 @@ validate_transaction_domain_records() {
 }
 
 recovery_operation_for_root_manifest() {
-  local document="$1" operation producer
-  jq -e '.kind == "root" and .target_state == "active" and .prior_state == "active"' \
-    <<< "$document" >/dev/null || return 1
+  local document="$1" operation producer policy
+  jq -e '.kind == "root"' <<< "$document" >/dev/null || return 1
   operation=$(jq -r '.operation' <<< "$document") || return 1
   producer=$(jq -c '.domain_records.producer' <<< "$document") || return 1
+  policy=$(jq -r '.file_rollback_policy' <<< "$document") || return 1
   if [[ "$producer" != null ]]; then
+    jq -e '.target_state == "active" and .prior_state == "active"' \
+      <<< "$document" >/dev/null || return 1
     printf 'producer-recovery\n'
   elif [[ "$operation" == enroll-secure-boot ]]; then
+    jq -e '.target_state == "active" and .prior_state == "active"' \
+      <<< "$document" >/dev/null || return 1
     printf 'firmware-recovery\n'
   elif [[ "$operation" == windows-bootnext ]]; then
+    jq -e '.target_state == "active" and .prior_state == "active"' \
+      <<< "$document" >/dev/null || return 1
     printf 'windows-recovery\n'
+  elif [[ "$operation" == unconfigure && "$policy" == preserve ]]; then
+    jq -e '.target_state == "disabled" and .prior_state == "active" and
+      .domain_records.unconfigure != null' <<< "$document" >/dev/null || return 1
+    printf 'unconfigure-recovery\n'
+  elif [[ "$policy" == restore ]] && software_recovery_root_is_supported "$document"; then
+    printf 'software-recovery\n'
   else
     return 1
   fi
@@ -2062,14 +2455,16 @@ validate_recovery_manifest_evolution() {
           pending_resolution($old[-1]; $new[($old | length) - 1]))
       else $new[0:($old | length)] == $old end;
     $current.kind == "recovery-attempt" and $current.operation == $operation and
-    $current.target_state == "active" and $current.prior_state == "recovery-required" and
+    $current.prior_state == "recovery-required" and
     if $operation == "producer-recovery" then
+      $current.target_state == "active" and
       $previous.firmware_backup == null and $previous.enrollment_plan == null and
       $previous.firmware_writes == [] and $current.firmware_backup == null and
       $current.enrollment_plan == null and $current.firmware_writes == [] and
       $previous.file_rollback_policy == "preserve" and
       $current.file_rollback_policy == "preserve"
     elif $operation == "firmware-recovery" then
+      $current.target_state == "active" and
       (($current.firmware_backup == $previous.firmware_backup and
           $current.enrollment_plan == $previous.enrollment_plan) or
         ($previous.firmware_backup == null and $previous.enrollment_plan == null and
@@ -2080,11 +2475,29 @@ validate_recovery_manifest_evolution() {
         ($previous.file_rollback_policy == "restore" and
           $current.file_rollback_policy == "preserve"))
     elif $operation == "windows-recovery" then
+      $current.target_state == "active" and
       $previous.firmware_backup == null and $previous.enrollment_plan == null and
       $previous.firmware_writes == [] and $current.firmware_backup == null and
       $current.enrollment_plan == null and $current.firmware_writes == [] and
       $previous.file_rollback_policy == "restore" and
       $current.file_rollback_policy == "restore"
+    elif $operation == "software-recovery" then
+      $current.target_state ==
+        (if $previous.kind == "root" then
+           (if $previous.status == "completed" then $previous.target_state
+            else $previous.prior_state end)
+         else $previous.target_state end) and
+      $previous.firmware_writes == [] and $current.firmware_backup == null and
+      $current.enrollment_plan == null and $current.firmware_writes == [] and
+      $current.file_rollback_policy == "preserve" and
+      (if $previous.kind == "root" then $previous.file_rollback_policy == "restore"
+       else $previous.file_rollback_policy == "preserve" end)
+    elif $operation == "unconfigure-recovery" then
+      $current.target_state == "disabled" and
+      $previous.firmware_writes == [] and $current.firmware_backup == null and
+      $current.enrollment_plan == null and $current.firmware_writes == [] and
+      $current.file_rollback_policy == "preserve" and
+      $previous.file_rollback_policy == "preserve"
     else false end
   ' >/dev/null
 }
@@ -2751,13 +3164,17 @@ lifecycle_removal_is_allowed() {
     if validate_lifecycle_json "$document" \
       && [[ $(jq -r '.state' <<< "$document") == disabled ]] \
       && validate_lifecycle_document_references "$document" \
-      && [[ $(jq -r '.last_transaction.operation' <<< "$document") == unconfigure ]] \
+      && [[ $(jq -r '.last_transaction.operation' <<< "$document") == unconfigure \
+        || $(jq -r '.last_transaction.operation' <<< "$document") == \
+          unconfigure-recovery ]] \
       && read_transaction_manifest "$(jq -r '.last_transaction.id' <<< "$document")" \
       && jq -e '
-        .kind == "root" and .operation == "unconfigure" and
         .status == "completed" and .target_state == "disabled" and
         .file_rollback_policy == "preserve" and
-        .domain_records.unconfigure != null
+        ((.kind == "root" and .operation == "unconfigure" and
+          .domain_records.unconfigure != null and .domain_records.final_proof != null) or
+         (.kind == "recovery-attempt" and .operation == "unconfigure-recovery" and
+          .domain_records.final_proof != null))
       ' <<< "$_manifest_json" >/dev/null; then
       result=0
     fi
@@ -2795,6 +3212,7 @@ reset_recovery_context() {
   _recovery_previous_manifest_json=""
   _recovery_attempt_count=0
   _recovery_target_state=""
+  _recovery_terminal_state=""
   _recovery_producer_reference="null"
 }
 
@@ -2855,6 +3273,39 @@ load_producer_recovery_context() {
   producer_document=$(read_control_document "$producer_path") || return 1
   [[ $(jq -r '.operation' <<< "$_recovery_root_manifest_json") == \
     "$(jq -r '.operation' <<< "$producer_document")" ]] || return 1
+}
+
+load_software_recovery_context() {
+  local recovery_operation
+  software_recovery_is_available || return 1
+  load_recovery_context || return $?
+  recovery_operation=$(recovery_operation_for_root_manifest \
+    "$_recovery_root_manifest_json") || return 1
+  [[ "$recovery_operation" == software-recovery ]] || return 1
+  _recovery_terminal_state=$(recovery_terminal_state_for_root_manifest \
+    "$_recovery_root_manifest_json" "$recovery_operation") || return 1
+  [[ "$_recovery_terminal_state" == active || "$_recovery_terminal_state" == disabled \
+    || "$_recovery_terminal_state" == unmanaged ]] || return 1
+  software_recovery_esp_is_safe
+}
+
+software_recovery_esp_is_safe() {
+  local esp target
+  [[ $(jq -r '.status' <<< "$_recovery_root_manifest_json") != completed ]] || return 0
+  esp=$(esp_path) || return 1
+  esp=${esp%/}
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    case "$target" in
+      "${esp}"/*)
+        declare -F artifact_esp_is_mounted >/dev/null || return 1
+        artifact_esp_is_mounted || return 1
+        return 0
+        ;;
+    esac
+  done < <(jq -r '.backups[] |
+    select(.kind == "file" or .kind == "absent-file") | .target' \
+    <<< "$_recovery_root_manifest_json")
 }
 
 manifest_owner_is_alive() {
@@ -3035,6 +3486,7 @@ begin_lifecycle_transaction() {
   _manifest_id="$transaction_id"
   _manifest_sha256=$(sha256_file "$manifest") || return 1
   lifecycle_failpoint "after-manifest-write" || return 1
+  lifecycle_package_boundary_is_clear || return 1
   _transaction_active=true
   _transaction_id="$transaction_id"
   _transaction_token="$token"
@@ -3195,18 +3647,22 @@ begin_lifecycle_recovery_attempt() {
   local operation="$1" transaction_id transaction_dir manifest prior_backup prior_hash backups
   local token token_hash boot_id owner_pid owner_start timestamp captured service_state
   local attempt_number manifest_document file_rollback_policy firmware_backup enrollment_plan
-  local firmware_writes recovery_operation
+  local firmware_writes recovery_operation terminal_state
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   case "$operation" in
     producer-recovery) load_producer_recovery_context || return $? ;;
     firmware-recovery) load_recovery_context || return $? ;;
     windows-recovery) load_recovery_context || return $? ;;
+    software-recovery) load_software_recovery_context || return $? ;;
+    unconfigure-recovery) load_unconfigure_recovery_context || return $? ;;
     *) return 1 ;;
   esac
   recovery_operation=$(recovery_operation_for_root_manifest \
     "$_recovery_root_manifest_json") || return 1
   [[ "$operation" == "$recovery_operation" ]] || return 1
+  terminal_state=$(recovery_terminal_state_for_root_manifest \
+    "$_recovery_root_manifest_json" "$recovery_operation") || return 1
   attempt_number=$((_recovery_attempt_count + 1))
   (( attempt_number <= MAX_RECOVERY_ATTEMPT_SEALS )) || return 2
 
@@ -3241,8 +3697,13 @@ begin_lifecycle_recovery_attempt() {
       <<< "$_recovery_previous_manifest_json") || return 1
     firmware_writes=$(jq -c '.firmware_writes' \
       <<< "$_recovery_previous_manifest_json") || return 1
-  else
+  elif [[ "$operation" == windows-recovery ]]; then
     file_rollback_policy=restore
+    firmware_backup=null
+    enrollment_plan=null
+    firmware_writes='[]'
+  else
+    file_rollback_policy=preserve
     firmware_backup=null
     enrollment_plan=null
     firmware_writes='[]'
@@ -3273,6 +3734,7 @@ begin_lifecycle_recovery_attempt() {
     --arg owner_start "$owner_start" \
     --argjson owner_uid "$(control_owner_uid)" \
     --arg operation "$operation" \
+    --arg terminal_state "$terminal_state" \
     --argjson attempt "$attempt_number" \
     --argjson root "$_recovery_root_reference" \
     --argjson previous "$_recovery_previous_reference" \
@@ -3287,7 +3749,7 @@ begin_lifecycle_recovery_attempt() {
       id: $id,
       kind: "recovery-attempt",
       operation: $operation,
-      target_state: "active",
+      target_state: $terminal_state,
       status: "transition",
       created_at: $timestamp,
       completed_at: null,
@@ -3328,11 +3790,12 @@ begin_lifecycle_recovery_attempt() {
   _manifest_id="$transaction_id"
   _manifest_sha256=$(sha256_file "$manifest") || return 1
   lifecycle_failpoint "after-attempt-manifest-write" || return 1
+  lifecycle_package_boundary_is_clear || return 1
   _transaction_active=true
   _transaction_id="$transaction_id"
   _transaction_token="$token"
   _transaction_operation="$operation"
-  _transaction_target_state=active
+  _transaction_target_state="$terminal_state"
   OMASECBOOT_TRANSACTION_ID="$transaction_id"
   OMASECBOOT_TRANSACTION_TOKEN="$token"
   export OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
@@ -3678,7 +4141,9 @@ apply_transaction_service_policy() {
 apply_recovery_transaction_service_policy() {
   local producer_path producer_document root_id
   if [[ "$_transaction_operation" == firmware-recovery \
-    || "$_transaction_operation" == windows-recovery ]]; then
+    || "$_transaction_operation" == windows-recovery \
+    || "$_transaction_operation" == software-recovery \
+    || "$_transaction_operation" == unconfigure-recovery ]]; then
     quiesce_transaction_service
     return
   fi
@@ -3923,6 +4388,210 @@ rollback_transaction_files() {
     ' <<< "$_manifest_json") || return 1
   write_transaction_manifest_json "$document" || return 1
   [[ "$status" == completed ]]
+}
+
+software_recovery_backups_are_restored() {
+  local root_manifest="$1" entry kind target expected mode uid gid current_mode current_uid current_gid
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    kind=$(jq -r '.kind' <<< "$entry") || return 1
+    target=$(jq -r '.target' <<< "$entry") || return 1
+    if [[ "$kind" == absent-file ]]; then
+      [[ ! -e "$target" && ! -L "$target" ]] || return 1
+      continue
+    fi
+    [[ "$kind" == file ]] || return 1
+    expected=$(jq -r '.sha256' <<< "$entry") || return 1
+    mode=$(jq -r '.mode' <<< "$entry") || return 1
+    uid=$(jq -r '.uid' <<< "$entry") || return 1
+    gid=$(jq -r '.gid' <<< "$entry") || return 1
+    validate_control_file "$target" || return 1
+    read -r current_uid current_gid current_mode \
+      < <(stat -Lc '%u %g %a' "$target" 2>/dev/null) || return 1
+    [[ "$current_uid" == "$uid" && "$current_gid" == "$gid" \
+      && "$current_mode" == "$mode" && "$(sha256_file "$target")" == "$expected" ]] \
+      || return 1
+  done < <(jq -c '.backups[] |
+    select(.kind == "file" or .kind == "absent-file")' <<< "$root_manifest")
+}
+
+restore_software_recovery_backups() {
+  local entry
+  local -a entries=()
+  mapfile -t entries < <(jq -c '.backups | reverse[] |
+    select(.kind == "file" or .kind == "absent-file")' \
+    <<< "$_recovery_root_manifest_json") || return 1
+  for entry in "${entries[@]}"; do
+    restore_transaction_backup_entry "$entry" || return 1
+  done
+  software_recovery_backups_are_restored "$_recovery_root_manifest_json"
+}
+
+persist_software_recovery_proof() {
+  local transaction_dir path timestamp resolution backups document reference
+  local current_reference existing
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  path="${transaction_dir}/final-proof.json"
+  timestamp=$(utc_timestamp) || return 1
+  if [[ $(jq -r '.status' <<< "$_recovery_root_manifest_json") == completed ]]; then
+    resolution=completed
+    backups='[]'
+  else
+    software_recovery_backups_are_restored "$_recovery_root_manifest_json" || return 1
+    resolution=rolled-back
+    backups=$(jq -c '[.backups[] |
+      select(.kind == "file" or .kind == "absent-file") |
+      {kind, target, sha256}]' <<< "$_recovery_root_manifest_json") || return 1
+  fi
+  document=$(jq -cn \
+    --argjson schema "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" \
+    --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
+    --arg timestamp "$timestamp" --arg resolution "$resolution" \
+    --arg terminal "$_transaction_target_state" \
+    --arg root_operation "$(jq -r '.operation' <<< "$_recovery_root_manifest_json")" \
+    --argjson root "$_recovery_root_reference" --argjson backups "$backups" '{
+      schema_version: $schema,
+      writer_version: $version,
+      transaction_id: $id,
+      operation: "software-recovery",
+      proved_at: $timestamp,
+      root_incident: $root,
+      root_operation: $root_operation,
+      resolution: $resolution,
+      terminal_state: $terminal,
+      restored_backups: $backups
+    }') || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  validate_software_recovery_proof_json "$_transaction_id" "$document" "$_manifest_json" \
+    || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    validate_software_recovery_proof_json "$_transaction_id" "$existing" "$_manifest_json" \
+      || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" '
+      ($existing | del(.proved_at)) == ($candidate | del(.proved_at))
+    ' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  reference=$(transaction_artifact_reference "$path" \
+    "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION") || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record final_proof "$reference"
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
+  fi
+}
+
+software_recovery_transaction() {
+  software_recovery_is_available || return 1
+  if [[ $(jq -r '.status' <<< "$_recovery_root_manifest_json") == completed ]]; then
+    transaction_phase_start prove-completed || return 1
+    persist_software_recovery_proof || return 1
+    transaction_phase_complete prove-completed
+    return
+  fi
+  transaction_phase_start restore-files || return 1
+  restore_software_recovery_backups || return 1
+  transaction_phase_complete restore-files || return 1
+  transaction_phase_start prove-restored || return 1
+  software_recovery_backups_are_restored "$_recovery_root_manifest_json" || return 1
+  persist_software_recovery_proof || return 1
+  transaction_phase_complete prove-restored
+}
+
+run_software_recovery_locked() {
+  local callback_rc=0 commit_rc=0 begin_rc=0
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  load_software_recovery_context || return $?
+  arm_transaction_traps
+  begin_lifecycle_recovery_attempt software-recovery || begin_rc=$?
+  if [[ $begin_rc -ne 0 ]]; then
+    if [[ "$_transaction_active" == true ]]; then
+      if read_lifecycle && [[ "$_lifecycle_state" == transition \
+        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
+        rollback_and_mark_recovery "$begin_rc" \
+          "software recovery attempt initialization failed" failed || true
+      else
+        detach_transaction_context
+      fi
+    fi
+    restore_transaction_traps
+    return "$begin_rc"
+  fi
+  software_recovery_transaction || callback_rc=$?
+  if [[ $callback_rc -eq 0 ]]; then
+    commit_lifecycle_recovery_attempt || commit_rc=$?
+    if [[ $commit_rc -ne 0 ]]; then
+      rollback_and_mark_recovery "$commit_rc" \
+        "stable software recovery publication failed" failed || true
+      callback_rc=$commit_rc
+    fi
+  else
+    rollback_and_mark_recovery "$callback_rc" "software recovery failed" failed || true
+  fi
+  restore_transaction_traps
+  return "$callback_rc"
+}
+
+run_registered_recovery_locked() {
+  local operation
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  prepare_registered_stale_recovery_runtime_locked || return 1
+  reconcile_stale_lifecycle || return 1
+  read_lifecycle || return 1
+  case "$_lifecycle_state" in
+    unmanaged|disabled|active) return 0 ;;
+    recovery-required) ;;
+    transition) return 1 ;;
+    *) return 1 ;;
+  esac
+  prepare_registered_recovery_runtime_locked || return 1
+  load_recovery_context || return $?
+  operation=$(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") \
+    || return 1
+  case "$operation" in
+    producer-recovery) run_registered_producer_recovery_locked ;;
+    firmware-recovery) run_firmware_recovery_locked ;;
+    windows-recovery) run_windows_recovery_locked ;;
+    software-recovery) run_software_recovery_locked ;;
+    unconfigure-recovery) run_unconfigure_recovery_locked ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_registered_stale_recovery_runtime_locked() {
+  return 0
+}
+
+prepare_registered_recovery_runtime_locked() {
+  return 0
+}
+
+recover_lifecycle_if_required() {
+  local rc=0
+  _lifecycle_recovery_performed=false
+  lifecycle_repair_is_available || return 1
+  require_control_root || return 1
+  with_boot_repair_lock || return 1
+  lifecycle_package_boundary_is_clear || {
+    release_boot_repair_lock
+    return 1
+  }
+  read_lifecycle || {
+    release_boot_repair_lock
+    return 1
+  }
+  if [[ "$_lifecycle_state" == transition || "$_lifecycle_state" == recovery-required ]]; then
+    _lifecycle_recovery_performed=true
+  fi
+  run_registered_recovery_locked || rc=$?
+  release_boot_repair_lock
+  return "$rc"
 }
 
 rollback_and_mark_recovery() {
@@ -4545,7 +5214,9 @@ finalize_recovery_attempt_incident() {
 
 publish_failed_recovery_attempt() {
   local seal reference root root_manifest timestamp state_document ordinal
-  [[ "$_transaction_active" == true ]] || return 1
+  [[ "$_transaction_active" == true \
+    && "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   read_incident_seal "$_transaction_id" || return 1
   seal="$_incident_json"
   [[ $(jq -r '.kind' <<< "$seal") == attempt \
@@ -4608,8 +5279,11 @@ publish_failed_recovery_attempt() {
 
 publish_resolved_recovery_attempt() {
   local seal reference root proof manifest manifest_hash completed_at timestamp state_document
-  local ordinal managed_settings tracking_ownership
-  [[ "$_transaction_active" == true ]] || return 1
+  local ordinal managed_settings tracking_ownership operation terminal_state root_manifest
+  local root_managed root_tracking
+  [[ "$_transaction_active" == true \
+    && "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
   read_incident_seal "$_transaction_id" || return 1
   seal="$_incident_json"
   [[ $(jq -r '.kind' <<< "$seal") == attempt \
@@ -4619,6 +5293,8 @@ publish_resolved_recovery_attempt() {
   root=$(jq -c '.root_incident' <<< "$seal") || return 1
   ordinal=$(jq -r '.ordinal' <<< "$seal") || return 1
   read_transaction_manifest "$_transaction_id" || return 1
+  operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
+  terminal_state=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
   proof=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
   [[ "$proof" != null ]] || return 1
   managed_settings=$(jq -c '.domain_records.managed_settings' <<< "$_manifest_json") || return 1
@@ -4627,8 +5303,32 @@ publish_resolved_recovery_attempt() {
   manifest=$(lifecycle_manifest_path "$_transaction_id") || return 1
   manifest_hash=$(sha256_file "$manifest") || return 1
   completed_at=$(jq -r '.completed_at' <<< "$_manifest_json") || return 1
+  root_manifest=$(recovery_root_manifest_from_reference "$root") || return 1
+  [[ $(recovery_operation_for_root_manifest "$root_manifest") == "$operation" \
+    && $(recovery_terminal_state_for_root_manifest "$root_manifest" "$operation") == \
+      "$terminal_state" ]] || return 1
+
   read_lifecycle || return 1
-  if [[ "$_lifecycle_state" == active \
+  if [[ "$terminal_state" == unmanaged ]]; then
+    if [[ "$_lifecycle_state" == unmanaged ]]; then
+      durable_sync "$(state_dir_path)" || return 1
+      _transaction_active=false
+      unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
+      return 0
+    fi
+    [[ "$_lifecycle_state" == transition \
+      && "$_lifecycle_transaction_id" == "$_transaction_id" \
+      && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == recovery-attempt ]] \
+      || return 1
+    validate_control_file "$(lifecycle_file_path)" || return 1
+    rm -f "$(lifecycle_file_path)" || return 1
+    durable_sync "$(state_dir_path)" || return 1
+    _transaction_active=false
+    unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
+    return 0
+  fi
+  [[ "$terminal_state" == active || "$terminal_state" == disabled ]] || return 1
+  if [[ "$_lifecycle_state" == "$terminal_state" \
     && $(jq -r '.last_recovery.final_attempt.id // ""' <<< "$_lifecycle_json") == \
        "$_transaction_id" ]]; then
     durable_sync "$(lifecycle_file_path)" || return 1
@@ -4642,11 +5342,21 @@ publish_resolved_recovery_attempt() {
     && $(jq -r '.transaction.kind' <<< "$_lifecycle_json") == recovery-attempt ]] \
     || return 1
   timestamp=$(utc_timestamp) || return 1
+  if [[ "$operation" == software-recovery \
+    && $(jq -r '.status' <<< "$root_manifest") == completed ]]; then
+    root_managed=$(jq -c '.domain_records.managed_settings' <<< "$root_manifest") || return 1
+    root_tracking=$(jq -c '.domain_records.tracking_ownership' <<< "$root_manifest") || return 1
+    if [[ "$root_managed" != null && "$root_tracking" != null ]]; then
+      managed_settings="$root_managed"
+      tracking_ownership="$root_tracking"
+    fi
+  fi
   state_document=$(jq -c \
     --arg version "$OMASECBOOT_VERSION" \
     --arg timestamp "$timestamp" \
     --arg id "$_transaction_id" \
-    --arg operation "$(jq -r '.operation' <<< "$_manifest_json")" \
+    --arg operation "$operation" \
+    --arg terminal_state "$terminal_state" \
     --arg manifest "$manifest" \
     --arg manifest_hash "$manifest_hash" \
     --arg completed_at "$completed_at" \
@@ -4658,7 +5368,7 @@ publish_resolved_recovery_attempt() {
     --argjson tracking_ownership "$tracking_ownership" '
       .writer_version = $version |
       .generation += 1 |
-      .state = "active" |
+      .state = $terminal_state |
       .transaction = null |
       .last_transaction = {
         id: $id,
@@ -4674,7 +5384,10 @@ publish_resolved_recovery_attempt() {
         resolved_at: $timestamp,
         root_incident: $root
       } |
-      if $managed_settings != null and $tracking_ownership != null then
+      if $operation == "unconfigure-recovery" then
+        .managed_settings = null |
+        .tracking_ownership = null
+      elif $managed_settings != null and $tracking_ownership != null then
         .managed_settings = $managed_settings |
         .tracking_ownership = $tracking_ownership
       else . end |

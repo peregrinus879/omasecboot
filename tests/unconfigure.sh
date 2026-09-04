@@ -32,6 +32,11 @@ source "${ROOT_DIR}/lib/enroll.sh"
 source "${ROOT_DIR}/lib/windows.sh"
 
 QUIET=true
+UNCONFIGURE_RECOVERY_FAILPOINT=""
+
+unconfigure_recovery_failpoint() {
+  [[ "$1" != "$UNCONFIGURE_RECOVERY_FAILPOINT" ]]
+}
 
 state_dir_path() { printf '%s/state\n' "$CASE_DIR"; }
 limine_lock_path() { printf '%s/boot-partition.lock\n' "$CASE_DIR"; }
@@ -70,6 +75,31 @@ limine_install_path() { printf 'limine-install\n'; }
 limine_mkinitcpio_path() { printf 'limine-mkinitcpio\n'; }
 limine_reset_enroll_path() { printf 'limine-reset-enroll\n'; }
 unconfigure_limine_tools_are_pinned() { return 0; }
+capture_unconfigure_limine_tools() {
+  jq -cn '{
+    package: "limine-mkinitcpio-hook",
+    version: "1.38.0-1",
+    install: {path: "limine-install", identity: "1:1", sha256: ("a" * 64)},
+    mkinitcpio: {path: "limine-mkinitcpio", identity: "1:2", sha256: ("b" * 64)},
+    reset: {path: "limine-reset-enroll", identity: "1:3", sha256: ("c" * 64)}
+  }'
+}
+unconfigure_limine_tools_match_intent() { return 0; }
+run_bound_unconfigure_limine_tool() {
+  local key="$1" handoff="$2" command
+  shift 2
+  case "$key" in
+    install) command=limine-install ;;
+    mkinitcpio) command=limine-mkinitcpio ;;
+    reset) command=limine-reset-enroll ;;
+    *) return 1 ;;
+  esac
+  if [[ "$handoff" == true ]]; then
+    with_limine_lock_handoff "$command" "$@"
+  else
+    "$command" "$@"
+  fi
+}
 read_current_firmware_modes() {
   _setup_mode=0
   _audit_mode=0
@@ -174,6 +204,7 @@ setup_fixture() {
   INSTALL_NOOP=false
   LIMINE_INSTALLED=false
   ESP_SYNC_FAIL=false
+  UNCONFIGURE_RECOVERY_FAILPOINT=""
   _recovery_previous_manifest_json=""
   mkdir -p "$(state_dir_path)" "$(dirname "$PRIMARY")" "$(dirname "$FALLBACK")" \
     "$(dirname "$EXTERNAL")"
@@ -224,7 +255,7 @@ setup_fixture() {
 }
 
 test_successful_unconfigure() {
-  local windows_hash key_hash manifest
+  local windows_hash key_hash manifest intent forged_intent
   setup_fixture success
   run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
     || fail_test "ownership seed failed"
@@ -242,15 +273,30 @@ test_successful_unconfigure() {
   jq -e '
     .status == "completed" and .file_rollback_policy == "preserve" and
     .completed_phases == [
-      "backup-software-state","restore-managed-settings","remove-windows-entry",
-      "remove-owned-tracking","reset-config-enrollment","rebuild-stock-limine",
-      "prove-unconfigured"
-    ] and .domain_records.unconfigure != null
+      "record-unconfigure","backup-software-state","restore-managed-settings",
+      "remove-windows-entry","remove-owned-tracking","reset-config-enrollment",
+      "rebuild-stock-limine","prove-unconfigured"
+    ] and .domain_records.unconfigure != null and .domain_records.final_proof != null
   ' "$manifest" >/dev/null || fail_test "completed unconfiguration proof is incomplete"
+  intent=$(jq -r '.domain_records.unconfigure.path' "$manifest")
+  jq -e --arg version "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" '
+    .operation == "unconfigure" and .managed_settings != null and
+    .tracking_ownership != null and .limine_source.sha256 != null and
+    .limine_tools.package == "limine-mkinitcpio-hook" and
+    .limine_tools.version == $version and
+    ([.limine_tools.install, .limine_tools.mkinitcpio, .limine_tools.reset] |
+      all(.identity != null and .sha256 != null))
+  ' "$intent" >/dev/null \
+    || fail_test "unconfiguration intent is incomplete"
+  forged_intent=$(jq '.limine_tools.version = "unsupported"' "$intent")
+  if validate_unconfigure_intent_json "$(jq -r '.id' "$manifest")" \
+    "$forged_intent" "$(<"$manifest")"; then
+    fail_test "unconfiguration intent accepted an unsupported tool version"
+  fi
   jq -e '
     .limine.source.sha256 == .limine.primary.sha256 and
     .limine.source.sha256 == .limine.fallback.sha256
-  ' "$(jq -r '.domain_records.unconfigure.path' "$manifest")" >/dev/null \
+  ' "$(jq -r '.domain_records.final_proof.path' "$manifest")" >/dev/null \
     || fail_test "unconfiguration proof is not bound to the stock Limine binary"
   [[ "$(limine_managed_setting_state ENABLE_VERIFICATION)" == yes \
     && "$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG)" == no \
@@ -321,6 +367,42 @@ test_rebuild_failure_preserves_files() {
   fi
 }
 
+test_rebuild_failure_recovers_disabled() {
+  local manifest proof rc=0
+  setup_fixture rebuild-recovery
+  run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
+    || fail_test "recovery ownership seed failed"
+  REBUILD_FAIL=true
+  if run_dormant_unconfigure; then
+    fail_test "recovery fixture unexpectedly completed unconfiguration"
+  fi
+  read_lifecycle || fail_test "unconfigure recovery fixture is unreadable"
+  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+  [[ $(recovery_operation_for_root_manifest "$(<"$manifest")") == \
+    unconfigure-recovery ]] || fail_test "preserved unconfigure selected the wrong recovery"
+
+  REBUILD_FAIL=false
+  with_boot_repair_lock || fail_test "could not lock unconfigure recovery"
+  run_unconfigure_recovery_locked || rc=$?
+  release_boot_repair_lock
+  [[ $rc -eq 0 ]] || fail_test "unconfigure recovery failed"
+  read_lifecycle || fail_test "recovered disabled lifecycle is unreadable"
+  jq -e '
+    .state == "disabled" and .managed_settings == null and
+    .tracking_ownership == null and
+    .last_transaction.operation == "unconfigure-recovery"
+  ' <<< "$_lifecycle_json" >/dev/null \
+    || fail_test "unconfigure recovery did not publish clean disabled state"
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '
+    .operation == "unconfigure-recovery" and .root_incident != null and
+    .intent != null and .settings == "original" and
+    .windows == "managed-block-absent"
+  ' "$proof" >/dev/null || fail_test "unconfigure recovery proof is incomplete"
+  lifecycle_removal_is_allowed \
+    || fail_test "recovered disabled state did not allow package removal"
+}
+
 test_pre_reset_failure_rolls_back_files() {
   local defaults_hash config_hash database_hash manifest forged
   setup_fixture pre-reset-failure
@@ -362,7 +444,8 @@ test_noop_install_rejects_non_stock_targets() {
   manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
   jq -e '
     .failure.phase == "rebuild-stock-limine" and
-    .file_rollback_policy == "preserve" and .domain_records.unconfigure == null
+    .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
+    .domain_records.final_proof == null
   ' "$manifest" >/dev/null || fail_test "non-stock target failure frontier is invalid"
 }
 
@@ -379,7 +462,8 @@ test_esp_sync_failure_blocks_disabled_commit() {
   manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
   jq -e '
     .failure.phase == "rebuild-stock-limine" and
-    .file_rollback_policy == "preserve" and .domain_records.unconfigure == null
+    .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
+    .domain_records.final_proof == null
   ' "$manifest" >/dev/null || fail_test "ESP sync failure frontier is invalid"
 }
 
@@ -405,14 +489,161 @@ test_original_enrollment_setting_is_restored() {
     || fail_test "final reset did not remove nested rebuild enrollment"
 }
 
-test_successful_unconfigure
-test_unknown_original_blocks_before_transition
-test_three_way_conflict_blocks_before_transition
-test_rebuild_failure_preserves_files
-test_pre_reset_failure_rolls_back_files
-test_noop_install_rejects_non_stock_targets
-test_esp_sync_failure_blocks_disabled_commit
-test_legacy_windows_block_is_removed
-test_original_enrollment_setting_is_restored
+test_recovery_phase_failpoints() (
+  local phase expected phase_index
+  local -a phases=(
+    restore-managed-settings
+    remove-windows-entry
+    remove-owned-tracking
+    reset-config-enrollment
+    rebuild-stock-limine
+    prove-unconfigured
+  )
+  local effect_log completed_log current_phase recovery_failpoint
+  phase_prefix() {
+    local count="$1" index
+    for ((index = 0; index < count; index++)); do
+      printf '%s ' "${phases[$index]}"
+    done
+  }
+  unconfigure_recovery_inputs_are_current() { return 0; }
+  transaction_phase_start() { current_phase="$1"; }
+  transaction_phase_complete() {
+    completed_log+="${1} "
+    current_phase=""
+  }
+  restore_limine_managed_settings() { effect_log+="restore-managed-settings "; }
+  remove_windows_managed_block_for_unconfigure() { effect_log+="remove-windows-entry "; }
+  remove_owned_tracking_entries() { effect_log+="remove-owned-tracking "; }
+  run_bound_unconfigure_limine_tool() { effect_log+="reset-config-enrollment "; }
+  run_checked_stock_limine_rebuild() { effect_log+="rebuild-stock-limine "; }
+  read_current_firmware_modes() { _secure_boot_mode=0; }
+  limine_managed_settings_are_original() { return 0; }
+  owned_tracking_is_absent() { return 0; }
+  windows_unconfigure_preflight() { _windows_block_state=absent; }
+  unconfigure_windows_state_identity() { printf '%s\n' fixture-windows; }
+  unconfigured_limine_targets_match_source() { return 0; }
+  persist_unconfigure_proof() { effect_log+="prove-unconfigured "; }
+  unconfigure_recovery_failpoint() { [[ "$1" != "$recovery_failpoint" ]]; }
+  _unconfigure_managed_settings_json='{}'
+  _unconfigure_tracking_paths_json='[]'
+  _unconfigure_windows_identity=fixture-windows
+
+  for phase_index in "${!phases[@]}"; do
+    phase=${phases[$phase_index]}
+    recovery_failpoint="after-${phase}"
+    effect_log=""
+    completed_log=""
+    current_phase=""
+    if unconfigure_recovery_transaction; then
+      fail_test "recovery phase failpoint succeeded: ${phase}"
+    fi
+    expected=$(phase_prefix "$((phase_index + 1))")
+    [[ "$effect_log" == "$expected" && "$current_phase" == "$phase" ]] \
+      || fail_test "recovery failure crossed the ${phase} frontier"
+    expected=$(phase_prefix "$phase_index")
+    [[ "$completed_log" == "$expected" ]] \
+      || fail_test "recovery failure completed the ${phase} phase"
+    recovery_failpoint=""
+    unconfigure_recovery_transaction \
+      || fail_test "recovery retry failed after ${phase} interruption"
+    expected=$(phase_prefix "${#phases[@]}")
+    [[ "$current_phase" == "" && "$completed_log" == \
+      "$(phase_prefix "$phase_index")${expected}" ]] \
+      || fail_test "recovery retry did not complete after ${phase} interruption"
+  done
+)
+
+test_recovery_phase_failure_chain() {
+  local root_id root_incident root_hash phase attempt_id attempt_manifest rc
+  local expected_attempt=0
+  local -a phases=(
+    restore-managed-settings
+    remove-windows-entry
+    remove-owned-tracking
+    reset-config-enrollment
+    rebuild-stock-limine
+    prove-unconfigured
+  )
+  setup_fixture recovery-phase-chain
+  run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
+    || fail_test "recovery phase ownership seed failed"
+  REBUILD_FAIL=true
+  if run_dormant_unconfigure; then
+    fail_test "recovery phase root unexpectedly completed"
+  fi
+  read_lifecycle || fail_test "recovery phase root is unreadable"
+  root_id="$_lifecycle_transaction_id"
+  root_incident=$(lifecycle_incident_path "$root_id")
+  root_hash=$(sha256_file "$root_incident") || fail_test "could not hash recovery root"
+  REBUILD_FAIL=false
+
+  for phase in "${phases[@]}"; do
+    UNCONFIGURE_RECOVERY_FAILPOINT="after-${phase}"
+    rc=0
+    with_boot_repair_lock || fail_test "${phase} recovery lock failed"
+    run_unconfigure_recovery_locked >/dev/null 2>&1 || rc=$?
+    release_boot_repair_lock
+    [[ $rc -ne 0 ]] || fail_test "${phase} recovery interruption reported success"
+    expected_attempt=$((expected_attempt + 1))
+    read_lifecycle || fail_test "${phase} recovery state is unreadable"
+    attempt_id=$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")
+    attempt_manifest=$(lifecycle_manifest_path "$attempt_id")
+    jq -e --arg root "$root_id" --arg phase "$phase" \
+      --argjson count "$expected_attempt" '
+        .state == "recovery-required" and
+        .transaction.root_incident.id == $root and
+        .transaction.attempt_count == $count
+      ' <<< "$_lifecycle_json" >/dev/null \
+      || fail_test "${phase} interruption lost recovery authority"
+    jq -e --arg root "$root_id" --arg phase "$phase" '
+      .kind == "recovery-attempt" and .operation == "unconfigure-recovery" and
+      .status == "failed" and .failure.phase == $phase and
+      .recovery.root_incident.id == $root and .file_rollback_policy == "preserve"
+    ' "$attempt_manifest" >/dev/null \
+      || fail_test "${phase} failed attempt frontier is invalid"
+    [[ $(sha256_file "$root_incident") == "$root_hash" ]] \
+      || fail_test "${phase} interruption rewrote the immutable root"
+  done
+
+  UNCONFIGURE_RECOVERY_FAILPOINT=""
+  rc=0
+  with_boot_repair_lock || fail_test "final recovery retry lock failed"
+  run_unconfigure_recovery_locked || rc=$?
+  release_boot_repair_lock
+  [[ $rc -eq 0 ]] || fail_test "final recovery retry failed"
+  read_lifecycle || fail_test "final recovery state is unreadable"
+  jq -e --arg root "$root_id" --argjson count "$((expected_attempt + 1))" '
+    .state == "disabled" and .managed_settings == null and
+    .tracking_ownership == null and .last_recovery.root_incident.id == $root and
+    .last_recovery.attempt_count == $count and
+    .last_recovery.final_attempt.status == "completed"
+  ' <<< "$_lifecycle_json" >/dev/null \
+    || fail_test "final recovery retry did not prove disabled state"
+  [[ $(sha256_file "$root_incident") == "$root_hash" ]] \
+    || fail_test "final recovery retry rewrote the immutable root"
+}
+
+case "${TEST_CASE:-all}" in
+  success) test_successful_unconfigure ;;
+  recovery) test_rebuild_failure_recovers_disabled ;;
+  recovery-phases) test_recovery_phase_failpoints ;;
+  recovery-phase-chain) test_recovery_phase_failure_chain ;;
+  all)
+    test_successful_unconfigure
+    test_unknown_original_blocks_before_transition
+    test_three_way_conflict_blocks_before_transition
+    test_rebuild_failure_preserves_files
+    test_rebuild_failure_recovers_disabled
+    test_pre_reset_failure_rolls_back_files
+    test_noop_install_rejects_non_stock_targets
+    test_esp_sync_failure_blocks_disabled_commit
+    test_legacy_windows_block_is_removed
+    test_original_enrollment_setting_is_restored
+    test_recovery_phase_failpoints
+    test_recovery_phase_failure_chain
+    ;;
+  *) fail_test "unknown TEST_CASE: ${TEST_CASE}" ;;
+esac
 
 printf 'unconfigure tests passed\n'

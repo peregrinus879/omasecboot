@@ -10,6 +10,7 @@ readonly EFI_ACTIVE_AUTH_ATTRIBUTES=39
 readonly EFI_STATE_ATTRIBUTES=6
 readonly FIRMWARE_BACKUP_SCHEMA_VERSION=1
 readonly ENROLLMENT_PLAN_SCHEMA_VERSION=1
+readonly MAX_SETUP_LINEAGE_MANIFESTS=4096
 
 _firmware_backup_id=""
 _firmware_backup_dir=""
@@ -37,6 +38,8 @@ _setup_state=""
 _enrollment_backup_id=""
 _firmware_recovery_backup_id=""
 _validated_current_pk_hash=""
+_enrollment_current_pk_hash=""
+_enrollment_planned_pk_hash=""
 
 enrollment_failpoint() {
   return 0
@@ -1275,6 +1278,16 @@ validate_enrollment_plan() {
   fi
 }
 
+load_enrollment_pk_fingerprints() {
+  local backup_id="$1" plan_dir
+  validate_enrollment_plan "$backup_id" false || return 1
+  plan_dir=$(firmware_plan_path "$backup_id") || return 1
+  _enrollment_current_pk_hash="$_validated_current_pk_hash"
+  _enrollment_planned_pk_hash=$(cut -f5 "${plan_dir}/PK.entries") || return 1
+  [[ "$_enrollment_current_pk_hash" =~ ^[0-9a-f]{64}$ \
+    && "$_enrollment_planned_pk_hash" =~ ^[0-9a-f]{64}$ ]]
+}
+
 record_enrollment_plan_confirmation() {
   local backup_id="$1" pk_replacement="${2:-}" pk_only="${3:-}" retained="${4:-}"
   local plan_dir manifest document timestamp hash current_pk planned_pk
@@ -1394,11 +1407,11 @@ classify_setup_state() {
 }
 
 state_aware_setup_is_available() {
-  return 1
+  lifecycle_repair_is_available
 }
 
 firmware_enrollment_is_available() {
-  return 1
+  lifecycle_repair_is_available
 }
 
 secure_boot_windows_gate() {
@@ -1411,7 +1424,7 @@ prepare_secure_boot_preflight() {
   state_aware_setup_is_available || return 1
   validate_efivarfs_mount || return 1
   classify_local_sbctl_keys || return 1
-  [[ "$_local_key_state" == none ]] || return 1
+  [[ "$_local_key_state" == none || "$_local_key_state" == complete ]] || return 1
   read_current_firmware_modes || return 1
   [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
     && "$_deployed_mode" == 0 ]] || return 1
@@ -1424,7 +1437,13 @@ prepare_secure_boot_transaction() {
   transaction_phase_complete "backup-firmware" || return 1
 
   transaction_phase_start "create-keys" || return 1
-  create_local_sbctl_keys || return 1
+  classify_local_sbctl_keys || return 1
+  if [[ "$_local_key_state" == none ]]; then
+    create_local_sbctl_keys || return 1
+  else
+    [[ "$_local_key_state" == complete ]] || return 1
+    validate_local_key_hierarchy || return 1
+  fi
   transaction_phase_complete "create-keys" || return 1
 
   transaction_phase_start "build-enrollment-plan" || return 1
@@ -1582,19 +1601,79 @@ classify_firmware_enrollment_frontier() {
   fi
 }
 
-lifecycle_references_firmware_backup() {
-  local backup_id="$1" transaction_id directory
+setup_backup_id_from_lifecycle_json() {
+  local document="$1" required_operation="${2:-any}" state reference transaction_id
+  local operation backup_id prior_path prior_hash prior_document depth=0
+  local -A visited=()
+  [[ "$required_operation" == any || "$required_operation" == activation ]] || return 1
+  while (( depth < MAX_SETUP_LINEAGE_MANIFESTS )); do
+    validate_lifecycle_json "$document" || return 1
+    validate_lifecycle_document_references "$document" || return 1
+    state=$(jq -r '.state' <<< "$document") || return 1
+    case "$state" in
+      active|disabled)
+        reference=$(jq -c '.last_transaction' <<< "$document") || return 1
+        [[ "$reference" != null ]] || return 1
+        transaction_id=$(jq -r '.id' <<< "$reference") || return 1
+        ;;
+      recovery-required)
+        reference=$(jq -c '.transaction.root_incident' <<< "$document") || return 1
+        validate_incident_reference "$reference" || return 1
+        transaction_id=$(jq -r '.id' <<< "$reference") || return 1
+        ;;
+      *) return 1 ;;
+    esac
+    [[ -z "${visited[$transaction_id]:-}" ]] || return 1
+    visited["$transaction_id"]=1
+    read_transaction_manifest "$transaction_id" || return 1
+    operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
+    if [[ $(jq -r '.status' <<< "$_manifest_json") == completed \
+      && ( "$operation" == unconfigure || "$operation" == unconfigure-recovery ) ]]; then
+      return 1
+    fi
+    if [[ $(jq -r '.status' <<< "$_manifest_json") == completed \
+      && $(jq -r '.firmware_backup.status // ""' <<< "$_manifest_json") == complete ]]; then
+      if [[ ( "$required_operation" == activation \
+          && "$operation" == activate-secure-boot-plan ) \
+        || ( "$required_operation" == any \
+          && ( "$operation" == prepare-secure-boot \
+            || "$operation" == activate-secure-boot-plan \
+            || "$operation" == enroll-secure-boot \
+            || "$operation" == firmware-recovery ) ) ]]; then
+        backup_id=$(jq -r '.firmware_backup.id' <<< "$_manifest_json") || return 1
+        validate_firmware_backup "$backup_id" || return 1
+        validate_enrollment_plan "$backup_id" false || return 1
+        if [[ "$required_operation" == activation ]]; then
+          printf '%s\n' "$transaction_id"
+        else
+          printf '%s\n' "$backup_id"
+        fi
+        return 0
+      fi
+    fi
+    [[ $(jq -r '.backups[0].kind' <<< "$_manifest_json") == prior-lifecycle ]] \
+      || return 1
+    prior_path=$(jq -r '.backups[0].path' <<< "$_manifest_json") || return 1
+    prior_hash=$(jq -r '.backups[0].sha256' <<< "$_manifest_json") || return 1
+    validate_private_control_file "$prior_path" || return 1
+    [[ $(sha256_file "$prior_path") == "$prior_hash" ]] || return 1
+    prior_document=$(read_control_document "$prior_path") || return 1
+    document="$prior_document"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+current_setup_backup_id() {
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == disabled || "$_lifecycle_state" == active ]] || return 1
-  transaction_id=$(jq -r '.last_transaction.id // ""' <<< "$_lifecycle_json") || return 1
-  [[ -n "$transaction_id" ]] || return 1
-  read_transaction_manifest "$transaction_id" || return 1
-  directory=$(firmware_backup_path "$backup_id") || return 1
-  [[ "$(jq -r '.firmware_backup.id // ""' <<< "$_manifest_json")" == "$backup_id" \
-    && "$(jq -r '.firmware_backup.path // ""' <<< "$_manifest_json")" == "$directory" \
-    && "$(jq -r '.firmware_backup.status // ""' <<< "$_manifest_json")" == complete \
-    && "$(jq -r '.firmware_backup.manifest_sha256 // ""' <<< "$_manifest_json")" == \
-      "$(sha256_file "${directory}/manifest.json")" ]]
+  setup_backup_id_from_lifecycle_json "$_lifecycle_json"
+}
+
+lifecycle_references_firmware_backup() {
+  local backup_id="$1" current
+  current=$(current_setup_backup_id) || return 1
+  [[ "$current" == "$backup_id" ]]
 }
 
 observe_setup_state() {
@@ -1616,6 +1695,8 @@ observe_setup_state() {
   [[ "$_local_key_state" == complete && -n "$backup_id" ]] || return 1
   lifecycle_references_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" false || return 1
+  [[ "$_audit_mode" == 0 && "$_deployed_mode" == 0 \
+    && $(current_firmware_backup_status "$backup_id" dbx) == exact ]] || return 1
   for name in PK KEK db; do
     status=$(current_database_plan_status "$backup_id" "$name") || return 1
     [[ "$status" == exact || "$status" == different ]] || return 1
@@ -1629,6 +1710,30 @@ observe_setup_state() {
     enrollment=partial
   fi
   classify_setup_state complete "$enrollment" "$_setup_mode" "$_secure_boot_mode"
+}
+
+validate_setup_instruction_boundary() {
+  local backup_id="$1" state="$2" name
+  [[ "$state" == 3 || "$state" == 4 ]] || return 1
+  validate_firmware_backup "$backup_id" || return 1
+  validate_enrollment_plan "$backup_id" true || return 1
+  revalidate_enrollment_plan_export "$backup_id" || return 1
+  read_current_firmware_modes || return 1
+  [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
+    && "$_deployed_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  current_firmware_variable_matches_backup "$backup_id" dbx || return 1
+  if [[ "$state" == 3 ]]; then
+    for name in PK KEK db; do
+      current_firmware_variable_matches_backup "$backup_id" "$name" || return 1
+    done
+  else
+    for name in PK KEK db; do
+      compare_current_database_to_plan "$backup_id" "$name" || return 1
+    done
+  fi
+  artifact_repair_preflight || return 1
+  verify_all_efi_artifacts "$_repair_config_checksum" || return 1
+  secure_boot_windows_gate
 }
 
 current_pk_is_absent() {
@@ -1762,11 +1867,10 @@ validate_firmware_recovery_authority() {
   prior_lifecycle=$(read_control_document "$prior_path") || return 1
   validate_lifecycle_json "$prior_lifecycle" || return 1
   validate_lifecycle_document_references "$prior_lifecycle" || return 1
-  jq -e '
-    .state == "active" and .transaction == null and
-    .last_transaction.operation == "activate-secure-boot-plan"
-  ' <<< "$prior_lifecycle" >/dev/null || return 1
-  activation_id=$(jq -r '.last_transaction.id' <<< "$prior_lifecycle") || return 1
+  jq -e '.state == "active" and .transaction == null' \
+    <<< "$prior_lifecycle" >/dev/null || return 1
+  activation_id=$(setup_backup_id_from_lifecycle_json "$prior_lifecycle" activation) \
+    || return 1
   read_transaction_manifest "$activation_id" || return 1
   activation_manifest="$_manifest_json"
   jq -e '

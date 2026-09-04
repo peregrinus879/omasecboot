@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154 # Command handlers consume globals set by sourced modules.
 set -euo pipefail
 
 # OmaSecBoot: lifecycle boundary for Secure Boot state and boot mutation hooks.
@@ -17,15 +18,121 @@ done
 # --- Commands ----------------------------------------------------------------
 
 cmd_setup() {
+  local backup_id state repair_required=true
+  [[ $# -eq 0 ]] || {
+    fail "Setup does not accept arguments"
+    return 2
+  }
   header "Secure Boot Setup"
-  fail "Setup is blocked until interrupted recovery enables the dormant firmware proof"
-  return 1
+  lifecycle_repair_is_available || {
+    fail "Setup is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "setup"
+  check_recovery_deps
+  recover_lifecycle_if_required || {
+    fail "Lifecycle recovery failed; no new setup mutation was attempted"
+    return 1
+  }
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run setup again to start a new setup mutation"
+    return 0
+  fi
+  check_deps
+  check_efi_mode
+  require_gum
+
+  backup_id=$(current_setup_backup_id || true)
+  if [[ -z "$backup_id" ]]; then
+    gum confirm "Back up firmware trust and prepare a Secure Boot enrollment plan?" \
+      || return 1
+    prepare_state_aware_setup true || return 1
+    backup_id=$(current_setup_backup_id) || return 1
+  fi
+  if ! validate_enrollment_plan "$backup_id" true >/dev/null 2>&1; then
+    load_enrollment_pk_fingerprints "$backup_id" || {
+      fail "The current Secure Boot enrollment plan is invalid"
+      return 1
+    }
+    echo "  Enrollment plan: $(firmware_plan_path "$backup_id")"
+    echo "  Current PK SHA-256: ${_enrollment_current_pk_hash}"
+    echo "  Planned PK SHA-256: ${_enrollment_planned_pk_hash}"
+    gum confirm "Replace the current PK with the planned OmaSecBoot PK?" || return 1
+    gum confirm "Confirm this firmware can delete only PK without clearing KEK, db, or dbx?" \
+      || return 1
+    gum confirm "Confirm retained trust entries and recovery preparation were reviewed?" \
+      || return 1
+    activate_confirmed_enrollment_plan "$backup_id" true true true || return 1
+    repair_required=false
+  fi
+  if [[ "$repair_required" == true ]]; then
+    run_artifact_repair sign || return 1
+  fi
+  state=$(observe_setup_state "$backup_id") || return 1
+  case "$state" in
+    2)
+      warn "Setup Mode is active; run sudo omasecboot enroll"
+      ;;
+    3)
+      validate_setup_instruction_boundary "$backup_id" 3 || return 1
+      warn "Boot artifacts are proved. In firmware settings, delete only PK to enter Setup Mode."
+      warn "Do not clear KEK, db, or dbx; then run sudo omasecboot enroll."
+      ;;
+    4)
+      validate_setup_instruction_boundary "$backup_id" 4 || return 1
+      warn "Enrollment is proved with Secure Boot off; enable Secure Boot in firmware settings."
+      ;;
+    5)
+      pass "Secure Boot enrollment is active and matches the confirmed plan"
+      ;;
+    *)
+      fail "Setup reached unsupported state ${state}"
+      return 1
+      ;;
+  esac
 }
 
 cmd_enroll() {
+  local backup_id state
+  [[ $# -eq 0 ]] || {
+    fail "Enrollment does not accept arguments"
+    return 2
+  }
   header "Key Enrollment"
-  fail "Enrollment is blocked until interrupted recovery enables dormant enrollment"
-  return 1
+  lifecycle_repair_is_available || {
+    fail "Enrollment is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "enroll"
+  check_recovery_deps
+  recover_lifecycle_if_required || {
+    fail "Lifecycle recovery failed; no new firmware mutation was attempted"
+    return 1
+  }
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run enroll again to start a new enrollment"
+    return 0
+  fi
+  check_deps
+  check_efi_mode
+  require_gum
+  backup_id=$(current_setup_backup_id) || {
+    fail "No current confirmed Secure Boot enrollment plan is available"
+    return 1
+  }
+  state=$(observe_setup_state "$backup_id") || return 1
+  if [[ "$state" == 4 || "$state" == 5 ]]; then
+    pass "The confirmed Secure Boot trust plan is already enrolled"
+    return 0
+  fi
+  [[ "$state" == 2 ]] || {
+    fail "Enrollment requires validated Setup Mode; current setup state is ${state}"
+    return 1
+  }
+  gum confirm "Enroll the confirmed db, KEK, and PK trust plan now?" || return 1
+  run_dormant_enrollment "$backup_id" || return 1
+  validate_setup_instruction_boundary "$backup_id" 4 || return 1
+  warn "Enrollment is proved; enable Secure Boot in firmware settings."
 }
 
 observed_limine_setting() {
@@ -114,9 +221,13 @@ cmd_adopt() {
   done
 
   check_root "adopt"
-  command -v jq >/dev/null 2>&1 || die "jq not installed. Run: ${BOLD}sudo pacman -S jq${NC}"
-  command -v flock >/dev/null 2>&1 \
-    || die "flock not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
+  check_recovery_deps
+  recover_lifecycle_if_required \
+    || die "Lifecycle recovery failed; adoption was not attempted"
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run adopt again to start a new adoption"
+    return 0
+  fi
   read_lifecycle || die "Lifecycle state is invalid or unsafe"
   # shellcheck disable=SC2154 # Set by read_lifecycle from the sourced module.
   [[ "$_lifecycle_state" == unmanaged ]] \
@@ -180,9 +291,9 @@ cmd_windows_help() {
   echo -e "  ${BOLD}Commands${NC}"
   echo "    available   Check for Windows Boot Manager without root or output"
   echo "    preflight   Run the read-only Windows encryption preparation gate"
-  echo "    setup       Blocked until recoverable Windows commands are integrated"
-  echo "    bootnext    Blocked until Windows recovery is integrated"
-  echo "    reboot      Blocked until Windows recovery is integrated"
+  echo "    setup       Blocked until recoverable commands are activated"
+  echo "    suppress    Blocked until recoverable commands are activated"
+  echo "    bootnext    Blocked until recoverable commands are activated"
   echo
 }
 
@@ -207,16 +318,52 @@ cmd_windows() {
       cmd_windows_preflight
       ;;
     setup)
-      fail "Windows setup is blocked until recoverable Windows commands are integrated"
-      return 1
+      lifecycle_repair_is_available || {
+        fail "Windows setup is blocked until recoverable Secure Boot commands are enabled"
+        return 1
+      }
+      check_root "windows setup"
+      check_recovery_deps
+      recover_lifecycle_if_required || return 1
+      if [[ "$_lifecycle_recovery_performed" == true ]]; then
+        pass "Lifecycle recovery completed; run windows setup again for a new mutation"
+        return 0
+      fi
+      check_deps
+      check_efi_mode
+      add_windows_boot_entry
+      ;;
+    suppress)
+      lifecycle_repair_is_available || {
+        fail "Windows suppression is blocked until recoverable Secure Boot commands are enabled"
+        return 1
+      }
+      check_root "windows suppress"
+      check_recovery_deps
+      recover_lifecycle_if_required || return 1
+      if [[ "$_lifecycle_recovery_performed" == true ]]; then
+        pass "Lifecycle recovery completed; run windows suppress again for a new mutation"
+        return 0
+      fi
+      check_deps
+      check_efi_mode
+      suppress_stale_windows_entry
       ;;
     bootnext)
-      fail "BootNext is blocked until Windows recovery is integrated"
-      return 1
-      ;;
-    reboot)
-      fail "Windows reboot is blocked until Windows recovery is integrated"
-      return 1
+      lifecycle_repair_is_available || {
+        fail "BootNext is blocked until recoverable Secure Boot commands are enabled"
+        return 1
+      }
+      check_root "windows bootnext"
+      check_recovery_deps
+      recover_lifecycle_if_required || return 1
+      if [[ "$_lifecycle_recovery_performed" == true ]]; then
+        pass "Lifecycle recovery completed; BootNext was not armed again"
+        return 0
+      fi
+      check_core_deps
+      check_efi_mode
+      run_dormant_windows_bootnext
       ;;
     help|--help|-h)
       cmd_windows_help
@@ -234,17 +381,92 @@ cmd_windows() {
 }
 
 cmd_cleanup() {
-  fail "Cleanup is blocked until interrupted recovery is available"
-  return 1
+  [[ $# -eq 0 ]] || {
+    fail "Cleanup does not accept arguments"
+    return 2
+  }
+  lifecycle_repair_is_available || {
+    fail "Cleanup is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "cleanup"
+  check_recovery_deps
+  recover_lifecycle_if_required || return 1
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run cleanup again for a new cleanup mutation"
+    return 0
+  fi
+  check_core_deps
+  run_tracking_cleanup cleanup
 }
 
 cmd_sign() {
-  fail "Signing is blocked until interrupted recovery is available"
-  return 1
+  [[ $# -eq 0 ]] || {
+    fail "Signing does not accept arguments"
+    return 2
+  }
+  lifecycle_repair_is_available || {
+    fail "Signing is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "sign"
+  check_recovery_deps
+  recover_lifecycle_if_required || return 1
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run sign again for a new signing mutation"
+    return 0
+  fi
+  check_deps
+  qheader "Signing EFI Files"
+  run_artifact_repair sign
+}
+
+cmd_unconfigure() {
+  [[ $# -eq 0 ]] || {
+    fail "Unconfigure does not accept arguments"
+    return 2
+  }
+  header "Disable OmaSecBoot Management"
+  lifecycle_repair_is_available || {
+    fail "Unconfiguration is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "unconfigure"
+  check_recovery_deps
+  recover_lifecycle_if_required || return 1
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; no new unconfiguration was started"
+    return 0
+  fi
+  check_deps
+  require_gum
+  gum confirm "Restore recorded defaults and rebuild stock Limine boot state?" || return 1
+  run_dormant_unconfigure
+}
+
+cmd_repair() {
+  [[ $# -eq 0 ]] || {
+    fail "Repair does not accept arguments"
+    return 2
+  }
+  header "Lifecycle Recovery"
+  lifecycle_repair_is_available || {
+    fail "Recovery is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "repair"
+  check_recovery_deps
+  recover_lifecycle_if_required || return 1
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed"
+  else
+    pass "No lifecycle recovery is required"
+  fi
 }
 
 cmd_status() {
   local lifecycle_rc=0 status_rc=0
+  [[ $# -eq 0 ]] || return 2
   check_core_deps
   show_lifecycle_status || lifecycle_rc=$?
   show_status || status_rc=$?
@@ -252,6 +474,7 @@ cmd_status() {
 }
 
 cmd_version() {
+  [[ $# -eq 0 ]] || return 2
   printf 'omasecboot %s\n' "$OMASECBOOT_VERSION"
 }
 
@@ -288,6 +511,7 @@ cmd_guard() {
 }
 
 cmd_help() {
+  [[ $# -eq 0 ]] || return 2
   header "Command Help"
   echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
   echo "  Artifact proof is implemented; mutation remains blocked until recovery is available."
@@ -295,13 +519,15 @@ cmd_help() {
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
   echo
   echo -e "  ${BOLD}Commands${NC}"
-  echo "    setup       Blocked until interrupted recovery is available"
-  echo "    adopt       Blocked until interrupted recovery is available"
-  echo "    enroll      Blocked until interrupted recovery is available"
+  echo "    setup       Blocked until recoverable commands are activated"
+  echo "    adopt       Blocked until recoverable commands are activated"
+  echo "    enroll      Blocked until recoverable commands are activated"
   echo "    windows     Probe Windows or run its read-only encryption preflight"
   echo "    status      Show Secure Boot status and file verification"
-  echo "    sign        Blocked until interrupted recovery is available"
-  echo "    cleanup     Blocked until interrupted recovery is available"
+  echo "    sign        Blocked until recoverable commands are activated"
+  echo "    cleanup     Blocked until recoverable commands are activated"
+  echo "    unconfigure Blocked until recoverable commands are activated"
+  echo "    repair      Blocked until recoverable commands are activated"
   echo "    version     Show the installed OmaSecBoot version"
   echo "    help        Show this help"
   echo
@@ -321,17 +547,19 @@ main() {
   done
 
   case "${1:-}" in
-    setup)    cmd_setup ;;
+    setup)    shift; cmd_setup "$@" ;;
     adopt)    shift; cmd_adopt "$@" ;;
-    enroll)   cmd_enroll ;;
+    enroll)   shift; cmd_enroll "$@" ;;
     windows)  shift; cmd_windows "$@" ;;
-    cleanup)  cmd_cleanup ;;
-    sign)     cmd_sign ;;
-    status)   cmd_status ;;
-    version|--version|-v) cmd_version ;;
+    cleanup)  shift; cmd_cleanup "$@" ;;
+    sign)     shift; cmd_sign "$@" ;;
+    unconfigure) shift; cmd_unconfigure "$@" ;;
+    repair)   shift; cmd_repair "$@" ;;
+    status)   shift; cmd_status "$@" ;;
+    version|--version|-v) shift; cmd_version "$@" ;;
     hook)     shift; cmd_hook "$@" ;;
     guard)    shift; cmd_guard "$@" ;;
-    help|--help|-h)  cmd_help ;;
+    help|--help|-h)  shift; cmd_help "$@" ;;
     *)
       cmd_help
       if [[ -n "${1:-}" ]]; then
