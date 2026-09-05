@@ -1,4 +1,5 @@
 #!/bin/bash
+# OmaSecBoot hook schema: 1
 set -euo pipefail
 
 exec @BINDIR@/omasecboot --quiet hook pre

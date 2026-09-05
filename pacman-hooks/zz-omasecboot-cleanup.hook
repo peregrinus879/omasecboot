@@ -1,4 +1,5 @@
 # OmaSecBoot: checkpoint the owned package producer before sbctl repair.
+# OmaSecBoot hook schema: 1
 # Runs before zz-sbctl.hook so the durable producer lease records this boundary first.
 # Mirrors zz-sbctl.hook's Path triggers to fire in the same transactions.
 

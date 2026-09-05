@@ -1,4 +1,5 @@
 # OmaSecBoot: preserve recovery dependencies while lifecycle state is managed.
+# OmaSecBoot hook schema: 1
 
 [Trigger]
 Type = Package

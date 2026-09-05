@@ -1414,6 +1414,10 @@ firmware_enrollment_is_available() {
   lifecycle_repair_is_available
 }
 
+lifecycle_activation_environment_is_ready() {
+  return 1
+}
+
 secure_boot_windows_gate() {
   windows_encryption_gate
 }
@@ -1465,6 +1469,7 @@ activate_enrollment_plan_preflight() {
   [[ "$pk_replacement" == true && "$pk_only" == true && "$retained" == true ]] \
     || return 1
   state_aware_setup_is_available || return 1
+  lifecycle_activation_environment_is_ready || return 1
   validate_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" false || return 1
   revalidate_enrollment_plan_export "$backup_id" false || return 1

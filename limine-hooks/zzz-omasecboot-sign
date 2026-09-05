@@ -1,4 +1,5 @@
 #!/bin/bash
+# OmaSecBoot hook schema: 1
 set -euo pipefail
 
 # The dispatcher validates lifecycle ownership and either retains the parent's

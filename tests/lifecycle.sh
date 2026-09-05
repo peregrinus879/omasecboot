@@ -1884,28 +1884,12 @@ printf '%s\n' "$schema_state" \
 read_lifecycle || fail_test "schema fixture did not restore"
 
 read_lifecycle_definition=$(declare -f read_lifecycle)
-full_restore_definition=$(declare -f is_full_snapshot_restore_hook)
 # shellcheck disable=SC2329 # Invoked through lifecycle state consumers.
 read_lifecycle() {
   _lifecycle_read_status=supported
   _lifecycle_state=invented
   return 0
 }
-if lifecycle_hook_pre >/dev/null 2>&1; then
-  fail_test "pre-hook accepted an unrecognized lifecycle state"
-else
-  [[ $? -eq 100 ]] || fail_test "pre-hook used a non-blocking unknown-state code"
-fi
-if lifecycle_hook_post : >/dev/null 2>&1; then
-  fail_test "post-hook accepted an unrecognized lifecycle state"
-else
-  [[ $? -eq 100 ]] || fail_test "post-hook used a non-blocking unknown-state code"
-fi
-if guard_boot_transaction >/dev/null 2>&1; then
-  fail_test "package guard accepted an unrecognized lifecycle state"
-else
-  [[ $? -eq 1 ]] || fail_test "package guard used an unexpected unknown-state code"
-fi
 if lifecycle_automation_is_active >/dev/null 2>&1; then
   fail_test "automation accepted an unrecognized lifecycle state"
 else
@@ -1914,33 +1898,7 @@ fi
 if show_lifecycle_status >/dev/null 2>&1; then
   fail_test "status accepted an unrecognized lifecycle state"
 fi
-is_full_snapshot_restore_hook() {
-  return 0
-}
-if lifecycle_hook_pre >/dev/null 2>&1; then
-  fail_test "full-restore admission accepted an unrecognized lifecycle state"
-else
-  [[ $? -eq 100 ]] || fail_test "full-restore unknown state was not blocking"
-fi
-full_restore_read_count=0
-# shellcheck disable=SC2329 # Invoked through lifecycle_hook_pre.
-read_lifecycle() {
-  full_restore_read_count=$((full_restore_read_count + 1))
-  _lifecycle_read_status=supported
-  if [[ $full_restore_read_count -eq 1 ]]; then
-    _lifecycle_state=disabled
-  else
-    _lifecycle_state=active
-  fi
-  return 0
-}
-if lifecycle_hook_pre >/dev/null 2>&1; then
-  fail_test "full-restore admission ignored a concurrent active state"
-else
-  [[ $? -eq 100 ]] || fail_test "full-restore race was not blocking"
-fi
 eval "$read_lifecycle_definition"
-eval "$full_restore_definition"
 read_lifecycle || fail_test "lifecycle reader did not restore after state-default tests"
 
 printf 'lifecycle tests passed\n'

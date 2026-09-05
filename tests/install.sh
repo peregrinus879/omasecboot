@@ -37,6 +37,21 @@ repair_hook="${STAGE_DIR}/etc/pacman.d/hooks/${repair_hook_name}"
 limine_pre_hook="${STAGE_DIR}/etc/boot/hooks/pre.d/000-omasecboot-guard"
 limine_post_hook="${STAGE_DIR}/etc/boot/hooks/post.d/zzz-omasecboot-sign"
 
+root_dest_link="${STAGE_DIR}/root-dest"
+ln -s / "$root_dest_link"
+for unsafe_destdir in '' ' ' $'\t' relative / // /./ "$root_dest_link"; do
+  if make -s -C "$ROOT_DIR" install DESTDIR="$unsafe_destdir" \
+    BINDIR="${STAGE_DIR}/live/bin" LIBDIR="${STAGE_DIR}/live/lib" \
+    HOOKDIR="${STAGE_DIR}/live/hooks" LIMINEPREHOOKDIR="${STAGE_DIR}/live/pre" \
+    LIMINEPOSTHOOKDIR="${STAGE_DIR}/live/post" STATEDIR="${STAGE_DIR}/live/state" \
+    > "${STAGE_DIR}/live-install.out" 2>&1; then
+    fail "install accepted a root-resolving DESTDIR: ${unsafe_destdir:-empty}"
+  fi
+  grep -Fq 'Refusing live source install' "${STAGE_DIR}/live-install.out" \
+    || fail "unstaged install omitted its package-build boundary"
+  [[ ! -e "${STAGE_DIR}/live" ]] || fail "refused unstaged install wrote files"
+done
+
 make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
   "${MAKE_INSTALL_PATHS[@]}" >/dev/null
 
@@ -60,6 +75,11 @@ grep -Fxq "exec ${PREFIX}/bin/omasecboot --quiet hook pre" "$limine_pre_hook" \
   || fail "Limine pre-hook does not target the ownership guard"
 grep -Fxq "exec ${PREFIX}/bin/omasecboot --quiet hook post" "$limine_post_hook" \
   || fail "Limine post-hook does not target validated repair"
+for hook in "$removal_guard" "$guard_hook" "$cleanup_hook" "$repair_hook" \
+  "$limine_pre_hook" "$limine_post_hook"; do
+  grep -Fxq '# OmaSecBoot hook schema: 1' "$hook" \
+    || fail "installed hook omitted its deployment schema: ${hook##*/}"
+done
 if grep -Fq 'OMASECBOOT_IN_LIMINE_HOOK' "$limine_post_hook"; then
   fail "Limine post-hook retained the environment-only bypass"
 fi
@@ -106,7 +126,7 @@ make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
   && "$(sha256sum "$windows_state_file")" == "$windows_state_checksum" \
   && "$(stat -Lc '%d:%i:%u:%g:%a:%h' "$windows_state_file")" == \
     "$windows_state_identity" ]] \
-  || fail "idempotent install replaced canonical Windows opt-in state"
+  || fail "idempotent reinstall replaced canonical Windows opt-in state"
 
 if make -s -C "$ROOT_DIR" uninstall DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" \
   "${MAKE_INSTALL_PATHS[@]}" > "${STAGE_DIR}/uninstall.out" 2>&1; then

@@ -1,4 +1,5 @@
 # OmaSecBoot: complete owned package-producer repair after sbctl runs.
+# OmaSecBoot hook schema: 1
 # Runs after zz-sbctl.hook and Limine-related package updates.
 
 [Trigger]

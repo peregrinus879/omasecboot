@@ -253,6 +253,10 @@ firmware_enrollment_is_available() {
   [[ "$ALLOW_ENROLL" == true ]]
 }
 
+lifecycle_activation_environment_is_ready() {
+  [[ "$ACTIVATION_READY" == true ]]
+}
+
 secure_boot_windows_gate() {
   return "$WINDOWS_RC"
 }
@@ -521,6 +525,7 @@ setup_fixture() {
   write_state_variable DeployedMode 0
   write_state_variable SecureBoot 0
   WINDOWS_RC=0
+  ACTIVATION_READY=true
   ALLOW_SETUP=true
   ALLOW_ENROLL=false
   SBCTL_FAIL_PHASE=""
@@ -739,6 +744,27 @@ test_confirmation_requires_acknowledgments() {
   jq -e '.confirmation == null' "$(firmware_plan_path "$backup_id")/manifest.json" \
     >/dev/null || fail_test "declined confirmation changed the plan"
   [[ ! -s "$ARTIFACT_LOG" ]] || fail_test "declined confirmation repaired artifacts"
+}
+
+test_activation_environment_guard() {
+  local state_file backup_id generation
+  setup_fixture activation-environment-guard
+  prepare_state_aware_setup true || fail_test "activation-environment preparation failed"
+  state_file=$(lifecycle_file_path)
+  backup_id=$(jq -r '.last_transaction.id' "$state_file")
+  read_lifecycle || fail_test "activation-environment lifecycle unreadable"
+  generation=$_lifecycle_generation
+  ACTIVATION_READY=false
+  if activate_confirmed_enrollment_plan "$backup_id" true true true; then
+    fail_test "incomplete activation environment was accepted"
+  fi
+  read_lifecycle || fail_test "activation-environment refusal damaged lifecycle"
+  [[ "$_lifecycle_state" == disabled && $_lifecycle_generation -eq generation ]] \
+    || fail_test "activation-environment refusal published a transaction"
+  jq -e '.confirmation == null' "$(firmware_plan_path "$backup_id")/manifest.json" \
+    >/dev/null || fail_test "activation-environment refusal changed the plan"
+  [[ ! -s "$ARTIFACT_LOG" ]] \
+    || fail_test "activation-environment refusal repaired artifacts"
 }
 
 test_activation_artifact_guard() {
@@ -1639,6 +1665,7 @@ run_case preparation-consent test_preparation_consent
 run_case incoherent-snapshot test_incoherent_snapshot_blocks
 run_case bad-key test_bad_key_rolls_back
 run_case confirmation-acknowledgments test_confirmation_requires_acknowledgments
+run_case activation-environment-guard test_activation_environment_guard
 run_case activation-artifact-guard test_activation_artifact_guard
 run_case preparation test_preparation_and_backup
 run_case absent-dbx test_absent_dbx_record

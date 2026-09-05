@@ -94,11 +94,119 @@ replace_limine_default_entry_in_file "$settings_fixture" \
 grep -Fxq 'UNRELATED=value' "$settings_fixture" \
   || fail_test "Limine setting replacement changed an unrelated entry"
 
-for command in setup adopt enroll sign cleanup unconfigure repair; do
-  if "cmd_${command}" > "${TEST_DIR}/${command}.out" 2>&1; then
-    fail_test "blocked ${command} command succeeded"
+lifecycle_repair_is_available || fail_test "production lifecycle repair gate is closed"
+activation_hook_dir="${TEST_DIR}/activation-hooks"
+activation_command="${TEST_DIR}/omasecboot"
+mkdir -p "$activation_hook_dir"
+printf '#!/bin/bash\n' > "$activation_command"
+chmod 755 "$activation_command"
+real_current_omasecboot_executable_path=$(declare -f current_omasecboot_executable_path)
+real_activation_hook_path=$(declare -f activation_hook_path)
+real_producer_package_version=$(declare -f producer_package_version)
+real_unconfigure_limine_tools_are_pinned=$(declare -f unconfigure_limine_tools_are_pinned)
+ACTIVATION_PACKAGES_SUPPORTED=true
+ACTIVATION_UNCONFIGURE_SUPPORTED=true
+current_omasecboot_executable_path() { printf '%s\n' "$activation_command"; }
+activation_hook_path() { printf '%s/%s\n' "$activation_hook_dir" "$1"; }
+producer_package_version() {
+  [[ "$ACTIVATION_PACKAGES_SUPPORTED" == true ]] || return 1
+  case "$1" in
+    limine-mkinitcpio-hook) printf '%s\n' "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ;;
+    limine-snapper-sync) printf '%s\n' "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" ;;
+    sbctl) printf '%s\n' "$SUPPORTED_SBCTL_VERSION" ;;
+    efibootmgr) printf '%s\n' "${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }" ;;
+    coreutils) printf '%s\n' "${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }" ;;
+    *) return 1 ;;
+  esac
+}
+unconfigure_limine_tools_are_pinned() {
+  [[ "$ACTIVATION_UNCONFIGURE_SUPPORTED" == true ]]
+}
+write_activation_hook() {
+  local key="$1" schema="${2:-$OMASECBOOT_HOOK_SCHEMA_VERSION}" target="$activation_command"
+  local hook source line placeholder='@BINDIR@/omasecboot'
+  hook=$(activation_hook_path "$key") || return 1
+  [[ "${3:-current}" == current ]] || target="${TEST_DIR}/wrong-command"
+  case "$key" in
+    removal) source="${ROOT_DIR}/pacman-hooks/00-omasecboot-removal-guard.hook" ;;
+    transaction) source="${ROOT_DIR}/pacman-hooks/00-omasecboot-transition-guard.hook" ;;
+    package-cleanup) source="${ROOT_DIR}/pacman-hooks/zz-omasecboot-cleanup.hook" ;;
+    package-sign) source="${ROOT_DIR}/pacman-hooks/zzz-omasecboot.hook" ;;
+    limine-pre) source="${ROOT_DIR}/limine-hooks/000-omasecboot-guard" ;;
+    limine-post) source="${ROOT_DIR}/limine-hooks/zzz-omasecboot-sign" ;;
+    *) return 1 ;;
+  esac
+  : > "$hook"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line//"$placeholder"/"$target"}
+    if [[ "$line" == '# OmaSecBoot hook schema: '* ]]; then
+      line="# OmaSecBoot hook schema: ${schema}"
+    fi
+    printf '%s\n' "$line" >> "$hook"
+  done < "$source"
+  if [[ "$key" == limine-pre || "$key" == limine-post ]]; then
+    chmod 755 "$hook"
+  else
+    chmod 644 "$hook"
   fi
+}
+for activation_key in removal transaction package-cleanup package-sign limine-pre limine-post; do
+  write_activation_hook "$activation_key"
 done
+lifecycle_activation_environment_is_ready \
+  || fail_test "current activation environment was rejected"
+write_activation_hook transaction 0
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "stale activation hook schema was accepted"
+fi
+write_activation_hook transaction
+write_activation_hook limine-post "$OMASECBOOT_HOOK_SCHEMA_VERSION" wrong
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "incorrectly targeted activation hook was accepted"
+fi
+write_activation_hook limine-post
+transaction_hook=$(activation_hook_path transaction)
+transaction_document=$(<"$transaction_hook")
+printf '%s\n' "${transaction_document/When = PreTransaction/When = PostTransaction}" \
+  > "$transaction_hook"
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "semantically altered activation hook was accepted"
+fi
+write_activation_hook transaction
+ACTIVATION_PACKAGES_SUPPORTED=false
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "unsupported activation packages were accepted"
+fi
+ACTIVATION_PACKAGES_SUPPORTED=true
+ACTIVATION_UNCONFIGURE_SUPPORTED=false
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "unsupported unconfiguration tools were accepted for activation"
+fi
+ACTIVATION_UNCONFIGURE_SUPPORTED=true
+real_observed_limine_setting=$(declare -f observed_limine_setting)
+real_observed_limine_token=$(declare -f observed_limine_token)
+observed_limine_setting() {
+  case "$1" in
+    ENABLE_VERIFICATION) printf 'yes # unsupported\n' ;;
+    ENABLE_ENROLL_LIMINE_CONFIG) printf 'no\n' ;;
+    *) return 1 ;;
+  esac
+}
+observed_limine_token() { printf 'absent\n'; }
+if adopt_lifecycle verify_adoption_observations \
+  'yes # unsupported' yes no no absent absent absent absent \
+  >/dev/null 2>&1; then
+  fail_test "unsupported observed adoption value was accepted"
+fi
+[[ ! -e "$(lifecycle_file_path)" ]] \
+  || fail_test "unsupported observed adoption value published lifecycle state"
+eval "$real_observed_limine_setting"
+eval "$real_observed_limine_token"
+eval "$real_current_omasecboot_executable_path"
+eval "$real_activation_hook_path"
+eval "$real_producer_package_version"
+eval "$real_unconfigure_limine_tools_are_pinned"
+
 main windows preflight > "${TEST_DIR}/windows-preflight.out" \
   || fail_test "public Windows preflight route failed"
 [[ "$PREFLIGHT_ROOT_CHECKED" == true && "$PREFLIGHT_CALLED" == true \
@@ -109,22 +217,15 @@ grep -Fq 'Windows Encryption Preflight' "${TEST_DIR}/windows-preflight.out" \
 if cmd_windows preflight unexpected >/dev/null 2>&1; then
   fail_test "Windows preflight accepted an extra argument"
 fi
-for command in setup suppress bootnext; do
-  if cmd_windows "$command" > "${TEST_DIR}/windows-${command}.out" 2>&1; then
-    fail_test "blocked Windows ${command} command succeeded"
-  fi
-done
-[[ ! -e "$(lifecycle_file_path)" ]] \
-  || fail_test "blocked public mutation created lifecycle state"
-
 cmd_help > "${TEST_DIR}/help.out"
 if grep -Eq 'Setup Mode|clear keys|enable Secure Boot' "${TEST_DIR}/help.out"; then
   fail_test "help exposed firmware mutation instructions"
 fi
-grep -Fq 'Do not change firmware keys' "${TEST_DIR}/help.out" \
+grep -Fq 'Change firmware trust only when setup or enroll prints a validated instruction' \
+  "${TEST_DIR}/help.out" \
   || fail_test "help omitted the firmware safety boundary"
-if grep -Eq 'sudo omasecboot (sign|cleanup)' "${ROOT_DIR}/lib/status.sh"; then
-  fail_test "status recommends a blocked repair command"
+if grep -Fq 'Blocked until recoverable commands are activated' "${TEST_DIR}/help.out"; then
+  fail_test "help still describes recoverable commands as blocked"
 fi
 [[ $(cmd_version) == 'omasecboot 1.0.0' ]] || fail_test "version contract changed"
 
@@ -142,11 +243,7 @@ eval "$REAL_REQUIRE_CONTROL_ROOT"
 adopt_lifecycle : "no" "no" "yes" "yes" \
   "absent" "absent" "absent" "absent" \
   || fail_test "active fixture adoption failed"
-if cmd_sign >/dev/null 2>&1; then
-  fail_test "public sign succeeded in active state"
-fi
-read_lifecycle || fail_test "active state became unreadable after blocked sign"
-[[ $_lifecycle_state == active ]] || fail_test "blocked sign changed active state"
+read_lifecycle || fail_test "active fixture lifecycle was unreadable"
 if cmd_guard removal > "${TEST_DIR}/removal-active.out" 2>&1; then
   fail_test "active lifecycle permitted dependency removal"
 fi
@@ -156,6 +253,8 @@ grep -Fq 'requires verified disabled or pristine lifecycle state' \
 
 active_generation=$_lifecycle_generation
 active_lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+real_resolve_package_producer_context=$(declare -f resolve_package_producer_context)
+resolve_package_producer_context() { return 1; }
 if cmd_hook package-cleanup > "${TEST_DIR}/external.out" 2>&1; then
   fail_test "unrepaired external package mutation reported success"
 else
@@ -163,16 +262,17 @@ else
 fi
 [[ $external_rc -eq 1 ]] || fail_test "external package mutation lost its failure status"
 if cmd_hook package-sign >/dev/null 2>&1; then
-  fail_test "closed production gate admitted package signing"
+  fail_test "unowned package signing checkpoint succeeded"
 fi
 if printf 'usr/lib/modules/6.18.0/modules.builtin\n' \
   | cmd_guard transaction >/dev/null 2>&1; then
-  fail_test "closed production gate admitted the package guard"
+  fail_test "package guard accepted a caller without a pacman coordinator"
 fi
-read_lifecycle || fail_test "blocked producer state became unreadable"
+read_lifecycle || fail_test "rejected producer state became unreadable"
 [[ $_lifecycle_state == active && $_lifecycle_generation -eq active_generation \
   && $(sha256_file "$(lifecycle_file_path)") == "$active_lifecycle_hash" ]] \
-  || fail_test "blocked producer automation changed lifecycle state"
+  || fail_test "rejected producer automation changed lifecycle state"
+eval "$real_resolve_package_producer_context"
 
 release_boot_repair_lock
 rm -rf "$(state_dir_path)"
@@ -214,7 +314,6 @@ setup_marker="${TEST_DIR}/setup-prepared"
 SETUP_STATE=3
 RECOVERY_OCCURRED=false
 PLAN_CONFIRMED=false
-lifecycle_repair_is_available() { return 0; }
 check_deps() { :; }
 check_core_deps() { :; }
 check_recovery_deps() { :; }
@@ -222,6 +321,17 @@ check_efi_mode() { :; }
 check_root() { :; }
 require_gum() { :; }
 gum() { [[ "$1" == confirm ]]; }
+disabled_lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+if cmd_adopt --verification-original unknown --enrollment-original yes \
+  --before-save-original absent --after-save-original absent \
+  > "${TEST_DIR}/adopt-unknown.out" 2>&1; then
+  fail_test "public adoption accepted an unknown original value"
+fi
+grep -Fq 'known original values so unconfiguration remains available' \
+  "${TEST_DIR}/adopt-unknown.out" \
+  || fail_test "unknown adoption omitted its unconfiguration safety reason"
+[[ $(sha256_file "$(lifecycle_file_path)") == "$disabled_lifecycle_hash" ]] \
+  || fail_test "unknown public adoption changed lifecycle state"
 recover_lifecycle_if_required() {
   printf 'recover\n' >> "$mutation_log"
   _lifecycle_recovery_performed="$RECOVERY_OCCURRED"
@@ -287,7 +397,7 @@ cmd_setup >/dev/null || fail_test "setup recovery-only route failed"
 cmd_windows bootnext >/dev/null || fail_test "BootNext recovery-only route failed"
 [[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover' ]] \
   || fail_test "a recovered command started an unintended second mutation"
-cmd_adopt --verification-original yes --enrollment-original no \
+cmd_adopt --verification-original unknown --enrollment-original no \
   --before-save-original absent --after-save-original absent >/dev/null \
   || fail_test "adoption recovery-only route failed"
 [[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover\nrecover' ]] \

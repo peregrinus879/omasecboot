@@ -87,6 +87,7 @@ package_targets_change_pinned_producer() {
   state=$(jq -er '
     if index("limine-mkinitcpio-hook") != null or
       index("limine-snapper-sync") != null or
+      index("sbctl") != null or
       index("efibootmgr") != null or
       index("coreutils") != null
     then "blocked" else "clear" end
@@ -235,7 +236,20 @@ producer_package_version() {
 producer_compatibility_is_supported() {
   local version
   case "$_producer_class" in
-    package|limine)
+    package)
+      version=$(producer_package_version limine-mkinitcpio-hook) || return 1
+      [[ "$version" == "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ]] || return 1
+      version=$(producer_package_version limine-snapper-sync) || return 1
+      [[ "$version" == "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" ]] || return 1
+      version=$(producer_package_version sbctl) || return 1
+      [[ "$version" == "$SUPPORTED_SBCTL_VERSION" ]] || return 1
+      version=$(producer_package_version efibootmgr) || return 1
+      [[ "efibootmgr ${version}" == "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" ]] \
+        || return 1
+      version=$(producer_package_version coreutils) || return 1
+      [[ "coreutils ${version}" == "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]]
+      ;;
+    limine)
       version=$(producer_package_version limine-mkinitcpio-hook) || return 1
       [[ "$version" == "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ]]
       ;;
@@ -829,7 +843,7 @@ registered_producer_repair_impl() {
   run_registered_producer_preparation "$producer" "$recovery" || return 1
   obligations=$(derive_registered_producer_obligations "$producer") || return 1
   if [[ -n "$before_obligations" ]]; then
-    [[ $(jq -Sc . <<< "$before_obligations") == $(jq -Sc . <<< "$obligations") ]] \
+    [[ "$(jq -Sc . <<< "$before_obligations")" == "$(jq -Sc . <<< "$obligations")" ]] \
       || return 1
   fi
   verify_obligated_efi_artifacts_exist "$obligations" || return 1
@@ -839,7 +853,7 @@ registered_producer_repair_impl() {
 
   transaction_phase_start "confirm-producer-output" || return 1
   final_obligations=$(derive_registered_producer_obligations "$producer") || return 1
-  [[ $(jq -Sc . <<< "$obligations") == $(jq -Sc . <<< "$final_obligations") ]] \
+  [[ "$(jq -Sc . <<< "$obligations")" == "$(jq -Sc . <<< "$final_obligations")" ]] \
     || return 1
   verify_obligated_efi_artifacts_exist "$final_obligations" || return 1
   transaction_phase_complete "confirm-producer-output"
@@ -1161,15 +1175,48 @@ complete_registered_producer_locked() {
 
 producer_package_pre_locked() {
   read_lifecycle || return 1
-  if [[ "$_lifecycle_state" == transition ]]; then
-    if current_transition_is_owned || producer_transition_is_owned; then
+  case "$_lifecycle_state" in
+    transition)
+      if current_transition_is_owned || producer_transition_is_owned; then
+        return 0
+      fi
+      fail "Boot-mutating package transaction blocked: lifecycle is transition for transaction ${_lifecycle_transaction_id}"
+      return 1
+      ;;
+    recovery-required)
+      fail "Boot-mutating package transaction blocked: lifecycle is recovery-required for transaction ${_lifecycle_transaction_id}"
+      return 1
+      ;;
+    active)
+      reconcile_and_recover_producer_locked || return 1
+      begin_registered_producer_lease
+      ;;
+    *)
+      fail "Boot-mutating package transaction blocked: lifecycle state is unsupported"
+      return 1
+      ;;
+  esac
+}
+
+producer_package_inactive_pre_locked() {
+  read_lifecycle || return 1
+  case "$_lifecycle_state" in
+    unmanaged|disabled)
+      if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
+        fail "Boot-mutating package transaction blocked: full snapshot restore is running"
+        return 1
+      fi
       return 0
-    fi
-    return 1
-  fi
-  [[ "$_lifecycle_state" != recovery-required ]] || return 1
-  reconcile_and_recover_producer_locked || return 1
-  begin_registered_producer_lease
+      ;;
+    active|transition|recovery-required)
+      fail "Boot-mutating package transaction blocked: lifecycle activated during admission"
+      return 1
+      ;;
+    *)
+      fail "Boot-mutating package transaction blocked: lifecycle state is unsupported"
+      return 1
+      ;;
+  esac
 }
 
 producer_package_pre() {
@@ -1185,13 +1232,17 @@ producer_package_pre() {
   }
   case "$_lifecycle_state" in
     unmanaged|disabled)
-      if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
-        drain_package_producer_targets
-        fail "Boot-mutating package transaction blocked: full snapshot restore is running"
-        return 1
-      fi
       drain_package_producer_targets
-      return 0
+      with_boot_repair_lock || return 1
+      producer_package_inactive_pre_locked || rc=$?
+      release_boot_repair_lock
+      return "$rc"
+      ;;
+    active|transition|recovery-required) ;;
+    *)
+      drain_package_producer_targets
+      fail "Boot-mutating package transaction blocked: lifecycle state is unsupported"
+      return 1
       ;;
   esac
   producer_automation_is_available || {
@@ -1226,6 +1277,15 @@ producer_package_checkpoint() {
   read_lifecycle || return 1
   case "$_lifecycle_state" in
     unmanaged|disabled) return 0 ;;
+    active|transition) ;;
+    recovery-required)
+      fail "Package producer checkpoint blocked: lifecycle is recovery-required for transaction ${_lifecycle_transaction_id}"
+      return 1
+      ;;
+    *)
+      fail "Package producer checkpoint blocked: lifecycle state is unsupported"
+      return 1
+      ;;
   esac
   producer_automation_is_available || return 1
   resolve_package_producer_context || return 1
@@ -1254,6 +1314,15 @@ producer_package_post() {
   read_lifecycle || return 1
   case "$_lifecycle_state" in
     unmanaged|disabled) return 0 ;;
+    active|transition) ;;
+    recovery-required)
+      fail "Package producer completion blocked: lifecycle is recovery-required for transaction ${_lifecycle_transaction_id}"
+      return 1
+      ;;
+    *)
+      fail "Package producer completion blocked: lifecycle state is unsupported"
+      return 1
+      ;;
   esac
   producer_automation_is_available || return 1
   resolve_package_producer_context || return 1
@@ -1280,18 +1349,33 @@ producer_limine_lock() {
 producer_limine_pre_locked() {
   read_lifecycle || return 1
   if [[ "$_producer_class" == restore ]]; then
-    [[ "$_lifecycle_state" == active ]] || return 1
+    case "$_lifecycle_state" in
+      unmanaged|disabled) return 0 ;;
+      active) ;;
+      *) return 1 ;;
+    esac
+    producer_automation_is_available || return 1
     [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]] \
       || return 1
     validate_control_file "$(snapshot_restore_lock_path)" || return 1
     begin_registered_producer_lease
     return
   fi
-  if [[ "$_lifecycle_state" == transition ]]; then
-    if current_transition_is_owned || producer_transition_is_owned; then
+  case "$_lifecycle_state" in
+    unmanaged|disabled)
+      [[ ! -e "$(snapshot_restore_lock_path)" \
+        && ! -L "$(snapshot_restore_lock_path)" ]] || return 1
       return 0
-    fi
-  fi
+      ;;
+    transition)
+      if current_transition_is_owned || producer_transition_is_owned; then
+        return 0
+      fi
+      ;;
+    active|recovery-required) ;;
+    *) return 1 ;;
+  esac
+  producer_automation_is_available || return 1
   reconcile_and_recover_producer_locked || return 1
   if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
     return 1
@@ -1307,17 +1391,17 @@ producer_limine_hook_pre() {
     return 100
   }
   case "$_lifecycle_state" in
-    unmanaged|disabled) return 0 ;;
+    unmanaged|disabled|active|transition|recovery-required) ;;
+    *)
+      fail "Boot mutation blocked: lifecycle state is unsupported"
+      return 100
+      ;;
   esac
-  producer_automation_is_available || {
-    fail "Boot mutation is blocked until complete boot repair is available"
+  resolve_limine_producer_context || {
+    [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] \
+      && return 0
     return 100
   }
-  resolve_limine_producer_context || return 100
-  if [[ "$_producer_class" == restore && "$_lifecycle_state" != active ]]; then
-    fail "Full snapshot restore is allowed only in active lifecycle state"
-    return 100
-  fi
   producer_limine_lock pre || return 100
   producer_limine_pre_locked || rc=$?
   release_boot_repair_lock
@@ -1330,6 +1414,11 @@ producer_limine_hook_post() {
   read_lifecycle || return 100
   case "$_lifecycle_state" in
     unmanaged|disabled) return 0 ;;
+    active|transition|recovery-required) ;;
+    *)
+      fail "Post-hook producer repair blocked: lifecycle state is unsupported"
+      return 100
+      ;;
   esac
   producer_automation_is_available || return 100
   resolve_limine_producer_context || return 100

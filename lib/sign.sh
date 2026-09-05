@@ -1199,7 +1199,8 @@ capture_unconfigure_limine_tools() {
 unconfigure_limine_tools_match_intent() {
   local current
   current=$(capture_unconfigure_limine_tools) || return 1
-  [[ $(jq -Sc . <<< "$current") == $(jq -Sc . <<< "$_unconfigure_limine_tools_json") ]]
+  [[ "$(jq -Sc . <<< "$current")" == \
+    "$(jq -Sc . <<< "$_unconfigure_limine_tools_json")" ]]
 }
 
 run_bound_unconfigure_limine_tool() {

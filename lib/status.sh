@@ -229,21 +229,21 @@ show_status() {
   if [[ -f /etc/pacman.d/hooks/00-omasecboot-removal-guard.hook ]]; then
     pass "00-omasecboot-removal-guard.hook present (dependency removal guard)"
   else
-    warn "00-omasecboot-removal-guard.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "00-omasecboot-removal-guard.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -f /etc/pacman.d/hooks/00-omasecboot-transition-guard.hook ]]; then
     pass "00-omasecboot-transition-guard.hook present (transaction guard)"
   else
-    warn "00-omasecboot-transition-guard.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "00-omasecboot-transition-guard.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -f /etc/pacman.d/hooks/zz-omasecboot-cleanup.hook ]]; then
     pass "zz-omasecboot-cleanup.hook present (pre-sbctl lifecycle checkpoint)"
   else
-    warn "zz-omasecboot-cleanup.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "zz-omasecboot-cleanup.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
@@ -257,21 +257,21 @@ show_status() {
   if [[ -f /etc/pacman.d/hooks/zzz-omasecboot.hook ]]; then
     pass "zzz-omasecboot.hook present (post-sbctl lifecycle checkpoint)"
   else
-    warn "zzz-omasecboot.hook missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "zzz-omasecboot.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -x /etc/boot/hooks/pre.d/000-omasecboot-guard ]]; then
     pass "000-omasecboot-guard present (Limine pre-mutation guard)"
   else
-    warn "000-omasecboot-guard missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "000-omasecboot-guard missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if [[ -x /etc/boot/hooks/post.d/zzz-omasecboot-sign ]]; then
     pass "zzz-omasecboot-sign present (Limine post-mutation checkpoint)"
   else
-    warn "zzz-omasecboot-sign missing. Run: ${BOLD}sudo make install${NC} from repo"
+    warn "zzz-omasecboot-sign missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
@@ -349,7 +349,7 @@ show_status() {
       pass "Limine enrollment hooks present"
       if limine_default_has_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll" \
         || limine_default_has_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"; then
-        warn "deprecated COMMANDS_* enrollment entries remain; automatic cleanup is blocked until recovery is available"
+        warn "deprecated COMMANDS_* enrollment entries remain; run sudo omasecboot sign to remove them safely"
       fi
     else
       warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
@@ -515,7 +515,7 @@ show_status() {
     done <<< "$unmanaged_windows_chainloads"
     echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
-    echo -e "  ${DIM}Managed Windows setup remains blocked until recoverable commands are integrated.${NC}"
+    echo -e "  ${DIM}Run sudo omasecboot windows setup to replace it with the validated firmware handoff.${NC}"
   fi
 
   # Tracked files (root only)
@@ -595,7 +595,7 @@ show_status() {
           echo -e "    ${YELLOW}!${NC} $file"
         done
         if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
-          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Repair is blocked until recovery is available; do not reboot with unresolved files.${NC}"
+          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Run sudo omasecboot sign before rebooting.${NC}"
         fi
         all_ok=false
         files_ok=false
@@ -609,7 +609,7 @@ show_status() {
       for stale_file in "${missing_tracked[@]}"; do
         echo -e "    ${YELLOW}!${NC} $stale_file"
       done
-      echo -e "  ${DIM}Tracking repair is blocked until recovery is available; boot-mutating package transactions remain unavailable.${NC}"
+      echo -e "  ${DIM}Run sudo omasecboot cleanup to remove stale tracking safely.${NC}"
       all_ok=false
       files_ok=false
     fi
@@ -619,7 +619,7 @@ show_status() {
       if $files_ok; then
         pass "All tracked files signed and all discovered EFI files enrolled"
       else
-        warn "Some files failed. Repair is blocked until recovery is available"
+        warn "Some files failed. Run sudo omasecboot sign to repair and prove them"
       fi
     fi
   else

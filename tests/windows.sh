@@ -956,31 +956,34 @@ if /usr/bin/grep -Eq '^mount:' "$CALL_LOG"; then
 fi
 
 : > "$CALL_LOG"
-for mutation in setup bootnext reboot; do
-  if cmd_windows "$mutation" > "${TEST_DIR}/${mutation}.out" 2>&1; then
+real_check_root=$(declare -f check_root)
+check_root() { die "Injected root boundary"; }
+for mutation in setup suppress bootnext; do
+  if (cmd_windows "$mutation") > "${TEST_DIR}/${mutation}.out" 2>&1; then
     fail_test "unsafe Windows ${mutation} mutation succeeded"
   fi
 done
-[[ ! -s "$CALL_LOG" ]] || fail_test "blocked Windows command reached a mutation tool"
-/usr/bin/grep -Fq 'recoverable Secure Boot commands are enabled' "${TEST_DIR}/setup.out" \
-  || fail_test "blocked Windows setup omitted its safety reason"
-/usr/bin/grep -Fq 'recoverable Secure Boot commands are enabled' \
-  "${TEST_DIR}/bootnext.out" || fail_test "blocked BootNext omitted its safety reason"
+eval "$real_check_root"
+[[ ! -s "$CALL_LOG" ]] || fail_test "unprivileged Windows command reached a mutation tool"
+for mutation in setup suppress bootnext; do
+  /usr/bin/grep -Fq 'Injected root boundary' "${TEST_DIR}/${mutation}.out" \
+    || fail_test "Windows ${mutation} omitted its root safety boundary"
+done
 
 if /usr/bin/grep -RE 'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
   "${ROOT_DIR}/bin" "${ROOT_DIR}/lib/common.sh" "${ROOT_DIR}/lib/lifecycle.sh" \
   "${ROOT_DIR}/lib/checks.sh" "${ROOT_DIR}/lib/discover.sh" "${ROOT_DIR}/lib/sign.sh" \
   "${ROOT_DIR}/lib/enroll.sh" "${ROOT_DIR}/lib/producers.sh" \
   "${ROOT_DIR}/lib/status.sh" >/dev/null; then
-  fail_test "production code outside the dormant Windows boundary retained a firmware mutation command"
+  fail_test "code outside the guarded Windows boundary retained a firmware mutation command"
 fi
 [[ $(/usr/bin/grep -Ec \
   'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
   "${ROOT_DIR}/lib/windows.sh") -eq 2 ]] \
-  || fail_test "dormant Windows code does not contain the two bounded BootNext writes"
+  || fail_test "guarded Windows code does not contain the two bounded BootNext writes"
 /usr/bin/grep -Fxq "  run_windows_efibootmgr -n \"\$target_number\" || command_rc=\$?" \
   "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "dormant Windows code bypassed its validated efibootmgr wrapper"
+  || fail_test "guarded Windows code bypassed its validated efibootmgr wrapper"
 if /usr/bin/grep -Eq 'run_windows_efibootmgr[[:space:]]+-N' \
   "${ROOT_DIR}/lib/windows.sh"; then
   fail_test "Windows recovery retained efibootmgr's unreliable BootNext deletion path"
@@ -990,10 +993,10 @@ fi
   || fail_test "Windows recovery does not use its bounded direct deletion wrapper"
 /usr/bin/grep -Fq "owner=\$(/usr/bin/pacman -Qqo \"\$path\" 2>/dev/null)" \
   "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "dormant Windows code does not verify efibootmgr package ownership"
+  || fail_test "guarded Windows code does not verify efibootmgr package ownership"
 /usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_efibootmgr_fd}\" \"\$@\"" \
   "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "dormant Windows code does not execute the validated efibootmgr inode"
+  || fail_test "guarded Windows code does not execute the validated efibootmgr inode"
 /usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_unlink_fd}\" \"\$path\"" \
   "${ROOT_DIR}/lib/windows.sh" \
   || fail_test "Windows recovery does not execute the validated unlink inode"
@@ -1006,7 +1009,7 @@ for source in "${ROOT_DIR}/bin/omasecboot" "${ROOT_DIR}"/lib/*.sh; do
   if /usr/bin/grep -Eq \
       'record_and_set_windows_bootnext|windows_recovery_transaction|execute_windows_recovery_action|run_windows_unlink' \
       "$source"; then
-    fail_test "production path outside windows.sh can invoke a dormant Windows mutation"
+    fail_test "production path outside windows.sh can invoke a guarded Windows mutation"
   fi
 done
 

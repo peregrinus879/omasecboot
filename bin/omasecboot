@@ -15,6 +15,93 @@ for lib in common lifecycle checks discover sign producers enroll windows status
   source "${LIB_DIR}/${lib}.sh"
 done
 
+current_omasecboot_executable_path() {
+  readlink -f "${BASH_SOURCE[0]}"
+}
+
+activation_hook_path() {
+  case "$1" in
+    removal) printf '/etc/pacman.d/hooks/00-omasecboot-removal-guard.hook\n' ;;
+    transaction) printf '/etc/pacman.d/hooks/00-omasecboot-transition-guard.hook\n' ;;
+    package-cleanup) printf '/etc/pacman.d/hooks/zz-omasecboot-cleanup.hook\n' ;;
+    package-sign) printf '/etc/pacman.d/hooks/zzz-omasecboot.hook\n' ;;
+    limine-pre) printf '/etc/boot/hooks/pre.d/000-omasecboot-guard\n' ;;
+    limine-post) printf '/etc/boot/hooks/post.d/zzz-omasecboot-sign\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_activation_hook() {
+  local key="$1" command="$2" path expected template expected_hash
+  local document normalized actual_hash executable=false
+  path=$(activation_hook_path "$key") || return 1
+  case "$key" in
+    removal)
+      expected="Exec = ${command} --quiet guard removal"
+      expected_hash=f2c7847bbcc8052717d7a42592a84a3b4ca1c5ab1254795d17d492012f8fa9fe
+      ;;
+    transaction)
+      expected="Exec = ${command} --quiet guard transaction"
+      expected_hash=e7c78629f6780240f0babef66c3035ce77324ad3a26607e4e5bd7eb0e690546a
+      ;;
+    package-cleanup)
+      expected="Exec = ${command} --quiet hook package-cleanup"
+      expected_hash=ee9784ebeffa6158c6ab4a6e43a4964cb8ebbf7f5985b34472c2af7b2d638136
+      ;;
+    package-sign)
+      expected="Exec = ${command} --quiet hook package-sign"
+      expected_hash=de7d909313d0091f221ad87d6e5769ecf6cc92d42658fdcc58a8f7a8fae79069
+      ;;
+    limine-pre)
+      expected="exec ${command} --quiet hook pre"
+      expected_hash=ea5485e3cc7a1470329f54b96bee38cc5edc1a9746878bf241183144432a2807
+      executable=true
+      ;;
+    limine-post)
+      expected="exec ${command} --quiet hook post"
+      expected_hash=0ecf4826228641befc2bff8df14ad28c0b0431e23b8366353b63cebac7eb7d05
+      executable=true
+      ;;
+    *) return 1 ;;
+  esac
+  validate_control_file "$path" || return 1
+  [[ "$executable" == false || -x "$path" ]] || return 1
+  document=$(<"$path") || return 1
+  [[ "$document" == *"$expected"* ]] || return 1
+  template=${expected/"$command"/@BINDIR@\/omasecboot}
+  normalized=${document/"$expected"/"$template"}
+  actual_hash=$(sha256_text "$normalized") || return 1
+  [[ "$actual_hash" == "$expected_hash" ]]
+}
+
+lifecycle_activation_environment_is_ready() {
+  local command key
+  command=$(current_omasecboot_executable_path) || return 1
+  validate_control_file "$command" && [[ -x "$command" ]] || return 1
+  [[ $(producer_package_version limine-mkinitcpio-hook) == \
+      "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
+    && $(producer_package_version limine-snapper-sync) == \
+      "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" \
+    && $(producer_package_version sbctl) == "$SUPPORTED_SBCTL_VERSION" \
+    && "efibootmgr $(producer_package_version efibootmgr)" == \
+      "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
+    && "coreutils $(producer_package_version coreutils)" == \
+      "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]] || {
+    fail "Lifecycle activation requires the exact supported recovery packages"
+    return 1
+  }
+  unconfigure_limine_tools_are_pinned || {
+    fail "Lifecycle activation requires the supported unconfiguration tools"
+    return 1
+  }
+  for key in removal transaction package-cleanup package-sign limine-pre limine-post; do
+    validate_activation_hook "$key" "$command" || {
+      fail "Lifecycle activation requires the current installed ${key} hook"
+      return 1
+    }
+  done
+}
+
 # --- Commands ----------------------------------------------------------------
 
 cmd_setup() {
@@ -170,6 +257,15 @@ observed_limine_token() {
 verify_adoption_observations() {
   local expected_verification="$1" expected_enrollment="$3"
   local expected_before_save="$5" expected_after_save="$7"
+  [[ "$expected_verification" == yes || "$expected_verification" == no \
+    || "$expected_verification" == unset ]] || return 1
+  [[ "$expected_enrollment" == yes || "$expected_enrollment" == no \
+    || "$expected_enrollment" == unset ]] || return 1
+  [[ "$expected_before_save" == present || "$expected_before_save" == absent ]] \
+    || return 1
+  [[ "$expected_after_save" == present || "$expected_after_save" == absent ]] \
+    || return 1
+  lifecycle_activation_environment_is_ready || return 1
   [[ "$(observed_limine_setting "ENABLE_VERIFICATION")" == \
     "$expected_verification" ]] || return 1
   [[ "$(observed_limine_setting "ENABLE_ENROLL_LIMINE_CONFIG")" == \
@@ -228,6 +324,11 @@ cmd_adopt() {
     pass "Lifecycle recovery completed; run adopt again to start a new adoption"
     return 0
   fi
+  if [[ "$original_verification" == unknown || "$original_enrollment" == unknown \
+    || "$original_before_save" == unknown || "$original_after_save" == unknown ]]; then
+    fail "Adoption requires known original values so unconfiguration remains available"
+    return 1
+  fi
   read_lifecycle || die "Lifecycle state is invalid or unsafe"
   # shellcheck disable=SC2154 # Set by read_lifecycle from the sourced module.
   [[ "$_lifecycle_state" == unmanaged ]] \
@@ -250,7 +351,7 @@ cmd_adopt() {
   echo "    COMMANDS_BEFORE_SAVE contains limine-reset-enroll: ${observed_before_save}"
   echo "    COMMANDS_AFTER_SAVE contains limine-enroll-config: ${observed_after_save}"
   echo
-  warn "Choose unknown when the value before OmaSecBoot cannot be confirmed"
+  warn "Adoption requires every original value so automatic unconfiguration remains possible"
 
   if [[ -z "$original_verification" || -z "$original_enrollment" \
     || -z "$original_before_save" || -z "$original_after_save" ]]; then
@@ -258,21 +359,21 @@ cmd_adopt() {
   fi
   if [[ -z "$original_verification" ]]; then
     original_verification=$(gum choose --header \
-      "Original ENABLE_VERIFICATION value" yes no unset unknown) || return 1
+      "Original ENABLE_VERIFICATION value" yes no unset) || return 1
   fi
   if [[ -z "$original_enrollment" ]]; then
     original_enrollment=$(gum choose --header \
-      "Original ENABLE_ENROLL_LIMINE_CONFIG value" yes no unset unknown) || return 1
+      "Original ENABLE_ENROLL_LIMINE_CONFIG value" yes no unset) || return 1
   fi
   if [[ -z "$original_before_save" ]]; then
     original_before_save=$(gum choose --header \
       "Was limine-reset-enroll originally in COMMANDS_BEFORE_SAVE?" \
-      present absent unknown) || return 1
+      present absent) || return 1
   fi
   if [[ -z "$original_after_save" ]]; then
     original_after_save=$(gum choose --header \
       "Was limine-enroll-config originally in COMMANDS_AFTER_SAVE?" \
-      present absent unknown) || return 1
+      present absent) || return 1
   fi
 
   adopt_lifecycle verify_adoption_observations \
@@ -281,7 +382,7 @@ cmd_adopt() {
     "$observed_before_save" "$original_before_save" \
     "$observed_after_save" "$original_after_save" \
     || die "Could not commit the adoption record"
-  pass "Existing configuration adopted; boot producers remain blocked until recovery is available"
+  pass "Existing configuration adopted; guarded boot-producer repair is active"
 }
 
 cmd_windows_help() {
@@ -291,9 +392,9 @@ cmd_windows_help() {
   echo -e "  ${BOLD}Commands${NC}"
   echo "    available   Check for Windows Boot Manager without root or output"
   echo "    preflight   Run the read-only Windows encryption preparation gate"
-  echo "    setup       Blocked until recoverable commands are activated"
-  echo "    suppress    Blocked until recoverable commands are activated"
-  echo "    bootnext    Blocked until recoverable commands are activated"
+  echo "    setup       Configure the validated firmware handoff"
+  echo "    suppress    Suppress an unsafe managed handoff"
+  echo "    bootnext    Request one direct firmware handoff"
   echo
 }
 
@@ -514,24 +615,24 @@ cmd_help() {
   [[ $# -eq 0 ]] || return 2
   header "Command Help"
   echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
-  echo "  Artifact proof is implemented; mutation remains blocked until recovery is available."
+  echo "  Mutations use durable recovery and fail closed on unproved state."
   echo
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
   echo
   echo -e "  ${BOLD}Commands${NC}"
-  echo "    setup       Blocked until recoverable commands are activated"
-  echo "    adopt       Blocked until recoverable commands are activated"
-  echo "    enroll      Blocked until recoverable commands are activated"
-  echo "    windows     Probe Windows or run its read-only encryption preflight"
+  echo "    setup       Prepare and prove the Secure Boot lifecycle"
+  echo "    adopt       Record an existing configuration explicitly"
+  echo "    enroll      Enroll the confirmed firmware trust plan"
+  echo "    windows     Validate and manage the Windows firmware handoff"
   echo "    status      Show Secure Boot status and file verification"
-  echo "    sign        Blocked until recoverable commands are activated"
-  echo "    cleanup     Blocked until recoverable commands are activated"
-  echo "    unconfigure Blocked until recoverable commands are activated"
-  echo "    repair      Blocked until recoverable commands are activated"
+  echo "    sign        Repair and prove managed EFI artifacts"
+  echo "    cleanup     Remove stale sbctl tracking entries safely"
+  echo "    unconfigure Restore recorded settings and disable management"
+  echo "    repair      Resume the registered interrupted operation"
   echo "    version     Show the installed OmaSecBoot version"
   echo "    help        Show this help"
   echo
-  echo -e "  ${DIM}Safety:${NC} Do not change firmware keys from this implementation state."
+  echo -e "  ${DIM}Safety:${NC} Change firmware trust only when setup or enroll prints a validated instruction."
   echo
 }
 

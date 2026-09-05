@@ -67,7 +67,6 @@ _transaction_operation=""
 _transaction_target_state=""
 _recovery_incident_json=""
 _lifecycle_recovery_performed=false
-_OMASECBOOT_FULL_RESTORE_POST=false
 _transaction_previous_exit=""
 _transaction_previous_int=""
 _transaction_previous_term=""
@@ -78,7 +77,7 @@ lifecycle_failpoint() {
 }
 
 lifecycle_repair_is_available() {
-  return 1
+  return 0
 }
 
 producer_recovery_is_available() {
@@ -1735,6 +1734,27 @@ validate_transaction_manifest_json() {
       (explode | all(.[]; . >= 32 and . != 127));
     def phase:
       type == "string" and length <= 128 and test("^[a-z0-9][a-z0-9-]*$");
+    def producer_phases($operation):
+      ["reconstruct-producer","backup-artifacts","configure-limine","enroll-config",
+       "verify-config","clean-tracking","sign-efi","prove-artifacts",
+       "confirm-producer-output"] as $repair |
+      if $operation == "producer-package" then ["package-pre-sbctl"] + $repair
+      elif $operation == "producer-limine" or $operation == "producer-snapshot" or
+        $operation == "producer-restore" or $operation == "producer-recovery"
+      then $repair
+      else null end;
+    def producer_phases_valid:
+      producer_phases(.operation) as $phases |
+      if $phases == null then true
+      else
+        (.completed_phases | length) as $done |
+        .completed_phases == $phases[0:$done] and $done <= ($phases | length) and
+        (if .current_phase == null then true
+         else $done < ($phases | length) and .current_phase == $phases[$done] end) and
+        (if .status == "completed" then
+          .completed_phases == $phases and .current_phase == null
+         else true end)
+      end;
     def artifact_reference:
       type == "object" and keys == ["path","schema_version","sha256"] and
       (.path | absolute_path) and (.schema_version | type == "number" and . >= 1 and floor == .) and
@@ -1801,6 +1821,7 @@ validate_transaction_manifest_json() {
     (.current_phase == null or (.current_phase | phase)) and
     (.completed_phases | type == "array" and length <= 128 and
       all(.[]; phase) and length == (unique | length)) and
+    producer_phases_valid and
     (.backups | type == "array" and length >= 1 and length <= $max_backups) and
     (all(.backups[];
       type == "object" and
@@ -5588,8 +5609,7 @@ run_lifecycle_transaction_with_preflight() {
     fail "Lifecycle state is invalid or unsafe"
     return 1
   }
-  if [[ ( -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ) \
-    && "$_OMASECBOOT_FULL_RESTORE_POST" != true ]]; then
+  if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
     fail "Operation ${operation} blocked while full snapshot restore is running"
     release_boot_repair_lock
     return 1
@@ -5743,224 +5763,6 @@ detach_transaction_context() {
   _transaction_operation=""
   _transaction_target_state=""
   unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
-}
-
-full_snapshot_restore_caller_is_valid() {
-  local caller=${HOOK_CALLER:-} wrapper_pid
-  full_restore_sync_process_is_valid "$PPID" || return 1
-
-  case "$caller" in
-    limine-snapper-sync)
-      return 0
-      ;;
-    limine-snapper-restore)
-      wrapper_pid=$(process_parent_pid "$PPID") || return 1
-      full_restore_wrapper_process_is_valid "$wrapper_pid"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-full_restore_sync_process_is_valid() {
-  local pid="$1" parent_uid
-  parent_uid=$(process_effective_uid "$pid") || return 1
-  [[ "$parent_uid" == "$(control_owner_uid)" ]] || return 1
-  process_runs_script "$pid" /usr/bin/limine-snapper-sync || return 1
-  process_cmdline_has_argument "$pid" --restore || return 1
-  process_cmdline_has_argument "$pid" --no-mutex
-}
-
-full_restore_wrapper_process_is_valid() {
-  local pid="$1"
-  [[ "$(process_effective_uid "$pid")" == "$(control_owner_uid)" ]] || return 1
-  process_runs_script "$pid" /usr/bin/limine-snapper-restore
-}
-
-is_full_snapshot_restore_hook() {
-  full_snapshot_restore_caller_is_valid
-}
-
-reconcile_stale_transition_from_hook() {
-  [[ "$_lifecycle_state" == transition ]] || return 1
-  read_transaction_manifest "$_lifecycle_transaction_id" || return 1
-  manifest_owner_is_alive && return 1
-  if ! lock_inherited_limine_fd; then
-    with_limine_lock || return 1
-  fi
-  with_repair_lock || return 1
-  reconcile_stale_lifecycle
-  local reconcile_rc=$?
-  release_repair_lock
-  read_lifecycle || return 1
-  return "$reconcile_rc"
-}
-
-full_restore_lifecycle_is_admissible() {
-  case "$_lifecycle_state" in
-    unmanaged|disabled) return 0 ;;
-    active) lifecycle_repair_is_available ;;
-    transition|recovery-required) return 1 ;;
-    *) return 1 ;;
-  esac
-}
-
-lifecycle_hook_pre() {
-  require_control_root || return 100
-  read_lifecycle || {
-    fail "Lifecycle state is invalid or unsafe"
-    return 100
-  }
-
-  if is_full_snapshot_restore_hook; then
-    if [[ "$_lifecycle_state" == transition ]]; then
-      reconcile_stale_transition_from_hook || true
-    fi
-    if ! full_restore_lifecycle_is_admissible; then
-      fail "Full snapshot restore is allowed only in stable lifecycle state"
-      return 100
-    fi
-    with_repair_lock || return 100
-    if ! read_lifecycle; then
-      release_repair_lock
-      fail "Lifecycle state became invalid during full snapshot restore admission"
-      return 100
-    fi
-    if ! full_restore_lifecycle_is_admissible; then
-      release_repair_lock
-      fail "Full snapshot restore is allowed only in stable lifecycle state"
-      return 100
-    fi
-    release_repair_lock
-    return 0
-  fi
-
-  case "$_lifecycle_state" in
-    unmanaged|disabled)
-      return 0
-      ;;
-    recovery-required)
-      fail "Boot mutation blocked while lifecycle is recovery-required"
-      return 100
-      ;;
-    transition)
-      if current_transition_is_owned && lock_inherited_limine_fd; then
-        return 0
-      fi
-      reconcile_stale_transition_from_hook || true
-      fail "External boot mutation blocked during transaction ${_lifecycle_transaction_id}"
-      return 100
-      ;;
-    active)
-      if ! lifecycle_repair_is_available; then
-        fail "Boot mutation is blocked until complete boot repair is available"
-        return 100
-      fi
-      if lock_inherited_limine_fd; then
-        return 0
-      fi
-      fail "Boot mutation lacks the validated inherited Limine lock"
-      return 100
-      ;;
-    *)
-      fail "Boot mutation blocked: lifecycle state is unsupported"
-      return 100
-      ;;
-  esac
-}
-
-lifecycle_hook_post() {
-  local repair_callback="$1"
-  require_control_root || return 100
-  read_lifecycle || {
-    fail "Lifecycle state is invalid or unsafe"
-    return 100
-  }
-
-  case "$_lifecycle_state" in
-    unmanaged|disabled)
-      return 0
-      ;;
-    recovery-required)
-      fail "Boot repair blocked while lifecycle is recovery-required"
-      return 100
-      ;;
-    transition)
-      if is_full_snapshot_restore_hook; then
-        fail "Full snapshot restore post-hook rejected outside stable lifecycle state"
-        return 100
-      fi
-      if current_transition_is_owned && lock_inherited_limine_fd; then
-        return 0
-      fi
-      reconcile_stale_transition_from_hook || true
-      fail "External post-hook blocked during transaction ${_lifecycle_transaction_id}"
-      return 100
-      ;;
-    active)
-      if ! lock_inherited_limine_fd; then
-        with_limine_lock || return 100
-      fi
-      if is_full_snapshot_restore_hook; then
-        _OMASECBOOT_FULL_RESTORE_POST=true
-      fi
-      "$repair_callback" || {
-        _OMASECBOOT_FULL_RESTORE_POST=false
-        fail "Post-hook repair failed"
-        return 100
-      }
-      _OMASECBOOT_FULL_RESTORE_POST=false
-      ;;
-    *)
-      fail "Boot repair blocked: lifecycle state is unsupported"
-      return 100
-      ;;
-  esac
-}
-
-guard_boot_transaction() {
-  require_control_root || return 1
-  read_lifecycle || {
-    fail "Boot-mutating package transaction blocked: lifecycle state is invalid or unsafe"
-    return 1
-  }
-  if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
-    fail "Boot-mutating package transaction blocked: full snapshot restore is running"
-    return 1
-  fi
-
-  case "$_lifecycle_state" in
-    unmanaged|disabled)
-      return 0
-      ;;
-    active)
-      if lifecycle_repair_is_available; then
-        return 0
-      fi
-      fail "Boot-mutating package transaction blocked: complete boot repair is unavailable"
-      return 1
-      ;;
-    transition)
-      if read_transaction_manifest "$_lifecycle_transaction_id" \
-        && ! manifest_owner_is_alive \
-        && with_boot_repair_lock; then
-        reconcile_stale_lifecycle || true
-        release_boot_repair_lock
-        read_lifecycle || true
-      fi
-      fail "Boot-mutating package transaction blocked: lifecycle is ${_lifecycle_state} for transaction ${_lifecycle_transaction_id}"
-      return 1
-      ;;
-    recovery-required)
-      fail "Boot-mutating package transaction blocked: lifecycle is recovery-required for transaction ${_lifecycle_transaction_id}"
-      return 1
-      ;;
-    *)
-      fail "Boot-mutating package transaction blocked: lifecycle state is unsupported"
-      return 1
-      ;;
-  esac
 }
 
 lifecycle_automation_is_active() {

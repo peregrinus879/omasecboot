@@ -1,4 +1,5 @@
 # OmaSecBoot: block package producers unless lifecycle permits boot mutation.
+# OmaSecBoot hook schema: 1
 
 [Trigger]
 Type = Path
