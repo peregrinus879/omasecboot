@@ -53,6 +53,11 @@ build_release() {
 package=$(build_release 1)
 upgrade=$(build_release 2)
 
+# The Arch container image skips documentation through NoExtract, which would
+# leave the packaged README missing and fail the integrity check. This is a
+# declared disposable root, so drop those rules before installing anything.
+sed -i '/^NoExtract/d' /etc/pacman.conf
+
 # Runtime dependencies that Arch provides; the two Omarchy producer packages are
 # assumed so the container does not depend on the Omarchy repository.
 pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep \
