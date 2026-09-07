@@ -1181,18 +1181,6 @@ classify_setup_state() {
   printf '%s\n' "$_setup_state"
 }
 
-state_aware_setup_is_available() {
-  lifecycle_repair_is_available
-}
-
-firmware_enrollment_is_available() {
-  lifecycle_repair_is_available
-}
-
-lifecycle_activation_environment_is_ready() {
-  return 1
-}
-
 secure_boot_windows_gate() {
   windows_encryption_gate
 }
@@ -1200,7 +1188,6 @@ secure_boot_windows_gate() {
 prepare_secure_boot_preflight() {
   local preparation_consent="${1:-}"
   [[ "$preparation_consent" == true ]] || return 1
-  state_aware_setup_is_available || return 1
   validate_efivarfs_mount || return 1
   classify_local_sbctl_keys || return 1
   [[ "$_local_key_state" == none || "$_local_key_state" == complete ]] || return 1
@@ -1233,7 +1220,6 @@ prepare_secure_boot_transaction() {
 prepare_state_aware_setup() {
   local preparation_consent="${1:-}"
   [[ "$preparation_consent" == true ]] || return 1
-  state_aware_setup_is_available || return 1
   run_lifecycle_transaction_with_preflight "prepare-secure-boot" "disabled" \
     "unmanaged,disabled" prepare_secure_boot_preflight prepare_secure_boot_transaction \
     "$preparation_consent"
@@ -1243,7 +1229,6 @@ activate_enrollment_plan_preflight() {
   local backup_id="$1" pk_replacement="${2:-}" pk_only="${3:-}" retained="${4:-}"
   [[ "$pk_replacement" == true && "$pk_only" == true && "$retained" == true ]] \
     || return 1
-  state_aware_setup_is_available || return 1
   lifecycle_activation_environment_is_ready || return 1
   validate_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" false || return 1
@@ -1269,7 +1254,6 @@ activate_enrollment_plan_transaction() {
   bind_enrollment_transaction "$backup_id" || return 1
   transaction_phase_complete "bind-enrollment-plan" || return 1
   enrollment_failpoint "before-activation-artifact-repair" || return 1
-  state_aware_setup_is_available || return 1
   repair_boot_artifacts || return 1
   revalidate_enrollment_plan_export "$backup_id"
 }
@@ -1278,7 +1262,6 @@ activate_confirmed_enrollment_plan() {
   local backup_id="$1" pk_replacement="${2:-}" pk_only="${3:-}" retained="${4:-}"
   [[ "$pk_replacement" == true && "$pk_only" == true && "$retained" == true ]] \
     || return 1
-  state_aware_setup_is_available || return 1
   run_lifecycle_transaction_with_preflight "activate-secure-boot-plan" "active" \
     "disabled,active" activate_enrollment_plan_preflight \
     activate_enrollment_plan_transaction "$backup_id" "$pk_replacement" "$pk_only" \
@@ -1687,7 +1670,6 @@ validate_firmware_recovery_authority() {
 }
 
 load_firmware_recovery_context() {
-  firmware_recovery_is_available || return 1
   load_recovery_context || return $?
   [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
     firmware-recovery ]] || return 1
@@ -1767,11 +1749,7 @@ record_firmware_write_result() {
 }
 
 revalidate_firmware_write_boundary() {
-  local backup_id="$1" hierarchy="$2" capability="${3:-firmware_enrollment_is_available}"
-  local frontier expected
-  [[ "$capability" == firmware_enrollment_is_available \
-    || "$capability" == firmware_recovery_is_available ]] || return 1
-  "$capability" || return 1
+  local backup_id="$1" hierarchy="$2" frontier expected
   validate_enrollment_transaction_binding "$backup_id" || return 1
   revalidate_enrollment_plan_export "$backup_id" || return 1
   case "$hierarchy" in
@@ -1786,7 +1764,6 @@ revalidate_firmware_write_boundary() {
 
 enrollment_preflight() {
   local backup_id="$1"
-  firmware_enrollment_is_available || return 1
   validate_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" true || return 1
   revalidate_enrollment_plan_export "$backup_id" || return 1
@@ -1803,26 +1780,25 @@ enrollment_preflight() {
 }
 
 apply_enrollment_hierarchy() {
-  local hierarchy="$1" capability="${2:-firmware_enrollment_is_available}"
+  local hierarchy="$1"
   [[ "$hierarchy" == db || "$hierarchy" == KEK || "$hierarchy" == PK ]] || return 1
-  [[ "$capability" == firmware_enrollment_is_available \
-    || "$capability" == firmware_recovery_is_available ]] || return 1
-  "$capability" || return 1
   run_sbctl_enrollment enroll-keys -m -f --partial "$hierarchy"
 }
 
+# A first enrollment requires sbctl to succeed; a recovery retry accepts a
+# verified readback even when the command itself failed.
 run_enrollment_write_phase() {
-  local backup_id="$1" hierarchy="$2" capability="${3:-firmware_enrollment_is_available}"
+  local backup_id="$1" hierarchy="$2" recovery="${3:-false}"
   local command_rc=0 frontier readback_status
+  [[ "$recovery" == true || "$recovery" == false ]] || return 1
   transaction_phase_start "enroll-${hierarchy,,}" || return 1
-  revalidate_firmware_write_boundary "$backup_id" "$hierarchy" "$capability" || return 1
+  revalidate_firmware_write_boundary "$backup_id" "$hierarchy" || return 1
   if [[ "$hierarchy" == db ]]; then
     preserve_transaction_files_on_failure || return 1
   fi
   record_firmware_write_start "$hierarchy" || return 1
   enrollment_failpoint "before-${hierarchy,,}-write" || return 1
-  "$capability" || return 1
-  apply_enrollment_hierarchy "$hierarchy" "$capability" || command_rc=$?
+  apply_enrollment_hierarchy "$hierarchy" || command_rc=$?
   enrollment_failpoint "after-${hierarchy,,}-command" || return 1
   record_firmware_write_command_result "$hierarchy" "$command_rc" || return 1
   enrollment_failpoint "after-${hierarchy,,}-command-result" || return 1
@@ -1833,11 +1809,8 @@ run_enrollment_write_phase() {
     *) readback_status=failed ;;
   esac
   record_firmware_write_result "$hierarchy" "$readback_status" || return 1
-  if [[ "$capability" == firmware_enrollment_is_available ]]; then
-    [[ $command_rc -eq 0 && "$readback_status" == verified ]] || return 1
-  else
-    [[ "$readback_status" == verified ]] || return 1
-  fi
+  [[ "$readback_status" == verified ]] || return 1
+  [[ "$recovery" == true || $command_rc -eq 0 ]] || return 1
   transaction_phase_complete "enroll-${hierarchy,,}"
 }
 
@@ -1924,14 +1897,12 @@ persist_firmware_enrollment_proof() {
 
 enroll_planned_trust_set() {
   local backup_id="$1" frontier
-  firmware_enrollment_is_available || return 1
   [[ "$backup_id" == "$_enrollment_backup_id" ]] || return 1
 
   transaction_phase_start "bind-enrollment-plan" || return 1
   bind_enrollment_transaction "$backup_id" || return 1
   transaction_phase_complete "bind-enrollment-plan" || return 1
 
-  firmware_enrollment_is_available || return 1
   repair_boot_artifacts || return 1
   enrollment_failpoint "after-enrollment-artifact-repair" || return 1
 
@@ -1940,7 +1911,6 @@ enroll_planned_trust_set() {
   run_enrollment_write_phase "$backup_id" PK || return 1
 
   transaction_phase_start "prove-enrolled-trust" || return 1
-  firmware_enrollment_is_available || return 1
   validate_enrollment_transaction_binding "$backup_id" || return 1
   frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
   [[ "$frontier" == F3 ]] || return 1
@@ -1968,7 +1938,6 @@ reconcile_pending_firmware_write() {
 
 firmware_recovery_transaction() {
   local backup_id="$1" frontier
-  firmware_recovery_is_available || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   if [[ $(jq -r '.firmware_backup == null' <<< "$_manifest_json") == true ]]; then
     transaction_phase_start "bind-enrollment-plan" || return 1
@@ -1985,7 +1954,6 @@ firmware_recovery_transaction() {
   firmware_ledger_matches_frontier "$_manifest_json" "$frontier" || return 1
   transaction_phase_complete "reconcile-firmware-write" || return 1
 
-  firmware_recovery_is_available || return 1
   artifact_repair_preflight || return 1
   repair_boot_artifacts || return 1
   enrollment_failpoint "after-recovery-artifact-repair" || return 1
@@ -1997,19 +1965,15 @@ firmware_recovery_transaction() {
     read_transaction_manifest "$_transaction_id" || return 1
     firmware_ledger_matches_frontier "$_manifest_json" "$frontier" || return 1
     case "$frontier" in
-      F0) run_enrollment_write_phase "$backup_id" db firmware_recovery_is_available \
-        || return 1 ;;
-      F1) run_enrollment_write_phase "$backup_id" KEK firmware_recovery_is_available \
-        || return 1 ;;
-      F2) run_enrollment_write_phase "$backup_id" PK firmware_recovery_is_available \
-        || return 1 ;;
+      F0) run_enrollment_write_phase "$backup_id" db true || return 1 ;;
+      F1) run_enrollment_write_phase "$backup_id" KEK true || return 1 ;;
+      F2) run_enrollment_write_phase "$backup_id" PK true || return 1 ;;
       F3) break ;;
       *) return 1 ;;
     esac
   done
 
   transaction_phase_start "prove-enrolled-trust" || return 1
-  firmware_recovery_is_available || return 1
   validate_enrollment_transaction_binding "$backup_id" || return 1
   [[ $(classify_firmware_enrollment_frontier "$backup_id") == F3 ]] || return 1
   verify_all_efi_artifacts "$_repair_config_checksum" || return 1
@@ -2056,7 +2020,6 @@ run_firmware_recovery_locked() {
 
 run_dormant_enrollment() {
   local backup_id="$1"
-  firmware_enrollment_is_available || return 1
   run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
     enrollment_preflight enroll_planned_trust_set "$backup_id"
 }

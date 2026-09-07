@@ -29,13 +29,11 @@ canonical="${STAGE_DIR}${PREFIX}/bin/omasecboot"
 canonical_lib="${STAGE_DIR}${PREFIX}/lib/omasecboot"
 canonical_state="${STAGE_DIR}/var/lib/omasecboot"
 windows_state_file="${canonical_state}/windows-enabled"
-cleanup_hook_name=zz-omasecboot-cleanup.hook
 sbctl_hook_name=zz-sbctl.hook
 repair_hook_name=zzz-omasecboot.hook
 hook_dir="${STAGE_DIR}/usr/share/libalpm/hooks"
 removal_guard="${hook_dir}/00-omasecboot-removal-guard.hook"
 guard_hook="${hook_dir}/00-omasecboot-transition-guard.hook"
-cleanup_hook="${hook_dir}/${cleanup_hook_name}"
 repair_hook="${hook_dir}/${repair_hook_name}"
 limine_pre_hook="${STAGE_DIR}/etc/boot/hooks/pre.d/000-omasecboot-guard"
 limine_post_hook="${STAGE_DIR}/etc/boot/hooks/post.d/zzz-omasecboot-sign"
@@ -73,17 +71,13 @@ grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet guard removal" "$removal_guar
   || fail "removal guard does not target the canonical command"
 grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet guard transaction" "$guard_hook" \
   || fail "transition guard does not target the canonical command"
-grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet cleanup" "$cleanup_hook" \
-  && fail "cleanup hook retained the public mutation path"
-grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet hook package-cleanup" "$cleanup_hook" \
-  || fail "cleanup hook does not target lifecycle-aware automation"
 grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet hook package-sign" "$repair_hook" \
   || fail "repair hook does not target lifecycle-aware automation"
 grep -Fxq "exec ${PREFIX}/bin/omasecboot --quiet hook pre" "$limine_pre_hook" \
   || fail "Limine pre-hook does not target the ownership guard"
 grep -Fxq "exec ${PREFIX}/bin/omasecboot --quiet hook post" "$limine_post_hook" \
   || fail "Limine post-hook does not target validated repair"
-for hook in "$removal_guard" "$guard_hook" "$cleanup_hook" "$repair_hook" \
+for hook in "$removal_guard" "$guard_hook" "$repair_hook" \
   "$limine_pre_hook" "$limine_post_hook"; do
   grep -Fxq '# OmaSecBoot hook schema: 1' "$hook" \
     || fail "installed hook omitted its deployment schema: ${hook##*/}"
@@ -96,10 +90,10 @@ fi
 
 [[ -x "${STAGE_DIR}${PREFIX}/bin/omasecboot" ]] \
   || fail "rendered hook target is not executable in the stage"
-grep -Fq "$STAGE_DIR" "$removal_guard" "$guard_hook" "$cleanup_hook" "$repair_hook" \
+grep -Fq "$STAGE_DIR" "$removal_guard" "$guard_hook" "$repair_hook" \
   "$limine_pre_hook" "$limine_post_hook" "$tmpfiles_conf" \
   && fail "DESTDIR leaked into a runtime hook target"
-for hook in "$removal_guard" "$guard_hook" "$cleanup_hook" "$repair_hook"; do
+for hook in "$removal_guard" "$guard_hook" "$repair_hook"; do
   [[ $(stat -Lc '%a' "$hook") == 644 ]] \
     || fail "pacman hook has the wrong installed mode: ${hook##*/}"
 done
@@ -127,8 +121,6 @@ grep -Fxq 'f /var/lib/omasecboot/repair.lock 0644 root root -' "$tmpfiles_conf" 
 [[ -f "$license_file" ]] || fail "license file was not installed"
 cmp -s "$license_file" "${ROOT_DIR}/LICENSE" || fail "installed license drifted"
 [[ -f "$readme_file" ]] || fail "documentation was not installed"
-[[ "$cleanup_hook_name" < "$sbctl_hook_name" ]] \
-  || fail "cleanup hook no longer sorts before sbctl"
 [[ "$sbctl_hook_name" < "$repair_hook_name" ]] \
   || fail "repair hook no longer sorts after sbctl"
 printf '%s\n' "${removal_guard##*/}" "${guard_hook##*/}" | LC_ALL=C sort -C \
@@ -169,7 +161,7 @@ grep -Fq 'Refusing source uninstall; remove the omasecboot package with pacman' 
 
 [[ -x "$canonical" && -d "$canonical_lib" ]] \
   || fail "blocked uninstall removed the command or recovery library"
-[[ -f "$removal_guard" && -f "$guard_hook" && -f "$cleanup_hook" && -f "$repair_hook" \
+[[ -f "$removal_guard" && -f "$guard_hook" && -f "$repair_hook" \
   && -x "$limine_pre_hook" && -x "$limine_post_hook" && -f "$tmpfiles_conf" ]] \
   || fail "blocked uninstall removed a lifecycle guard, repair hook, or declaration"
 [[ -f "$windows_state_file" && ! -L "$windows_state_file" \

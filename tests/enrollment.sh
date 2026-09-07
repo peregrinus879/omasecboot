@@ -189,8 +189,6 @@ SBCTL_ROOT=""
 SBCTL_LOG=""
 ARTIFACT_LOG=""
 WINDOWS_RC=0
-ALLOW_SETUP=true
-ALLOW_ENROLL=false
 SBCTL_FAIL_PHASE=""
 SBCTL_MISMATCH_PHASE=""
 SBCTL_BAD_KEY=false
@@ -241,18 +239,6 @@ validate_efivarfs_mount() {
   [[ -d "$EFIVARS_DIR" && ! -L "$EFIVARS_DIR" ]]
 }
 
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"not-found","active_state":"inactive","unit_file_state":"not-found"}}'
-}
-
-state_aware_setup_is_available() {
-  [[ "$ALLOW_SETUP" == true ]]
-}
-
-firmware_enrollment_is_available() {
-  [[ "$ALLOW_ENROLL" == true ]]
-}
-
 lifecycle_activation_environment_is_ready() {
   [[ "$ACTIVATION_READY" == true ]]
 }
@@ -296,7 +282,6 @@ persist_fixture_final_proof() {
       transaction_id: $id,
       proved_at: $timestamp,
       config: {path: $config, checksum: $checksum, sha256: $digest, identity: "1:1"},
-      obligations: {kind: "not-applicable", paths: []},
       artifacts: [{
         identity: "1:1",
         path: $artifact,
@@ -460,12 +445,6 @@ enrollment_failpoint() {
     after-enrollment-artifact-repair)
       write_raw_database dbx "$PLAN_SOURCE/mismatch.esl"
       ;;
-    before-db-write)
-      ALLOW_ENROLL=false
-      ;;
-    before-activation-artifact-repair)
-      ALLOW_SETUP=false
-      ;;
     *) return 1 ;;
   esac
 }
@@ -526,8 +505,6 @@ setup_fixture() {
   write_state_variable SecureBoot 0
   WINDOWS_RC=0
   ACTIVATION_READY=true
-  ALLOW_SETUP=true
-  ALLOW_ENROLL=false
   SBCTL_FAIL_PHASE=""
   SBCTL_MISMATCH_PHASE=""
   SBCTL_BAD_KEY=false
@@ -767,29 +744,6 @@ test_activation_environment_guard() {
     || fail_test "activation-environment refusal repaired artifacts"
 }
 
-test_activation_artifact_guard() {
-  local state_file backup_id manifest
-  setup_fixture activation-artifact-guard
-  prepare_state_aware_setup true || fail_test "activation-guard preparation failed"
-  state_file=$(lifecycle_file_path)
-  backup_id=$(jq -r '.last_transaction.id' "$state_file")
-  ENROLLMENT_MUTATION_POINT=before-activation-artifact-repair
-  if activate_confirmed_enrollment_plan "$backup_id" true true true; then
-    fail_test "false activation guard allowed artifact repair"
-  fi
-  if grep -Fq artifact-repair "$ARTIFACT_LOG"; then
-    fail_test "false activation guard reached artifact mutation"
-  fi
-  read_lifecycle || fail_test "activation-guard lifecycle unreadable"
-  [[ "$_lifecycle_state" == recovery-required ]] \
-    || fail_test "post-publication activation guard did not require recovery"
-  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
-  jq -e '.enrollment_plan != null and .rollback.status == "completed"' \
-    "$manifest" >/dev/null || fail_test "activation guard outcome was not durable"
-  jq -e '.confirmation == null' "$(firmware_plan_path "$backup_id")/manifest.json" \
-    >/dev/null || fail_test "activation guard did not roll back confirmation"
-}
-
 test_preparation_and_backup() {
   local backup_id original_uuid name
   setup_fixture preparation
@@ -966,7 +920,6 @@ test_live_firmware_ledger_writer() {
   setup_fixture live-ledger-writer
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   if run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
     enrollment_preflight firmware_ledger_writer_callback "$backup_id"; then
     fail_test "ledger writer fixture reported success"
@@ -1012,12 +965,6 @@ test_enrollment_guard_and_success() {
     || fail_test "observed state 2 mismatch"
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
     || fail_test "dormant enrollment did not start from F0"
-  : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
-    fail_test "false production guard allowed enrollment"
-  fi
-  [[ ! -s "$SBCTL_LOG" ]] || fail_test "false guard reached sbctl"
-  ALLOW_ENROLL=true
   run_dormant_enrollment "$backup_id" || fail_test "dormant enrollment failed"
   mapfile -t partial_calls < <(grep -- '--partial' "$SBCTL_LOG")
   [[ "${partial_calls[*]}" == \
@@ -1082,7 +1029,6 @@ test_firmware_command_evidence_boundaries() {
   setup_fixture unknown-command-result
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=after-db-command
   if run_dormant_enrollment "$backup_id"; then
     fail_test "post-command failpoint reported success"
@@ -1099,7 +1045,6 @@ test_firmware_command_evidence_boundaries() {
   setup_fixture pending-readback
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=after-db-command-result
   if run_dormant_enrollment "$backup_id"; then
     fail_test "post-command-result failpoint reported success"
@@ -1116,7 +1061,6 @@ test_firmware_command_evidence_boundaries() {
   setup_fixture unchanged-readback
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_FAIL_PHASE=before-db
   if run_dormant_enrollment "$backup_id"; then
     fail_test "no-effect db command reported success"
@@ -1137,7 +1081,6 @@ test_dbx_drift_blocks_cleanly() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   write_raw_database dbx "$PLAN_SOURCE/mismatch.esl"
-  ALLOW_ENROLL=true
   read_lifecycle || fail_test "drift fixture lifecycle unreadable"
   generation=$_lifecycle_generation
   : > "$SBCTL_LOG"
@@ -1157,7 +1100,6 @@ test_partial_readback_failure() {
   setup_fixture partial-readback
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_MISMATCH_PHASE=db
   : > "$SBCTL_LOG"
   if run_dormant_enrollment "$backup_id"; then
@@ -1197,7 +1139,6 @@ test_db_command_failure_after_effect() {
   setup_fixture db-command-failure
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_FAIL_PHASE=after-db
   : > "$SBCTL_LOG"
   if run_dormant_enrollment "$backup_id"; then
@@ -1227,7 +1168,6 @@ test_pk_command_failure_after_effect() {
   setup_fixture pk-command-failure
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_FAIL_PHASE=after-PK
   : > "$SBCTL_LOG"
   : > "$ARTIFACT_LOG"
@@ -1256,7 +1196,6 @@ test_artifact_repair_drift_blocks_write() {
   setup_fixture artifact-drift
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=after-enrollment-artifact-repair
   : > "$SBCTL_LOG"
   if run_dormant_enrollment "$backup_id"; then
@@ -1272,30 +1211,6 @@ test_artifact_repair_drift_blocks_write() {
     .rollback.status == "completed" and
     .firmware_writes == []' "$manifest" >/dev/null \
     || fail_test "pre-write drift rollback policy is incorrect"
-}
-
-test_guard_flip_blocks_write() {
-  local backup_id manifest
-  setup_fixture guard-flip
-  backup_id=$(prepare_and_activate)
-  enter_setup_mode
-  ALLOW_ENROLL=true
-  ENROLLMENT_MUTATION_POINT=before-db-write
-  : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
-    fail_test "false phase guard allowed a firmware write"
-  fi
-  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
-    fail_test "false phase guard reached sbctl partial enrollment"
-  fi
-  read_lifecycle || fail_test "phase-guard lifecycle unreadable"
-  manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
-  jq -e '.rollback.status == "preserved" and
-    (.firmware_writes | length) == 1 and
-    .firmware_writes[0].hierarchy == "db" and
-    .firmware_writes[0].command_exit_code == null and
-    .firmware_writes[0].readback_status == "pending"' "$manifest" >/dev/null \
-    || fail_test "blocked write attempt was not durable"
 }
 
 test_plan_manifest_tamper_blocks() {
@@ -1340,7 +1255,6 @@ test_firmware_recovery_from_unbound_root() {
   [[ $(current_setup_backup_id) == "$backup_id" ]] \
     || fail_test "intervening transaction hid the current setup plan"
   enter_setup_mode
-  ALLOW_ENROLL=true
   if run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
     enrollment_preflight fail_before_enrollment_binding "$backup_id"; then
     fail_test "unbound enrollment incident reported success"
@@ -1433,7 +1347,6 @@ test_firmware_recovery_resolves_pending_effect() {
   setup_fixture recovery-pending-effect
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=after-db-command
   if run_dormant_enrollment "$backup_id"; then
     fail_test "pending-effect fixture reported success"
@@ -1470,7 +1383,6 @@ test_firmware_recovery_inherits_resolved_retry() {
   setup_fixture recovery-pending-retry
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=before-db-write
   if run_dormant_enrollment "$backup_id"; then
     fail_test "pending retry fixture reported success"
@@ -1516,7 +1428,6 @@ test_firmware_recovery_retry_limit_is_cumulative() {
   setup_fixture recovery-retry-limit
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_FAIL_PHASE=before-db
   if run_dormant_enrollment "$backup_id"; then
     fail_test "retry-limit root reported success"
@@ -1544,7 +1455,6 @@ test_firmware_recovery_completes_post_pk_effect() {
   setup_fixture recovery-post-pk-effect
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   SBCTL_FAIL_PHASE=after-PK
   if run_dormant_enrollment "$backup_id"; then
     fail_test "post-PK recovery fixture reported success"
@@ -1571,7 +1481,6 @@ test_firmware_recovery_leaves_unreadable_pending() {
   setup_fixture recovery-unreadable-pending
   backup_id=$(prepare_and_activate)
   enter_setup_mode
-  ALLOW_ENROLL=true
   ENROLLMENT_MUTATION_POINT=after-db-command
   if run_dormant_enrollment "$backup_id"; then
     fail_test "unreadable pending fixture reported success"
@@ -1666,7 +1575,6 @@ run_case incoherent-snapshot test_incoherent_snapshot_blocks
 run_case bad-key test_bad_key_rolls_back
 run_case confirmation-acknowledgments test_confirmation_requires_acknowledgments
 run_case activation-environment-guard test_activation_environment_guard
-run_case activation-artifact-guard test_activation_artifact_guard
 run_case preparation test_preparation_and_backup
 run_case absent-dbx test_absent_dbx_record
 run_case missing-entry test_missing_current_entry_blocks
@@ -1679,7 +1587,6 @@ run_case partial-readback test_partial_readback_failure
 run_case db-command-failure test_db_command_failure_after_effect
 run_case pk-command-failure test_pk_command_failure_after_effect
 run_case artifact-drift test_artifact_repair_drift_blocks_write
-run_case guard-flip test_guard_flip_blocks_write
 run_case plan-tamper test_plan_manifest_tamper_blocks
 run_case windows-gate test_windows_gate_blocks_preparation
 run_case recovery-unbound-root test_firmware_recovery_from_unbound_root

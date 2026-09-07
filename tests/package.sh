@@ -88,10 +88,8 @@ systemd
 util-linux
 EOF
 )
-floor_admits_pin 9.5 "${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }" \
-  || fail_test "coreutils floor rejects the pinned recovery version"
-floor_admits_pin 18 "${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }" \
-  || fail_test "efibootmgr floor rejects the pinned recovery version"
+floor_admits_pin 18 "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" \
+  || fail_test "efibootmgr floor disagrees with the runtime minimum"
 floor_admits_pin 0.18 "$SUPPORTED_SBCTL_VERSION" \
   || fail_test "sbctl floor rejects the pinned recovery version"
 floor_admits_pin 1.38.0 "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
@@ -172,7 +170,6 @@ usr/share/libalpm/
 usr/share/libalpm/hooks/
 usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook
 usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook
-usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook
 usr/share/libalpm/hooks/zzz-omasecboot.hook
 usr/share/licenses/
 usr/share/licenses/omasecboot/
@@ -237,14 +234,13 @@ activation_hook_path() {
   case "$1" in
     removal) printf '%s/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook\n' "$extract" ;;
     transaction) printf '%s/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook\n' "$extract" ;;
-    package-cleanup) printf '%s/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook\n' "$extract" ;;
     package-sign) printf '%s/usr/share/libalpm/hooks/zzz-omasecboot.hook\n' "$extract" ;;
     limine-pre) printf '%s/etc/boot/hooks/pre.d/000-omasecboot-guard\n' "$extract" ;;
     limine-post) printf '%s/etc/boot/hooks/post.d/zzz-omasecboot-sign\n' "$extract" ;;
     *) return 1 ;;
   esac
 }
-for key in removal transaction package-cleanup package-sign limine-pre limine-post; do
+for key in removal transaction package-sign limine-pre limine-post; do
   validate_activation_hook "$key" /usr/bin/omasecboot \
     || fail_test "packaged hook would fail activation: ${key}"
   validate_activation_hook "$key" /usr/local/bin/omasecboot >/dev/null 2>&1 \
@@ -265,7 +261,7 @@ printf '[options]\nSigLevel = Never\n' > "${BUILD_DIR}/pacman.conf"
 # Same-named hooks in a later hook directory replace the packaged ones, so the
 # staged transactions never try to execute the packaged command inside a chroot.
 for hook in 00-omasecboot-removal-guard 00-omasecboot-transition-guard \
-  zz-omasecboot-cleanup zzz-omasecboot; do
+  zzz-omasecboot; do
   cat > "${override_hooks}/${hook}.hook" <<'EOF'
 [Trigger]
 Type = Path
@@ -296,7 +292,6 @@ installed_paths=(
   "${root}/usr/lib/omasecboot/lifecycle.sh"
   "${root}/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook"
   "${root}/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook"
-  "${root}/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook"
   "${root}/usr/share/libalpm/hooks/zzz-omasecboot.hook"
   "${root}/etc/boot/hooks/pre.d/000-omasecboot-guard"
   "${root}/etc/boot/hooks/post.d/zzz-omasecboot-sign"

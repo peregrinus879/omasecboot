@@ -62,14 +62,6 @@ durable_sync() {
     return 1
   fi
 }
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-systemctl() {
-  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
-    || return 1
-  printf 'inactive\n'
-}
 mountpoint() { [[ "$1" == -q && "$2" == "$(esp_path)" ]]; }
 findmnt() {
   [[ "$1" == -n && "$2" == -T && "$3" == "$(esp_path)" && "$4" == -o \
@@ -111,16 +103,6 @@ read_current_firmware_modes() {
   _audit_mode=0
   _deployed_mode=0
   _secure_boot_mode="$SECURE_BOOT_MODE"
-}
-derive_uki_inventory_obligations() {
-  jq -cn --arg primary "$PRIMARY" --arg fallback "$FALLBACK" \
-    '{kind:"uki-inventory",paths:[$fallback,$primary]}'
-}
-verify_obligated_efi_artifacts_exist() {
-  local obligations="$1" path
-  while IFS= read -r path; do
-    [[ -f "$path" ]] || return 1
-  done < <(jq -r '.paths[]' <<< "$obligations")
 }
 
 write_limine_binary() {

@@ -40,8 +40,7 @@ _windows_bootnext_record_json=""
 _windows_bootnext_record_path=""
 _windows_efibootmgr_fd=""
 _windows_efibootmgr_hash=""
-_windows_unlink_fd=""
-_windows_unlink_hash=""
+_windows_efibootmgr_package=""
 _windows_recovery_plan_json=""
 _windows_recovery_record_json=""
 _windows_recovery_record_path=""
@@ -69,20 +68,8 @@ windows_recovery_failpoint() {
   return 0
 }
 
-windows_bootnext_mutation_is_available() {
-  lifecycle_repair_is_available
-}
-
-windows_recovery_is_available() {
-  return 0
-}
-
 windows_efibootmgr_executable_path() {
   printf '%s\n' "$WINDOWS_EFIBOOTMGR_EXECUTABLE"
-}
-
-windows_unlink_executable_path() {
-  printf '%s\n' "$WINDOWS_UNLINK_EXECUTABLE"
 }
 
 windows_efibootmgr_query_path() {
@@ -99,14 +86,6 @@ close_windows_efibootmgr_boundary() {
   fi
   _windows_efibootmgr_fd=""
   _windows_efibootmgr_hash=""
-}
-
-close_windows_unlink_boundary() {
-  if [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ ]]; then
-    exec {_windows_unlink_fd}<&-
-  fi
-  _windows_unlink_fd=""
-  _windows_unlink_hash=""
 }
 
 windows_reject() {
@@ -1479,14 +1458,15 @@ validate_windows_efibootmgr_boundary() {
   close_windows_efibootmgr_boundary
   path=$(windows_efibootmgr_executable_path) || return 1
   [[ "$path" == "$WINDOWS_EFIBOOTMGR_EXECUTABLE" ]] || return 1
-  package=$(/usr/bin/pacman -Q efibootmgr 2>/dev/null) || {
+  package=$(producer_package_version efibootmgr) || {
     windows_reject "Cannot verify the installed efibootmgr package"
     return 1
   }
-  [[ "$package" == "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" ]] || {
-    windows_reject "Unsupported efibootmgr package: ${package}"
+  [[ $(vercmp "$package" "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" 2>/dev/null) -ge 0 ]] || {
+    windows_reject "Unsupported efibootmgr package: efibootmgr ${package}"
     return 1
   }
+  _windows_efibootmgr_package="efibootmgr ${package}"
   owner=$(/usr/bin/pacman -Qqo "$path" 2>/dev/null) || {
     windows_reject "Cannot verify ownership of the efibootmgr executable"
     return 1
@@ -1540,75 +1520,6 @@ hash_bound_windows_efibootmgr() {
   sha256_file "/proc/self/fd/${_windows_efibootmgr_fd}"
 }
 
-validate_windows_unlink_boundary() {
-  local package owner path path_uid path_mode path_device path_inode
-  local fd_path fd_uid fd_mode fd_device fd_inode executable_hash
-  close_windows_unlink_boundary
-  path=$(windows_unlink_executable_path) || return 1
-  [[ "$path" == "$WINDOWS_UNLINK_EXECUTABLE" ]] || return 1
-  package=$(/usr/bin/pacman -Q coreutils 2>/dev/null) || {
-    windows_reject "Cannot verify the installed coreutils package"
-    return 1
-  }
-  [[ "$package" == "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]] || {
-    windows_reject "Unsupported coreutils package: ${package}"
-    return 1
-  }
-  owner=$(/usr/bin/pacman -Qqo "$path" 2>/dev/null) || {
-    windows_reject "Cannot verify ownership of the unlink executable"
-    return 1
-  }
-  [[ "$owner" == coreutils && -x "$path" ]] || {
-    windows_reject "The supported package does not own the unlink executable"
-    return 1
-  }
-  validate_control_file "$path" || {
-    windows_reject "The unlink executable is unsafe"
-    return 1
-  }
-  read -r path_uid path_mode path_device path_inode \
-    < <(stat -Lc '%u %a %d %i' "$path" 2>/dev/null) || return 1
-  exec {_windows_unlink_fd}< "$path" || {
-    windows_reject "Cannot bind the unlink executable"
-    return 1
-  }
-  fd_path="/proc/self/fd/${_windows_unlink_fd}"
-  read -r fd_uid fd_mode fd_device fd_inode \
-    < <(stat -Lc '%u %a %d %i' "$fd_path" 2>/dev/null) || {
-      close_windows_unlink_boundary
-      return 1
-    }
-  [[ "$fd_uid" == "$path_uid" && "$fd_mode" == "$path_mode" \
-    && "$fd_device" == "$path_device" && "$fd_inode" == "$path_inode" ]] || {
-      close_windows_unlink_boundary
-      windows_reject "The unlink executable changed while it was opened"
-      return 1
-    }
-  executable_hash=$(sha256_file "$fd_path") || {
-    close_windows_unlink_boundary
-    return 1
-  }
-  [[ "$executable_hash" =~ ^[0-9a-f]{64}$ \
-    && $(stat -Lc '%d:%i' "$path" 2>/dev/null) == "${fd_device}:${fd_inode}" ]] || {
-      close_windows_unlink_boundary
-      windows_reject "The unlink executable changed while it was validated"
-      return 1
-    }
-  _windows_unlink_hash="$executable_hash"
-}
-
-run_windows_unlink() {
-  local path="$1"
-  [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ \
-    && "$path" == "$(windows_bootnext_variable_path)" ]] || return 1
-  "/proc/self/fd/${_windows_unlink_fd}" "$path"
-}
-
-hash_bound_windows_unlink() {
-  [[ "${_windows_unlink_fd:-}" =~ ^[0-9]+$ ]] || return 1
-  sha256_file "/proc/self/fd/${_windows_unlink_fd}"
-}
-
 capture_windows_bootnext_variable_evidence() {
   local path state before_identity after_identity before_hash after_hash
   path=$(windows_bootnext_variable_path) || return 1
@@ -1631,7 +1542,6 @@ load_windows_recovery_context() {
   local root_id reference path record root_boot_id recovery_boot_id relation prior observed
   local target action outcome write_frontier tool=null variable=null current_hash
   local first_state second_state
-  windows_recovery_is_available || return 1
   load_recovery_context || return $?
   [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
     windows-recovery ]] || return 1
@@ -1740,26 +1650,6 @@ load_windows_recovery_context() {
       second_state=$(read_windows_bootnext_state) || return 1
       jq -e --argjson expected "$first_state" '. == $expected' \
         <<< "$second_state" >/dev/null || return 1
-      validate_windows_unlink_boundary || {
-        windows_report_error
-        return 1
-      }
-      current_hash=$(hash_bound_windows_unlink) || {
-        close_windows_unlink_boundary
-        return 1
-      }
-      tool=$(jq -cn \
-        --arg package "$WINDOWS_UNLINK_PACKAGE_IDENTITY" \
-        --arg executable "$WINDOWS_UNLINK_EXECUTABLE" \
-        --arg hash "$current_hash" '{
-          package: $package,
-          executable: $executable,
-          executable_sha256: $hash
-        }') || {
-          close_windows_unlink_boundary
-          return 1
-        }
-      close_windows_unlink_boundary
     fi
   else
     windows_reject "BootNext no longer matches the recorded prior state or Windows target"
@@ -1839,10 +1729,15 @@ load_windows_recovery_record() {
   _windows_recovery_record_path="$path"
 }
 
+# Removes the BootNext variable through GNU rm; a wrapper so tests can observe
+# and fail the call.
+remove_windows_bootnext_variable() {
+  [[ "$1" == "$(windows_bootnext_variable_path)" ]] || return 1
+  rm -f -- "$1"
+}
+
 execute_windows_recovery_action() {
-  local action recovery_boot_id observed expected_hash prior_number variable current_variable
-  local current_state
-  local command_rc=0
+  local action recovery_boot_id observed prior_number current_state rc=0
   load_windows_recovery_record || return 1
   action=$(jq -r '.action' <<< "$_windows_recovery_record_json") || return 1
   recovery_boot_id=$(jq -r '.recovery_boot_id' <<< "$_windows_recovery_record_json") \
@@ -1851,106 +1746,20 @@ execute_windows_recovery_action() {
     windows_reject "The system boot changed during Windows recovery"
     return 1
   }
-  windows_recovery_is_available || return 1
   if [[ "$action" == none ]]; then
     _windows_recovery_command_rc=null
     return 0
   fi
-  observed=$(jq -c '.observed' <<< "$_windows_recovery_record_json") || return 1
   case "$action" in
     set-prior)
       validate_windows_efibootmgr_boundary || return 1
-      expected_hash=$(jq -r '.tool.executable_sha256' \
-        <<< "$_windows_recovery_record_json") || {
-          close_windows_efibootmgr_boundary
-          return 1
-        }
-      [[ "$(hash_bound_windows_efibootmgr)" == "$expected_hash" \
-        && "$recovery_boot_id" == "$(boot_id_value)" ]] || {
-          close_windows_efibootmgr_boundary
-          return 1
-        }
-      windows_recovery_is_available || {
-        close_windows_efibootmgr_boundary
-        return 1
-      }
-      current_state=$(read_windows_bootnext_state) || {
-        close_windows_efibootmgr_boundary
-        windows_reject "BootNext became unreadable before Windows recovery mutation"
-        windows_report_error
-        return 1
-      }
-      jq -e --argjson expected "$observed" '. == $expected' \
-        <<< "$current_state" >/dev/null || {
-        close_windows_efibootmgr_boundary
-        windows_reject "BootNext changed after Windows recovery evidence was recorded"
-        windows_report_error
-        return 1
-      }
-      prior_number=$(jq -r '.prior.boot_number' <<< "$_windows_recovery_record_json") \
-        || {
-          close_windows_efibootmgr_boundary
-          return 1
-        }
-      run_windows_efibootmgr -n "$prior_number" || command_rc=$?
-      windows_recovery_failpoint "after-recovery-command" || {
-        close_windows_efibootmgr_boundary
-        return 1
-      }
+      windows_recovery_set_prior || rc=$?
       close_windows_efibootmgr_boundary
       ;;
-    delete)
-      validate_windows_unlink_boundary || return 1
-      expected_hash=$(jq -r '.tool.executable_sha256' \
-        <<< "$_windows_recovery_record_json") || {
-          close_windows_unlink_boundary
-          return 1
-        }
-      [[ "$(hash_bound_windows_unlink)" == "$expected_hash" \
-        && "$recovery_boot_id" == "$(boot_id_value)" ]] || {
-          close_windows_unlink_boundary
-          return 1
-        }
-      windows_recovery_is_available || {
-        close_windows_unlink_boundary
-        return 1
-      }
-      current_state=$(read_windows_bootnext_state) || {
-        close_windows_unlink_boundary
-        windows_reject "BootNext became unreadable before Windows recovery mutation"
-        windows_report_error
-        return 1
-      }
-      jq -e --argjson expected "$observed" '. == $expected' \
-        <<< "$current_state" >/dev/null || {
-        close_windows_unlink_boundary
-        windows_reject "BootNext changed after Windows recovery evidence was recorded"
-        windows_report_error
-        return 1
-      }
-      variable=$(jq -c '.variable' <<< "$_windows_recovery_record_json") || {
-        close_windows_unlink_boundary
-        return 1
-      }
-      current_variable=$(capture_windows_bootnext_variable_evidence) || {
-        close_windows_unlink_boundary
-        return 1
-      }
-      [[ "$(jq -Sc . <<< "$current_variable")" == "$(jq -Sc . <<< "$variable")" ]] \
-        || {
-          close_windows_unlink_boundary
-          return 1
-        }
-      run_windows_unlink "$(windows_bootnext_variable_path)" || command_rc=$?
-      windows_recovery_failpoint "after-recovery-command" || {
-        close_windows_unlink_boundary
-        return 1
-      }
-      close_windows_unlink_boundary
-      ;;
+    delete) windows_recovery_delete || rc=$? ;;
     *) return 1 ;;
   esac
-  _windows_recovery_command_rc="$command_rc"
+  [[ $rc -eq 0 ]] || return "$rc"
   current_state=$(read_windows_bootnext_state) || {
     windows_reject "BootNext recovery readback is unreadable"
     windows_report_error
@@ -1962,6 +1771,46 @@ execute_windows_recovery_action() {
       windows_report_error
       return 1
     }
+}
+
+# BootNext must still read exactly as the recovery record observed it.
+windows_recovery_state_is_observed() {
+  local current_state
+  current_state=$(read_windows_bootnext_state) || {
+    windows_reject "BootNext became unreadable before Windows recovery mutation"
+    windows_report_error
+    return 1
+  }
+  jq -e --argjson expected "$(jq -c '.observed' <<< "$_windows_recovery_record_json")" \
+    '. == $expected' <<< "$current_state" >/dev/null || {
+    windows_reject "BootNext changed after Windows recovery evidence was recorded"
+    windows_report_error
+    return 1
+  }
+}
+
+# Runs with the efibootmgr boundary open; the caller closes it.
+windows_recovery_set_prior() {
+  local prior_number command_rc=0
+  [[ "$(hash_bound_windows_efibootmgr)" == \
+    "$(jq -r '.tool.executable_sha256' <<< "$_windows_recovery_record_json")" ]] \
+    || return 1
+  windows_recovery_state_is_observed || return 1
+  prior_number=$(jq -r '.prior.boot_number' <<< "$_windows_recovery_record_json") \
+    || return 1
+  run_windows_efibootmgr -n "$prior_number" || command_rc=$?
+  windows_recovery_failpoint "after-recovery-command" || return 1
+  _windows_recovery_command_rc="$command_rc"
+}
+
+windows_recovery_delete() {
+  local command_rc=0
+  windows_recovery_state_is_observed || return 1
+  [[ "$(jq -Sc . <<< "$(capture_windows_bootnext_variable_evidence)")" == \
+    "$(jq -Sc '.variable' <<< "$_windows_recovery_record_json")" ]] || return 1
+  remove_windows_bootnext_variable "$(windows_bootnext_variable_path)" || command_rc=$?
+  windows_recovery_failpoint "after-recovery-command" || return 1
+  _windows_recovery_command_rc="$command_rc"
 }
 
 persist_windows_recovery_proof() {
@@ -2025,7 +1874,6 @@ persist_windows_recovery_proof() {
 }
 
 windows_recovery_transaction() {
-  windows_recovery_is_available || return 1
   transaction_phase_start "classify-bootnext" || return 1
   persist_windows_recovery_record || return 1
   windows_recovery_failpoint "after-recovery-record" || return 1
@@ -2044,7 +1892,6 @@ run_windows_recovery_locked() {
   local callback_rc=0 commit_rc=0 begin_rc=0 stale_attempt_id="" failure_reason
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
-  windows_recovery_is_available || return 1
   _windows_error=""
   read_lifecycle || return 1
   if [[ "$_lifecycle_state" == transition ]]; then
@@ -2081,7 +1928,6 @@ run_windows_recovery_locked() {
   fi
   windows_recovery_transaction || callback_rc=$?
   close_windows_efibootmgr_boundary
-  close_windows_unlink_boundary
   if [[ $callback_rc -eq 0 ]]; then
     commit_lifecycle_recovery_attempt || commit_rc=$?
     if [[ $commit_rc -ne 0 ]]; then
@@ -2127,10 +1973,6 @@ windows_bootnext_exact_target_is_current() {
 }
 
 windows_bootnext_preflight() {
-  windows_bootnext_mutation_is_available || {
-    fail "Windows BootNext mutation is not available in this build"
-    return 1
-  }
   read_windows_target_state || return 1
   resolve_windows_target || {
     windows_report_error
@@ -2168,7 +2010,7 @@ persist_windows_bootnext_record() {
     --arg recorded_at "$timestamp" \
     --arg executable "$WINDOWS_EFIBOOTMGR_EXECUTABLE" \
     --arg executable_sha256 "$executable_hash" \
-    --arg package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
+    --arg package "$_windows_efibootmgr_package" \
     --arg boot_number "$_windows_state_boot_number" \
     --arg label "$_windows_state_label" \
     --arg loader_path "$_windows_state_loader_path" \
@@ -2281,10 +2123,6 @@ write_windows_bootnext_bound() {
   prior=$(read_windows_bootnext_state) || return 1
   jq -e --argjson prior "$prior" '.prior == $prior' <<< "$record" >/dev/null || {
     windows_reject "BootNext changed after its prior value was recorded"
-    return 1
-  }
-  windows_bootnext_mutation_is_available || {
-    windows_reject "Windows BootNext mutation is not available in this build"
     return 1
   }
   target_number=$(jq -r '.target.boot_number' <<< "$record") || return 1

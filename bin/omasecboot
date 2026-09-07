@@ -24,7 +24,6 @@ activation_hook_path() {
   case "$1" in
     removal) printf '/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook\n' ;;
     transaction) printf '/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook\n' ;;
-    package-cleanup) printf '/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook\n' ;;
     package-sign) printf '/usr/share/libalpm/hooks/zzz-omasecboot.hook\n' ;;
     limine-pre) printf '/etc/boot/hooks/pre.d/000-omasecboot-guard\n' ;;
     limine-post) printf '/etc/boot/hooks/post.d/zzz-omasecboot-sign\n' ;;
@@ -39,19 +38,15 @@ validate_activation_hook() {
   case "$key" in
     removal)
       expected="Exec = ${command} --quiet guard removal"
-      expected_hash=f04654910c43de6a1f5487ba87bac02bb84c0bcc19650db4ad542f81100eac52
+      expected_hash=f70bc5a660776e2a5dd4ea5e8184a61b1adc547db4c3286a69b355383f1eb56d
       ;;
     transaction)
       expected="Exec = ${command} --quiet guard transaction"
-      expected_hash=e7c78629f6780240f0babef66c3035ce77324ad3a26607e4e5bd7eb0e690546a
-      ;;
-    package-cleanup)
-      expected="Exec = ${command} --quiet hook package-cleanup"
-      expected_hash=ee9784ebeffa6158c6ab4a6e43a4964cb8ebbf7f5985b34472c2af7b2d638136
+      expected_hash=cedd35b7b7209cb01587649fba225907c3552b837a03f8f609fd063154e99f5f
       ;;
     package-sign)
       expected="Exec = ${command} --quiet hook package-sign"
-      expected_hash=de7d909313d0091f221ad87d6e5769ecf6cc92d42658fdcc58a8f7a8fae79069
+      expected_hash=6250350574ba80e09c65a1f49571df2e925e6976254b32868fae3ea132b4a0c9
       ;;
     limine-pre)
       expected="exec ${command} --quiet hook pre"
@@ -86,19 +81,20 @@ lifecycle_activation_environment_is_ready() {
       "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
     && $(producer_package_version limine-snapper-sync) == \
       "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" \
-    && $(producer_package_version sbctl) == "$SUPPORTED_SBCTL_VERSION" \
-    && "efibootmgr $(producer_package_version efibootmgr)" == \
-      "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" \
-    && "coreutils $(producer_package_version coreutils)" == \
-      "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]] || {
-    fail "Lifecycle activation requires the exact supported recovery packages"
+    && $(producer_package_version sbctl) == "$SUPPORTED_SBCTL_VERSION" ]] || {
+    fail "Lifecycle activation requires the exact supported producer packages"
+    return 1
+  }
+  [[ $(vercmp "$(producer_package_version efibootmgr)" \
+    "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" 2>/dev/null) -ge 0 ]] || {
+    fail "Lifecycle activation requires efibootmgr ${WINDOWS_EFIBOOTMGR_MINIMUM_VERSION} or newer"
     return 1
   }
   unconfigure_limine_tools_are_pinned || {
     fail "Lifecycle activation requires the supported unconfiguration tools"
     return 1
   }
-  for key in removal transaction package-cleanup package-sign limine-pre limine-post; do
+  for key in removal transaction package-sign limine-pre limine-post; do
     validate_activation_hook "$key" "$command" || {
       fail "Lifecycle activation requires the current installed, unshadowed ${key} hook"
       return 1
@@ -111,10 +107,6 @@ lifecycle_activation_environment_is_ready() {
 # _lifecycle_recovery_performed and report instead of starting new work.
 recoverable_command_prelude() {
   local name="$1"
-  lifecycle_repair_is_available || {
-    fail "${name^} is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
   check_root "$name"
   check_recovery_deps
   recover_lifecycle_if_required || {
@@ -505,7 +497,6 @@ cmd_hook() {
   case "$1" in
     pre) producer_limine_hook_pre ;;
     post) producer_limine_hook_post ;;
-    package-cleanup) producer_package_checkpoint ;;
     package-sign) producer_package_post ;;
     *) return 2 ;;
   esac

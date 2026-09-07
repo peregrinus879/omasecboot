@@ -159,53 +159,34 @@ export PATH
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/bin/omasecboot"
 
-test_pinned_windows_tool_boundaries() (
-  local efibootmgr_package="" unlink_package="" efibootmgr_hash unlink_hash
-  local variable_dir variable
-  efibootmgr_package=$(/usr/bin/pacman -Q efibootmgr 2>/dev/null || true)
-  if [[ "$efibootmgr_package" == "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" ]]; then
+# The efibootmgr boundary binds the open executable and records the installed
+# package; anything below the supported floor is refused.
+test_efibootmgr_boundary() (
+  (
+    producer_package_version() { printf '17-1\n'; }
+    if validate_windows_efibootmgr_boundary >/dev/null 2>&1; then
+      fail_test "the efibootmgr boundary accepted a version below the floor"
+    fi
+  ) || exit 1
+  local version
+  version=$(producer_package_version efibootmgr 2>/dev/null || true)
+  if [[ -n "$version" ]] \
+    && [[ $(vercmp "$version" "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION") -ge 0 ]]; then
     validate_windows_efibootmgr_boundary \
-      || fail_test "could not validate the pinned efibootmgr executable"
-    efibootmgr_hash=$(hash_bound_windows_efibootmgr) \
-      || fail_test "could not hash the open efibootmgr executable"
-    [[ "$efibootmgr_hash" == "$(sha256_file /usr/bin/efibootmgr)" ]] \
+      || fail_test "could not validate the installed efibootmgr executable"
+    [[ "$_windows_efibootmgr_package" == "efibootmgr ${version}" ]] \
+      || fail_test "the boundary recorded the wrong efibootmgr package"
+    [[ $(hash_bound_windows_efibootmgr) == "$(sha256_file /usr/bin/efibootmgr)" ]] \
       || fail_test "the open efibootmgr executable hash changed"
     run_windows_efibootmgr --version >/dev/null \
-      || fail_test "could not execute the pinned efibootmgr inode"
+      || fail_test "could not execute the bound efibootmgr inode"
     close_windows_efibootmgr_boundary
   elif validate_windows_efibootmgr_boundary >/dev/null 2>&1; then
-    fail_test "the efibootmgr boundary accepted an unpinned host package"
-  fi
-
-  unlink_package=$(/usr/bin/pacman -Q coreutils 2>/dev/null || true)
-  if [[ "$unlink_package" == "$WINDOWS_UNLINK_PACKAGE_IDENTITY" ]]; then
-    validate_windows_unlink_boundary \
-      || fail_test "could not validate the pinned unlink executable"
-    unlink_hash=$(hash_bound_windows_unlink) \
-      || fail_test "could not hash the open unlink executable"
-    [[ "$unlink_hash" == "$(sha256_file /usr/bin/unlink)" ]] \
-      || fail_test "the open unlink executable hash changed"
-    variable_dir="${TEST_DIR}/boundary-efivars"
-    mkdir -p "$variable_dir"
-    windows_bootnext_efivars_dir() {
-      printf '%s\n' "$variable_dir"
-    }
-    variable=$(windows_bootnext_variable_path)
-    : > "$variable"
-    if run_windows_unlink "${TEST_DIR}/wrong-variable"; then
-      fail_test "the unlink boundary accepted a non-BootNext path"
-    fi
-    run_windows_unlink "$variable" \
-      || fail_test "could not execute the pinned unlink inode"
-    [[ ! -e "$variable" ]] \
-      || fail_test "the pinned unlink inode did not remove BootNext"
-    close_windows_unlink_boundary
-  elif validate_windows_unlink_boundary >/dev/null 2>&1; then
-    fail_test "the unlink boundary accepted an unpinned host package"
+    fail_test "the efibootmgr boundary accepted an unsupported host package"
   fi
 )
 
-test_pinned_windows_tool_boundaries
+test_efibootmgr_boundary
 
 if windows_block_device_matches "$LOADER_SOURCE" "$TEST_MAJ_MIN"; then
   fail_test "regular file was accepted as the mapped ESP block device"
@@ -827,7 +808,7 @@ if /usr/bin/grep -Eq 'run_windows_efibootmgr[[:space:]]+-N' \
   "${ROOT_DIR}/lib/windows.sh"; then
   fail_test "Windows recovery retained efibootmgr's unreliable BootNext deletion path"
 fi
-/usr/bin/grep -Fq "run_windows_unlink \"\$(windows_bootnext_variable_path)\"" \
+/usr/bin/grep -Fq "remove_windows_bootnext_variable \"\$(windows_bootnext_variable_path)\"" \
   "${ROOT_DIR}/lib/windows.sh" \
   || fail_test "Windows recovery does not use its bounded direct deletion wrapper"
 /usr/bin/grep -Fq "owner=\$(/usr/bin/pacman -Qqo \"\$path\" 2>/dev/null)" \
@@ -836,9 +817,8 @@ fi
 /usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_efibootmgr_fd}\" \"\$@\"" \
   "${ROOT_DIR}/lib/windows.sh" \
   || fail_test "guarded Windows code does not execute the validated efibootmgr inode"
-/usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_unlink_fd}\" \"\$path\"" \
-  "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "Windows recovery does not execute the validated unlink inode"
+/usr/bin/grep -Fxq "  rm -f -- \"\$1\"" "${ROOT_DIR}/lib/windows.sh" \
+  || fail_test "Windows recovery does not remove BootNext through its bounded wrapper"
 if /usr/bin/grep -RE 'systemctl[[:space:]]+reboot' \
   "${ROOT_DIR}/lib" "${ROOT_DIR}/bin" >/dev/null; then
   fail_test "production code retained a direct reboot command"
@@ -846,7 +826,7 @@ fi
 for source in "${ROOT_DIR}/bin/omasecboot" "${ROOT_DIR}"/lib/*.sh; do
   [[ "$source" == "${ROOT_DIR}/lib/windows.sh" ]] && continue
   if /usr/bin/grep -Eq \
-      'record_and_set_windows_bootnext|windows_recovery_transaction|execute_windows_recovery_action|run_windows_unlink' \
+      'record_and_set_windows_bootnext|windows_recovery_transaction|execute_windows_recovery_action|remove_windows_bootnext_variable' \
       "$source"; then
     fail_test "production path outside windows.sh can invoke a guarded Windows mutation"
   fi

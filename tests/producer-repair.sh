@@ -69,40 +69,12 @@ sbctl_database_candidate_paths() {
   printf '%s/files.json\n%s/files.db\n' "$CASE_DIR" "$CASE_DIR"
 }
 
-limine_vendor_config_dir() {
-  printf '%s/config/vendor\n' "$CASE_DIR"
-}
-
-limine_system_config_path() {
-  printf '%s/config/limine-entry-tool.conf\n' "$CASE_DIR"
-}
-
-limine_system_config_dir() {
-  printf '%s/config/system\n' "$CASE_DIR"
-}
-
-limine_snapper_config_path() {
-  printf '%s/config/limine-snapper-sync.conf\n' "$CASE_DIR"
-}
-
-machine_id_path() {
-  printf '%s/machine-id\n' "$CASE_DIR"
-}
-
-kernel_modules_dir() {
-  printf '%s/modules\n' "$CASE_DIR"
-}
-
 control_owner_uid() {
   id -u
 }
 
 require_control_root() {
   return 0
-}
-
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"not-found","active_state":"inactive","unit_file_state":"not-found"}}'
 }
 
 limine_enrollment_hooks_present() {
@@ -119,33 +91,18 @@ findmnt() {
   printf 'vfat\n'
 }
 
-producer_uefi_is_available() {
-  return 0
-}
-
 producer_package_version() {
   case "$1" in
     limine-mkinitcpio-hook) printf '%s\n' "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ;;
     limine-snapper-sync) printf '%s\n' "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" ;;
     sbctl) printf '%s\n' "$SUPPORTED_SBCTL_VERSION" ;;
-    efibootmgr) printf '%s\n' "${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }" ;;
-    coreutils) printf '%s\n' "${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }" ;;
     *) return 1 ;;
   esac
-}
-
-producer_file_owner_package() {
-  [[ "$1" == "$(kernel_modules_dir)/6.18.0/modules.builtin" ]] || return 1
-  printf 'linux\n'
 }
 
 process_matches_identity() {
   [[ "$1" == "$BASHPID" && "$2" == "$_producer_owner_kind" \
     && "$3" == "$_producer_owner_identity" ]]
-}
-
-full_restore_runtime_state() {
-  printf 'clear\n'
 }
 
 write_binary() {
@@ -245,7 +202,6 @@ create_snapshot_output() {
     }]
   }' > "${history}/snapshots.json"
   printf 'RECONSTRUCTED SNAPSHOT\n' > "${history}/${name}"
-  SNAPSHOT_OUTPUT="${history}/${name}"
 }
 
 run_package_producer_reconstruction() {
@@ -262,23 +218,14 @@ setup_fixture() {
   local name="$1" old_checksum
   CASE_DIR="${TEST_DIR}/${name}"
   REGISTRY_LOG="${CASE_DIR}/registry.log"
-  SNAPSHOT_OUTPUT=""
-  mkdir -p "${CASE_DIR}/boot/EFI/limine" "${CASE_DIR}/boot/EFI/BOOT" \
-    "${CASE_DIR}/config/vendor" "${CASE_DIR}/config/system" \
-    "${CASE_DIR}/modules/6.18.0"
+  mkdir -p "${CASE_DIR}/boot/EFI/limine" "${CASE_DIR}/boot/EFI/BOOT"
   printf 'TIMEOUT=5\n' > "$(limine_config_path)"
   printf '%s\n' \
     'ENABLE_VERIFICATION=yes' \
     'ENABLE_ENROLL_LIMINE_CONFIG=no' \
     'COMMANDS_BEFORE_SAVE="other limine-reset-enroll"' \
     'COMMANDS_AFTER_SAVE="limine-enroll-config other"' \
-    "ESP_PATH=\"$(esp_path)\"" \
-    'ENABLE_UKI=yes' \
-    'CUSTOM_UKI_NAME="omarchy"' \
-    'MKINITCPIO_FALLBACK=no' \
     > "$(limine_default_config_path)"
-  printf '0123456789abcdef0123456789abcdef\n' > "$(machine_id_path)"
-  : > "$(kernel_modules_dir)/6.18.0/modules.builtin"
   old_checksum=$(printf '0%.0s' {1..128})
   write_binary "$(limine_unsigned_binary_path)" "$old_checksum"
   write_binary "$(limine_primary_binary_path)" "$old_checksum"
@@ -296,8 +243,6 @@ set_producer_context() {
   local context="$1"
   reset_producer_context
   _producer_owner_pid=$BASHPID
-  _producer_service_policy=quiesce
-  _producer_service_owner_json=null
   case "$context" in
     package)
       _producer_class=package
@@ -305,8 +250,6 @@ set_producer_context() {
       _producer_owner_kind=executable
       _producer_owner_identity=/usr/bin/pacman
       _producer_caller=pacman
-      _producer_lock_policy=coordinator-lease
-      _producer_targets_json='["usr/lib/modules/6.18.0/modules.builtin"]'
       ;;
     uki-build)
       _producer_class=limine
@@ -314,7 +257,6 @@ set_producer_context() {
       _producer_owner_kind=script
       _producer_owner_identity=/usr/share/libalpm/scripts/limine-mkinitcpio-install
       _producer_caller=limine-mkinitcpio-install
-      _producer_lock_policy=inherited
       ;;
     entry-tool)
       _producer_class=limine
@@ -322,7 +264,6 @@ set_producer_context() {
       _producer_owner_kind=script
       _producer_owner_identity=/usr/bin/limine-entry-tool
       _producer_caller=limine-entry-tool
-      _producer_lock_policy=inherited
       ;;
     snapshot-sync)
       _producer_class=snapshot
@@ -330,7 +271,6 @@ set_producer_context() {
       _producer_owner_kind=script
       _producer_owner_identity=/usr/bin/limine-snapper-sync
       _producer_caller=limine-snapper-sync
-      _producer_lock_policy=inherited
       ;;
     full-restore)
       _producer_class=restore
@@ -338,9 +278,6 @@ set_producer_context() {
       _producer_owner_kind=script
       _producer_owner_identity=/usr/bin/limine-snapper-sync
       _producer_caller=limine-snapper-sync
-      _producer_restore=true
-      _producer_no_mutex=true
-      _producer_lock_policy=restore-window
       : > "$(snapshot_restore_lock_path)"
       chmod 644 "$(snapshot_restore_lock_path)"
       ;;
@@ -350,7 +287,7 @@ set_producer_context() {
 
 assert_recovered_case() {
   local context="$1" root_id="$2" attempt_id attempt_manifest proof_reference proof_path
-  local producer_reference expected_kind expected_action expected_path=""
+  local producer_reference expected_action
   read_lifecycle || fail_test "${context}: recovered lifecycle was unreadable"
   [[ "$_lifecycle_state" == active ]] \
     || fail_test "${context}: recovery did not restore active state"
@@ -381,8 +318,7 @@ assert_recovered_case() {
   jq -e '.kind == "recovery-attempt" and .operation == "producer-recovery" and
     .status == "completed" and .completed_phases == [
       "reconstruct-producer","backup-artifacts","configure-limine","enroll-config",
-      "verify-config","clean-tracking","sign-efi","prove-artifacts",
-      "confirm-producer-output"
+      "verify-config","clean-tracking","sign-efi","prove-artifacts"
     ]' <<< "$_manifest_json" >/dev/null \
     || fail_test "${context}: recovery phases were incomplete or out of order"
   proof_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json")
@@ -395,36 +331,15 @@ assert_recovered_case() {
     || fail_test "${context}: stable state selected the wrong recovery manifest"
 
   case "$context" in
-    package|uki-build)
-      expected_kind=uki-inventory
-      expected_action=package
-      expected_path="$(esp_path)/EFI/Linux/omarchy_linux.efi"
-      ;;
-    entry-tool)
-      expected_kind=not-applicable
-      expected_action=""
-      ;;
-    snapshot-sync|full-restore)
-      expected_kind=snapshot-manifest
-      expected_action=snapshot
-      expected_path="$SNAPSHOT_OUTPUT"
-      ;;
+    package|uki-build) expected_action=package ;;
+    entry-tool) expected_action="" ;;
+    snapshot-sync|full-restore) expected_action=snapshot ;;
   esac
-  jq -e --arg kind "$expected_kind" --arg path "$expected_path" '
-    .obligations.kind == $kind and
-    (if $path == "" then .obligations.paths == []
-     else .obligations.paths == [$path] and any(.artifacts[]; .path == $path) end)
-  ' "$proof_path" >/dev/null \
-    || fail_test "${context}: final proof omitted fixed-registry obligations"
   if [[ -n "$expected_action" ]]; then
     [[ $(grep -Fxc "$expected_action" "$REGISTRY_LOG") -eq 1 ]] \
       || fail_test "${context}: recovery selected the wrong reconstruction handler"
   elif [[ -s "$REGISTRY_LOG" ]]; then
     fail_test "${context}: no-op registry entry executed a reconstruction handler"
-  fi
-  if [[ "$context" == full-restore ]]; then
-    [[ ! -e "$(snapshot_restore_lock_path)" && ! -L "$(snapshot_restore_lock_path)" ]] \
-      || fail_test "${context}: stale restore marker survived recovery"
   fi
 }
 
@@ -444,6 +359,7 @@ run_repair_case() (
     || fail_test "${context}: failed root incident was not published"
   release_boot_repair_lock
 
+  rm -f "$(snapshot_restore_lock_path)"
   with_boot_repair_lock || fail_test "${context}: producer recovery could not lock"
   reconcile_and_recover_producer_locked \
     || fail_test "${context}: lifecycle-integrated producer recovery failed"

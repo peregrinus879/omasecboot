@@ -88,16 +88,6 @@ durable_sync() {
   [[ -z "$SYNC_FAIL_PATH" || "$path" != "$SYNC_FAIL_PATH" ]]
 }
 
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-
-systemctl() {
-  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
-    || return 1
-  printf 'inactive\n'
-}
-
 limine_enrollment_hooks_present() {
   :
 }
@@ -455,19 +445,16 @@ test_mapping_validation() {
 }
 
 test_managed_setting_drift_repair() {
-  local obligations
-  obligations=$(jq -cn --arg path "$SNAPSHOT" \
-    '{kind: "snapshot-manifest", paths: [$path]}')
   # A value that drifted back to its recorded original is repaired, not refused.
   set_limine_default_value ENABLE_VERIFICATION yes || fail_test "drift fixture failed"
-  run_artifact_repair "artifact-drift-original" "$obligations" \
+  run_artifact_repair "artifact-drift-original" \
     || fail_test "repair refused a managed setting that drifted to its recorded original"
   [[ $(grep -Fxc 'ENABLE_VERIFICATION=no' "$(limine_default_config_path)") -eq 1 ]] \
     || fail_test "drift repair did not re-apply the managed value"
   # A value outside {managed, original} is a conflict and is refused.
   replace_limine_default_entry ENABLE_VERIFICATION 'ENABLE_VERIFICATION=maybe' \
     || fail_test "conflict fixture failed"
-  if run_artifact_repair "artifact-drift-conflict" "$obligations" >/dev/null 2>&1; then
+  if run_artifact_repair "artifact-drift-conflict" >/dev/null 2>&1; then
     fail_test "repair accepted a managed setting outside its recorded values"
   fi
   set_limine_default_value ENABLE_VERIFICATION no || fail_test "conflict cleanup failed"
@@ -493,10 +480,8 @@ test_staged_limine_install() {
 }
 
 test_successful_repair() {
-  local checksum manifest last_enroll first_sign artifact proof obligations
-  obligations=$(jq -cn --arg path "$SNAPSHOT" \
-    '{kind: "snapshot-manifest", paths: [$path]}')
-  run_artifact_repair "artifact-success" "$obligations" \
+  local checksum manifest last_enroll first_sign artifact proof
+  run_artifact_repair "artifact-success" \
     || fail_test "artifact repair failed"
   checksum=$(current_limine_config_checksum) || fail_test "config checksum failed"
   verify_limine_embedded_checksum "$PRIMARY" "$checksum" \
@@ -548,32 +533,14 @@ test_successful_repair() {
     || fail_test "repair phases were not committed in the required order"
   proof=$(jq -r '.domain_records.final_proof.path' "$manifest")
   jq -e --arg path "$SNAPSHOT" --argjson schema "$FINAL_PROOF_SCHEMA_VERSION" '
-    .schema_version == $schema and
-    .obligations == {kind: "snapshot-manifest", paths: [$path]} and
-    any(.artifacts[]; .path == $path)
-  ' "$proof" >/dev/null || fail_test "final proof omitted producer obligations"
-  if validate_efi_obligations_json \
-    '{"kind":"uki-inventory","paths":["/boot/EFI/Linux/A.efi","/boot/EFI/Linux/a.efi"]}'; then
-    fail_test "case-insensitive duplicate EFI obligations were accepted"
-  fi
+    .schema_version == $schema and any(.artifacts[]; .path == $path)
+  ' "$proof" >/dev/null || fail_test "final proof omitted the snapshot artifact"
 
   : > "$ARTIFACT_LOG"
   run_artifact_repair "artifact-current-config" \
     || fail_test "current config enrollment repair failed"
   [[ $(grep -Fc 'enroll:' "$ARTIFACT_LOG") -eq 2 ]] \
     || fail_test "current config was not enrolled into both Limine binaries"
-}
-
-test_missing_obligation_rollback() {
-  local missing obligations
-  missing="$(esp_path)/EFI/Linux/expected-kernel.efi"
-  obligations=$(jq -cn --arg path "$missing" \
-    '{kind: "uki-inventory", paths: [$path]}')
-  if run_artifact_repair "artifact-missing-obligation" "$obligations" \
-    >/dev/null 2>&1; then
-    fail_test "missing expected UKI reported a complete final proof"
-  fi
-  assert_recovery_rollback "prove-artifacts"
 }
 
 test_empty_database_repair() {
@@ -729,6 +696,5 @@ run_case sign-sync-failure test_sign_sync_failure_rollback
 run_case final-mapping-failure test_final_mapping_failure_rollback
 run_case proof-failure test_final_proof_failure_rollback
 run_case proof-drift test_final_proof_drift_rollback
-run_case missing-obligation test_missing_obligation_rollback
 
 printf 'artifact tests passed\n'

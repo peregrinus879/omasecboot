@@ -12,7 +12,6 @@ LIMINEPREHOOKDIR  = /etc/boot/hooks/pre.d
 LIMINEPOSTHOOKDIR = /etc/boot/hooks/post.d
 PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
                00-omasecboot-transition-guard.hook \
-               zz-omasecboot-cleanup.hook \
                zzz-omasecboot.hook
 
 .PHONY: install uninstall test

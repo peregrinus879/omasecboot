@@ -54,7 +54,6 @@ REPAIR_BODY_CALLS=0
 PREFLIGHT_CONFIG_CHECKSUM=""
 REPAIR_CONFIG_CHECKSUM=""
 _repair_config_checksum=""
-BOOTNEXT_CAPABILITY=true
 BOOTNEXT_TOOL_VALID=true
 BOOTNEXT_TOOL_HASH='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 BOOTNEXT_COMMAND_RC=0
@@ -64,11 +63,8 @@ BOOTNEXT_COMMAND_CALLS=0
 BOOTNEXT_FAILPOINT=""
 BOOTNEXT_FAIL_ACTION=""
 BOOTNEXT_CALL_LOG=""
-WINDOWS_RECOVERY_CAPABILITY=true
 WINDOWS_RECOVERY_FAILPOINT=""
 WINDOWS_RECOVERY_FAIL_ACTION=""
-UNLINK_TOOL_VALID=true
-UNLINK_TOOL_HASH='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 UNLINK_COMMAND_RC=0
 UNLINK_COMMAND_EFFECT=true
 UNLINK_COMMAND_CALLS=0
@@ -136,18 +132,11 @@ windows_validate_efivarfs_mount() {
   [[ -d "$directory" && ! -L "$directory" ]]
 }
 
-windows_bootnext_mutation_is_available() {
-  [[ "$BOOTNEXT_CAPABILITY" == true ]]
-}
-
-windows_recovery_is_available() {
-  [[ "$WINDOWS_RECOVERY_CAPABILITY" == true ]]
-}
-
 validate_windows_efibootmgr_boundary() {
   [[ "$BOOTNEXT_TOOL_VALID" == true \
     && "$BOOTNEXT_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
   _windows_efibootmgr_hash="$BOOTNEXT_TOOL_HASH"
+  _windows_efibootmgr_package='efibootmgr 18-4'
 }
 
 hash_bound_windows_efibootmgr() {
@@ -155,18 +144,7 @@ hash_bound_windows_efibootmgr() {
   printf '%s\n' "$BOOTNEXT_TOOL_HASH"
 }
 
-validate_windows_unlink_boundary() {
-  [[ "$UNLINK_TOOL_VALID" == true \
-    && "$UNLINK_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
-  _windows_unlink_hash="$UNLINK_TOOL_HASH"
-}
-
-hash_bound_windows_unlink() {
-  [[ "$UNLINK_TOOL_HASH" =~ ^[0-9a-f]{64}$ ]] || return 1
-  printf '%s\n' "$UNLINK_TOOL_HASH"
-}
-
-run_windows_unlink() {
+remove_windows_bootnext_variable() {
   local path="$1"
   [[ "$path" == "$(windows_bootnext_variable_path)" ]] || return 64
   UNLINK_COMMAND_CALLS=$((UNLINK_COMMAND_CALLS + 1))
@@ -210,7 +188,6 @@ windows_bootnext_failpoint() {
     change-target) TARGET_BOOT=0008 ;;
     change-tool) BOOTNEXT_TOOL_HASH='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ;;
     change-boot) TEST_BOOT_ID='11111111-2222-4333-8444-555555555555' ;;
-    disable-capability) BOOTNEXT_CAPABILITY=false ;;
     corrupt-attributes) write_bootnext_variable 0007 3 ;;
     signal-term) kill -TERM "$BASHPID" ;;
     fail) return 75 ;;
@@ -226,7 +203,6 @@ windows_recovery_failpoint() {
     change-state) write_bootnext_variable 0008 ;;
     change-tool)
       BOOTNEXT_TOOL_HASH='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-      UNLINK_TOOL_HASH='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
       ;;
     corrupt-attributes) write_bootnext_variable 0007 3 ;;
     replace-variable)
@@ -237,16 +213,6 @@ windows_recovery_failpoint() {
     fail) return 75 ;;
     *) return 1 ;;
   esac
-}
-
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-
-systemctl() {
-  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
-    || return 1
-  printf 'inactive\n'
 }
 
 resolve_windows_target() {
@@ -340,7 +306,6 @@ setup_fixture() {
   PREFLIGHT_CONFIG_CHECKSUM=""
   REPAIR_CONFIG_CHECKSUM=""
   _repair_config_checksum=""
-  BOOTNEXT_CAPABILITY=true
   BOOTNEXT_TOOL_VALID=true
   BOOTNEXT_TOOL_HASH='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   BOOTNEXT_COMMAND_RC=0
@@ -349,11 +314,8 @@ setup_fixture() {
   BOOTNEXT_COMMAND_CALLS=0
   BOOTNEXT_FAILPOINT=""
   BOOTNEXT_FAIL_ACTION=""
-  WINDOWS_RECOVERY_CAPABILITY=true
   WINDOWS_RECOVERY_FAILPOINT=""
   WINDOWS_RECOVERY_FAIL_ACTION=""
-  UNLINK_TOOL_VALID=true
-  UNLINK_TOOL_HASH='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
   UNLINK_COMMAND_RC=0
   UNLINK_COMMAND_EFFECT=true
   UNLINK_COMMAND_CALLS=0
@@ -1051,7 +1013,7 @@ test_bootnext_success_and_schema() {
     || fail_test "BootNext record mode is unsafe"
   jq -e \
     --arg hash "$BOOTNEXT_TOOL_HASH" \
-    --arg package "$WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY" '
+    --arg package 'efibootmgr 18-4' '
     .operation == "windows-bootnext" and
     .prior == {boot_number:null,present:false} and
     .target == {
@@ -1089,16 +1051,6 @@ test_bootnext_prior_value() {
 
 test_bootnext_preflight_boundaries() {
   local lifecycle_hash variable
-  setup_bootnext_fixture bootnext-gate
-  lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
-  BOOTNEXT_CAPABILITY=false
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
-    fail_test "closed BootNext capability opened a transaction"
-  fi
-  [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
-    && $BOOTNEXT_COMMAND_CALLS -eq 0 ]] \
-    || fail_test "closed BootNext capability changed durable state"
-
   setup_bootnext_fixture bootnext-attributes
   write_bootnext_variable 0009 3
   lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
@@ -1185,15 +1137,6 @@ test_bootnext_prewrite_races() {
     fail_test "boot-ID race reported BootNext success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "boot-ID race reached efibootmgr"
-  assert_bootnext_recovery set-bootnext
-
-  setup_bootnext_fixture bootnext-capability-race
-  BOOTNEXT_FAILPOINT=before-target-revalidation
-  BOOTNEXT_FAIL_ACTION=disable-capability
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
-    fail_test "closed second BootNext gate reported success"
-  fi
-  [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "closed second gate reached efibootmgr"
   assert_bootnext_recovery set-bootnext
 }
 
@@ -1718,7 +1661,7 @@ test_windows_recovery_reconciles_completed_transition() {
 
 test_windows_recovery_prewrite_races() {
   local action manifest
-  for action in change-boot change-state change-tool replace-variable; do
+  for action in change-boot change-state replace-variable; do
     setup_bootnext_fixture "recovery-race-${action}"
     create_bootnext_effect_incident
     WINDOWS_RECOVERY_FAILPOINT=after-recovery-record

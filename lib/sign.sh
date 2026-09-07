@@ -1026,7 +1026,6 @@ unconfigure_windows_state_identity() {
 # Everything an unconfiguration mutates must still match what its intent
 # captured. Shared by the root transaction and by recovery.
 unconfigure_inputs_are_current() {
-  local current_obligations
   unconfigure_limine_tools_match_intent || return 1
   artifact_esp_is_mounted || return 1
   validate_control_file "$(limine_default_config_path)" || return 1
@@ -1037,12 +1036,7 @@ unconfigure_inputs_are_current() {
   limine_managed_settings_are_restorable "$_unconfigure_managed_settings_json" || return 1
   owned_tracking_state_is_safe "$_unconfigure_tracking_paths_json" || return 1
   windows_unconfigure_preflight || return 1
-  [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
-    || return 1
-  current_obligations=$(derive_uki_inventory_obligations) || return 1
-  validate_efi_obligations_json "$current_obligations" || return 1
-  [[ "$(jq -Sc . <<< "$current_obligations")" == \
-    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]]
+  [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]]
 }
 
 # The root transaction also requires the lifecycle's ownership records to be
@@ -1171,8 +1165,6 @@ unconfigure_preflight() {
     <<< "$_lifecycle_json") || return 1
   _unconfigure_tracking_reference_json=$(jq -c '.tracking_ownership' \
     <<< "$_lifecycle_json") || return 1
-  _unconfigure_rebuild_obligations_json=$(derive_uki_inventory_obligations) || return 1
-  validate_efi_obligations_json "$_unconfigure_rebuild_obligations_json" || return 1
   _unconfigure_windows_identity=$(unconfigure_windows_state_identity) || return 1
   unconfigure_validate_all_conflicts || {
     fail "Unconfiguration found an unknown original value or a managed-state conflict"
@@ -1230,7 +1222,6 @@ persist_unconfigure_intent() {
     --arg windows_identity "$_unconfigure_windows_identity" \
     --argjson managed "$_unconfigure_managed_reference_json" \
     --argjson tracking "$_unconfigure_tracking_reference_json" \
-    --argjson obligations "$_unconfigure_rebuild_obligations_json" \
     --argjson tools "$_unconfigure_limine_tools_json" '{
       schema_version: $schema,
       writer_version: $version,
@@ -1241,8 +1232,7 @@ persist_unconfigure_intent() {
       tracking_ownership: $tracking,
       windows_state_identity: $windows_identity,
       limine_source: {path: $source, identity: $source_identity, sha256: $source_hash},
-      limine_tools: $tools,
-      rebuild_obligations: $obligations
+      limine_tools: $tools
     }') || return 1
   persist_transaction_domain_record unconfigure "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
     validate_unconfigure_intent_json recorded_at "$document" || return 1
@@ -1250,28 +1240,18 @@ persist_unconfigure_intent() {
 }
 
 run_checked_stock_limine_rebuild() {
-  local final_obligations
   run_visible run_bound_unconfigure_limine_tool install true \
     --no-efi-register --fallback || return 1
   run_visible run_bound_unconfigure_limine_tool mkinitcpio true || return 1
   run_visible run_bound_unconfigure_limine_tool reset false || return 1
   durable_sync "$(esp_path)" || return 1
-  final_obligations=$(derive_uki_inventory_obligations) || return 1
-  [[ "$(jq -Sc . <<< "$final_obligations")" == \
-    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
-  verify_obligated_efi_artifacts_exist "$final_obligations" || return 1
   unconfigured_limine_targets_match_source
 }
 
 persist_unconfigure_proof() {
-  local document root_incident current_obligations operation="$_transaction_operation"
+  local document root_incident operation="$_transaction_operation"
   [[ "$operation" == unconfigure || "$operation" == unconfigure-recovery ]] || return 1
   unconfigured_limine_targets_match_source || return 1
-  current_obligations=$(derive_uki_inventory_obligations) || return 1
-  validate_efi_obligations_json "$current_obligations" || return 1
-  [[ "$(jq -Sc . <<< "$current_obligations")" == \
-    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
-  verify_obligated_efi_artifacts_exist "$current_obligations" || return 1
   root_incident=null
   [[ "$operation" == unconfigure ]] || root_incident="$_recovery_root_reference"
   document=$(jq -cn \
@@ -1287,8 +1267,7 @@ persist_unconfigure_proof() {
     --argjson intent "$_unconfigure_intent_reference_json" \
     --argjson root_incident "$root_incident" \
     --argjson managed_settings "$_unconfigure_managed_reference_json" \
-    --argjson tracking_ownership "$_unconfigure_tracking_reference_json" \
-    --argjson obligations "$_unconfigure_rebuild_obligations_json" '{
+    --argjson tracking_ownership "$_unconfigure_tracking_reference_json" '{
       schema_version: $schema,
       writer_version: $version,
       transaction_id: $id,
@@ -1301,7 +1280,6 @@ persist_unconfigure_proof() {
       windows: "managed-block-absent",
       managed_settings: $managed_settings,
       tracking_ownership: $tracking_ownership,
-      rebuild_obligations: $obligations,
       limine: {
         source: {path: $source, sha256: $source_hash},
         primary: {path: $primary, config_checksum: $zero_checksum, sha256: $primary_hash},
@@ -1319,7 +1297,6 @@ unconfigure_recovery_failpoint() {
 load_unconfigure_recovery_context() {
   local recovery_operation root_id intent_path intent_document managed_path tracking_path
   local managed_document tracking_document
-  unconfigure_recovery_is_available || return 1
   load_recovery_context || return $?
   recovery_operation=$(recovery_operation_for_root_manifest \
     "$_recovery_root_manifest_json") || return 1
@@ -1338,8 +1315,6 @@ load_unconfigure_recovery_context() {
   _unconfigure_managed_reference_json=$(jq -c '.managed_settings' \
     <<< "$intent_document") || return 1
   _unconfigure_tracking_reference_json=$(jq -c '.tracking_ownership' \
-    <<< "$intent_document") || return 1
-  _unconfigure_rebuild_obligations_json=$(jq -c '.rebuild_obligations' \
     <<< "$intent_document") || return 1
   _unconfigure_windows_identity=$(jq -r '.windows_state_identity' \
     <<< "$intent_document") || return 1
@@ -1583,26 +1558,15 @@ sign_all_efi() {
 }
 
 verify_all_efi_artifacts() {
-  local expected="$1" persist_proof="${2:-false}" obligations="${3:-}"
+  local expected="$1" persist_proof="${2:-false}"
   local enrolled_raw file config config_hash config_identity hash identity
   local proved_artifacts='[]'
-  local -A enrolled_map=() discovered_map=()
+  local -A enrolled_map=()
 
   [[ "$persist_proof" == true || "$persist_proof" == false ]] || return 1
-  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
-  validate_efi_obligations_json "$obligations" || return 1
   verify_limine_config_targets "$expected" || return 1
   collect_discovered_efi_files || return 1
   validate_discovered_sbctl_mappings || return 1
-  for file in "${_discovered_efi_files[@]}"; do
-    discovered_map["$file"]=1
-  done
-  while IFS= read -r file; do
-    [[ -n "${discovered_map[$file]:-}" ]] || {
-      fail "Expected EFI artifact is missing from discovery: ${file}"
-      return 1
-    }
-  done < <(jq -r '.paths[]' <<< "$obligations")
   enrolled_raw=$(list_enrolled_paths) || {
     fail "Could not read final sbctl tracking state"
     return 1
@@ -1632,7 +1596,7 @@ verify_all_efi_artifacts() {
     validate_control_file "$config" || return 1
     config_hash=$(sha256_file "$config") || return 1
     config_identity=$(control_file_identity "$config") || return 1
-    persist_final_artifact_proof "$expected" "$obligations" "$config" "$config_hash" \
+    persist_final_artifact_proof "$expected" "$config" "$config_hash" \
       "$config_identity" "$proved_artifacts" || return 1
   fi
   qpass "All discovered EFI artifacts are locally signed and tracked"
@@ -1641,12 +1605,11 @@ verify_all_efi_artifacts() {
 # Re-reads every proved artifact and the config once more at the persistence
 # boundary, then publishes the proof create-once.
 persist_final_artifact_proof() {
-  local expected="$1" obligations="$2" config="$3" config_hash="$4"
-  local config_identity="$5" artifacts="$6" artifact file document
+  local expected="$1" config="$2" config_hash="$3" config_identity="$4" artifacts="$5"
+  local artifact file document
   [[ "$_transaction_active" == true && "$expected" =~ ^[0-9a-f]{128}$ \
     && "$config_hash" =~ ^[0-9a-f]{64}$ \
     && "$config_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-  validate_efi_obligations_json "$obligations" || return 1
   jq -e 'type == "array" and length > 0' <<< "$artifacts" >/dev/null || return 1
   [[ "$config" == "$(limine_config_path)" ]] || return 1
   validate_control_file "$config" || return 1
@@ -1664,14 +1627,13 @@ persist_final_artifact_proof() {
     --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
     --arg timestamp "$(utc_timestamp)" --arg config "$config" --arg checksum "$expected" \
     --arg config_hash "$config_hash" --arg config_identity "$config_identity" \
-    --argjson obligations "$obligations" --argjson artifacts "$artifacts" '{
+    --argjson artifacts "$artifacts" '{
       schema_version: $schema,
       writer_version: $version,
       transaction_id: $id,
       proved_at: $timestamp,
       config: {path: $config, checksum: $checksum, sha256: $config_hash,
         identity: $config_identity},
-      obligations: $obligations,
       artifacts: $artifacts
     }') || return 1
   persist_transaction_domain_record final_proof "$FINAL_PROOF_SCHEMA_VERSION" \
@@ -1679,9 +1641,6 @@ persist_final_artifact_proof() {
 }
 
 repair_boot_artifacts() {
-  local obligations="${1:-}"
-  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
-  validate_efi_obligations_json "$obligations" || return 1
   transaction_phase_start "backup-artifacts" || return 1
   transaction_backup_file "$(limine_default_config_path)" || return 1
   transaction_backup_file "$(limine_primary_binary_path)" || return 1
@@ -1714,13 +1673,11 @@ repair_boot_artifacts() {
   transaction_phase_complete "sign-efi" || return 1
 
   transaction_phase_start "prove-artifacts" || return 1
-  verify_all_efi_artifacts "$_repair_config_checksum" true "$obligations" || return 1
+  verify_all_efi_artifacts "$_repair_config_checksum" true || return 1
   transaction_phase_complete "prove-artifacts"
 }
 
 run_artifact_repair() {
-  local operation="$1" obligations="${2:-}"
-  [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
-  run_lifecycle_transaction_with_preflight "$operation" "active" "active" \
-    artifact_repair_preflight repair_boot_artifacts "$obligations"
+  run_lifecycle_transaction_with_preflight "$1" "active" "active" \
+    artifact_repair_preflight repair_boot_artifacts
 }

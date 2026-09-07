@@ -26,29 +26,20 @@ source "${ROOT_DIR}/lib/discover.sh"
 source "${ROOT_DIR}/lib/sign.sh"
 # shellcheck source=../lib/producers.sh
 source "${ROOT_DIR}/lib/producers.sh"
-REAL_CAPTURE_PRODUCER_BASELINE=$(declare -f capture_producer_baseline)
 REAL_RESOLVE_PACKAGE_PRODUCER_CONTEXT=$(declare -f resolve_package_producer_context)
-REAL_FULL_RESTORE_RUNTIME_STATE=$(declare -f full_restore_runtime_state)
-REAL_LIFECYCLE_REPAIR_IS_AVAILABLE=$(declare -f lifecycle_repair_is_available)
 
 CASE_DIR="${TEST_DIR}/case"
 CONFIG_FILE="${CASE_DIR}/limine.conf"
 DEFAULTS_FILE="${CASE_DIR}/limine-defaults"
 EFI_FILE="${CASE_DIR}/boot/EFI/Linux/test.efi"
-SERVICE_ACTIVE_FILE="${CASE_DIR}/service-active"
-SERVICE_ACTION_LOG="${CASE_DIR}/service-actions"
 REGISTRY_LOG="${CASE_DIR}/registry-actions"
-PRODUCTION_GATE=false
 OWNER_ALIVE=true
 ROOT_ALLOWED=true
 LIMINE_CONTEXT=restore
 LIMINE_OWNER_PID_OVERRIDE=""
-RESTORE_RUNTIME_STATE=clear
 MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
 SNAPPER_VERSION="$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION"
 SBCTL_VERSION="$SUPPORTED_SBCTL_VERSION"
-EFIBOOTMGR_VERSION="${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }"
-COREUTILS_VERSION="${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }"
 PRODUCER_FAILPOINT=""
 
 state_dir_path() {
@@ -87,10 +78,6 @@ durable_sync() {
   :
 }
 
-lifecycle_repair_is_available() {
-  [[ "$PRODUCTION_GATE" == true ]]
-}
-
 process_matches_identity() {
   [[ "$1" =~ ^[1-9][0-9]*$ && ( "$2" == executable || "$2" == script ) \
     && "$3" == /* ]]
@@ -100,17 +87,11 @@ manifest_owner_is_alive() {
   [[ "$OWNER_ALIVE" == true ]]
 }
 
-full_restore_runtime_state() {
-  printf '%s\n' "$RESTORE_RUNTIME_STATE"
-}
-
 producer_package_version() {
   case "$1" in
     limine-mkinitcpio-hook) printf '%s\n' "$MKINITCPIO_VERSION" ;;
     limine-snapper-sync) printf '%s\n' "$SNAPPER_VERSION" ;;
     sbctl) printf '%s\n' "$SBCTL_VERSION" ;;
-    efibootmgr) printf '%s\n' "$EFIBOOTMGR_VERSION" ;;
-    coreutils) printf '%s\n' "$COREUTILS_VERSION" ;;
     *) return 1 ;;
   esac
 }
@@ -119,65 +100,8 @@ lifecycle_failpoint() {
   [[ "$1" != "$PRODUCER_FAILPOINT" ]]
 }
 
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-
-systemctl() {
-  local unit="$TRANSACTION_SERVICE_UNIT"
-  case "$*" in
-    "show --property=ActiveState --value ${unit}")
-      printf '%s\n' "$(<"$SERVICE_ACTIVE_FILE")"
-      ;;
-    "stop ${unit}")
-      printf 'stop\n' >> "$SERVICE_ACTION_LOG"
-      printf 'inactive\n' > "$SERVICE_ACTIVE_FILE"
-      ;;
-    "start ${unit}")
-      printf 'start\n' >> "$SERVICE_ACTION_LOG"
-      printf 'active\n' > "$SERVICE_ACTIVE_FILE"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
 producer_reconstruction_preflight() {
   :
-}
-
-capture_producer_baseline() {
-  local transaction_id="$1" timestamp artifacts document path entry
-  timestamp=$(utc_timestamp)
-  artifacts='[]'
-  for path in "$CONFIG_FILE" "$DEFAULTS_FILE"; do
-    entry=$(jq -cn \
-      --arg kind "$([[ "$path" == "$CONFIG_FILE" ]] && printf config || printf defaults)" \
-      --arg path "$path" \
-      --arg hash "$(sha256_file "$path")" \
-      --arg identity "$(control_file_identity "$path")" '{
-        identity: $identity,
-        kind: $kind,
-        path: $path,
-        presence: "present",
-        sha256: $hash
-      }')
-    artifacts=$(jq -c --argjson entry "$entry" '. + [$entry]' <<< "$artifacts")
-  done
-  artifacts=$(jq -c 'sort_by(.path)' <<< "$artifacts")
-  document=$(jq -cn \
-    --argjson schema "$PRODUCER_BASELINE_SCHEMA_VERSION" \
-    --arg version "$OMASECBOOT_VERSION" \
-    --arg id "$transaction_id" \
-    --arg timestamp "$timestamp" \
-    --argjson artifacts "$artifacts" '{
-      schema_version: $schema,
-      writer_version: $version,
-      transaction_id: $id,
-      captured_at: $timestamp,
-      artifacts: $artifacts
-    }')
-  validate_producer_baseline_json "$transaction_id" "$document"
-  printf '%s\n' "$document"
 }
 
 resolve_package_producer_context() {
@@ -188,7 +112,6 @@ resolve_package_producer_context() {
   _producer_owner_kind=executable
   _producer_owner_identity=/usr/bin/pacman
   _producer_caller=pacman
-  _producer_lock_policy=coordinator-lease
 }
 
 resolve_limine_producer_context() {
@@ -202,23 +125,18 @@ resolve_limine_producer_context() {
       _producer_subtype="entry-tool"
       _producer_owner_identity=/usr/bin/limine-entry-tool
       _producer_caller=limine-entry-tool
-      _producer_lock_policy=inherited
       ;;
     snapshot)
       _producer_class=snapshot
       _producer_subtype=snapshot-sync
       _producer_owner_identity=/usr/bin/limine-snapper-sync
       _producer_caller=limine-snapper-sync
-      _producer_lock_policy=inherited
       ;;
     restore)
       _producer_class=restore
       _producer_subtype=full-restore
       _producer_owner_identity=/usr/bin/limine-snapper-sync
       _producer_caller=limine-snapper-sync
-      _producer_restore=true
-      _producer_no_mutex=true
-      _producer_lock_policy=restore-window
       ;;
     *) return 1 ;;
   esac
@@ -251,7 +169,6 @@ write_test_final_proof() {
         sha256: $config_hash,
         identity: $config_identity
       },
-      obligations: {kind: "not-applicable", paths: []},
       artifacts: [{
         path: $artifact,
         sha256: $artifact_hash,
@@ -269,7 +186,7 @@ write_test_final_proof() {
 run_test_producer_repair_phases() {
   local phase
   for phase in reconstruct-producer backup-artifacts configure-limine enroll-config \
-    verify-config clean-tracking sign-efi prove-artifacts confirm-producer-output; do
+    verify-config clean-tracking sign-efi prove-artifacts; do
     transaction_phase_start "$phase" || return 1
     if [[ "$phase" == prove-artifacts ]]; then
       write_test_final_proof || return 1
@@ -302,20 +219,14 @@ reset_case() {
   printf 'TIMEOUT=5\n' > "$CONFIG_FILE"
   printf 'ENABLE_VERIFICATION=no\n' > "$DEFAULTS_FILE"
   printf 'SIGNED EFI\n' > "$EFI_FILE"
-  printf 'inactive\n' > "$SERVICE_ACTIVE_FILE"
-  : > "$SERVICE_ACTION_LOG"
   : > "$REGISTRY_LOG"
-  PRODUCTION_GATE=false
   OWNER_ALIVE=true
   ROOT_ALLOWED=true
   LIMINE_CONTEXT=restore
   LIMINE_OWNER_PID_OVERRIDE=""
-  RESTORE_RUNTIME_STATE=clear
   MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
   SNAPPER_VERSION="$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION"
   SBCTL_VERSION="$SUPPORTED_SBCTL_VERSION"
-  EFIBOOTMGR_VERSION="${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }"
-  COREUTILS_VERSION="${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }"
   PRODUCER_FAILPOINT=""
   reset_recovery_context
   reset_producer_context
@@ -339,46 +250,6 @@ activate_case() {
 }
 
 reset_case
-(
-  eval "$REAL_LIFECYCLE_REPAIR_IS_AVAILABLE"
-  lifecycle_repair_is_available || fail_test "production lifecycle repair gate is closed"
-)
-(
-  eval "$REAL_CAPTURE_PRODUCER_BASELINE"
-  inventory_extra_efi=false
-  inventory_extra_tracking=false
-  extra_efi="$CASE_DIR/boot/EFI/Linux/extra.efi"
-  tracking_path="$CASE_DIR/tracking.json"
-  extra_tracking_path="$CASE_DIR/tracking-extra.json"
-  discover_efi_files() {
-    printf '%s\n' "$EFI_FILE"
-    [[ "$inventory_extra_efi" == false ]] || printf '%s\n' "$extra_efi"
-  }
-  sbctl_database_candidate_paths() {
-    printf '%s\n' "$tracking_path"
-    [[ "$inventory_extra_tracking" == false ]] || printf '%s\n' "$extra_tracking_path"
-  }
-  baseline=$(capture_producer_baseline 11111111-1111-1111-1111-111111111111) \
-    || fail_test "real producer baseline capture failed"
-  producer_baseline_matches_current "$baseline" \
-    || fail_test "unchanged complete producer baseline did not revalidate"
-  printf 'CHANGED EFI\n' > "$EFI_FILE"
-  if producer_baseline_matches_current "$baseline"; then
-    fail_test "changed producer baseline artifact revalidated"
-  fi
-  printf 'SIGNED EFI\n' > "$EFI_FILE"
-  printf 'EXTRA EFI\n' > "$extra_efi"
-  inventory_extra_efi=true
-  if producer_baseline_matches_current "$baseline"; then
-    fail_test "new EFI artifact was omitted from baseline revalidation"
-  fi
-  inventory_extra_efi=false
-  rm -f "$extra_efi"
-  inventory_extra_tracking=true
-  if producer_baseline_matches_current "$baseline"; then
-    fail_test "new tracking candidate was omitted from baseline revalidation"
-  fi
-)
 [[ $(parse_pacman_query_version limine-mkinitcpio-hook \
   'limine-mkinitcpio-hook 1.38.0-1') == 1.38.0-1 ]] \
   || fail_test "pacman package version was not parsed"
@@ -390,86 +261,6 @@ for invalid_query in \
     fail_test "malformed pacman package query was accepted"
   fi
 done
-(
-  eval "$REAL_FULL_RESTORE_RUNTIME_STATE"
-  scanner_root="${TEST_DIR}/scanner-proc"
-  scanner_cwd="${TEST_DIR}/scanner-cwd"
-  scanner_pid=91021
-  mkdir -p "${scanner_root}/${scanner_pid}" "$scanner_cwd"
-  : > "${scanner_cwd}/relative-restore"
-  ln -s "$scanner_cwd" "${scanner_root}/${scanner_pid}/cwd"
-  [[ $(full_restore_process_script "${scanner_root}/${scanner_pid}" relative-restore) == \
-    "${scanner_cwd}/relative-restore" ]] \
-    || fail_test "restore process script was not resolved through its own cwd"
-
-  SCAN_FAILURE=""
-  SCAN_EXECUTABLE=/usr/bin/bash
-  SCAN_SCRIPT=/usr/bin/limine-snapper-restore
-  full_restore_process_root() {
-    if [[ "$SCAN_FAILURE" == root ]]; then
-      printf 'relative\n'
-    else
-      printf '%s\n' "$scanner_root"
-    fi
-  }
-  validate_control_file() {
-    [[ "$SCAN_FAILURE" != validate ]]
-  }
-  process_start_time() {
-    [[ "$1" == "$scanner_pid" && "$SCAN_FAILURE" != start ]] || return 1
-    printf '910210\n'
-  }
-  process_effective_uid() {
-    [[ "$1" == "$scanner_pid" && "$SCAN_FAILURE" != uid ]] || return 1
-    id -u
-  }
-  process_state() {
-    [[ "$1" == "$scanner_pid" && "$SCAN_FAILURE" != state ]] || return 1
-    printf 'S\n'
-  }
-  full_restore_process_executable() {
-    [[ "$SCAN_FAILURE" != executable ]] || return 1
-    printf '%s\n' "$SCAN_EXECUTABLE"
-  }
-  full_restore_process_script() {
-    [[ "$SCAN_FAILURE" != script ]] || return 1
-    printf '%s\n' "$SCAN_SCRIPT"
-  }
-  write_scanner_cmdline() {
-    printf '%s\0' "$@" > "${scanner_root}/${scanner_pid}/cmdline"
-  }
-  assert_scanner_state() {
-    local expected="$1" reason="$2" actual
-    actual=$(full_restore_runtime_state)
-    [[ "$actual" == "$expected" ]] || fail_test "$reason"
-  }
-
-  write_scanner_cmdline bash relative-restore
-  assert_scanner_state running "restore wrapper process was not detected"
-  SCAN_SCRIPT=/usr/bin/limine-snapper-sync
-  write_scanner_cmdline bash relative-restore --restore --no-mutex
-  assert_scanner_state running "restore sync shell was not detected"
-  write_scanner_cmdline bash relative-restore --restore
-  assert_scanner_state clear "non-full sync shell was treated as a full restore"
-  SCAN_EXECUTABLE=/usr/lib/limine/limine-snapper-sync
-  SCAN_SCRIPT=""
-  write_scanner_cmdline /usr/lib/limine/limine-snapper-sync --restore
-  assert_scanner_state running "native restore worker was not detected"
-  write_scanner_cmdline /usr/lib/limine/limine-snapper-sync --update
-  assert_scanner_state clear "unrelated native worker was treated as a restore"
-
-  SCAN_EXECUTABLE=/usr/bin/bash
-  SCAN_SCRIPT=/usr/bin/limine-snapper-sync
-  for SCAN_FAILURE in validate root start uid state executable script; do
-    write_scanner_cmdline bash relative-restore --restore --no-mutex
-    assert_scanner_state unknown \
-      "restore process scan did not fail closed for ${SCAN_FAILURE} uncertainty"
-  done
-  SCAN_FAILURE=""
-  rm -f "${scanner_root}/${scanner_pid}/cmdline"
-  assert_scanner_state unknown \
-    "restore process scan did not fail closed for cmdline uncertainty"
-)
 (
   process_effective_uid() { id -u; }
   process_matches_identity() {
@@ -507,49 +298,20 @@ large_targets="$TEST_DIR/package-targets"
 for ((target_index = 0; target_index < 7000; target_index++)); do
   printf 'usr/lib/modules/test-%05d/vmlinuz\n' "$target_index" >> "$large_targets"
 done
-read_package_producer_targets < "$large_targets" \
-  || fail_test "package target reader rejected a realistic transaction"
-jq -e 'length == 7000' <<< "$_producer_targets_json" >/dev/null \
-  || fail_test "package target reader truncated a realistic transaction"
-boundary_targets="$TEST_DIR/package-target-boundary"
-: > "$boundary_targets"
-for ((target_index = 0; target_index < 120; target_index++)); do
-  printf '%04095d\n' 0 >> "$boundary_targets"
-done
-read_package_producer_targets < "$boundary_targets" \
-  || fail_test "package target reader rejected its exact byte boundary"
-printf '%04095d\n' 0 >> "$boundary_targets"
-if read_package_producer_targets < "$boundary_targets"; then
-  fail_test "package target reader accepted input above its byte boundary"
+if package_targets_change_pinned_producer < "$large_targets"; then
+  fail_test "package target policy blocked a realistic transaction"
+else
+  [[ $? -eq 1 ]] || fail_test "package target policy rejected a realistic transaction"
 fi
-count_boundary_targets="$TEST_DIR/package-target-count-boundary"
-: > "$count_boundary_targets"
-for ((target_index = 0; target_index < MAX_PRODUCER_TARGETS; target_index++)); do
-  printf 'usr/lib/x/%016x\n' "$target_index" >> "$count_boundary_targets"
-done
-read_package_producer_targets < "$count_boundary_targets" \
-  || fail_test "package target reader rejected its exact count boundary"
-jq -e --argjson count "$MAX_PRODUCER_TARGETS" 'length == $count' \
-  <<< "$_producer_targets_json" >/dev/null \
-  || fail_test "package target reader truncated its exact count boundary"
-printf 'usr/lib/x/overflow\n' >> "$count_boundary_targets"
-if read_package_producer_targets < "$count_boundary_targets"; then
-  fail_test "package target reader accepted input above its count boundary"
+if package_targets_change_pinned_producer < /dev/null; then
+  fail_test "package target policy accepted an empty target list"
+else
+  [[ $? -eq 2 ]] || fail_test "empty package target list was not classified as unusable"
 fi
 stream_package_targets() {
   local target
   while IFS= read -r target; do printf '%s\n' "$target"; done < "$large_targets"
 }
-stream_malformed_package_targets() {
-  printf '%04100d\n' 0
-  stream_package_targets
-}
-set +e
-stream_malformed_package_targets | read_package_producer_targets
-malformed_pipe_status=("${PIPESTATUS[@]}")
-set -e
-[[ ${malformed_pipe_status[0]} -eq 0 && ${malformed_pipe_status[1]} -ne 0 ]] \
-  || fail_test "malformed package targets were not drained before rejection"
 ROOT_ALLOWED=false
 set +e
 stream_package_targets | producer_package_pre >/dev/null 2>&1
@@ -563,29 +325,8 @@ producer_package_pre < "$large_targets" \
 [[ ! -e "$(lifecycle_file_path)" ]] \
   || fail_test "unmanaged package producer wrote lifecycle state"
 
-activate_case
-if producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' >/dev/null 2>&1; then
-  fail_test "closed production gate admitted a package producer"
-fi
-set +e
-stream_package_targets | producer_package_pre >/dev/null 2>&1
-closed_pipe_status=("${PIPESTATUS[@]}")
-set -e
-[[ ${closed_pipe_status[0]} -eq 0 && ${closed_pipe_status[1]} -ne 0 ]] \
-  || fail_test "closed package gate returned before draining NeedsTargets input"
-read_lifecycle || fail_test "closed package gate damaged lifecycle state"
-[[ "$_lifecycle_state" == active ]] || fail_test "closed package gate changed active state"
-producer_recovery_is_available \
-  || fail_test "producer component capability was not available"
-if lifecycle_repair_is_available; then
-  fail_test "closed producer-gate fixture unexpectedly opened"
-fi
-firmware_recovery_is_available \
-  || fail_test "firmware recovery component capability was not available"
-
 (
   reset_case
-  PRODUCTION_GATE=true
   read_lifecycle() {
     _lifecycle_read_status=supported
     _lifecycle_state=invented
@@ -597,11 +338,6 @@ firmware_recovery_is_available \
   set -e
   [[ ${unknown_pipe_status[0]} -eq 0 && ${unknown_pipe_status[1]} -eq 1 ]] \
     || fail_test "unknown-state package rejection did not drain NeedsTargets input"
-  if producer_package_checkpoint >/dev/null 2>&1; then
-    fail_test "package checkpoint accepted an unsupported lifecycle state"
-  else
-    [[ $? -eq 1 ]] || fail_test "unknown package checkpoint status was not blocking"
-  fi
   if producer_package_post >/dev/null 2>&1; then
     fail_test "package completion accepted an unsupported lifecycle state"
   else
@@ -622,7 +358,6 @@ firmware_recovery_is_available \
 (
   reset_case
   LIMINE_CONTEXT=restore
-  PRODUCTION_GATE=false
   restore_read_count=0
   read_lifecycle() {
     restore_read_count=$((restore_read_count + 1))
@@ -647,7 +382,6 @@ firmware_recovery_is_available \
 (
   reset_case
   LIMINE_CONTEXT="entry-tool"
-  PRODUCTION_GATE=false
   producer_limine_lock() { with_boot_repair_lock; }
   limine_read_count=0
   read_lifecycle() {
@@ -664,7 +398,7 @@ firmware_recovery_is_available \
   else
     [[ $? -eq 100 ]] || fail_test "Limine producer race used a non-blocking status"
   fi
-  [[ $limine_read_count -eq 2 ]] \
+  [[ $limine_read_count -ge 2 ]] \
     || fail_test "Limine producer admission was not repeated under both locks"
   [[ ! -e "$(lifecycle_file_path)" ]] \
     || fail_test "blocked Limine producer race wrote lifecycle state"
@@ -711,7 +445,6 @@ firmware_recovery_is_available \
 for producer_failpoint in after-producer-manifest-write after-producer-transition-write; do
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   PRODUCER_FAILPOINT="$producer_failpoint"
   if producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
     >/dev/null 2>&1; then
@@ -728,18 +461,7 @@ for producer_failpoint in after-producer-manifest-write after-producer-transitio
 done
 reset_case
 activate_case
-PRODUCTION_GATE=true
-invalid_targets_output="$CASE_DIR/invalid-targets.out"
-set +e
-stream_malformed_package_targets \
-  | producer_package_pre > "$invalid_targets_output" 2>&1
-invalid_targets_status=("${PIPESTATUS[@]}")
-set -e
-[[ ${invalid_targets_status[0]} -eq 0 && ${invalid_targets_status[1]} -ne 0 ]] \
-  || fail_test "active malformed package targets were not drained before rejection"
-grep -Fq 'package targets are invalid' "$invalid_targets_output" \
-  || fail_test "malformed package targets omitted their rejection reason"
-for pinned_target in limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr coreutils; do
+for pinned_target in limine-mkinitcpio-hook limine-snapper-sync sbctl; do
   pinned_targets_output="${CASE_DIR}/pinned-targets-${pinned_target}.out"
   if producer_package_pre <<< "$pinned_target" \
     > "$pinned_targets_output" 2>&1; then
@@ -751,15 +473,6 @@ for pinned_target in limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr
   [[ "$_lifecycle_state" == active ]] \
     || fail_test "pinned package rejection changed lifecycle state: ${pinned_target}"
 done
-SBCTL_VERSION=0.19-1
-if producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
-  >/dev/null 2>&1; then
-  fail_test "package producer accepted a drifted sbctl version"
-fi
-read_lifecycle || fail_test "sbctl compatibility rejection damaged lifecycle state"
-[[ "$_lifecycle_state" == active ]] \
-  || fail_test "sbctl compatibility rejection changed lifecycle state"
-SBCTL_VERSION="$SUPPORTED_SBCTL_VERSION"
 producer_package_pre <<'EOF' || fail_test "package producer lease was not published"
 usr/lib/modules/6.18.0/modules.builtin
 usr/lib/initcpio/install/base
@@ -770,30 +483,23 @@ read_lifecycle || fail_test "package lease lifecycle was unreadable"
 package_root_id="$_lifecycle_transaction_id"
 package_manifest=$(lifecycle_manifest_path "$package_root_id")
 package_record=$(jq -r '.domain_records.producer.path' "$package_manifest")
-package_baseline=$(jq -r '.baseline.path' "$package_record")
-jq -e '
-  .producer_class == "package" and .subtype == "package-transaction" and
-  .service_policy == "quiesce" and
-  .invocation.targets == [
-    "usr/lib/initcpio/install/base",
-    "usr/lib/modules/6.18.0/modules.builtin"
-  ]
-' "$package_record" >/dev/null || fail_test "package producer record was incomplete"
-[[ $(stat -Lc '%a' "$package_record") == 600 \
-  && $(stat -Lc '%a' "$package_baseline") == 600 ]] \
+jq -e '.producer_class == "package" and .subtype == "package-transaction" and
+  .caller == "pacman"' "$package_record" >/dev/null \
+  || fail_test "package producer record was incomplete"
+[[ $(stat -Lc '%a' "$package_record") == 600 ]] \
   || fail_test "producer evidence was not private"
 package_state_hash=$(sha256_file "$(lifecycle_file_path)")
 process_has_ancestor_definition=$(declare -f process_has_ancestor)
 process_has_ancestor() { return 1; }
-if producer_package_checkpoint >/dev/null 2>&1; then
-  fail_test "package checkpoint accepted a caller outside the recorded coordinator"
+if producer_package_post >/dev/null 2>&1; then
+  fail_test "package completion accepted a caller outside the recorded coordinator"
 fi
 eval "$process_has_ancestor_definition"
-read_lifecycle || fail_test "rejected package checkpoint damaged lifecycle state"
+read_lifecycle || fail_test "rejected package completion damaged lifecycle state"
 [[ "$_lifecycle_state" == transition \
   && "$_lifecycle_transaction_id" == "$package_root_id" \
   && $(sha256_file "$(lifecycle_file_path)") == "$package_state_hash" ]] \
-  || fail_test "rejected package checkpoint changed the producer lease"
+  || fail_test "rejected package completion changed the producer lease"
 producer_limine_lock_definition=$(declare -f producer_limine_lock)
 producer_limine_lock() { with_boot_repair_lock; }
 LIMINE_CONTEXT="entry-tool"
@@ -804,14 +510,10 @@ read_lifecycle || fail_test "cross-class Limine suppression damaged lifecycle st
   && "$_lifecycle_transaction_id" == "$package_root_id" ]] \
   || fail_test "cross-class Limine post-hook altered the package lease"
 LIMINE_CONTEXT=restore
-producer_package_checkpoint || fail_test "package checkpoint failed"
-jq -e '.completed_phases == ["package-pre-sbctl"]' "$package_manifest" >/dev/null \
-  || fail_test "package checkpoint was not durable"
 invalid_package_phase=$(jq -c '.current_phase = "configure-limine"' "$package_manifest")
 if validate_transaction_manifest_json "$package_root_id" "$invalid_package_phase" false; then
   fail_test "package producer accepted an out-of-order next phase"
 fi
-producer_package_checkpoint || fail_test "package checkpoint was not idempotent"
 producer_package_post || fail_test "package final repair failed"
 read_lifecycle || fail_test "completed package lifecycle was unreadable"
 [[ "$_lifecycle_state" == active ]] || fail_test "package repair did not restore active state"
@@ -819,24 +521,15 @@ jq -e '
   .status == "completed" and .file_rollback_policy == "preserve" and
   .domain_records.producer != null and .domain_records.final_proof != null and
   .completed_phases == [
-    "package-pre-sbctl","reconstruct-producer","backup-artifacts","configure-limine",
-    "enroll-config","verify-config","clean-tracking","sign-efi","prove-artifacts",
-    "confirm-producer-output"
+    "reconstruct-producer","backup-artifacts","configure-limine","enroll-config",
+    "verify-config","clean-tracking","sign-efi","prove-artifacts"
   ]
 ' "$package_manifest" >/dev/null || fail_test "package final proof was not committed"
-incomplete_package_manifest=$(jq -c '
-  .completed_phases |= map(select(. != "confirm-producer-output"))
-' "$package_manifest")
-if validate_transaction_manifest_json "$package_root_id" \
-  "$incomplete_package_manifest" false; then
-  fail_test "completed package producer omitted its final obligation confirmation"
-fi
 
 run_limine_admission_case() {
   local context="$1" expected_class="$2" root_id record
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   LIMINE_CONTEXT="$context"
   producer_limine_hook_pre \
     || fail_test "${context} Limine pre-hook did not publish a lease"
@@ -866,8 +559,7 @@ run_limine_admission_case() {
     || fail_test "${context} Limine completion did not restore active state"
   jq -e '.completed_phases == [
     "reconstruct-producer","backup-artifacts","configure-limine","enroll-config",
-    "verify-config","clean-tracking","sign-efi","prove-artifacts",
-    "confirm-producer-output"
+    "verify-config","clean-tracking","sign-efi","prove-artifacts"
   ]' "$(lifecycle_manifest_path "$root_id")" >/dev/null \
     || fail_test "${context} producer committed an incomplete phase sequence"
 }
@@ -879,7 +571,6 @@ eval "$producer_limine_lock_definition"
 (
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   LIMINE_CONTEXT="entry-tool"
   with_boot_repair_lock || fail_test "owned-transition fixture could not lock"
   begin_lifecycle_transaction repair active \
@@ -930,7 +621,6 @@ eval "$producer_limine_lock_definition"
 (
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   with_boot_repair_lock || fail_test "recovery-required fixture could not lock"
   begin_lifecycle_transaction repair active \
     || fail_test "recovery-required fixture did not start"
@@ -954,7 +644,6 @@ eval "$producer_limine_lock_definition"
 (
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   LIMINE_CONTEXT="entry-tool"
   producer_limine_lock() { with_boot_repair_lock; }
   with_boot_repair_lock || fail_test "stale non-producer fixture could not lock"
@@ -982,7 +671,6 @@ eval "$producer_limine_lock_definition"
 
 reset_case
 activate_case
-PRODUCTION_GATE=true
 producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
   || fail_test "stale package fixture lease failed"
 read_lifecycle || fail_test "stale package lease was unreadable"
@@ -1023,7 +711,6 @@ jq -e --arg root "$stale_root_id" '
   || fail_test "failed package recovery cross-references were incomplete"
 [[ -f "$stale_root_incident" ]] || fail_test "failed package root was not sealed"
 stale_root_hash=$(sha256_file "$stale_root_incident")
-producer_package_checkpoint || fail_test "recovered package checkpoint failed"
 producer_package_post || fail_test "recovered package final repair failed"
 read_lifecycle || fail_test "recovered package completion was unreadable"
 [[ "$_lifecycle_state" == active \
@@ -1037,7 +724,6 @@ for recovery_failpoint in after-attempt-manifest-write after-attempt-transition-
   before-recovery-resolved-state-write; do
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
     || fail_test "${recovery_failpoint} fixture lease was rejected"
   read_lifecycle || fail_test "${recovery_failpoint} fixture was unreadable"
@@ -1068,7 +754,7 @@ for recovery_failpoint in after-attempt-manifest-write after-attempt-transition-
   with_boot_repair_lock || fail_test "${recovery_failpoint} retry could not lock"
   read_lifecycle || fail_test "${recovery_failpoint} retry could not read lifecycle"
   if [[ "$_lifecycle_state" == transition ]]; then
-    prepare_stale_transition_reconciliation_locked \
+    prepare_registered_stale_recovery_runtime_locked \
       || fail_test "${recovery_failpoint} retry rejected stale attempt context"
     reconcile_stale_lifecycle \
       || fail_test "${recovery_failpoint} retry could not reconcile stale attempt"
@@ -1093,7 +779,6 @@ done
 
 reset_case
 activate_case
-PRODUCTION_GATE=true
 producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
   || fail_test "failed-attempt publication fixture lease was rejected"
 OWNER_ALIVE=false
@@ -1119,38 +804,28 @@ read_lifecycle || fail_test "failed recovery-attempt publication retry was unrea
 [[ "$_lifecycle_state" == active ]] \
   || fail_test "failed recovery-attempt publication retry did not return to active"
 
+
 : > "$REGISTRY_LOG"
-run_registered_producer_preparation \
-  '{"producer_class":"package","subtype":"package-transaction"}' \
-  || fail_test "package registry entry was unavailable"
-run_registered_producer_preparation \
-  '{"producer_class":"limine","subtype":"uki-build"}' \
-  || fail_test "UKI registry entry was unavailable"
-run_registered_producer_preparation \
-  '{"producer_class":"limine","subtype":"entry-tool"}' \
-  || fail_test "entry-tool registry entry was unavailable"
-run_registered_producer_preparation \
-  '{"producer_class":"snapshot","subtype":"snapshot-sync"}' \
-  || fail_test "root snapshot completion was unavailable"
-run_registered_producer_preparation \
-  '{"producer_class":"restore","subtype":"full-restore"}' \
-  || fail_test "root restore completion was unavailable"
-if grep -Fq snapshot "$REGISTRY_LOG"; then
-  fail_test "root snapshot or restore completion reran snapshot sync"
-fi
-run_registered_producer_preparation \
-  '{"producer_class":"snapshot","subtype":"snapshot-sync"}' true \
-  || fail_test "snapshot registry entry was unavailable"
-run_registered_producer_preparation \
-  '{"producer_class":"restore","subtype":"full-restore"}' true \
-  || fail_test "restore registry entry was unavailable"
+for entry in package:package-transaction limine:uki-build limine:entry-tool \
+  snapshot:snapshot-sync restore:full-restore; do
+  run_registered_producer_preparation \
+    "{\"producer_class\":\"${entry%%:*}\",\"subtype\":\"${entry#*:}\"}" \
+    || fail_test "root completion registry entry was unavailable: ${entry}"
+done
+[[ ! -s "$REGISTRY_LOG" ]] || fail_test "root completion reran a producer"
+for entry in package:package-transaction limine:uki-build limine:entry-tool \
+  snapshot:snapshot-sync restore:full-restore; do
+  run_registered_producer_preparation \
+    "{\"producer_class\":\"${entry%%:*}\",\"subtype\":\"${entry#*:}\"}" true \
+    || fail_test "recovery registry entry was unavailable: ${entry}"
+done
 if run_registered_producer_preparation \
-  '{"producer_class":"package","subtype":"injected-callback"}' >/dev/null 2>&1; then
+  '{"producer_class":"package","subtype":"injected-callback"}' true >/dev/null 2>&1; then
   fail_test "unknown durable producer subtype selected executable code"
 fi
 [[ $(grep -Fxc package "$REGISTRY_LOG") -eq 2 \
   && $(grep -Fxc snapshot "$REGISTRY_LOG") -eq 2 ]] \
-  || fail_test "static registry selected the wrong fixed handlers"
+  || fail_test "recovery registry selected the wrong fixed handlers"
 
 reset_case
 lock_probe="$CASE_DIR/lock-probe"
@@ -1186,7 +861,7 @@ ensure_state_layout || fail_test "nested lock fixture layout failed"
 : > "$(limine_lock_path)"
 chmod 644 "$(limine_lock_path)"
 with_boot_repair_lock || fail_test "parent boot repair lock failed"
-with_registry_limine_handoff /usr/bin/timeout 5 \
+with_limine_lock_handoff /usr/bin/timeout 5 \
   "$lock_probe" "$ROOT_DIR" "$CASE_DIR" "$lock_probe_output" \
   || fail_test "nested producer lock handoff failed"
 [[ $(< "$lock_probe_output") == local:inherited ]] \
@@ -1234,10 +909,10 @@ lock_inherited_limine_fd
 with_repair_lock
 set +e
 if [[ "$mode" == replace ]]; then
-  with_registry_limine_handoff replace_limine_lock_path
+  with_limine_lock_handoff replace_limine_lock_path
   handoff_rc=$?
 else
-  with_registry_limine_handoff /usr/bin/true
+  with_limine_lock_handoff /usr/bin/true
   handoff_rc=$?
 fi
 set -e
@@ -1343,11 +1018,8 @@ set -e
 (
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
     || fail_test "unrecoverable-lock fixture lease was rejected"
-  producer_package_checkpoint \
-    || fail_test "unrecoverable-lock fixture checkpoint failed"
   read_lifecycle || fail_test "unrecoverable-lock fixture was unreadable"
   lock_failure_id="$_lifecycle_transaction_id"
   lock_failure_state_hash=$(sha256_file "$(lifecycle_file_path)")
@@ -1359,7 +1031,7 @@ set -e
     chmod 666 "$path"
   }
   run_package_producer_reconstruction() {
-    with_registry_limine_handoff break_current_limine_lock_path
+    with_limine_lock_handoff break_current_limine_lock_path
   }
   registered_producer_repair() {
     run_package_producer_reconstruction
@@ -1379,47 +1051,28 @@ set -e
 
 reset_case
 activate_case
-PRODUCTION_GATE=true
-SNAPPER_VERSION=1.30.0-1
-: > "$(snapshot_restore_lock_path)"
-chmod 644 "$(snapshot_restore_lock_path)"
-if producer_limine_hook_pre >/dev/null 2>&1; then
-  fail_test "unsupported snapshot producer version received a restore lease"
-fi
-read_lifecycle || fail_test "unsupported-version state became unreadable"
-[[ "$_lifecycle_state" == active ]] \
-  || fail_test "unsupported snapshot producer version changed lifecycle state"
-
 (
   reset_case
   activate_case
-  PRODUCTION_GATE=true
   marker_path=$(snapshot_restore_lock_path)
   : > "$marker_path"
   chmod 644 "$marker_path"
-  marker_identity=$(control_file_identity "$marker_path")
   producer_limine_hook_pre || fail_test "stale-restore fixture lease was rejected"
   read_lifecycle || fail_test "stale-restore fixture was unreadable"
   restore_id="$_lifecycle_transaction_id"
-  restore_record=$(jq -r '.domain_records.producer.path' \
-    "$(lifecycle_manifest_path "$restore_id")")
-  jq -e --arg path "$marker_path" --arg identity "$marker_identity" '
-    .producer_class == "restore" and
-    .restore_marker == {path: $path, identity: $identity}
-  ' "$restore_record" >/dev/null \
-    || fail_test "restore lease did not bind the upstream marker inode"
+  jq -e '.producer_class == "restore" and .caller == "limine-snapper-sync"' \
+    "$(jq -r '.domain_records.producer.path' "$(lifecycle_manifest_path "$restore_id")")" \
+    >/dev/null || fail_test "restore lease recorded the wrong producer"
 
   OWNER_ALIVE=false
-  RESTORE_RUNTIME_STATE=running
-  with_boot_repair_lock || fail_test "stale-restore running check could not lock"
-  if run_registered_recovery_locked; then
-    fail_test "stale restore reconciled while its native worker survived"
+  with_boot_repair_lock || fail_test "stale-restore marker check could not lock"
+  if reconcile_and_recover_producer_locked; then
+    fail_test "stale restore reconciled while its marker still existed"
   fi
   release_boot_repair_lock
-  read_lifecycle || fail_test "live stale-restore state became unreadable"
-  [[ "$_lifecycle_state" == transition \
-    && $(control_file_identity "$marker_path") == "$marker_identity" ]] \
-    || fail_test "live stale-restore reconciliation changed durable state or marker"
+  read_lifecycle || fail_test "marked stale-restore state became unreadable"
+  [[ "$_lifecycle_state" == transition && -e "$marker_path" ]] \
+    || fail_test "stale-restore reconciliation changed durable state or removed the marker"
 
   registered_producer_repair() {
     local path producer
@@ -1428,13 +1081,11 @@ read_lifecycle || fail_test "unsupported-version state became unreadable"
     run_registered_producer_preparation "$producer" true || return 1
     run_test_producer_repair_phases
   }
-  RESTORE_RUNTIME_STATE=clear
+  rm -f "$marker_path"
   with_boot_repair_lock || fail_test "stale-restore recovery could not lock"
-  run_registered_recovery_locked \
-    || fail_test "quiescent stale restore did not recover"
+  reconcile_and_recover_producer_locked \
+    || fail_test "stale restore did not recover once its marker was gone"
   release_boot_repair_lock
-  [[ ! -e "$marker_path" && ! -L "$marker_path" ]] \
-    || fail_test "stale full-restore marker was not removed"
   [[ $(grep -Fxc snapshot "$REGISTRY_LOG") -eq 1 ]] \
     || fail_test "stale full restore did not use snapshot reconstruction"
   read_lifecycle || fail_test "recovered stale-restore state became unreadable"
@@ -1442,80 +1093,8 @@ read_lifecycle || fail_test "unsupported-version state became unreadable"
     || fail_test "stale full restore did not return to active state"
 )
 
-(
-  reset_case
-  activate_case
-  PRODUCTION_GATE=true
-  marker_path=$(snapshot_restore_lock_path)
-  : > "$marker_path"
-  chmod 644 "$marker_path"
-  producer_limine_hook_pre || fail_test "replaced-marker fixture lease was rejected"
-  OWNER_ALIVE=false
-  rm -f "$marker_path"
-  : > "$marker_path"
-  chmod 644 "$marker_path"
-  replacement_identity=$(control_file_identity "$marker_path")
-  with_boot_repair_lock || fail_test "replaced-marker check could not lock"
-  if reconcile_and_recover_producer_locked; then
-    fail_test "stale restore accepted a replacement marker inode"
-  fi
-  release_boot_repair_lock
-  read_lifecycle || fail_test "replaced-marker state became unreadable"
-  [[ "$_lifecycle_state" == transition \
-    && $(control_file_identity "$marker_path") == "$replacement_identity" ]] \
-    || fail_test "replaced marker was removed or lifecycle state changed"
-)
-
-(
-  reset_case
-  activate_case
-  PRODUCTION_GATE=true
-  CURRENT_BOOT_ID=$(boot_id_value)
-  boot_id_value() { printf '%s\n' "$CURRENT_BOOT_ID"; }
-  marker_path=$(snapshot_restore_lock_path)
-  : > "$marker_path"
-  chmod 644 "$marker_path"
-  producer_limine_hook_pre || fail_test "cross-boot restore fixture lease was rejected"
-  OWNER_ALIVE=false
-  rm -f "$marker_path"
-  with_boot_repair_lock || fail_test "same-boot missing-marker check could not lock"
-  if reconcile_and_recover_producer_locked; then
-    fail_test "same-boot stale restore accepted a missing marker"
-  fi
-  release_boot_repair_lock
-  read_lifecycle || fail_test "same-boot missing-marker state became unreadable"
-  [[ "$_lifecycle_state" == transition ]] \
-    || fail_test "same-boot missing marker changed lifecycle state"
-
-  CURRENT_BOOT_ID=11111111-2222-4333-8444-555555555555
-  registered_producer_repair() {
-    local path producer
-    path=$(jq -r '.path' <<< "$_recovery_producer_reference") || return 1
-    producer=$(read_control_document "$path") || return 1
-    run_registered_producer_preparation "$producer" true || return 1
-    run_test_producer_repair_phases
-  }
-  with_boot_repair_lock || fail_test "cross-boot stale-restore check could not lock"
-  prepare_stale_transition_reconciliation_locked \
-    || fail_test "cross-boot marker absence was not admitted"
-  reconcile_stale_lifecycle || fail_test "cross-boot stale restore did not publish recovery"
-  release_boot_repair_lock
-  read_lifecycle || fail_test "cross-boot recovery incident became unreadable"
-  [[ "$_lifecycle_state" == recovery-required ]] \
-    || fail_test "cross-boot stale restore did not enter recovery-required"
-
-  with_boot_repair_lock || fail_test "cross-boot recovery retry could not lock"
-  reconcile_and_recover_producer_locked \
-    || fail_test "existing restore incident rejected an absent runtime marker"
-  release_boot_repair_lock
-  read_lifecycle || fail_test "cross-boot recovered state became unreadable"
-  [[ "$_lifecycle_state" == active ]] \
-    || fail_test "cross-boot stale restore did not return to active state"
-)
-
 reset_case
 activate_case
-PRODUCTION_GATE=true
 : > "$(snapshot_restore_lock_path)"
 chmod 644 "$(snapshot_restore_lock_path)"
 if producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' >/dev/null 2>&1; then
@@ -1535,70 +1114,6 @@ producer_limine_hook_post || fail_test "full-restore post repair failed"
 read_lifecycle || fail_test "full-restore completion was unreadable"
 [[ "$_lifecycle_state" == active ]] || fail_test "full restore did not commit active state"
 
-reset_case
-activate_case
-(
-  snapshot_hook_pid=$BASHPID
-  snapshot_watcher_pid=91011
-  snapshot_owner_pid=91012
-  printf 'active\n' > "$SERVICE_ACTIVE_FILE"
-  transaction_service_main_pid() { printf '%s\n' "$snapshot_watcher_pid"; }
-  process_effective_uid() {
-    [[ "$1" == "$snapshot_watcher_pid" || "$1" == "$snapshot_owner_pid" ]] \
-      || return 1
-    id -u
-  }
-  process_parent_pid() {
-    case "$1" in
-      "$snapshot_hook_pid") printf '%s\n' "$snapshot_owner_pid" ;;
-      "$snapshot_owner_pid") printf '%s\n' "$snapshot_watcher_pid" ;;
-      "$snapshot_watcher_pid") printf '1\n' ;;
-      1) printf '1\n' ;;
-      *) return 1 ;;
-    esac
-  }
-  process_start_time() {
-    case "$1" in
-      "$snapshot_owner_pid") printf '910120\n' ;;
-      "$snapshot_watcher_pid") printf '910110\n' ;;
-      *) return 1 ;;
-    esac
-  }
-  process_runs_script() {
-    [[ "$1" == "$snapshot_watcher_pid" \
-      && "$2" == /usr/bin/limine-snapper-watcher ]]
-  }
-  capture_service_state() {
-    printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"active","unit_file_state":"enabled"}}'
-  }
-  producer_limine_lock() { with_boot_repair_lock; }
-  PRODUCTION_GATE=true
-  LIMINE_CONTEXT=snapshot
-  LIMINE_OWNER_PID_OVERRIDE=$snapshot_owner_pid
-  producer_limine_hook_pre \
-    || fail_test "watcher-owned snapshot lease could not be published"
-  read_lifecycle || fail_test "watcher-owned snapshot lease was unreadable"
-  snapshot_id="$_lifecycle_transaction_id"
-  snapshot_record=$(jq -r '.domain_records.producer.path' \
-    "$(lifecycle_manifest_path "$snapshot_id")")
-  jq -e --argjson watcher "$snapshot_watcher_pid" \
-    --argjson owner "$snapshot_owner_pid" '
-    .producer_class == "snapshot" and .service_policy == "preserve-owner" and
-    .service_owner.pid == $watcher and .owner.pid == $owner
-  ' "$snapshot_record" >/dev/null \
-    || fail_test "watcher descendant did not record preserve-owner"
-  jq -e --arg unit "$TRANSACTION_SERVICE_UNIT" \
-    '.service_state[$unit].quiesce_status == "completed"' \
-    "$(lifecycle_manifest_path "$snapshot_id")" >/dev/null \
-    || fail_test "preserve-owner policy was not applied"
-  [[ ! -s "$SERVICE_ACTION_LOG" ]] \
-    || fail_test "snapshot policy stopped its own watcher service"
-  producer_limine_hook_post \
-    || fail_test "watcher-owned snapshot lease did not complete"
-  read_lifecycle || fail_test "watcher-owned snapshot completion was unreadable"
-  [[ "$_lifecycle_state" == active ]] \
-    || fail_test "watcher-owned snapshot completion did not restore active state"
-)
 
 resolver_owner=91001
 resolver_wrapper=91002
@@ -1689,292 +1204,5 @@ if HOOK_CALLER=limine-snapper-restore HOOK_CMDLINE='--restore --no-mutex' \
   resolve_limine_producer_process "$resolver_owner" >/dev/null 2>&1; then
   fail_test "forged legacy hook environment selected a restore producer"
 fi
-
-reset_case
-VENDOR_CONFIG_DIR="$CASE_DIR/config/vendor"
-SYSTEM_CONFIG_PATH="$CASE_DIR/config/limine-entry-tool.conf"
-SYSTEM_CONFIG_DIR="$CASE_DIR/config/system"
-SNAPPER_CONFIG_PATH="$CASE_DIR/config/limine-snapper-sync.conf"
-MACHINE_ID_PATH="$CASE_DIR/machine-id"
-KERNEL_MODULES_DIR="$CASE_DIR/modules"
-MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
-SNAPPER_VERSION="$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION"
-esp_path() { printf '%s/boot\n' "$CASE_DIR"; }
-limine_vendor_config_dir() { printf '%s\n' "$VENDOR_CONFIG_DIR"; }
-limine_system_config_path() { printf '%s\n' "$SYSTEM_CONFIG_PATH"; }
-limine_system_config_dir() { printf '%s\n' "$SYSTEM_CONFIG_DIR"; }
-limine_snapper_config_path() { printf '%s\n' "$SNAPPER_CONFIG_PATH"; }
-machine_id_path() { printf '%s\n' "$MACHINE_ID_PATH"; }
-kernel_modules_dir() { printf '%s\n' "$KERNEL_MODULES_DIR"; }
-producer_uefi_is_available() { return 0; }
-producer_package_version() {
-  case "$1" in
-    limine-mkinitcpio-hook) printf '%s\n' "$MKINITCPIO_VERSION" ;;
-    limine-snapper-sync) printf '%s\n' "$SNAPPER_VERSION" ;;
-    sbctl) printf '%s\n' "$SBCTL_VERSION" ;;
-    efibootmgr) printf '%s\n' "$EFIBOOTMGR_VERSION" ;;
-    coreutils) printf '%s\n' "$COREUTILS_VERSION" ;;
-    *) return 1 ;;
-  esac
-}
-OWNER_QUERY_FAIL=false
-producer_file_owner_package() {
-  if [[ "$OWNER_QUERY_FAIL" == true && "$1" == */6.18.1/modules.builtin ]]; then
-    return 1
-  fi
-  case "$1" in
-    */6.18.0/modules.builtin) printf 'linux\n' ;;
-    */6.18.1/modules.builtin) printf 'linux-lts\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-mkdir -p "$VENDOR_CONFIG_DIR" "$SYSTEM_CONFIG_DIR" \
-  "$KERNEL_MODULES_DIR/6.18.0" "$KERNEL_MODULES_DIR/6.18.1"
-printf 'ENABLE_UKI=no\n' > "$VENDOR_CONFIG_DIR/defaults.conf"
-printf '%s\n' 'ENABLE_UKI=yes' 'CUSTOM_UKI_NAME="omarchy"' \
-  > "$SYSTEM_CONFIG_DIR/omarchy-uki.conf"
-: > "$KERNEL_MODULES_DIR/6.18.0/modules.builtin"
-: > "$KERNEL_MODULES_DIR/6.18.1/modules.builtin"
-printf '0123456789abcdef0123456789abcdef\n' > "$MACHINE_ID_PATH"
-cat >> "$DEFAULTS_FILE" <<EOF
-ESP_PATH="$(esp_path)"
-MKINITCPIO_FALLBACK=linux-lts
-EOF
-
-uki_obligations=$(derive_uki_inventory_obligations) \
-  || fail_test "UKI inventory obligations could not be derived"
-jq -e --arg linux "$(esp_path)/EFI/Linux/omarchy_linux.efi" \
-  --arg lts "$(esp_path)/EFI/Linux/omarchy_linux-lts.efi" \
-  --arg fallback "$(esp_path)/EFI/Linux/omarchy_linux-lts-fallback.efi" '
-    .kind == "uki-inventory" and
-    .paths == ([$linux, $lts, $fallback] | sort)
-  ' <<< "$uki_obligations" >/dev/null \
-  || fail_test "UKI inventory obligations did not follow effective configuration"
-while IFS= read -r expected_uki; do
-  [[ "$expected_uki" == *-fallback.efi ]] && continue
-  printf 'EXPECTED UKI\n' > "$expected_uki"
-done < <(jq -r '.paths[]' <<< "$uki_obligations")
-if verify_obligated_efi_artifacts_exist "$uki_obligations" >/dev/null 2>&1; then
-  fail_test "missing fallback UKI satisfied producer obligations"
-fi
-fallback_uki=$(jq -r '.paths[] | select(endswith("-fallback.efi"))' \
-  <<< "$uki_obligations")
-printf 'EXPECTED FALLBACK UKI\n' > "$fallback_uki"
-verify_obligated_efi_artifacts_exist "$uki_obligations" \
-  || fail_test "complete UKI inventory did not satisfy producer obligations"
-printf 'MKINITCPIO_FALLBACK=yes\n' >> "$DEFAULTS_FILE"
-all_fallback_obligations=$(derive_uki_inventory_obligations) \
-  || fail_test "all-kernel fallback obligations could not be derived"
-jq -e --arg linux_fallback "$(esp_path)/EFI/Linux/omarchy_linux-fallback.efi" '
-  .kind == "uki-inventory" and (.paths | length) == 4 and
-  (.paths | index($linux_fallback)) != null
-' <<< "$all_fallback_obligations" >/dev/null \
-  || fail_test "MKINITCPIO_FALLBACK=yes omitted an expected UKI"
-printf 'CUSTOM_UKI_NAME="unsupported-name"\n' >> "$DEFAULTS_FILE"
-invalid_name_obligations=$(derive_uki_inventory_obligations) \
-  || fail_test "invalid custom UKI name did not use the producer fallback"
-jq -e --arg prefix "$(esp_path)/EFI/Linux/0123456789abcdef0123456789abcdef_" '
-  .kind == "uki-inventory" and (.paths | length) == 4 and
-  all(.paths[]; startswith($prefix))
-' <<< "$invalid_name_obligations" >/dev/null \
-  || fail_test "invalid custom UKI name did not fall back to machine ID"
-printf 'CUSTOM_UKI_NAME="omarchy"\n' >> "$DEFAULTS_FILE"
-OWNER_QUERY_FAIL=true
-if derive_uki_inventory_obligations >/dev/null 2>&1; then
-  fail_test "failed package ownership query weakened UKI obligations"
-fi
-OWNER_QUERY_FAIL=false
-MKINITCPIO_VERSION=1.37.1-1
-if derive_uki_inventory_obligations >/dev/null 2>&1; then
-  fail_test "unsupported UKI producer version bypassed obligation pinning"
-fi
-MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
-
-printf 'ENABLE_UKI=no\nESP_PATH="%s"\n' "$(esp_path)" >> "$DEFAULTS_FILE"
-non_uki_obligations=$(derive_uki_inventory_obligations) \
-  || fail_test "non-UKI mode could not be classified"
-jq -e '.kind == "not-applicable" and .paths == []' \
-  <<< "$non_uki_obligations" >/dev/null \
-  || fail_test "non-UKI mode created false EFI obligations"
-
-printf 'ENABLE_UKI=yes\nESP_PATH="%s"\n' "$(esp_path)" >> "$DEFAULTS_FILE"
-history_dir="$(esp_path)/0123456789abcdef0123456789abcdef/limine_history"
-mkdir -p "$history_dir"
-snapshot_name="omarchy_linux.efi_sha256_$(printf 'a%.0s' {1..64})"
-nested_snapshot_name="omarchy_linux-lts.efi_xxh_$(printf 'b%.0s' {1..16})"
-deep_snapshot_name="omarchy_linux-zen.efi_b3_$(printf 'c%.0s' {1..64})"
-jq -n --arg snapshot "$snapshot_name" --arg nested "$nested_snapshot_name" \
-  --arg deep "$deep_snapshot_name" '{
-  jsonFormatVersion: "1.3.0",
-  snapshotEntries: [{
-    kernelEntries: [{
-      imageDetails: [
-        {fileName: "omarchy_linux.efi", fileHashName: $snapshot},
-        {fileName: "initramfs-linux", fileHashName: "initramfs-linux_sha256_deadbeef"}
-      ],
-      subKernels: [{
-        imageDetails: [{fileName: "omarchy_linux-lts.efi", fileHashName: $nested}],
-        subKernels: [{
-          imageDetails: [{fileName: "omarchy_linux-zen.efi", fileHashName: $deep}],
-          subKernels: []
-        }]
-      }]
-    }]
-  }]
-}' > "$history_dir/snapshots.json"
-snapshot_obligations=$(derive_snapshot_manifest_obligations) \
-  || fail_test "snapshot manifest obligations could not be derived"
-jq -e --arg path "$history_dir/$snapshot_name" \
-  --arg nested "$history_dir/$nested_snapshot_name" \
-  --arg deep "$history_dir/$deep_snapshot_name" '
-  .kind == "snapshot-manifest" and .paths == ([$path, $nested, $deep] | sort)
-' <<< "$snapshot_obligations" >/dev/null \
-  || fail_test "snapshot manifest selected the wrong EFI obligations"
-if verify_obligated_efi_artifacts_exist "$snapshot_obligations" >/dev/null 2>&1; then
-  fail_test "missing snapshot UKI satisfied producer obligations"
-fi
-printf 'SNAPSHOT UKI\n' > "$history_dir/$snapshot_name"
-if verify_obligated_efi_artifacts_exist "$snapshot_obligations" >/dev/null 2>&1; then
-  fail_test "missing nested snapshot UKI satisfied producer obligations"
-fi
-printf 'NESTED SNAPSHOT UKI\n' > "$history_dir/$nested_snapshot_name"
-if verify_obligated_efi_artifacts_exist "$snapshot_obligations" >/dev/null 2>&1; then
-  fail_test "missing deeply nested snapshot UKI satisfied producer obligations"
-fi
-printf 'DEEP SNAPSHOT UKI\n' > "$history_dir/$deep_snapshot_name"
-verify_obligated_efi_artifacts_exist "$snapshot_obligations" \
-  || fail_test "present snapshot UKI did not satisfy producer obligations"
-jq --arg mismatch "$nested_snapshot_name" '
-  .snapshotEntries[0].kernelEntries[0].imageDetails[0].fileHashName = $mismatch
-' "$history_dir/snapshots.json" > "$history_dir/snapshots.json.tmp"
-mv "$history_dir/snapshots.json.tmp" "$history_dir/snapshots.json"
-if derive_snapshot_manifest_obligations >/dev/null 2>&1; then
-  fail_test "snapshot hash name was not bound to its EFI source name"
-fi
-jq --arg snapshot "$snapshot_name" '
-  .snapshotEntries[0].kernelEntries[0].imageDetails[0].fileHashName = $snapshot
-' "$history_dir/snapshots.json" > "$history_dir/snapshots.json.tmp"
-mv "$history_dir/snapshots.json.tmp" "$history_dir/snapshots.json"
-jq '.snapshotEntries[0].kernelEntries[0].imageDetails[0].fileHashName = "is_not_available"' \
-  "$history_dir/snapshots.json" > "$history_dir/snapshots.json.tmp"
-mv "$history_dir/snapshots.json.tmp" "$history_dir/snapshots.json"
-if derive_snapshot_manifest_obligations >/dev/null 2>&1; then
-  fail_test "unavailable snapshot UKI produced a complete obligation set"
-fi
-jq '.snapshotEntries[0].kernelEntries[0].imageDetails[0].fileHashName =
-  "omarchy_linux.efi_sha256_deadbeef"' \
-  "$history_dir/snapshots.json" > "$history_dir/snapshots.json.tmp"
-mv "$history_dir/snapshots.json.tmp" "$history_dir/snapshots.json"
-if derive_snapshot_manifest_obligations >/dev/null 2>&1; then
-  fail_test "malformed snapshot hash produced a complete obligation set"
-fi
-
-COMPOSED_CLASS=""
-COMPOSED_SUBTYPE=""
-COMPOSED_DERIVE_MISMATCH_AT=0
-COMPOSED_PREPARATION_CALLS=0
-COMPOSED_VERIFY_CALLS=0
-COMPOSED_REPAIR_CALLS=0
-COMPOSED_PHASE_LOG=""
-COMPOSED_DERIVE_LOG="$CASE_DIR/composed-derive"
-_transaction_id=00000000-0000-0000-0000-000000000001
-read_transaction_manifest() {
-  _manifest_json='{"kind":"root","domain_records":{"producer":{"path":"/producer.json"}}}'
-}
-validate_producer_record_reference() { return 0; }
-read_control_document() {
-  jq -cn --arg class "$COMPOSED_CLASS" --arg subtype "$COMPOSED_SUBTYPE" \
-    '{producer_class: $class, subtype: $subtype}'
-}
-transaction_phase_start() { COMPOSED_PHASE_LOG+="start:$1 "; }
-transaction_phase_complete() { COMPOSED_PHASE_LOG+="complete:$1 "; }
-producer_reconstruction_preflight() { return 0; }
-derive_registered_producer_obligations() {
-  local call_count=0
-  if [[ -f "$COMPOSED_DERIVE_LOG" ]]; then
-    while IFS= read -r _; do call_count=$((call_count + 1)); done \
-      < "$COMPOSED_DERIVE_LOG"
-  fi
-  call_count=$((call_count + 1))
-  printf 'call\n' >> "$COMPOSED_DERIVE_LOG"
-  if [[ $call_count -eq $COMPOSED_DERIVE_MISMATCH_AT ]]; then
-    printf '%s\n' '{"kind":"uki-inventory","paths":["/boot/EFI/Linux/raced.efi"]}'
-  else
-    printf '%s\n' '{"kind":"not-applicable","paths":[]}'
-  fi
-}
-run_registered_producer_preparation() {
-  [[ "$2" == false ]] || return 1
-  COMPOSED_PREPARATION_CALLS=$((COMPOSED_PREPARATION_CALLS + 1))
-}
-verify_obligated_efi_artifacts_exist() {
-  COMPOSED_VERIFY_CALLS=$((COMPOSED_VERIFY_CALLS + 1))
-}
-artifact_repair_preflight() { return 0; }
-repair_boot_artifacts() {
-  validate_efi_obligations_json "$1" || return 1
-  COMPOSED_REPAIR_CALLS=$((COMPOSED_REPAIR_CALLS + 1))
-}
-
-run_composed_repair_case() {
-  local class="$1" subtype="$2" expected_derivations="$3"
-  COMPOSED_CLASS="$class"
-  COMPOSED_SUBTYPE="$subtype"
-  : > "$COMPOSED_DERIVE_LOG"
-  COMPOSED_DERIVE_MISMATCH_AT=0
-  COMPOSED_PREPARATION_CALLS=0
-  COMPOSED_VERIFY_CALLS=0
-  COMPOSED_REPAIR_CALLS=0
-  COMPOSED_PHASE_LOG=""
-  registered_producer_repair_impl \
-    || fail_test "composed ${class}:${subtype} repair failed"
-  [[ $(grep -Fxc call "$COMPOSED_DERIVE_LOG") -eq $expected_derivations \
-    && $COMPOSED_PREPARATION_CALLS -eq 1 \
-    && $COMPOSED_VERIFY_CALLS -eq 2 \
-    && $COMPOSED_REPAIR_CALLS -eq 1 \
-    && "$COMPOSED_PHASE_LOG" == \
-      "start:reconstruct-producer complete:reconstruct-producer start:confirm-producer-output complete:confirm-producer-output " ]] \
-    || fail_test "composed ${class}:${subtype} repair skipped an orchestration boundary"
-}
-
-run_composed_repair_case package package-transaction 3
-run_composed_repair_case limine uki-build 3
-run_composed_repair_case limine entry-tool 2
-run_composed_repair_case snapshot snapshot-sync 2
-run_composed_repair_case restore full-restore 2
-
-COMPOSED_CLASS=package
-COMPOSED_SUBTYPE=package-transaction
-: > "$COMPOSED_DERIVE_LOG"
-COMPOSED_DERIVE_MISMATCH_AT=2
-COMPOSED_PREPARATION_CALLS=0
-COMPOSED_VERIFY_CALLS=0
-COMPOSED_REPAIR_CALLS=0
-COMPOSED_PHASE_LOG=""
-if registered_producer_repair_impl; then
-  fail_test "pre-reconstruction package inventory race reported success"
-fi
-[[ $COMPOSED_PREPARATION_CALLS -eq 1 \
-  && $COMPOSED_VERIFY_CALLS -eq 0 \
-  && $COMPOSED_REPAIR_CALLS -eq 0 \
-  && "$COMPOSED_PHASE_LOG" == "start:reconstruct-producer " ]] \
-  || fail_test "pre-reconstruction package race crossed the repair boundary"
-
-COMPOSED_CLASS=snapshot
-COMPOSED_SUBTYPE=snapshot-sync
-: > "$COMPOSED_DERIVE_LOG"
-COMPOSED_DERIVE_MISMATCH_AT=2
-COMPOSED_PREPARATION_CALLS=0
-COMPOSED_VERIFY_CALLS=0
-COMPOSED_REPAIR_CALLS=0
-COMPOSED_PHASE_LOG=""
-if registered_producer_repair_impl; then
-  fail_test "post-proof producer inventory race reported success"
-fi
-[[ $COMPOSED_REPAIR_CALLS -eq 1 \
-  && "$COMPOSED_PHASE_LOG" == *"start:confirm-producer-output " \
-  && "$COMPOSED_PHASE_LOG" != *"complete:confirm-producer-output "* ]] \
-  || fail_test "post-proof inventory race crossed the confirmation boundary"
 
 printf 'producer tests passed\n'

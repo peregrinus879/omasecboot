@@ -11,7 +11,6 @@ fail_test() {
 
 removal_hook="${ROOT_DIR}/pacman-hooks/00-omasecboot-removal-guard.hook"
 guard_hook="${ROOT_DIR}/pacman-hooks/00-omasecboot-transition-guard.hook"
-cleanup_hook="${ROOT_DIR}/pacman-hooks/zz-omasecboot-cleanup.hook"
 repair_hook="${ROOT_DIR}/pacman-hooks/zzz-omasecboot.hook"
 grep -Fxq 'When = PreTransaction' "$guard_hook" \
   || fail_test "package guard is not a pre-transaction hook"
@@ -30,37 +29,14 @@ collect_hook_targets() {
     printf '%s\n' "${line#Target = }"
   done < "$1"
 }
-expected_removal_targets=$(sort <<'EOF'
-b3sum
-bash
-btrfs-progs
-coreutils
-efibootmgr
-findutils
-gawk
-grep
-inotify-tools
-jq
-libnotify
-limine
-limine-mkinitcpio-hook
-limine-snapper-sync
-mkinitcpio
-omarchy
-omarchy-settings
-omasecboot
-openssl
-pacman
-sbctl
-snapper
-systemd
-tar
-util-linux
-xxhash
-EOF
-)
+# The removal guard protects exactly the package's own dependencies.
+expected_removal_targets=$( {
+  printf 'omasecboot\n'
+  sed -n "/^depends=(/,/^)/p" "${ROOT_DIR}/PKGBUILD" | grep -o "'[^']*'" \
+    | tr -d "'" | sed 's/[<>=].*//'
+} | sort)
 [[ $(collect_hook_targets "$removal_hook" | sort) == "$expected_removal_targets" ]] \
-  || fail_test "recovery-dependency removal registry drifted"
+  || fail_test "recovery-dependency removal registry drifted from PKGBUILD depends"
 printf '%s\n' "${removal_hook##*/}" "${guard_hook##*/}" | LC_ALL=C sort -C \
   || fail_test "removal guard no longer sorts before the producer guard"
 grep -Fxq 'Type = Package' "$removal_hook" \
@@ -78,9 +54,7 @@ if grep -Eq '^(Depends =|NeedsTargets$)' "$removal_hook"; then
 fi
 expected_targets=$(sort <<'EOF'
 boot/*
-coreutils
 efi/*
-efibootmgr
 linux*
 limine*
 mkinitcpio*
@@ -102,7 +76,7 @@ usr/share/**/*.efi*
 usr/src/*/dkms.conf
 EOF
 )
-for hook in "$guard_hook" "$cleanup_hook" "$repair_hook"; do
+for hook in "$guard_hook" "$repair_hook"; do
   actual_targets=$(collect_hook_targets "$hook" | sort)
   [[ "$actual_targets" == "$expected_targets" ]] \
     || fail_test "hook target registry drifted: ${hook##*/}"
@@ -120,10 +94,8 @@ for hook in "$guard_hook" "$cleanup_hook" "$repair_hook"; do
 done
 [[ $(grep -Fxc NeedsTargets "$guard_hook") -eq 1 ]] \
   || fail_test "package pre-hook does not own exactly one NeedsTargets stream"
-for hook in "$cleanup_hook" "$repair_hook"; do
-  if grep -Fxq NeedsTargets "$hook"; then
-    fail_test "package post-hook requested an unauthoritative target stream: ${hook##*/}"
-  fi
-done
+if grep -Fxq NeedsTargets "$repair_hook"; then
+  fail_test "package post-hook requested an unauthoritative target stream"
+fi
 
 printf 'guard tests passed\n'

@@ -31,14 +31,6 @@ require_control_root() { :; }
 durable_sync() { :; }
 artifact_esp_is_mounted() { [[ "$ESP_MOUNTED" == true ]]; }
 lifecycle_package_boundary_is_clear() { [[ "$PACKAGE_BOUNDARY_CLEAR" == true ]]; }
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-systemctl() {
-  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
-    || return 1
-  printf 'inactive\n'
-}
 
 FAILPOINT=""
 FAILPOINT_USED=false

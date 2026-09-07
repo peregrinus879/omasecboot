@@ -60,16 +60,6 @@ windows_encryption_gate() {
   _windows_preflight_result=prepared
 }
 
-capture_service_state() {
-  printf '%s\n' '{"limine-snapper-sync.service":{"load_state":"loaded","active_state":"inactive","unit_file_state":"disabled"}}'
-}
-
-systemctl() {
-  [[ "$*" == "show --property=ActiveState --value ${TRANSACTION_SERVICE_UNIT}" ]] \
-    || return 1
-  printf 'inactive\n'
-}
-
 noop_transaction() {
   transaction_phase_start "noop"
   transaction_phase_complete "noop"
@@ -94,7 +84,6 @@ replace_limine_default_entry_in_file "$settings_fixture" \
 grep -Fxq 'UNRELATED=value' "$settings_fixture" \
   || fail_test "Limine setting replacement changed an unrelated entry"
 
-lifecycle_repair_is_available || fail_test "production lifecycle repair gate is closed"
 activation_hook_dir="${TEST_DIR}/activation-hooks"
 activation_command="${TEST_DIR}/omasecboot"
 mkdir -p "$activation_hook_dir"
@@ -117,8 +106,7 @@ producer_package_version() {
     limine-mkinitcpio-hook) printf '%s\n' "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ;;
     limine-snapper-sync) printf '%s\n' "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" ;;
     sbctl) printf '%s\n' "$SUPPORTED_SBCTL_VERSION" ;;
-    efibootmgr) printf '%s\n' "${WINDOWS_EFIBOOTMGR_PACKAGE_IDENTITY#efibootmgr }" ;;
-    coreutils) printf '%s\n' "${WINDOWS_UNLINK_PACKAGE_IDENTITY#coreutils }" ;;
+    efibootmgr) printf '%s\n' "${WINDOWS_EFIBOOTMGR_MINIMUM_VERSION}-1" ;;
     *) return 1 ;;
   esac
 }
@@ -133,7 +121,6 @@ write_activation_hook() {
   case "$key" in
     removal) source="${ROOT_DIR}/pacman-hooks/00-omasecboot-removal-guard.hook" ;;
     transaction) source="${ROOT_DIR}/pacman-hooks/00-omasecboot-transition-guard.hook" ;;
-    package-cleanup) source="${ROOT_DIR}/pacman-hooks/zz-omasecboot-cleanup.hook" ;;
     package-sign) source="${ROOT_DIR}/pacman-hooks/zzz-omasecboot.hook" ;;
     limine-pre) source="${ROOT_DIR}/limine-hooks/000-omasecboot-guard" ;;
     limine-post) source="${ROOT_DIR}/limine-hooks/zzz-omasecboot-sign" ;;
@@ -153,7 +140,7 @@ write_activation_hook() {
     chmod 644 "$hook"
   fi
 }
-for activation_key in removal transaction package-cleanup package-sign limine-pre limine-post; do
+for activation_key in removal transaction package-sign limine-pre limine-post; do
   write_activation_hook "$activation_key"
 done
 lifecycle_activation_environment_is_ready \
@@ -250,7 +237,7 @@ if grep -Fq 'Blocked until recoverable commands are activated' "${TEST_DIR}/help
 fi
 [[ $(cmd_version) == 'omasecboot 1.0.0' ]] || fail_test "version contract changed"
 
-cmd_hook package-cleanup || fail_test "unmanaged package automation did not no-op"
+cmd_hook package-sign || fail_test "unmanaged package automation did not no-op"
 cmd_guard removal || fail_test "pristine lifecycle blocked dependency removal"
 REAL_REQUIRE_CONTROL_ROOT=$(declare -f require_control_root)
 require_control_root() { return 1; }
@@ -276,15 +263,12 @@ active_generation=$_lifecycle_generation
 active_lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
 real_resolve_package_producer_context=$(declare -f resolve_package_producer_context)
 resolve_package_producer_context() { return 1; }
-if cmd_hook package-cleanup > "${TEST_DIR}/external.out" 2>&1; then
+if cmd_hook package-sign > "${TEST_DIR}/external.out" 2>&1; then
   fail_test "unrepaired external package mutation reported success"
 else
   external_rc=$?
 fi
 [[ $external_rc -eq 1 ]] || fail_test "external package mutation lost its failure status"
-if cmd_hook package-sign >/dev/null 2>&1; then
-  fail_test "unowned package signing checkpoint succeeded"
-fi
 if printf 'usr/lib/modules/6.18.0/modules.builtin\n' \
   | cmd_guard transaction >/dev/null 2>&1; then
   fail_test "package guard accepted a caller without a pacman coordinator"
@@ -299,7 +283,7 @@ release_boot_repair_lock
 rm -rf "$(state_dir_path)"
 run_lifecycle_transaction "disable-test" "disabled" "unmanaged" noop_transaction \
   || fail_test "disabled fixture did not commit"
-cmd_hook package-cleanup || fail_test "disabled package automation did not no-op"
+cmd_hook package-sign || fail_test "disabled package automation did not no-op"
 if cmd_guard removal >/dev/null 2>&1; then
   fail_test "disabled lifecycle without unconfiguration proof permitted dependency removal"
 fi
@@ -309,7 +293,6 @@ read_lifecycle || fail_test "disabled state became unreadable"
 route_log="${TEST_DIR}/routes"
 producer_limine_hook_pre() { printf 'limine-pre\n' >> "$route_log"; }
 producer_limine_hook_post() { printf 'limine-post\n' >> "$route_log"; }
-producer_package_checkpoint() { printf 'package-checkpoint\n' >> "$route_log"; }
 producer_package_post() { printf 'package-post\n' >> "$route_log"; }
 producer_package_pre() { printf 'package-pre\n' >> "$route_log"; }
 lifecycle_removal_is_allowed() {
@@ -319,11 +302,10 @@ lifecycle_removal_is_allowed() {
 }
 cmd_hook pre || fail_test "Limine pre-hook route failed"
 cmd_hook post || fail_test "Limine post-hook route failed"
-cmd_hook package-cleanup || fail_test "package checkpoint route failed"
 cmd_hook package-sign || fail_test "package post route failed"
 cmd_guard transaction || fail_test "package pre-guard route failed"
 cmd_guard removal || fail_test "package removal guard route failed"
-[[ $(<"$route_log") == $'limine-pre\nlimine-post\npackage-checkpoint\npackage-post\npackage-pre\nremoval' ]] \
+[[ $(<"$route_log") == $'limine-pre\nlimine-post\npackage-post\npackage-pre\nremoval' ]] \
   || fail_test "internal producer routes selected the wrong handlers"
 if cmd_hook unknown >/dev/null 2>&1 || cmd_guard unknown >/dev/null 2>&1 \
   || cmd_guard removal extra >/dev/null 2>&1; then
