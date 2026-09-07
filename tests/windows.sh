@@ -310,6 +310,18 @@ write_good_lsblk() {
         size: 536870912,
         "log-sec": 512,
         fstype: "vfat"
+      },
+      {
+        path: "/dev/linux-esp",
+        "maj:min": "259:2",
+        type: "part",
+        partn: 2,
+        partuuid: "aaaabbbb-cccc-4ddd-8eee-ffff00001111",
+        parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        start: 1050624,
+        size: 536870912,
+        "log-sec": 512,
+        fstype: "vfat"
       }
     ]
   }' > "$LSBLK_FIXTURE"
@@ -529,7 +541,7 @@ windows_select_firmware_target || fail_test "mapping fixture target was not sele
 windows_map_target_esp || fail_test "valid Windows ESP mapping failed"
 [[ "$_windows_device_path" == /dev/windows-esp \
   && "$_windows_maj_min" == "$TEST_MAJ_MIN" ]] \
-  || fail_test "Windows ESP mapping returned the wrong device"
+  || fail_test "Windows ESP mapping returned the wrong device beside the Linux ESP"
 WINDOWS_BLOCK_DEVICE_MATCH=false
 if windows_map_target_esp >/dev/null 2>&1; then
   fail_test "ESP mapping ignored a changed block-device identity"

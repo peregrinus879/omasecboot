@@ -665,6 +665,36 @@ run_gate "$case_output"
   || fail_test "second ESP failure omitted its device-specific blocker"
 assert_no_runtime_artifacts
 
+# Quattro's normal dual-boot shape: the Windows ESP carries the loader and the
+# Linux ESP does not; only the Windows one is reported and the scan is complete.
+reset_case
+write_two_esp_inventory "$TEST_MAJ_MIN" 999:2
+printf '/dev/esp-a\n/dev/esp-b\n' > "$VFAT_DEVICES"
+printf '/dev/esp-a\n' > "$LOADER_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
+  || fail_test "loader-bearing plus loader-free ESP pair did not pass the gate"
+/usr/bin/grep -Fq 'Boot manager: /dev/esp-a' "$case_output" \
+  || fail_test "the loader-bearing ESP of the pair was not reported"
+if /usr/bin/grep -Fq 'Boot manager: /dev/esp-b' "$case_output"; then
+  fail_test "the loader-free ESP of the pair was reported as a boot manager"
+fi
+/usr/bin/grep -Fq 'mount:/dev/esp-b:' "$CALL_LOG" \
+  || fail_test "the loader-free ESP was not inspected"
+assert_no_runtime_artifacts
+
+# A SATA-attached internal disk is not external media.
+reset_case
+write_inventory /dev/sata-esp "$TEST_MAJ_MIN" false sata block:scsi:pci
+printf '/dev/sata-esp\n' > "$VFAT_DEVICES"
+printf '/dev/sata-esp\n' > "$LOADER_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
+  || fail_test "SATA internal ESP was not scanned as internal media"
+/usr/bin/grep -Fq 'Boot manager: /dev/sata-esp' "$case_output" \
+  || fail_test "SATA internal ESP loader was not reported"
+assert_no_runtime_artifacts
+
 reset_case
 write_two_esp_inventory 8:1 8:2
 printf '/dev/esp-a\n/dev/esp-b\n' > "$VFAT_DEVICES"
