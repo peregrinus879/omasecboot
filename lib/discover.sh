@@ -134,33 +134,15 @@ list_enrolled_entries_from_cli() {
   json=$(sbctl list-files --json 2>/dev/null) || return 1
   [[ -n "$json" && "$json" != "null" ]] || return 0
 
+  # sbctl 0.18 prints its file database: an object keyed by path whose values
+  # carry `file` and `output_file`. Any other shape fails closed.
   printf '%s\n' "$json" | jq -r '
-    def row($file; $output):
-      select(($file // "") != "")
-      | [($file), ($output // $file)]
-      | @tsv;
-
-    if type == "array" then
-      .[]
-      | if type == "object" then
-          row((.file // .path // .source // ""); (.output_file // .output // .file // .path // .source // ""))
-        elif type == "string" then
-          row(.; .)
-        else
-          empty
-        end
-    elif type == "object" then
-      to_entries[]
-      | if (.value | type) == "object" then
-          row((.value.file // .key); (.value.output_file // .value.output // .value.file // .key))
-        elif (.value | type) == "string" then
-          row(.key; .value)
-        else
-          row(.key; .key)
-        end
-    else
-      empty
-    end
+    if type != "object" then error("unsupported sbctl list-files shape") else . end
+    | to_entries[]
+    | if (.value | type) != "object" or (.value.file | type) != "string" or .value.file == ""
+      then error("unsupported sbctl list-files entry") else . end
+    | [.value.file, (.value.output_file // .value.file)]
+    | @tsv
   ' 2>/dev/null
 }
 

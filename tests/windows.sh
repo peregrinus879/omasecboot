@@ -160,30 +160,38 @@ export PATH
 source "${ROOT_DIR}/bin/omasecboot"
 
 # The efibootmgr boundary binds the open executable and records the installed
-# package; anything below the supported floor is refused.
+# package; anything below the supported floor or owned by another package is
+# refused. The package facts are stubbed so the case never depends on the host.
 test_efibootmgr_boundary() (
+  local executable
+  executable=$(windows_efibootmgr_executable_path)
+  producer_file_owner_package() {
+    [[ "$1" == "$executable" ]] || return 1
+    printf 'efibootmgr\n'
+  }
   (
     producer_package_version() { printf '17-1\n'; }
     if validate_windows_efibootmgr_boundary >/dev/null 2>&1; then
       fail_test "the efibootmgr boundary accepted a version below the floor"
     fi
   ) || exit 1
-  local version
-  version=$(producer_package_version efibootmgr 2>/dev/null || true)
-  if [[ -n "$version" ]] \
-    && [[ $(vercmp "$version" "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION") -ge 0 ]]; then
-    validate_windows_efibootmgr_boundary \
-      || fail_test "could not validate the installed efibootmgr executable"
-    [[ "$_windows_efibootmgr_package" == "efibootmgr ${version}" ]] \
-      || fail_test "the boundary recorded the wrong efibootmgr package"
-    [[ $(hash_bound_windows_efibootmgr) == "$(sha256_file /usr/bin/efibootmgr)" ]] \
-      || fail_test "the open efibootmgr executable hash changed"
-    run_windows_efibootmgr --version >/dev/null \
-      || fail_test "could not execute the bound efibootmgr inode"
-    close_windows_efibootmgr_boundary
-  elif validate_windows_efibootmgr_boundary >/dev/null 2>&1; then
-    fail_test "the efibootmgr boundary accepted an unsupported host package"
-  fi
+  (
+    producer_package_version() { printf '18-4\n'; }
+    producer_file_owner_package() { printf 'not-efibootmgr\n'; }
+    if validate_windows_efibootmgr_boundary >/dev/null 2>&1; then
+      fail_test "the efibootmgr boundary accepted a foreign-owned executable"
+    fi
+  ) || exit 1
+  producer_package_version() { printf '18-4\n'; }
+  validate_windows_efibootmgr_boundary \
+    || fail_test "could not validate the supported efibootmgr executable"
+  [[ "$_windows_efibootmgr_package" == "efibootmgr 18-4" ]] \
+    || fail_test "the boundary recorded the wrong efibootmgr package"
+  [[ $(hash_bound_windows_efibootmgr) == "$(sha256_file "$executable")" ]] \
+    || fail_test "the open efibootmgr executable hash changed"
+  run_windows_efibootmgr --version >/dev/null \
+    || fail_test "could not execute the bound efibootmgr inode"
+  close_windows_efibootmgr_boundary
 )
 
 test_efibootmgr_boundary
@@ -853,7 +861,7 @@ fi
 /usr/bin/grep -Fq "remove_windows_bootnext_variable \"\$(windows_bootnext_variable_path)\"" \
   "${ROOT_DIR}/lib/windows.sh" \
   || fail_test "Windows recovery does not use its bounded direct deletion wrapper"
-/usr/bin/grep -Fq "owner=\$(/usr/bin/pacman -Qqo \"\$path\" 2>/dev/null)" \
+/usr/bin/grep -Fq "owner=\$(producer_file_owner_package \"\$path\")" \
   "${ROOT_DIR}/lib/windows.sh" \
   || fail_test "guarded Windows code does not verify efibootmgr package ownership"
 /usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_efibootmgr_fd}\" \"\$@\"" \

@@ -470,7 +470,7 @@ show_status() {
     done <<< "$unmanaged_windows_chainloads"
     echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
-    echo -e "  ${DIM}Run sudo omasecboot windows setup to replace it with the validated firmware handoff.${NC}"
+    echo -e "  ${DIM}Run sudo omasecboot windows setup to add the validated firmware handoff; remove the chainload entry from limine.conf yourself.${NC}"
   fi
 
   # Tracked files (root only)

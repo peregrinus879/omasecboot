@@ -156,7 +156,7 @@ sbctl() {
         empty) return 0 ;;
         json)
           if [[ ! -f "$SBCTL_FILES_DB" ]]; then
-            printf '[]\n'
+            printf '{}\n'
           elif [[ -n "$SBCTL_OMIT_LIST_PATH" ]]; then
             jq --arg path "$SBCTL_OMIT_LIST_PATH" 'del(.[$path])' "$SBCTL_FILES_DB"
           else
@@ -262,7 +262,8 @@ setup_fixture() {
   printf 'files_db: %s\n' "$SBCTL_FILES_DB" > "$SBCTL_CONFIG"
   : > "$ARTIFACT_LOG"
 
-  adopt_lifecycle : "yes" "no" "no" "yes" \
+  # Originals match the managed values unless a case overrides one.
+  adopt_lifecycle : "yes" "${FIXTURE_ORIGINAL_VERIFICATION:-no}" "no" "yes" \
     "present" "absent" "present" "absent" \
     || fail_test "${name}: active fixture adoption failed"
 }
@@ -445,6 +446,8 @@ test_mapping_validation() {
 }
 
 test_managed_setting_drift_repair() {
+  # The fixture recorded ENABLE_VERIFICATION=yes as the original; repair manages no.
+  run_artifact_repair "artifact-drift-baseline" || fail_test "baseline repair failed"
   # A value that drifted back to its recorded original is repaired, not refused.
   set_limine_default_value ENABLE_VERIFICATION yes || fail_test "drift fixture failed"
   run_artifact_repair "artifact-drift-original" \
@@ -696,5 +699,6 @@ run_case sign-sync-failure test_sign_sync_failure_rollback
 run_case final-mapping-failure test_final_mapping_failure_rollback
 run_case proof-failure test_final_proof_failure_rollback
 run_case proof-drift test_final_proof_drift_rollback
+FIXTURE_ORIGINAL_VERIFICATION=yes run_case setting-drift test_managed_setting_drift_repair
 
 printf 'artifact tests passed\n'

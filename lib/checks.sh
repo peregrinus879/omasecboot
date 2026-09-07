@@ -20,14 +20,16 @@ check_recovery_deps() {
   done
 }
 
+# The Limine hook tools are proved by exact package version at activation;
+# here only the executables this code runs itself are required.
 check_deps() {
   check_core_deps
-  command -v limine-update >/dev/null 2>&1 \
-    || die "limine-update not installed. Install: ${BOLD}limine-mkinitcpio-hook${NC}"
-  command -v limine-enroll-config >/dev/null 2>&1 \
-    || die "limine-enroll-config not installed. Update: ${BOLD}limine-mkinitcpio-hook${NC}"
-  command -v limine-reset-enroll >/dev/null 2>&1 \
-    || die "limine-reset-enroll not installed. Update: ${BOLD}limine-mkinitcpio-hook${NC}"
+  command -v limine >/dev/null 2>&1 \
+    || die "limine not installed. Run: ${BOLD}sudo pacman -S limine${NC}"
+  command -v b2sum >/dev/null 2>&1 \
+    || die "b2sum not installed. Run: ${BOLD}sudo pacman -S coreutils${NC}"
+  command -v openssl >/dev/null 2>&1 \
+    || die "openssl not installed. Run: ${BOLD}sudo pacman -S openssl${NC}"
   check_esp_mount
 }
 

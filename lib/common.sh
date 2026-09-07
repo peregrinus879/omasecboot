@@ -139,6 +139,36 @@ version_at_least() {
   [[ "$result" == 0 || "$result" == 1 ]]
 }
 
+# True only when the jq expression is true for the document. A jq failure or a
+# null result is false, so callers fail closed.
+json_is() {
+  jq -e "$1" <<< "$2" >/dev/null 2>&1
+}
+
+# Version of an installed package from one exact `pacman -Q` line.
+parse_pacman_query_version() {
+  local package="$1" output="$2" version
+  [[ "$package" =~ ^[A-Za-z0-9@+_.-]+$ \
+    && "$output" == "$package "* && "$output" != *$'\n'* ]] || return 1
+  version=${output#"$package "}
+  [[ -n "$version" && ${#version} -le 255 && "$version" != *[[:space:]]* \
+    && "$version" != *[$'\001'-$'\037'$'\177']* ]] || return 1
+  printf '%s\n' "$version"
+}
+
+producer_package_version() {
+  local package="$1" output
+  validate_control_file /usr/bin/pacman || return 1
+  output=$(/usr/bin/pacman -Q "$package" 2>/dev/null) || return 1
+  parse_pacman_query_version "$package" "$output"
+}
+
+producer_file_owner_package() {
+  local path="$1"
+  validate_control_file /usr/bin/pacman || return 1
+  /usr/bin/pacman -Qqo "$path" 2>/dev/null
+}
+
 control_file_identity() {
   stat -Lc '%d:%i' "$1" 2>/dev/null
 }
@@ -361,6 +391,9 @@ release_repair_lock() {
 }
 
 release_limine_lock() {
+  if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == local ]]; then
+    flock -u 200 2>/dev/null || true
+  fi
   if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false ]]; then
     exec 200>&- || true
   fi

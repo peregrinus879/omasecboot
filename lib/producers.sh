@@ -136,29 +136,6 @@ resolve_limine_producer_process() {
   return 0
 }
 
-parse_pacman_query_version() {
-  local package="$1" output="$2" version
-  [[ "$package" =~ ^[A-Za-z0-9@+_.-]+$ \
-    && "$output" == "$package "* && "$output" != *$'\n'* ]] || return 1
-  version=${output#"$package "}
-  [[ -n "$version" && ${#version} -le 255 && "$version" != *[[:space:]]* \
-    && "$version" != *[$'\001'-$'\037'$'\177']* ]] || return 1
-  printf '%s\n' "$version"
-}
-
-producer_package_version() {
-  local package="$1" output
-  validate_control_file /usr/bin/pacman || return 1
-  output=$(/usr/bin/pacman -Q "$package" 2>/dev/null) || return 1
-  parse_pacman_query_version "$package" "$output"
-}
-
-producer_file_owner_package() {
-  local path="$1"
-  validate_control_file /usr/bin/pacman || return 1
-  /usr/bin/pacman -Qqo "$path" 2>/dev/null
-}
-
 # --- Leases ------------------------------------------------------------------
 
 producer_operation() {
@@ -352,15 +329,6 @@ run_registered_producer_recovery_locked() {
     "registered producer recovery"
 }
 
-prepare_registered_recovery_runtime_locked() {
-  read_lifecycle || return 1
-  [[ "$_lifecycle_state" == recovery-required ]] || return 0
-  load_recovery_context || return $?
-  [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
-    producer-recovery ]] || return 0
-  producer_runtime_is_clear
-}
-
 reconcile_and_recover_producer_locked() {
   read_lifecycle || return 1
   if [[ "$_lifecycle_state" == transition ]]; then
@@ -483,7 +451,10 @@ producer_package_pre() {
       return 1
       ;;
   esac
-  resolve_package_producer_context || return 1
+  resolve_package_producer_context || {
+    fail "Boot-mutating package transaction blocked: producer context could not be resolved"
+    return 1
+  }
   with_boot_repair_lock || return 1
   producer_package_pre_locked || rc=$?
   release_boot_repair_lock
@@ -506,7 +477,10 @@ producer_package_post() {
       return 1
       ;;
   esac
-  resolve_package_producer_context || return 1
+  resolve_package_producer_context || {
+    fail "Package producer completion blocked: producer context could not be resolved"
+    return 1
+  }
   with_boot_repair_lock || return 1
   complete_registered_producer_locked package || rc=$?
   detach_transaction_context
@@ -575,6 +549,7 @@ producer_limine_hook_pre() {
   resolve_limine_producer_context || {
     [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] \
       && return 0
+    fail "Boot mutation blocked: the calling producer is not recognized"
     return 100
   }
   producer_limine_lock pre || return 100
@@ -595,7 +570,10 @@ producer_limine_hook_post() {
       return 100
       ;;
   esac
-  resolve_limine_producer_context || return 100
+  resolve_limine_producer_context || {
+    fail "Post-hook producer repair blocked: the calling producer is not recognized"
+    return 100
+  }
   producer_limine_lock post || return 100
   if current_transition_is_owned; then
     release_boot_repair_lock

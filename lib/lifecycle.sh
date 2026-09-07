@@ -53,7 +53,6 @@ _recovery_terminal_state=""
 _recovery_producer_reference="null"
 _transaction_active=false
 _transaction_id=""
-_transaction_token=""
 _transaction_operation=""
 _transaction_target_state=""
 _recovery_incident_json=""
@@ -1479,13 +1478,13 @@ validate_transaction_manifest_json() {
   done < <(jq -c '.backups[] |
     select(.kind == "file" or .kind == "absent-file")' <<< "$document")
 
-  if [[ $(jq -r '.firmware_backup == null' <<< "$document") == false ]]; then
+  if json_is '.firmware_backup != null' "$document"; then
     firmware_backup_id=$(jq -r '.firmware_backup.id' <<< "$document") || return 1
     firmware_backup_path=$(jq -r '.firmware_backup.path' <<< "$document") || return 1
     [[ "$firmware_backup_path" == \
       "$(state_dir_path)/firmware-backup/${firmware_backup_id}" ]] || return 1
   fi
-  if [[ $(jq -r '.enrollment_plan == null' <<< "$document") == false ]]; then
+  if json_is '.enrollment_plan != null' "$document"; then
     enrollment_backup_id=$(jq -r '.enrollment_plan.backup_id' <<< "$document") \
       || return 1
     enrollment_plan_path=$(jq -r '.enrollment_plan.path' <<< "$document") || return 1
@@ -2119,8 +2118,7 @@ read_incident_seal() {
       return 1
     }
   if [[ $(jq -r '.kind' <<< "$saved") == root ]]; then
-    [[ "$manifest_kind" == root \
-      && $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || {
+    { [[ "$manifest_kind" == root ]] && json_is '.recovery == null' "$_manifest_json"; } || {
         _incident_read_status=control-state-ambiguous
         return 1
       }
@@ -2256,7 +2254,7 @@ validate_lifecycle_document_references() {
   tracking_ownership=$(jq -c '.tracking_ownership' <<< "$document") || return 1
   validate_lifecycle_ownership_pair "$managed_settings" "$tracking_ownership" || return 1
 
-  if [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]]; then
+  if json_is '.last_transaction != null' "$document"; then
     transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
     manifest=$(jq -r '.last_transaction.manifest' <<< "$document") || return 1
     [[ "$manifest" == "$(lifecycle_manifest_path "$transaction_id")" \
@@ -2279,7 +2277,7 @@ validate_lifecycle_document_references() {
       [[ "$operation" == unconfigure ]] || return 1
     fi
     if [[ "$kind" == root ]]; then
-      [[ $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || return 1
+      json_is '.recovery == null' "$_manifest_json" || return 1
     else
       saved_manifest="$_manifest_json"
       saved_manifest_id="$_manifest_id"
@@ -2319,7 +2317,7 @@ validate_lifecycle_document_references() {
         "$(jq -r '.manifest' <<< "$saved_manifest")" ]] || return 1
   fi
 
-  if [[ $(jq -r '.last_recovery != null' <<< "$document") == true ]]; then
+  if json_is '.last_recovery != null' "$document"; then
     saved_manifest="$_manifest_json"
     saved_manifest_id="$_manifest_id"
     saved_manifest_hash="$_manifest_sha256"
@@ -2376,7 +2374,7 @@ load_lifecycle_ownership_records() {
 
 validate_completed_transaction_reference() {
   local document="$1" transaction_id state
-  [[ $(jq -r '.last_transaction != null' <<< "$document") == true ]] || return 0
+  json_is '.last_transaction != null' "$document" || return 0
   state=$(jq -r '.state' <<< "$document") || return 1
   transaction_id=$(jq -r '.last_transaction.id' <<< "$document") || return 1
   read_transaction_manifest "$transaction_id" || return 1
@@ -2792,7 +2790,6 @@ activate_transaction_context() {
   local transaction_id="$1" token="$2" operation="$3" target_state="$4"
   _transaction_active=true
   _transaction_id="$transaction_id"
-  _transaction_token="$token"
   _transaction_operation="$operation"
   _transaction_target_state="$target_state"
   OMASECBOOT_TRANSACTION_ID="$transaction_id"
@@ -3011,13 +3008,13 @@ validate_transaction_manifest_candidate_files() {
     fi
   fi
 
-  if [[ $(jq -r '.firmware_backup != null' <<< "$candidate") == true ]]; then
+  if json_is '.firmware_backup != null' "$candidate"; then
     firmware_id=$(jq -r '.firmware_backup.id' <<< "$candidate") || return 1
     firmware_path=$(jq -r '.firmware_backup.path' <<< "$candidate") || return 1
     [[ "$firmware_path" == \
       "$(state_dir_path)/firmware-backup/${firmware_id}" ]] || return 1
   fi
-  if [[ $(jq -r '.enrollment_plan != null' <<< "$candidate") == true ]]; then
+  if json_is '.enrollment_plan != null' "$candidate"; then
     plan_id=$(jq -r '.enrollment_plan.backup_id' <<< "$candidate") || return 1
     plan_path=$(jq -r '.enrollment_plan.path' <<< "$candidate") || return 1
     [[ "$plan_path" == "$(state_dir_path)/firmware-backup/${plan_id}/plan" ]] \
@@ -3332,8 +3329,9 @@ rollback_transaction_files() {
     return
   fi
   [[ "$policy" == restore ]] || return 1
-  mapfile -t entries < <(jq -c '.backups | reverse[] |
-    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json")
+  entries_json=$(jq -c '.backups | reverse[] |
+    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json") || return 1
+  [[ -z "$entries_json" ]] || mapfile -t entries <<< "$entries_json"
   for entry in "${entries[@]}"; do
     if ! restore_transaction_backup_entry "$entry"; then
       failures+=("$(jq -r '.target' <<< "$entry")")
@@ -3384,9 +3382,10 @@ software_recovery_backups_are_restored() {
 restore_software_recovery_backups() {
   local entry
   local -a entries=()
-  mapfile -t entries < <(jq -c '.backups | reverse[] |
+  entries_json=$(jq -c '.backups | reverse[] |
     select(.kind == "file" or .kind == "absent-file")' \
     <<< "$_recovery_root_manifest_json") || return 1
+  [[ -z "$entries_json" ]] || mapfile -t entries <<< "$entries_json"
   for entry in "${entries[@]}"; do
     restore_transaction_backup_entry "$entry" || return 1
   done
@@ -3534,8 +3533,15 @@ run_registered_recovery_locked() {
   esac
 }
 
+# Producer recovery never runs while the full-restore marker exists; the other
+# recovery operations do not touch producer outputs and proceed.
 prepare_registered_recovery_runtime_locked() {
-  return 0
+  read_lifecycle || return 1
+  [[ "$_lifecycle_state" == recovery-required ]] || return 0
+  load_recovery_context || return $?
+  [[ $(recovery_operation_for_root_manifest "$_recovery_root_manifest_json") == \
+    producer-recovery ]] || return 0
+  producer_runtime_is_clear
 }
 
 recover_lifecycle_if_required() {
@@ -3723,9 +3729,8 @@ commit_lifecycle_transaction() {
   [[ "$_lifecycle_state" == transition \
     && "$_lifecycle_transaction_id" == "$_transaction_id" ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  [[ $(jq -r '.current_phase == null' <<< "$_manifest_json") == true \
-    && $(jq -r '.kind' <<< "$_manifest_json") == root \
-    && $(jq -r '.recovery == null' <<< "$_manifest_json") == true ]] || return 1
+  json_is '.current_phase == null and .kind == "root" and .recovery == null' \
+    "$_manifest_json" || return 1
   manifest_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
   manifest_target=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
   lifecycle_operation=$(jq -r '.transaction.operation' <<< "$_lifecycle_json") || return 1
@@ -4225,8 +4230,8 @@ ensure_recovery_attempt_failure() {
 commit_lifecycle_recovery_attempt() {
   [[ "$_transaction_active" == true ]] || return 1
   read_transaction_manifest "$_transaction_id" || return 1
-  [[ $(jq -r '.kind' <<< "$_manifest_json") == recovery-attempt \
-    && $(jq -r '.current_phase == null' <<< "$_manifest_json") == true ]] || return 1
+  json_is '.kind == "recovery-attempt" and .current_phase == null' "$_manifest_json" \
+    || return 1
   finalize_recovery_attempt_incident 0 "" completed || return 1
   publish_resolved_recovery_attempt
 }
@@ -4244,6 +4249,13 @@ ensure_lifecycle_recovery() {
 }
 
 reconcile_stale_lifecycle() {
+  local rc=0
+  reconcile_stale_transition || rc=$?
+  (( rc == 0 )) || detach_transaction_context
+  return "$rc"
+}
+
+reconcile_stale_transition() {
   local transaction_id manifest_status manifest_kind incident_status
   local reason="transaction owner is no longer valid"
   read_lifecycle || return 1
@@ -4256,10 +4268,7 @@ reconcile_stale_lifecycle() {
     return 1
   }
 
-  _transaction_active=true
-  _transaction_id="$transaction_id"
-  _transaction_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
-  _transaction_target_state=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
+  set_transaction_context "$transaction_id" || return 1
   manifest_status=$(jq -r '.status' <<< "$_manifest_json") || return 1
   manifest_kind=$(jq -r '.kind' <<< "$_manifest_json") || return 1
   if [[ "$manifest_kind" == recovery-attempt ]]; then
@@ -4330,8 +4339,10 @@ run_previous_exit_trap() {
   local exit_code="$1" declaration="$_transaction_previous_exit" command
   local trap_rc errexit=false
   [[ -n "$declaration" ]] || return 0
-  if [[ "$declaration" =~ ^trap\ --\ \'(.*)\'\ EXIT$ ]]; then
-    command=${BASH_REMATCH[1]}
+  if [[ "$declaration" == "trap -- "*" EXIT" ]]; then
+    # `trap -p` prints the handler shell-quoted; let the shell unquote it.
+    eval "set -- ${declaration#trap -- }"
+    command=$1
     [[ $- == *e* ]] && errexit=true
     set +e
     return_status "$exit_code"
@@ -4528,9 +4539,13 @@ adopt_transaction_context() {
     && "$_lifecycle_transaction_id" == "$transaction_id" ]] || return 1
   read_transaction_manifest "$transaction_id" || return 1
   [[ $(jq -r '.status' <<< "$_manifest_json") == transition ]] || return 1
+  set_transaction_context "$transaction_id"
+}
+
+# Bind the loaded manifest as the current transaction context.
+set_transaction_context() {
   _transaction_active=true
-  _transaction_id="$transaction_id"
-  _transaction_token=""
+  _transaction_id="$1"
   _transaction_operation=$(jq -r '.operation' <<< "$_manifest_json") || return 1
   _transaction_target_state=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
 }
@@ -4538,7 +4553,6 @@ adopt_transaction_context() {
 detach_transaction_context() {
   _transaction_active=false
   _transaction_id=""
-  _transaction_token=""
   _transaction_operation=""
   _transaction_target_state=""
   unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN

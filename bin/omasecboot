@@ -118,7 +118,7 @@ recoverable_command_prelude() {
 # --- Commands ----------------------------------------------------------------
 
 cmd_setup() {
-  local backup_id state repair_required=true
+  local backup_id state repair_required=true backup_rc=0
   [[ $# -eq 0 ]] || {
     fail "Setup does not accept arguments"
     return 2
@@ -133,7 +133,11 @@ cmd_setup() {
   check_efi_mode
   require_gum
 
-  backup_id=$(current_setup_backup_id || true)
+  backup_id=$(current_setup_backup_id) || backup_rc=$?
+  if (( backup_rc == 2 )); then
+    fail "The recorded firmware backup or enrollment plan failed validation; setup will not replace it"
+    return 1
+  fi
   if [[ -z "$backup_id" ]]; then
     gum confirm "Back up firmware trust and prepare a Secure Boot enrollment plan?" \
       || return 1

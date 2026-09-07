@@ -58,18 +58,14 @@ test_sbctl_boundary_implementation() (
     printf '%s\n' "$boundary_config"
   }
 
-  pacman() {
-    case "$1" in
-      -Q)
-        [[ "$2" == sbctl ]] || return 1
-        printf '%s\n' "$boundary_package"
-        ;;
-      -Qqo)
-        [[ "$2" == /usr/bin/sbctl ]] || return 1
-        printf '%s\n' "$boundary_owner"
-        ;;
-      *) return 1 ;;
-    esac
+  producer_package_version() {
+    [[ "$1" == sbctl ]] || return 1
+    printf '%s\n' "${boundary_package#sbctl }"
+  }
+
+  producer_file_owner_package() {
+    [[ "$1" == /usr/bin/sbctl ]] || return 1
+    printf '%s\n' "$boundary_owner"
   }
 
   command() {

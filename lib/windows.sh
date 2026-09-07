@@ -1355,8 +1355,9 @@ write_windows_target_state() {
     --arg boot_number "$_windows_boot_number" \
     --arg label "$_windows_label" \
     --arg partuuid "$_windows_partuuid" \
-    --arg loader "$WINDOWS_LOADER_UEFI" '{
-      schema_version: 1,
+    --arg loader "$WINDOWS_LOADER_UEFI" \
+    --argjson schema "$WINDOWS_STATE_SCHEMA_VERSION" '{
+      schema_version: $schema,
       writer_version: $version,
       enabled: true,
       boot_number: $boot_number,
@@ -1456,7 +1457,6 @@ validate_windows_efibootmgr_boundary() {
   local fd_path fd_uid fd_mode fd_device fd_inode executable_hash
   close_windows_efibootmgr_boundary
   path=$(windows_efibootmgr_executable_path) || return 1
-  [[ "$path" == "$WINDOWS_EFIBOOTMGR_EXECUTABLE" ]] || return 1
   package=$(producer_package_version efibootmgr) || {
     windows_reject "Cannot verify the installed efibootmgr package"
     return 1
@@ -1466,7 +1466,7 @@ validate_windows_efibootmgr_boundary() {
     return 1
   }
   _windows_efibootmgr_package="efibootmgr ${package}"
-  owner=$(/usr/bin/pacman -Qqo "$path" 2>/dev/null) || {
+  owner=$(producer_file_owner_package "$path") || {
     windows_reject "Cannot verify ownership of the efibootmgr executable"
     return 1
   }
@@ -1523,7 +1523,7 @@ capture_windows_bootnext_variable_evidence() {
   local path state before_identity after_identity before_hash after_hash
   path=$(windows_bootnext_variable_path) || return 1
   state=$(read_windows_bootnext_state) || return 1
-  [[ $(jq -r '.present' <<< "$state") == true ]] || return 1
+  json_is '.present == true' "$state" || return 1
   before_identity=$(stat -Lc '%d:%i' "$path" 2>/dev/null) || return 1
   before_hash=$(sha256_file "$path") || return 1
   after_identity=$(stat -Lc '%d:%i' "$path" 2>/dev/null) || return 1
@@ -1611,7 +1611,7 @@ load_windows_recovery_context() {
     action=none
     outcome="prior-unchanged"
   elif [[ "$relation" == later-boot \
-    && $(jq -r '.present' <<< "$observed") == false ]]; then
+    ]] && json_is '.present == false' "$observed"; then
     action=none
     outcome=consumed-unknown
   elif jq -e --argjson prior "$prior" '. == $prior' <<< "$observed" >/dev/null; then
@@ -1620,7 +1620,7 @@ load_windows_recovery_context() {
   elif jq -e --arg target "$target" \
     '.present == true and .boot_number == $target' <<< "$observed" >/dev/null; then
     outcome="prior-restored"
-    if [[ $(jq -r '.present' <<< "$prior") == true ]]; then
+    if json_is '.present == true' "$prior"; then
       action=set-prior
       validate_windows_efibootmgr_boundary || {
         windows_report_error

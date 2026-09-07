@@ -640,14 +640,15 @@ canonical_entries_are_equal() {
 }
 
 validate_sbctl_enrollment_boundary() {
-  local package executable config owner path
-  package=$(pacman -Q sbctl 2>/dev/null) || return 1
-  [[ "$package" =~ ^sbctl[[:space:]]0\.18-[0-9]+$ ]] || return 1
+  local package version executable config owner path
+  version=$(producer_package_version sbctl) || return 1
+  [[ "$version" == "$SUPPORTED_SBCTL_VERSION" ]] || return 1
+  package="sbctl ${version}"
   executable=$(command -v sbctl) || return 1
   executable=$(readlink -f "$executable" 2>/dev/null) || return 1
   [[ "$executable" == /usr/bin/sbctl ]] || return 1
   validate_control_file "$executable" || return 1
-  owner=$(LC_ALL=C pacman -Qqo "$executable" 2>/dev/null) || return 1
+  owner=$(producer_file_owner_package "$executable") || return 1
   [[ "$owner" == sbctl ]] || return 1
   config=$(sbctl_config_path) || return 1
   if [[ -e "$config" || -L "$config" ]]; then
@@ -1383,8 +1384,8 @@ setup_backup_id_from_lifecycle_json() {
             || "$operation" == enroll-secure-boot \
             || "$operation" == firmware-recovery ) ) ]]; then
         backup_id=$(jq -r '.firmware_backup.id' <<< "$_manifest_json") || return 1
-        validate_firmware_backup "$backup_id" || return 1
-        validate_enrollment_plan "$backup_id" false || return 1
+        validate_firmware_backup "$backup_id" || return 2
+        validate_enrollment_plan "$backup_id" false || return 2
         if [[ "$required_operation" == activation ]]; then
           printf '%s\n' "$transaction_id"
         else
@@ -1699,7 +1700,8 @@ record_firmware_write_start() {
     return 1
   fi
   [[ $(jq -r '.file_rollback_policy' <<< "$_manifest_json") == preserve \
-    && $(jq -r '.enrollment_plan != null' <<< "$_manifest_json") == true ]] || return 1
+    ]] || return 1
+  json_is '.enrollment_plan != null' "$_manifest_json" || return 1
   timestamp=$(utc_timestamp) || return 1
   document=$(jq -c --arg hierarchy "$hierarchy" --arg timestamp "$timestamp" '
     .firmware_writes += [{
@@ -1939,7 +1941,7 @@ reconcile_pending_firmware_write() {
 firmware_recovery_transaction() {
   local backup_id="$1" frontier
   read_transaction_manifest "$_transaction_id" || return 1
-  if [[ $(jq -r '.firmware_backup == null' <<< "$_manifest_json") == true ]]; then
+  if json_is '.firmware_backup == null' "$_manifest_json"; then
     transaction_phase_start "bind-enrollment-plan" || return 1
     bind_enrollment_transaction "$backup_id" || return 1
     transaction_phase_complete "bind-enrollment-plan" || return 1

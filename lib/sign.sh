@@ -55,19 +55,24 @@ list_limine_default_entries() {
       sub(/^[[:space:]]*/, "", line)
       print key "=" line
     }
-  ' "$file" 2>/dev/null
+  ' "$file"
 }
 
+# Reads every assignment of one key. An absent file has no entries; a file
+# that exists but cannot be read is a failure, never an empty result.
 load_limine_default_entry() {
-  local key="$1" line raw=""
+  local key="$1" file line raw="" entries
   _limine_default_raw=""
   _limine_default_count=0
-
-  while IFS= read -r line; do
-    _limine_default_count=$((_limine_default_count + 1))
-    raw=${line#*=}
-  done < <(list_limine_default_entries "$(limine_default_config_path)" "$key" || true)
-
+  file=$(limine_default_config_path)
+  if [[ -e "$file" || -L "$file" ]]; then
+    entries=$(list_limine_default_entries "$file" "$key") || return 1
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      _limine_default_count=$((_limine_default_count + 1))
+      raw=${line#*=}
+    done <<< "$entries"
+  fi
   _limine_default_raw="$raw"
 }
 
