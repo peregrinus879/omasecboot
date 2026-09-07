@@ -1174,7 +1174,6 @@ windows_encryption_gate() {
     *)
       windows_preflight_mark_unknown loader \
         "Windows preflight collection failed safely"
-      windows_preflight_finalize_states
       windows_preflight_print_summary
       windows_preflight_print_common_guidance
       windows_preflight_print_home_guidance
@@ -1462,7 +1461,7 @@ validate_windows_efibootmgr_boundary() {
     windows_reject "Cannot verify the installed efibootmgr package"
     return 1
   }
-  [[ $(vercmp "$package" "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" 2>/dev/null) -ge 0 ]] || {
+  version_at_least "$package" "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" || {
     windows_reject "Unsupported efibootmgr package: efibootmgr ${package}"
     return 1
   }

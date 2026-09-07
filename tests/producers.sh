@@ -754,8 +754,6 @@ for recovery_failpoint in after-attempt-manifest-write after-attempt-transition-
   with_boot_repair_lock || fail_test "${recovery_failpoint} retry could not lock"
   read_lifecycle || fail_test "${recovery_failpoint} retry could not read lifecycle"
   if [[ "$_lifecycle_state" == transition ]]; then
-    prepare_registered_stale_recovery_runtime_locked \
-      || fail_test "${recovery_failpoint} retry rejected stale attempt context"
     reconcile_stale_lifecycle \
       || fail_test "${recovery_failpoint} retry could not reconcile stale attempt"
   fi

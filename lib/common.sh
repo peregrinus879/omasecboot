@@ -131,6 +131,14 @@ validate_control_file() {
   mode_is_control_safe "$mode"
 }
 
+# pacman's vercmp prints -1, 0, or 1. A missing tool or unusable input must
+# fail the comparison instead of reading as 0.
+version_at_least() {
+  local result
+  result=$(vercmp "$1" "$2" 2>/dev/null) || return 1
+  [[ "$result" == 0 || "$result" == 1 ]]
+}
+
 control_file_identity() {
   stat -Lc '%d:%i' "$1" 2>/dev/null
 }

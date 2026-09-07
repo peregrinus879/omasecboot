@@ -352,30 +352,6 @@ run_registered_producer_recovery_locked() {
     "registered producer recovery"
 }
 
-# A full restore leaves its marker for the whole restore. No producer lease,
-# reconciliation, or recovery runs while it exists, and OmaSecBoot never
-# removes it: the marker lives under /run/lock and clears with the boot.
-producer_runtime_is_clear() {
-  local marker
-  marker=$(snapshot_restore_lock_path) || return 1
-  [[ ! -e "$marker" && ! -L "$marker" ]]
-}
-
-prepare_registered_stale_recovery_runtime_locked() {
-  local root
-  read_lifecycle || return 1
-  [[ "$_lifecycle_state" == transition ]] || return 0
-  read_transaction_manifest "$_lifecycle_transaction_id" || return 1
-  manifest_owner_is_alive && return 0
-  root="$_manifest_json"
-  if [[ $(jq -r '.kind' <<< "$root") == recovery-attempt ]]; then
-    root=$(recovery_root_manifest_from_reference \
-      "$(jq -c '.recovery.root_incident' <<< "$root")") || return 1
-  fi
-  [[ $(jq -r '.domain_records.producer' <<< "$root") == null ]] \
-    || producer_runtime_is_clear
-}
-
 prepare_registered_recovery_runtime_locked() {
   read_lifecycle || return 1
   [[ "$_lifecycle_state" == recovery-required ]] || return 0

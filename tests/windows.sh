@@ -200,6 +200,23 @@ control_owner_uid() {
   id -u
 }
 
+state_dir_path() {
+  printf '%s/state\n' "$TEST_DIR"
+}
+mkdir -p "$(state_dir_path)"
+chmod 755 "$(state_dir_path)"
+
+write_windows_target_state_fixture() {
+  local boot_number="${1:-0007}"
+  jq -cn --arg version "$OMASECBOOT_VERSION" --arg boot_number "$boot_number" \
+    --arg loader "$WINDOWS_LOADER_UEFI" '{
+      schema_version: 1, writer_version: $version, enabled: true,
+      boot_number: $boot_number, label: "Windows Boot Manager",
+      partuuid: "00112233-4455-6677-8899-aabbccddeeff", loader_path: $loader
+    }' > "$(windows_target_state_path)"
+  chmod 644 "$(windows_target_state_path)"
+}
+
 windows_efibootmgr_executable_path() {
   printf '%s/efibootmgr\n' "$BIN_DIR"
 }
@@ -367,7 +384,19 @@ write_good_lsblk
 write_existing_mount
 reset_findmnt_calls
 
-available_output=$(cmd_windows available) || fail_test "available rejected the valid structural target"
+if cmd_windows available > "${TEST_DIR}/no-optin.out" 2>&1; then
+  fail_test "available succeeded without the durable Windows opt-in"
+fi
+[[ ! -s "${TEST_DIR}/no-optin.out" ]] \
+  || fail_test "available without the opt-in produced output"
+write_windows_target_state_fixture 0001
+if cmd_windows available > "${TEST_DIR}/stale-optin.out" 2>&1; then
+  fail_test "available succeeded with an opt-in that no longer matches firmware"
+fi
+[[ ! -s "${TEST_DIR}/stale-optin.out" ]] \
+  || fail_test "available with a stale opt-in produced output"
+write_windows_target_state_fixture
+available_output=$(cmd_windows available) || fail_test "available rejected the recorded structural target"
 [[ -z "$available_output" ]] || fail_test "available produced output"
 [[ $(find_windows_boot_entry) == $'0007\tWindows Boot Manager' ]] \
   || fail_test "structural target identity was parsed incorrectly"
@@ -388,6 +417,7 @@ else
 fi
 [[ ! -s "${TEST_DIR}/unavailable.out" ]] \
   || fail_test "unavailable probe emitted command diagnostics"
+rm -f "$(windows_target_state_path)"
 
 begin_inventory '0001,0007,0002,0003,0004'
 add_entry 0001 '*' Linux "$LINUX_DP"
@@ -866,8 +896,9 @@ jq -e '."system.windows"' "$menu_file" >/dev/null \
   || fail_test "Quattro menu entry lacks its availability guard"
 
 write_good_inventory
-PATH="${ROOT_DIR}/bin:${BIN_DIR}:${ORIGINAL_PATH}" \
-  bash -c 'command -v omasecboot >/dev/null && omasecboot windows available' \
-  || fail_test "Quattro menu guard failed with Windows available"
+write_windows_target_state_fixture
+cmd_windows available \
+  || fail_test "Quattro menu guard failed with the recorded Windows handoff"
+rm -f "$(windows_target_state_path)"
 
 printf 'windows tests passed\n'

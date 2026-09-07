@@ -878,6 +878,16 @@ grep -Fq 'recovery-required (stale transaction' "${TEST_DIR}/stale-status.out" \
   || fail_test "status did not classify the stale owner"
 
 with_boot_repair_lock
+: > "$(snapshot_restore_lock_path)"
+if reconcile_stale_lifecycle > "${TEST_DIR}/stale-marker.out" 2>&1; then
+  fail_test "stale transition was reconciled while the full-restore marker existed"
+fi
+grep -Fq 'blocked while full snapshot restore is running' "${TEST_DIR}/stale-marker.out" \
+  || fail_test "marker refusal omitted its reason"
+read_lifecycle || fail_test "marker-blocked lifecycle could not be read"
+[[ $_lifecycle_state == transition ]] \
+  || fail_test "marker refusal changed durable state"
+rm -f "$(snapshot_restore_lock_path)"
 reconcile_stale_lifecycle || fail_test "stale transition was not reconciled"
 release_boot_repair_lock
 read_lifecycle || fail_test "reconciled lifecycle could not be read"

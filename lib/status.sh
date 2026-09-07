@@ -207,7 +207,6 @@ show_status() {
   for hook_entry in \
     "/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook|dependency removal guard" \
     "/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook|transaction guard" \
-    "/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook|pre-sbctl lifecycle checkpoint" \
     "/usr/share/libalpm/hooks/zz-sbctl.hook|re-signing" \
     "/usr/share/libalpm/hooks/zzz-omasecboot.hook|post-sbctl lifecycle checkpoint" \
     "/etc/boot/hooks/pre.d/000-omasecboot-guard|Limine pre-mutation guard" \
@@ -228,7 +227,7 @@ show_status() {
 
   local hook_name shadow_dir
   for hook_name in 00-omasecboot-removal-guard.hook 00-omasecboot-transition-guard.hook \
-    zz-omasecboot-cleanup.hook zzz-omasecboot.hook; do
+    zzz-omasecboot.hook; do
     if pacman_hook_is_shadowed "$(pacman_system_hook_dir)/${hook_name}"; then
       shadow_dir=$(pacman_configured_hook_dirs 2>/dev/null | tr '\n' ' ')
       fail "${hook_name} is shadowed by a same-named hook in a configured HookDir (${shadow_dir% }); remove the stale copy"

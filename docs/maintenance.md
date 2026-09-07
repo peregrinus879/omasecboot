@@ -195,7 +195,7 @@ Rechecked 2026-08-30. Re-fetch these sources before changing public claims.
 ## T-9 Decision Record
 
 - CI runs in `archlinux:base-devel` containers on GitHub Actions: one lint job (`bash -n`, ShellCheck, menu JSONC), one job per hermetic suite so the hour-long aggregate runs in parallel, and one package job that builds and stages as an unprivileged user and then runs `tests/package-root.sh` as root. The privileged job installs the Arch dependencies and passes `--assume-installed` for the two Omarchy producer packages so CI does not depend on the Omarchy Package Repository; it therefore does not exercise lifecycle activation, only package install, hook execution, guarded removal, blocked producer transactions, upgrade, and preservation.
-- The container job seeds a minimal schema-2 `lifecycle.json` to prove both guards block; the record is intentionally invalid for the strict reader, and both guards must fail closed on it exactly as they do on an active record.
+- The container job seeds a minimal schema-2 `lifecycle.json` to prove both guards block; the record is intentionally malformed for the strict reader, and both guards must fail closed through their unreadable-record branches. A valid `active` record needs hash-bound manifest references, so the active-record refusals are proved by the hermetic guard suite instead.
 
 ## Known Limitations
 

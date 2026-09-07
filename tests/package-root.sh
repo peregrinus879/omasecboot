@@ -2,11 +2,11 @@
 # Privileged package lifecycle check for a disposable Arch container.
 #
 # Installs the built package with real pacman hook execution, then proves the
-# tmpfiles state layout, the removal guard's pristine and blocked decisions,
-# the transition guard's blocked decision for a pinned package, an upgrade, and
-# removal that preserves durable state. It mutates the running system, so it
-# refuses to run unless OMASECBOOT_DISPOSABLE_ROOT=1 is set by a throwaway
-# container job. Never run it on a real machine.
+# tmpfiles state layout, both guards admitting a pristine lifecycle, both
+# guards failing closed on a malformed managed record, an upgrade, and removal
+# that preserves durable state. It mutates the running system, so it refuses
+# to run unless OMASECBOOT_DISPOSABLE_ROOT=1 is set by a throwaway container
+# job. Never run it on a real machine.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -24,6 +24,8 @@ fail_test() {
 if findmnt -n -t efivarfs -O rw >/dev/null 2>&1; then
   fail_test "refusing to run where EFI variables are writable"
 fi
+[[ ! -e /var/lib/sbctl/keys ]] \
+  || fail_test "refusing to run where sbctl keys already exist"
 
 pkgname=omasecboot
 pkgver=$(sed -n 's/^pkgver=//p' "${ROOT_DIR}/PKGBUILD")
@@ -116,7 +118,8 @@ done
 [[ -d "$state" && -f "${state}/repair.lock" ]] \
   || fail_test "removal from pristine state deleted the state directory or lock"
 
-# 3. Reinstall, seed a managed lifecycle, and prove both guards block.
+# 3. Reinstall and seed a malformed managed record. The strict reader rejects
+#    it, so both guards must fail closed without reading any further.
 pacman -U --noconfirm "${assume[@]}" "$package" > "${BUILD_DIR}/reinstall.log" 2>&1 \
   || { cat "${BUILD_DIR}/reinstall.log" >&2; fail_test "package reinstall failed"; }
 assert_installed 1

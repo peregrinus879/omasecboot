@@ -407,6 +407,9 @@ run_gate() {
   local output="$1"
   GATE_RC=0
   windows_encryption_gate > "$output" 2>&1 || GATE_RC=$?
+  if /usr/bin/grep -Fq 'command not found' "$output"; then
+    fail_test "preflight called an undefined function"
+  fi
   if /usr/bin/grep -Eqi 'ntfs-3g|hivex|mount:[^:]*windows-os|mount:.*ntfs' \
     "$CALL_LOG"; then
     fail_test "preflight invoked a forbidden Windows-volume operation"

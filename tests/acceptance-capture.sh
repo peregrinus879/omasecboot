@@ -72,7 +72,7 @@ file_block() { # title path
 capture_state() {
   local phase="$1" manifest incident
   section "State ${phase}"
-  block "Time and kernel" date -u +%Y-%m-%dT%H:%M:%SZ
+  block "Time (UTC)" date -u +%Y-%m-%dT%H:%M:%SZ
   block "Kernel" uname -r
   block "Firmware and machine model" bash -c 'for f in sys_vendor product_name product_family bios_vendor bios_version bios_date; do printf "%s=%s\n" "$f" "$(cat /sys/class/dmi/id/$f 2>/dev/null)"; done'
   block "Omarchy version" bash -c 'pacman -Q omarchy omarchy-settings 2>&1; cat /usr/share/omarchy/version 2>/dev/null'
@@ -83,12 +83,12 @@ capture_state() {
   block "sbctl verify" sbctl verify
   block "omasecboot status" bash -c 'command -v omasecboot >/dev/null && omasecboot status || echo "omasecboot is not installed"'
   block "omasecboot version" bash -c 'command -v omasecboot >/dev/null && omasecboot version || echo "omasecboot is not installed"'
-  block "Boot entries" efibootmgr -v
+  block "Boot entries (MAC nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([0-9a-fA-F]+,[0-9]+\)/MAC(redacted)/g"'
   block "ESP mount" findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS /boot
   block "Installed hooks" bash -c 'ls -la /usr/share/libalpm/hooks/*omasecboot* /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/pre.d/*omasecboot* /etc/boot/hooks/post.d/*omasecboot* 2>&1; sha256sum /usr/share/libalpm/hooks/*omasecboot* /etc/boot/hooks/*/*omasecboot* 2>/dev/null'
   block "Stale source install" bash -c 'ls -la /usr/local/bin/omasecboot /usr/local/lib/omasecboot 2>&1'
   block "EFI artifacts" bash -c 'find /boot/EFI -type f \( -iname "*.efi" -o -name "*.efi_*" \) -exec sha256sum {} + 2>/dev/null | sort -k2'
-  block "Limine checksum enrollment" bash -c 'for f in /boot/EFI/limine/limine_x64.efi /boot/EFI/BOOT/BOOTX64.EFI; do printf "%s: " "$f"; grep -a -o "++CONFIG_B2SUM_SIGNATURE++[0-9a-f]\{128\}" "$f" 2>/dev/null | head -1 | cut -c26-41 || echo "absent"; echo; done; printf "limine.conf b2sum: "; b2sum /boot/limine.conf | cut -c1-16'
+  block "Limine checksum enrollment (first 16 hex digits)" bash -c 'for f in /boot/EFI/limine/limine_x64.efi /boot/EFI/BOOT/BOOTX64.EFI; do h=$(grep -a -o "++CONFIG_B2SUM_SIGNATURE++[0-9a-f]\{128\}" "$f" 2>/dev/null | head -1 | cut -c27-42); printf "%s: %s\n" "$f" "${h:-absent}"; done; printf "limine.conf b2sum: "; b2sum /boot/limine.conf | cut -c1-16'
   file_block "/etc/default/limine" /etc/default/limine
   file_block "/boot/limine.conf" /boot/limine.conf
   block "Lifecycle directory" bash -c "ls -laR ${state_dir} 2>&1 | grep -v -E '^\s*$'"

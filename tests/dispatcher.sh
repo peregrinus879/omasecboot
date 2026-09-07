@@ -424,7 +424,6 @@ RECOVERY_OPERATION=""
 _OMASECBOOT_LIMINE_LOCK_OWNED=true
 _OMASECBOOT_REPAIR_LOCK_OWNED=true
 reconcile_stale_lifecycle() { :; }
-prepare_registered_stale_recovery_runtime_locked() { :; }
 prepare_registered_recovery_runtime_locked() { :; }
 read_lifecycle() { _lifecycle_state=recovery-required; }
 load_recovery_context() { _recovery_root_manifest_json='{}'; }

@@ -85,8 +85,8 @@ lifecycle_activation_environment_is_ready() {
     fail "Lifecycle activation requires the exact supported producer packages"
     return 1
   }
-  [[ $(vercmp "$(producer_package_version efibootmgr)" \
-    "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" 2>/dev/null) -ge 0 ]] || {
+  version_at_least "$(producer_package_version efibootmgr)" \
+    "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" || {
     fail "Lifecycle activation requires efibootmgr ${WINDOWS_EFIBOOTMGR_MINIMUM_VERSION} or newer"
     return 1
   }
@@ -345,7 +345,7 @@ cmd_windows_help() {
   echo -e "  ${BOLD}Usage${NC}   sudo omasecboot windows <command>"
   echo
   echo -e "  ${BOLD}Commands${NC}"
-  echo "    available   Check for Windows Boot Manager without root or output"
+  echo "    available   Check the recorded Windows handoff without root or output"
   echo "    preflight   Run the read-only Windows encryption preparation gate"
   echo "    setup       Configure the validated firmware handoff"
   echo "    suppress    Suppress an unsafe managed handoff"
@@ -368,7 +368,9 @@ cmd_windows() {
 
   case "${1:-}" in
     available)
-      find_windows_boot_entry >/dev/null
+      read_windows_target_state >/dev/null 2>&1 || return 1
+      find_windows_boot_entry >/dev/null || return 1
+      windows_state_matches_resolved_target
       ;;
     preflight)
       cmd_windows_preflight

@@ -79,6 +79,16 @@ snapshot_restore_lock_path() {
   printf '/run/lock/limine-snapper-restore.lock\n'
 }
 
+# A full restore leaves its marker for the whole restore. No producer lease,
+# stale-transition reconciliation, or recovery runs while it exists, and
+# OmaSecBoot never removes it: the marker lives under /run/lock and clears
+# with the boot.
+producer_runtime_is_clear() {
+  local marker
+  marker=$(snapshot_restore_lock_path) || return 1
+  [[ ! -e "$marker" && ! -L "$marker" ]]
+}
+
 pacman_database_lock_path() {
   printf '/var/lib/pacman/db.lck\n'
 }
@@ -3502,7 +3512,6 @@ run_software_recovery_locked() {
 run_registered_recovery_locked() {
   local operation
   boot_locks_are_held || return 1
-  prepare_registered_stale_recovery_runtime_locked || return 1
   reconcile_stale_lifecycle || return 1
   read_lifecycle || return 1
   case "$_lifecycle_state" in
@@ -3523,10 +3532,6 @@ run_registered_recovery_locked() {
     unconfigure-recovery) run_unconfigure_recovery_locked ;;
     *) return 1 ;;
   esac
-}
-
-prepare_registered_stale_recovery_runtime_locked() {
-  return 0
 }
 
 prepare_registered_recovery_runtime_locked() {
@@ -4246,6 +4251,10 @@ reconcile_stale_lifecycle() {
   transaction_id="$_lifecycle_transaction_id"
   read_transaction_manifest "$transaction_id" || return 1
   manifest_owner_is_alive && return 0
+  producer_runtime_is_clear || {
+    fail "Stale transaction ${transaction_id} blocked while full snapshot restore is running"
+    return 1
+  }
 
   _transaction_active=true
   _transaction_id="$transaction_id"
@@ -4381,11 +4390,11 @@ run_lifecycle_transaction_with_preflight() {
     fail "Lifecycle state is invalid or unsafe"
     return 1
   }
-  if [[ -e "$(snapshot_restore_lock_path)" || -L "$(snapshot_restore_lock_path)" ]]; then
+  producer_runtime_is_clear || {
     fail "Operation ${operation} blocked while full snapshot restore is running"
     release_boot_repair_lock
     return 1
-  fi
+  }
   if [[ ",${allowed_states}," != *",${_lifecycle_state},"* ]]; then
     if [[ "$_lifecycle_state" == recovery-required || "$_lifecycle_state" == transition ]]; then
       fail "Lifecycle is ${_lifecycle_state} for transaction ${_lifecycle_transaction_id}; recovery is required"

@@ -200,10 +200,10 @@ All mutating commands require root, refuse extra arguments, and complete any pen
 | `setup` | Prepare or reuse a validated plan, confirm PK fingerprints, prove artifacts, and print the next firmware instruction |
 | `enroll` | Write the confirmed db, KEK, and PK plan from Setup Mode with per-write read-back |
 | `adopt [--...-original VALUE]` | Record an existing configuration as `active` with its original values |
-| `status` | Show Secure Boot state, lifecycle, hooks, both Limine checksums, Limine 12 readiness, Windows entries, stale sbctl entries, and file verification. Basic information works without root |
+| `status` | Show Secure Boot state, lifecycle, hooks, both Limine checksums, Limine 12 readiness, Windows entries, stale sbctl entries, and file verification. Run it with sudo; lifecycle records are root-only |
 | `sign` | Repair `/etc/default/limine`, re-enroll the checksum into both Limine executables, clean stale tracking, sign and track every artifact, and prove the result. Never rebuilds UKIs or runs `limine-update` |
 | `cleanup` | Remove stale sbctl tracking entries |
-| `windows available` | Exit 0 silently if one valid Windows target resolves; no root required |
+| `windows available` | Exit 0 silently if the durable Windows opt-in exists and still matches one valid firmware target; no root required |
 | `windows preflight` | The read-only encryption preparation gate |
 | `windows setup` | Record the validated target and write the managed Limine entry |
 | `windows suppress` | Remove the managed Limine entry, keep the opt-in |
@@ -250,7 +250,7 @@ These are four different operations. None of them is a factory reset.
 | Message or symptom | Meaning | Action |
 |---|---|---|
 | `Lifecycle: unmanaged (explicit setup or adoption required)` | No lifecycle record | Run `setup`, or `adopt` if Limine was already configured |
-| `Lifecycle activation requires the exact supported producer packages` | One of the three pinned producer packages is not at its supported version, or efibootmgr is older than 18 | Update or downgrade from disabled or pristine state; see Requirements |
+| `Lifecycle activation requires the exact supported producer packages` or `Lifecycle activation requires efibootmgr 18 or newer` | One of the three pinned producer packages is not at its supported version, or efibootmgr is older than 18 | Update or downgrade from disabled or pristine state; see Requirements |
 | `sign` or `status` reports that `/EFI/BOOT/BOOTX64.EFI` carries no Limine config checksum | On a shared ESP, Windows repair or a Windows installer rewrote the fallback loader with its own copy | Rerun Omarchy's `limine-update` to restore Limine's fallback copy, then `sudo omasecboot sign` |
 | `Lifecycle activation requires the current installed ... hook` | A hook is missing, altered, or targets a command other than `/usr/bin/omasecboot` | Reinstall the package; remove any `/usr/local` copy |
 | `Boot-mutating package transaction blocked: ... disable lifecycle before changing pinned producers` | A pacman transaction would change a supported package while active | See Day-to-Day Operation |
@@ -291,7 +291,7 @@ Limine, limine-entry-tool, and limine-snapper-sync share `/run/lock/boot-partiti
 
 ### Firmware
 
-Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode, AuditMode, DeployedMode, and SecureBoot values, and the DMI product UUID are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
+Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode, AuditMode, DeployedMode, and SecureBoot values, and the DMI identity fields (product UUID plus the vendor, product, board, and BIOS identifiers, including the board serial) are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
 
 ### Code structure
 
