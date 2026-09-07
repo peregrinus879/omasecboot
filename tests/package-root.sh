@@ -31,9 +31,10 @@ builder=omasecboot-build
 id "$builder" >/dev/null 2>&1 || useradd --system --create-home "$builder"
 chown -R "$builder" "$BUILD_DIR"
 
-# Build the package as an unprivileged user from a working-tree archive.
+# Build the package as an unprivileged user from a working-tree archive. The
+# checkout is usually owned by the CI build user, so root trusts it explicitly.
 mkdir -p "${BUILD_DIR}/${pkgname}-${pkgver}"
-git -C "$ROOT_DIR" ls-files -z --cached --others --exclude-standard \
+git -C "$ROOT_DIR" -c safe.directory="$ROOT_DIR" ls-files -z --cached --others --exclude-standard \
   | tar -C "$ROOT_DIR" --null -T - -cf - | tar -C "${BUILD_DIR}/${pkgname}-${pkgver}" -xf -
 tar -C "$BUILD_DIR" -czf "${BUILD_DIR}/${pkgname}-${pkgver}.tar.gz" "${pkgname}-${pkgver}"
 cp "${ROOT_DIR}/PKGBUILD" "${BUILD_DIR}/PKGBUILD"
