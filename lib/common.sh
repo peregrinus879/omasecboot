@@ -277,6 +277,19 @@ with_limine_lock() {
   _OMASECBOOT_LIMINE_LOCK_OWNED=local
 }
 
+# Assigns one input line per named variable; the line count must match, so
+# a missing or multi-line value fails instead of shifting later fields.
+read_lines() {
+  local index=0 name
+  local -a lines=()
+  mapfile -t lines
+  (( ${#lines[@]} == $# )) || return 1
+  for name in "$@"; do
+    printf -v "$name" '%s' "${lines[$index]}"
+    index=$((index + 1))
+  done
+}
+
 boot_locks_are_held() {
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]]

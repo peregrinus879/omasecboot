@@ -28,7 +28,6 @@ depends=(
   'gum'
   'efibootmgr>=18'
   'sbctl>=0.18'
-  'sbsigntools'
   'limine'
   'limine-mkinitcpio-hook>=1.38.0'
   'limine-snapper-sync>=1.31.0'

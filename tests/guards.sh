@@ -52,7 +52,6 @@ omasecboot
 openssl
 pacman
 sbctl
-sbsigntools
 snapper
 systemd
 tar

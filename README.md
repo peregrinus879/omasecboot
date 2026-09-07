@@ -61,21 +61,20 @@ The consolidated registry handles its supported producer, firmware, Windows, sof
 - [jq](https://jqlang.github.io/jq/) - JSON parser
 - [OpenSSL](https://www.openssl.org/) - strict X.509 DER and local key-pair validation
 - [gum](https://github.com/charmbracelet/gum) - interactive adoption and Windows preflight prompts
-- [efibootmgr](https://github.com/rhboot/efibootmgr) and util-linux - firmware, block-device, filesystem, lock, mount, and privilege-drop inspection
-- [sbsigntools](https://git.kernel.org/pub/scm/linux/kernel/git/jejb/sbsigntools.git/) - advisory Windows boot-manager signer metadata
+- [efibootmgr](https://github.com/rhboot/efibootmgr) and util-linux - firmware, block-device, filesystem, lock, and mount inspection
 - UEFI firmware with Secure Boot support
 - EFI System Partition mounted at `/boot`
 - For dual-boot: Windows Boot Manager present in the firmware boot entries
 
 ```bash
-sudo pacman -S --needed sbctl jq openssl gum efibootmgr sbsigntools util-linux
+sudo pacman -S --needed sbctl jq openssl gum efibootmgr util-linux
 ```
 
 ### Windows Preflight
 
-`sudo omasecboot windows preflight` is the implemented read-only preparation gate. It independently inspects Windows firmware options, direct BitLocker filesystem signatures, and Microsoft boot-manager files on internal GPT ESPs. It never mounts a Windows volume. It may temporarily mount an internal FAT ESP read-only under a private runtime path, request `O_NOATIME` while copying the boot manager, and inspect the copy as the unprivileged `nobody` identity.
+`sudo omasecboot windows preflight` is the implemented read-only preparation gate. It independently inspects Windows firmware options, direct BitLocker filesystem signatures, and Microsoft boot-manager files on internal GPT ESPs. It never mounts a Windows volume. It may temporarily mount an internal FAT ESP read-only under a private runtime path and reads only the loader header, with `O_NOATIME`, to confirm a boot manager is present.
 
-A complete three-detector negative returns success only as a bounded observation; it is not proof that Windows is absent and is not firmware clearance. Any positive or unknown signal requires confirmation that the Windows encryption state was checked and every available recovery key was backed up. A user decline returns 1. Missing tools, ambiguous probes, external ESPs, unsafe mounts, or unknown signer metadata print the applicable preparation guidance and return 2 without an override. Recognized signer names are embedded metadata only, not proof of firmware db/dbx acceptance or bootability.
+A complete three-detector negative returns success only as a bounded observation; it is not proof that Windows is absent and is not firmware clearance. Any positive or unknown signal requires confirmation that the Windows encryption state was checked and every available recovery key was backed up. A user decline returns 1. Missing tools, ambiguous probes, external ESPs, or unsafe mounts print the applicable preparation guidance and return 2 without an override. A present Microsoft loader is a signal only, not proof of firmware db/dbx acceptance or bootability.
 
 These preparations are required before every firmware mutation. Do not change Windows solely to evaluate this development source tree.
 
@@ -139,7 +138,7 @@ Provides explicit Windows firmware handoff operations:
 - `windows preflight` requires root and runs the read-only three-signal encryption preparation gate. It prints edition-specific Home decryption or Pro/Enterprise/Education suspension and resume guidance, requires administrator approval for managed devices, and fails closed on technical uncertainty.
 - `windows setup` records the validated target and managed Limine handoff, `windows suppress` removes an unsafe managed block without deleting the opt-in, and `windows bootnext` requests one direct firmware handoff.
 
-The setup transaction parses BootOrder and raw UEFI device-path nodes, maps the GPT HD node by PARTUUID and geometry to one FAT ESP, validates the exact loader read-only, persists strict target identity, and composes the managed Limine block with artifact repair in one lifecycle transaction. Standard HD short-form paths rely on point-in-time uniqueness across the current Linux block inventory, and every write revalidates that mapping. A reusable ESP mount must be unique, identity-matched, free of same-device subroot aliases, and reached through a controlled path. One controlled root mount may be reused without writing even when writable; the descriptor-bound loader read applies `O_NOATIME` and fails closed if that flag cannot be set. An uncontrolled read-only root mount is not read directly, and the mapped ESP is instead mounted `ro,noatime` under the owned runtime path. Uncontrolled writable, multiple, and subroot mounts fail closed. The opened loader descriptor must remain on the selected kernel mount ID and mapped filesystem before and after its `MZ` header is read. The transaction also rejects efibootmgr diagnostics, malformed paths, duplicate installations or labels, unsupported localized labels, missing BootOrder records, and geometry or loader changes. Selecting Windows from the Limine boot menu requests a one-boot firmware handoff; it does not prove that Windows booted successfully. Requires `efibootmgr`, `jq`, GNU coreutils, and util-linux.
+The setup transaction parses BootOrder and raw UEFI device-path nodes, maps the GPT HD node by PARTUUID and geometry to one FAT ESP, validates the exact loader read-only, persists strict target identity, and composes the managed Limine block with artifact repair in one lifecycle transaction. Standard HD short-form paths rely on point-in-time uniqueness across the current Linux block inventory, and every write revalidates that mapping. The single whole-filesystem mount of the mapped ESP is reused without writing, even when writable; the loader read applies `O_NOATIME` and fails closed if that flag cannot be set. Without such a mount the ESP is mounted `ro,noatime` under the owned runtime path, and multiple mounts fail closed. The opened loader must be on the mapped filesystem and start with the `MZ` header, and the mount is proved again after the read. The transaction also rejects efibootmgr diagnostics, malformed paths, duplicate installations or labels, unsupported localized labels, missing BootOrder records, and geometry or loader changes. Selecting Windows from the Limine boot menu requests a one-boot firmware handoff; it does not prove that Windows booted successfully. Requires `efibootmgr`, `jq`, GNU coreutils, and util-linux.
 
 ### `status`
 

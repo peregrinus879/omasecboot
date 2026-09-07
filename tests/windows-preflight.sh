@@ -119,28 +119,11 @@ if [[ -n "$target" ]]; then
   elif [[ -z "$columns" ]]; then
     printf '%s\n' "$target"
   else
-    [[ "$columns" == 'TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS' ]] || exit 2
-    access=ro
-    mount_id=$TEST_MOUNT_ID
-    if [[ -f "${target}/.reusable" ]]; then
-      access=$(< "${target}/.access")
-      mount_id=$(< "${target}/.id")
-    fi
-    jq -cn --arg target "$target" --arg maj "$(< "${target}/.maj")" \
-      --argjson id "$mount_id" --arg options "${access},nosuid,nodev,noexec,noatime" '{
-      filesystems: [{
-        target: $target,
-        id: $id,
-        "maj:min": $maj,
-        fstype: "vfat",
-        fsroot: "/",
-        "vfs-options": $options
-      }]
-    }'
+    exit 2
   fi
   exit 0
 fi
-[[ "$columns" == 'TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS' ]] || exit 2
+[[ "$columns" == 'TARGET,MAJ:MIN,FSTYPE,FSROOT' ]] || exit 2
 /usr/bin/cat "$FINDMNT_INVENTORY"
 EOF
 
@@ -188,79 +171,6 @@ printf 'dd:%s\n' "$*" >> "$CALL_LOG"
 /usr/bin/dd "$@"
 EOF
 
-cat > "${BIN_DIR}/setpriv" <<'EOF'
-#!/bin/bash
-set -euo pipefail
-printf 'setpriv:%s\n' "$*" >> "$CALL_LOG"
-joined=" $* "
-for required in '--reuid=nobody' '--regid=nobody' '--clear-groups' \
-  '--inh-caps=-all' '--ambient-caps=-all' '--bounding-set=-all' \
-  '--no-new-privs' '--reset-env'; do
-  [[ "$joined" == *" ${required} "* ]] || exit 96
-done
-while [[ $# -gt 0 && "$1" != -- ]]; do
-  shift
-done
-[[ $# -gt 0 ]] || exit 95
-shift
-exec "$@"
-EOF
-
-cat > "${BIN_DIR}/sbverify" <<'EOF'
-#!/bin/bash
-set -euo pipefail
-script_dir=$(/usr/bin/dirname "$0")
-test_dir=$(/usr/bin/dirname "$script_dir")
-SIGNER_MODE=$(< "${script_dir}/signer-mode")
-printf 'sbverify:%s\n' "$*" >> "${test_dir}/calls.log"
-[[ $# -eq 2 && "$1" == --list && "$2" == /proc/self/fd/3 ]] || exit 94
-[[ $(/usr/bin/od -An -N2 -tx1 "$2" | /usr/bin/tr -d '[:space:]') == 4d5a ]] || exit 93
-case "$SIGNER_MODE" in
-  2011)
-    printf '%s\n' \
-      'signature 1' \
-      'image signature issuers:' \
-      ' - /C=US/O=Microsoft Corporation/CN=Microsoft Windows Production PCA 2011' \
-      'image signature certificates:'
-    ;;
-  2023)
-    printf '%s\n' \
-      'signature 1' \
-      'image signature issuers:' \
-      ' - /C=US/O=Microsoft Corporation/CN=Windows UEFI CA 2023' \
-      'image signature certificates:'
-    ;;
-  both)
-    printf '%s\n' \
-      'signature 1' \
-      'image signature issuers:' \
-      ' - /C=US/O=Microsoft Corporation/CN=Microsoft Windows Production PCA 2011' \
-      'image signature certificates:' \
-      'signature 2' \
-      'image signature issuers:' \
-      ' - /C=US/O=Microsoft Corporation/CN=Windows UEFI CA 2023' \
-      'image signature certificates:'
-    ;;
-  unknown)
-    printf '%s\n' \
-      'signature 1' \
-      'image signature issuers:' \
-      ' - /C=US/O=Example Corp/CN=Future Windows Signing CA 2040' \
-      'image signature certificates:'
-    ;;
-  malformed) printf 'signature 1\n' ;;
-  whitespace)
-    printf '%s\n' \
-      'signature 1' \
-      '  image signature issuers:' \
-      '   - /C=US/O=Microsoft Corporation/CN=Windows UEFI CA 2023' \
-      '  image signature certificates:'
-    ;;
-  fail) exit 1 ;;
-  *) exit 2 ;;
-esac
-EOF
-
 cat > "${BIN_DIR}/gum" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -290,13 +200,13 @@ EOF
 
 chmod +x "${BIN_DIR}/efibootmgr" "${BIN_DIR}/lsblk" "${BIN_DIR}/blkid" \
   "${BIN_DIR}/findmnt" "${BIN_DIR}/mount" "${BIN_DIR}/umount" \
-  "${BIN_DIR}/dd" "${BIN_DIR}/setpriv" "${BIN_DIR}/sbverify" "${BIN_DIR}/gum"
+  "${BIN_DIR}/dd" "${BIN_DIR}/gum"
 
 export EFI_FIXTURE EFI_ERROR_FIXTURE LSBLK_FIXTURE FINDMNT_INVENTORY DEVICE_MAP
 export BITLOCKER_DEVICES VFAT_DEVICES BLKID_UNKNOWN_DEVICES LOADER_DEVICES
 export BAD_LOADER_DEVICES MOUNT_FAIL_DEVICES MOUNT_SIGNAL_DEVICES
 export LOADER_SOURCE CALL_LOG GUM_LOG TEST_MOUNT_ID
-export EFI_RC=0 LSBLK_RC=0 SIGNER_MODE=2023
+export EFI_RC=0 LSBLK_RC=0
 export GUM_EDITION=Home GUM_MANAGEMENT='Personal device'
 export GUM_ADMIN_APPROVED=true GUM_RECOVERY_APPROVED=true
 export GUM_PREPARATION_APPROVED=true
@@ -325,22 +235,6 @@ windows_runtime_dir_path() {
 windows_block_device_matches() {
   local path="$1" maj="$2"
   /usr/bin/grep -Fxq "${path}"$'\t'"${maj}" "$DEVICE_MAP"
-}
-
-windows_preflight_setpriv_path() {
-  printf '%s/setpriv\n' "$BIN_DIR"
-}
-
-windows_preflight_sbverify_path() {
-  if [[ "$SBVERIFY_AVAILABLE" != true ]]; then
-    printf '%s/missing-sbverify\n' "$BIN_DIR"
-    return 0
-  fi
-  printf '%s/sbverify\n' "$BIN_DIR"
-}
-
-windows_preflight_prepare_inspection_owner() {
-  chmod 400 "$1"
 }
 
 windows_preflight_gum_path() {
@@ -464,30 +358,19 @@ write_two_esp_inventory() {
 }
 
 write_reusable_mount() {
-  local target="$1" access="$2"
+  local target="$1"
   mkdir -m 700 "$target"
   mkdir -p "${target}/EFI/Microsoft/Boot"
   cp "$LOADER_SOURCE" "${target}/EFI/Microsoft/Boot/bootmgfw.efi"
   printf '%s\n' "$TEST_MAJ_MIN" > "${target}/.maj"
-  printf '%s\n' "$TEST_MOUNT_ID" > "${target}/.id"
-  printf '%s\n' "$access" > "${target}/.access"
   : > "${target}/.reusable"
-  jq -n --arg target "$target" --arg maj "$TEST_MAJ_MIN" \
-    --arg access "$access" --argjson id "$TEST_MOUNT_ID" '{
-    filesystems: [{
-      target: $target,
-      id: $id,
-      "maj:min": $maj,
-      fstype: "vfat",
-      fsroot: "/",
-      "vfs-options": ($access + ",nosuid,nodev,noexec,noatime")
-    }]
+  jq -n --arg target "$target" --arg maj "$TEST_MAJ_MIN" '{
+    filesystems: [{target: $target, "maj:min": $maj, fstype: "vfat", fsroot: "/"}]
   }' > "$FINDMNT_INVENTORY"
 }
 
 reset_case() {
-  rm -rf "${TEST_DIR}/run" "${TEST_DIR}/reusable-esp" \
-    "${TEST_DIR}/uncontrolled-esp"
+  rm -rf "${TEST_DIR}/run" "${TEST_DIR}/reusable-esp"
   mkdir -m 700 "${TEST_DIR}/run"
   : > "$EFI_ERROR_FIXTURE"
   : > "$BITLOCKER_DEVICES"
@@ -504,28 +387,24 @@ reset_case() {
   write_inventory
   EFI_RC=0
   LSBLK_RC=0
-  SIGNER_MODE=2023
   GUM_EDITION=Home
   GUM_MANAGEMENT='Personal device'
   GUM_ADMIN_APPROVED=true
   GUM_RECOVERY_APPROVED=true
   GUM_PREPARATION_APPROVED=true
   GUM_AVAILABLE=true
-  SBVERIFY_AVAILABLE=true
   LOCK_FAIL_LIMINE=false
   LOCK_FAIL_REPAIR=false
   _OMASECBOOT_LIMINE_LOCK_OWNED=false
   _OMASECBOOT_REPAIR_LOCK_OWNED=false
   QUIET=false
-  export EFI_RC LSBLK_RC SIGNER_MODE GUM_EDITION GUM_MANAGEMENT
+  export EFI_RC LSBLK_RC GUM_EDITION GUM_MANAGEMENT
   export GUM_ADMIN_APPROVED GUM_RECOVERY_APPROVED GUM_PREPARATION_APPROVED
   export GUM_AVAILABLE LOCK_FAIL_LIMINE LOCK_FAIL_REPAIR
-  export SBVERIFY_AVAILABLE
 }
 
 run_gate() {
   local output="$1"
-  printf '%s\n' "$SIGNER_MODE" > "${BIN_DIR}/signer-mode"
   GATE_RC=0
   windows_encryption_gate > "$output" 2>&1 || GATE_RC=$?
   if /usr/bin/grep -Eqi 'ntfs-3g|hivex|mount:[^:]*windows-os|mount:.*ntfs' \
@@ -540,10 +419,6 @@ run_gate() {
 
 assert_no_runtime_artifacts() {
   local runtime="${TEST_DIR}/run/omasecboot"
-  if [[ -d "$runtime" ]] \
-    && compgen -G "${runtime}/bootmgfw.*" >/dev/null; then
-    fail_test "private boot-manager copy was not cleaned"
-  fi
   if [[ -d "$runtime" ]] \
     && compgen -G "${runtime}/windows-preflight-*/.mounted" >/dev/null; then
     fail_test "owned ESP mount was not cleaned"
@@ -594,85 +469,28 @@ fi
 reset_case
 printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
 GUM_EDITION=Education
-SIGNER_MODE=both
-export GUM_EDITION SIGNER_MODE
+export GUM_EDITION
 run_gate "$case_output"
 [[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
   || fail_test "ESP-loader-only signal did not trigger and pass the gate"
-/usr/bin/grep -Fq '(known-both)' "$case_output" \
-  || fail_test "multi-signature loader was not fully classified"
-/usr/bin/grep -Fq 'Microsoft Windows Production PCA 2011' "$case_output" \
-  || fail_test "2011 issuer metadata was not reported"
-/usr/bin/grep -Fq 'Windows UEFI CA 2023' "$case_output" \
-  || fail_test "2023 issuer metadata was not reported"
+/usr/bin/grep -Fq 'Boot manager: /dev/linux-esp' "$case_output" \
+  || fail_test "ESP loader was not reported"
 /usr/bin/grep -Fq 'iflag=fullblock,noatime' "$CALL_LOG" \
-  || fail_test "full loader copy omitted O_NOATIME"
-/usr/bin/grep -Fq -- '--reuid=nobody --regid=nobody --clear-groups' "$CALL_LOG" \
-  || fail_test "signer inspection omitted real/effective identity drop"
-/usr/bin/grep -Fq -- '--inh-caps=-all --ambient-caps=-all --bounding-set=-all' \
-  "$CALL_LOG" || fail_test "signer inspection did not clear capabilities"
-/usr/bin/grep -Fq 'sbverify:--list /proc/self/fd/3' "$CALL_LOG" \
-  || fail_test "sbverify received an ESP or private-copy pathname"
+  || fail_test "loader read omitted O_NOATIME"
 assert_no_runtime_artifacts
 
 reset_case
-write_reusable_mount "${TEST_DIR}/reusable-esp" rw
+write_reusable_mount "${TEST_DIR}/reusable-esp"
 run_gate "$case_output"
 [[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
-  || fail_test "controlled reusable ESP did not pass the gate"
-/usr/bin/grep -Fq 'Boot manager: /dev/linux-esp (known-2023)' "$case_output" \
-  || fail_test "controlled reusable ESP loader was not inspected"
+  || fail_test "reusable ESP mount did not pass the gate"
+/usr/bin/grep -Fq 'Boot manager: /dev/linux-esp' "$case_output" \
+  || fail_test "reusable ESP loader was not inspected"
 if /usr/bin/grep -Fq 'mount:/dev/linux-esp:' "$CALL_LOG"; then
-  fail_test "controlled reusable ESP was mounted again"
+  fail_test "reusable ESP was mounted again"
 fi
 /usr/bin/grep -Fq 'iflag=fullblock,noatime' "$CALL_LOG" \
-  || fail_test "reusable writable ESP copy omitted O_NOATIME"
-assert_no_runtime_artifacts
-
-reset_case
-write_reusable_mount "${TEST_DIR}/uncontrolled-esp" rw
-chmod 777 "${TEST_DIR}/uncontrolled-esp"
-run_gate "$case_output"
-[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "uncontrolled writable ESP did not fail closed"
-if /usr/bin/grep -Fq 'mount:/dev/linux-esp:' "$CALL_LOG"; then
-  fail_test "uncontrolled writable ESP reached the owned-mount fallback"
-fi
-assert_no_runtime_artifacts
-
-reset_case
-printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
-SIGNER_MODE=whitespace
-export SIGNER_MODE
-run_gate "$case_output"
-[[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
-  || fail_test "whitespace-tolerant signer fixture did not pass"
-/usr/bin/grep -Fq '(known-2023)' "$case_output" \
-  || fail_test "indented signer metadata was not classified"
-assert_no_runtime_artifacts
-
-reset_case
-printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
-SIGNER_MODE=unknown
-export SIGNER_MODE
-run_gate "$case_output"
-[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "unknown signer metadata did not leave a technical blocker"
-/usr/bin/grep -Fq 'Future Windows Signing CA 2040' "$case_output" \
-  || fail_test "unknown sanitized issuer metadata was not reportable"
-/usr/bin/grep -Fq 'maintainer review is required' "$case_output" \
-  || fail_test "unknown issuer omitted maintainer disposition"
-assert_no_runtime_artifacts
-
-reset_case
-printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
-SIGNER_MODE=malformed
-export SIGNER_MODE
-run_gate "$case_output"
-[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "malformed signer output did not leave a technical blocker"
-/usr/bin/grep -Fq 'signer metadata could not be inspected' "$case_output" \
-  || fail_test "malformed signer output omitted its disposition"
+  || fail_test "reusable ESP read omitted O_NOATIME"
 assert_no_runtime_artifacts
 
 reset_case
@@ -683,20 +501,6 @@ run_gate "$case_output"
   || fail_test "unsafe loader did not leave a technical blocker"
 /usr/bin/grep -Fq 'failed safely on ESP /dev/linux-esp' "$case_output" \
   || fail_test "unsafe loader omitted its device-specific blocker"
-assert_no_runtime_artifacts
-
-reset_case
-printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
-SBVERIFY_AVAILABLE=false
-export SBVERIFY_AVAILABLE
-run_gate "$case_output"
-[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "missing sbverify did not leave a technical blocker"
-/usr/bin/grep -Fq 'requires sbsigntools (/usr/bin/sbverify)' "$case_output" \
-  || fail_test "missing sbverify omitted its prerequisite"
-if /usr/bin/grep -Fq 'dd:' "$CALL_LOG"; then
-  fail_test "missing sbverify still copied the boot manager"
-fi
 assert_no_runtime_artifacts
 
 reset_case
@@ -855,7 +659,7 @@ printf '/dev/esp-b\n' > "$MOUNT_FAIL_DEVICES"
 run_gate "$case_output"
 [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
   || fail_test "second-ESP failure did not leave a technical blocker"
-/usr/bin/grep -Fq 'Boot manager: /dev/esp-a (known-2023)' "$case_output" \
+/usr/bin/grep -Fq 'Boot manager: /dev/esp-a' "$case_output" \
   || fail_test "first ESP result was lost when the second ESP failed"
 /usr/bin/grep -Fq 'failed safely on ESP /dev/esp-b' "$case_output" \
   || fail_test "second ESP failure omitted its device-specific blocker"

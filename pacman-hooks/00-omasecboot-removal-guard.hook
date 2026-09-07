@@ -21,7 +21,6 @@ Target = jq
 Target = openssl
 Target = efibootmgr
 Target = util-linux
-Target = sbsigntools
 Target = limine
 Target = limine-mkinitcpio-hook
 Target = limine-snapper-sync

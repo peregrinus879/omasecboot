@@ -22,6 +22,7 @@ _firmware_raw_hash=""
 _firmware_payload_hash=""
 _firmware_payload_size=""
 _firmware_state_value=""
+_firmware_current_file=""
 _sbctl_package_identity=""
 _sbctl_executable=""
 _sbctl_executable_hash=""
@@ -184,60 +185,38 @@ inspect_raw_efivar_file() {
 }
 
 copy_firmware_variable_snapshot() {
-  local name="$1" destination="$2" source first second source_identity final_identity
-  local parent old_umask
+  local name="$1" destination="$2" source parent first second rc=0
   source=$(firmware_variable_path "$name") || return 1
   validate_firmware_variable_file "$source" || return 1
   parent=$(dirname "$destination")
   validate_private_control_directory "$parent" || return 1
   [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
-  source_identity=$(stat -Lc '%d:%i' "$source" 2>/dev/null) || return 1
-
-  old_umask=$(umask)
-  umask 077
-  first=$(mktemp "${parent}/.${name}.first.XXXXXX") || {
-    umask "$old_umask"
-    return 1
-  }
-  second=$(mktemp "${parent}/.${name}.second.XXXXXX") || {
-    umask "$old_umask"
+  first=$(umask 077; mktemp "${parent}/.${name}.first.XXXXXX") || return 1
+  second=$(umask 077; mktemp "${parent}/.${name}.second.XXXXXX") || {
     rm -f "$first"
     return 1
   }
-  umask "$old_umask"
-  if ! dd if="$source" of="$first" iflag=fullblock status=none 2>/dev/null \
-    || ! dd if="$source" of="$second" iflag=fullblock status=none 2>/dev/null \
-    || ! chmod 600 "$first" "$second" \
-    || ! cmp -s "$first" "$second"; then
-    rm -f "$first" "$second"
-    return 1
-  fi
-  final_identity=$(stat -Lc '%d:%i' "$source" 2>/dev/null) || {
-    rm -f "$first" "$second"
-    return 1
-  }
-  [[ "$source_identity" == "$final_identity" ]] || {
-    rm -f "$first" "$second"
-    return 1
-  }
-  validate_private_control_file "$first" || {
-    rm -f "$first" "$second"
-    return 1
-  }
-  inspect_raw_efivar_file "$first" || {
-    rm -f "$first" "$second"
-    return 1
-  }
-  durable_sync "$first" || {
-    rm -f "$first" "$second"
-    return 1
-  }
+  copy_firmware_variable_twice "$source" "$first" "$second" || rc=1
   rm -f "$second"
-  mv "$first" "$destination" || {
-    rm -f "$first"
-    return 1
-  }
-  durable_sync "$parent"
+  if (( rc == 0 )); then
+    { mv "$first" "$destination" && durable_sync "$parent"; } || rc=1
+  fi
+  (( rc == 0 )) || rm -f "$first"
+  return "$rc"
+}
+
+# Two reads must agree and the source inode must not change while it is read.
+copy_firmware_variable_twice() {
+  local source="$1" first="$2" second="$3" identity
+  identity=$(stat -Lc '%d:%i' "$source" 2>/dev/null) || return 1
+  dd if="$source" of="$first" iflag=fullblock status=none 2>/dev/null || return 1
+  dd if="$source" of="$second" iflag=fullblock status=none 2>/dev/null || return 1
+  chmod 600 "$first" "$second" || return 1
+  cmp -s "$first" "$second" || return 1
+  [[ $(stat -Lc '%d:%i' "$source" 2>/dev/null) == "$identity" ]] || return 1
+  validate_private_control_file "$first" || return 1
+  inspect_raw_efivar_file "$first" || return 1
+  durable_sync "$first"
 }
 
 read_firmware_machine_identity() {
@@ -283,6 +262,44 @@ firmware_variable_expected_attributes() {
   esac
 }
 
+firmware_variable_is_state() {
+  case "$1" in
+    SetupMode|AuditMode|DeployedMode|SecureBoot) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The last inspected raw efivar carries the attributes variable $1 must have;
+# a state variable must also hold a one-byte 0 or 1.
+firmware_inspection_is_expected() {
+  local name="$1" expected
+  expected=$(firmware_variable_expected_attributes "$name") || return 1
+  [[ "$_firmware_raw_attributes" == "$expected" ]] || return 1
+  ! firmware_variable_is_state "$name" || [[ $_firmware_payload_size -eq 1 \
+    && ( "$_firmware_state_value" == 0 || "$_firmware_state_value" == 1 ) ]]
+}
+
+inspect_firmware_variable_file() {
+  inspect_raw_efivar_file "$2" || return 1
+  firmware_inspection_is_expected "$1"
+}
+
+# Copies the current value of firmware variable $1 into the runtime directory
+# and inspects it; the caller removes _firmware_current_file.
+inspect_current_firmware_variable() {
+  local name="$1" runtime
+  _firmware_current_file=""
+  ensure_firmware_runtime_dir || return 1
+  runtime=$(firmware_runtime_dir_path) || return 1
+  _firmware_current_file=$(mktemp -u "${runtime}/.${name}.XXXXXX") || return 1
+  if ! read_current_firmware_variable "$name" "$_firmware_current_file" \
+    || ! inspect_raw_efivar_file "$_firmware_current_file"; then
+    rm -f "$_firmware_current_file"
+    _firmware_current_file=""
+    return 1
+  fi
+}
+
 record_transaction_firmware_backup_attachment() {
   local backup_id="$1" status="$2" directory manifest_hash="" document current
   [[ "$_transaction_active" == true \
@@ -312,11 +329,7 @@ record_transaction_firmware_backup_attachment() {
 }
 
 capture_prechange_firmware_set() {
-  local backup_id="${1:-$_transaction_id}" root staging destination manifest timestamp boot_id
-  local name presence final_presence raw_file expected_attributes entry variables='{}'
-  local -a names=(PK KEK db dbx SetupMode AuditMode DeployedMode SecureBoot)
-  local -A observed_presence=()
-  local -A observed_hash=()
+  local backup_id="${1:-$_transaction_id}" root staging destination
   [[ "$_transaction_active" == true && "$backup_id" == "$_transaction_id" ]] || return 1
   validate_efivarfs_mount || return 1
   read_firmware_machine_identity || return 1
@@ -328,41 +341,35 @@ capture_prechange_firmware_set() {
   [[ ! -e "$staging" && ! -L "$staging" ]] || return 1
   record_transaction_firmware_backup_attachment "$backup_id" pending || return 1
   install -d -m 700 "$staging" || return 1
-  validate_private_control_directory "$staging" || return 1
+  if ! validate_private_control_directory "$staging" \
+    || ! stage_firmware_backup "$backup_id" "$staging" \
+    || ! durable_sync "$staging" \
+    || ! mv "$staging" "$destination"; then
+    rm -rf "$staging"
+    return 1
+  fi
+  durable_sync "$root" || return 1
+  record_transaction_firmware_backup_attachment "$backup_id" complete || return 1
+  _firmware_backup_id="$backup_id"
+  _firmware_backup_dir="$destination"
+}
+
+# Copies every firmware variable into the staging directory, reads each one
+# again to prove the set did not change meanwhile, and writes the manifest.
+stage_firmware_backup() {
+  local backup_id="$1" staging="$2" name presence raw_file entry variables='{}'
+  local manifest timestamp boot_id
+  local -a names=(PK KEK db dbx SetupMode AuditMode DeployedMode SecureBoot)
+  local -A observed_presence=() observed_hash=()
 
   for name in "${names[@]}"; do
-    presence=$(firmware_variable_presence "$name") || {
-      rm -rf "$staging"
-      return 1
-    }
+    presence=$(firmware_variable_presence "$name") || return 1
     observed_presence["$name"]=$presence
     if [[ "$presence" == present ]]; then
       raw_file="${staging}/${name}.efivar"
-      copy_firmware_variable_snapshot "$name" "$raw_file" || {
-        rm -rf "$staging"
-        return 1
-      }
-      inspect_raw_efivar_file "$raw_file" || {
-        rm -rf "$staging"
-        return 1
-      }
+      copy_firmware_variable_snapshot "$name" "$raw_file" || return 1
+      inspect_firmware_variable_file "$name" "$raw_file" || return 1
       observed_hash["$name"]=$_firmware_raw_hash
-      expected_attributes=$(firmware_variable_expected_attributes "$name") || {
-        rm -rf "$staging"
-        return 1
-      }
-      [[ "$_firmware_raw_attributes" == "$expected_attributes" ]] || {
-        rm -rf "$staging"
-        return 1
-      }
-      if [[ "$name" == SetupMode || "$name" == AuditMode \
-        || "$name" == DeployedMode || "$name" == SecureBoot ]]; then
-        [[ $_firmware_payload_size -eq 1 \
-          && ( "$_firmware_state_value" == 0 || "$_firmware_state_value" == 1 ) ]] || {
-          rm -rf "$staging"
-          return 1
-        }
-      fi
       entry=$(jq -cn --arg file "${name}.efivar" \
         --arg raw_hash "$_firmware_raw_hash" \
         --arg payload_hash "$_firmware_payload_hash" \
@@ -376,65 +383,30 @@ capture_prechange_firmware_set() {
           payload_sha256: $payload_hash,
           payload_size: $payload_size,
           value: (if $state_value == "" then null else ($state_value | tonumber) end)
-        }') || {
-        rm -rf "$staging"
-        return 1
-      }
+        }') || return 1
     else
-      if [[ "$name" == SetupMode || "$name" == AuditMode \
-        || "$name" == DeployedMode || "$name" == SecureBoot ]]; then
-        rm -rf "$staging"
-        return 1
-      fi
+      ! firmware_variable_is_state "$name" || return 1
       entry='{"present":false,"raw_file":null,"attributes":null,"raw_sha256":null,"payload_sha256":null,"payload_size":null,"value":null}'
     fi
     variables=$(jq -c --arg name "$name" --argjson entry "$entry" \
-      '.[$name] = $entry' <<< "$variables") || {
-      rm -rf "$staging"
-      return 1
-    }
+      '.[$name] = $entry' <<< "$variables") || return 1
   done
 
-  enrollment_failpoint "after-firmware-snapshot" || {
-    rm -rf "$staging"
-    return 1
-  }
+  enrollment_failpoint "after-firmware-snapshot" || return 1
 
   for name in "${names[@]}"; do
-    final_presence=$(firmware_variable_presence "$name") || {
-      rm -rf "$staging"
-      return 1
-    }
-    [[ "$final_presence" == "${observed_presence[$name]}" ]] || {
-      rm -rf "$staging"
-      return 1
-    }
-    if [[ "$final_presence" == present ]]; then
-      raw_file="${staging}/.${name}.verify"
-      copy_firmware_variable_snapshot "$name" "$raw_file" || {
-        rm -rf "$staging"
-        return 1
-      }
-      inspect_raw_efivar_file "$raw_file" || {
-        rm -rf "$staging"
-        return 1
-      }
-      rm -f "$raw_file"
-      [[ "$_firmware_raw_hash" == "${observed_hash[$name]}" ]] || {
-        rm -rf "$staging"
-        return 1
-      }
-    fi
+    presence=$(firmware_variable_presence "$name") || return 1
+    [[ "$presence" == "${observed_presence[$name]}" ]] || return 1
+    [[ "$presence" == present ]] || continue
+    raw_file="${staging}/.${name}.verify"
+    copy_firmware_variable_snapshot "$name" "$raw_file" || return 1
+    inspect_raw_efivar_file "$raw_file" || return 1
+    rm -f "$raw_file"
+    [[ "$_firmware_raw_hash" == "${observed_hash[$name]}" ]] || return 1
   done
 
-  timestamp=$(utc_timestamp) || {
-    rm -rf "$staging"
-    return 1
-  }
-  boot_id=$(boot_id_value) || {
-    rm -rf "$staging"
-    return 1
-  }
+  timestamp=$(utc_timestamp) || return 1
+  boot_id=$(boot_id_value) || return 1
   manifest=$(jq -cn --argjson schema "$FIRMWARE_BACKUP_SCHEMA_VERSION" \
     --arg version "$OMASECBOOT_VERSION" --arg id "$backup_id" \
     --arg timestamp "$timestamp" --arg boot_id "$boot_id" \
@@ -446,32 +418,13 @@ capture_prechange_firmware_set() {
       boot_id: $boot_id,
       machine: $machine,
       variables: $variables
-    }') || {
-    rm -rf "$staging"
-    return 1
-  }
-  printf '%s\n' "$manifest" | atomic_write_control_file "${staging}/manifest.json" 600 \
-    || {
-    rm -rf "$staging"
-    return 1
-  }
-  durable_sync "$staging" || {
-    rm -rf "$staging"
-    return 1
-  }
-  mv "$staging" "$destination" || {
-    rm -rf "$staging"
-    return 1
-  }
-  durable_sync "$root" || return 1
-
-  record_transaction_firmware_backup_attachment "$backup_id" complete || return 1
-  _firmware_backup_id="$backup_id"
-  _firmware_backup_dir="$destination"
+    }') || return 1
+  printf '%s\n' "$manifest" | atomic_write_control_file "${staging}/manifest.json" 600
 }
 
 validate_firmware_backup() {
-  local backup_id="$1" directory manifest name entry present raw_file expected_attributes
+  local backup_id="$1" directory manifest name present raw_file attributes
+  local raw_sha256 payload_sha256 payload_size value
   local -a names=(PK KEK db dbx SetupMode AuditMode DeployedMode SecureBoot)
   directory=$(firmware_backup_path "$backup_id") || return 1
   validate_private_control_directory "$directory" || return 1
@@ -517,38 +470,25 @@ validate_firmware_backup() {
     "$_firmware_product_uuid" ]] || return 1
 
   for name in "${names[@]}"; do
-    entry=$(jq -c --arg name "$name" '.variables[$name]' \
-      <<< "$_firmware_backup_json") || return 1
-    present=$(jq -r '.present' <<< "$entry") || return 1
-    [[ "$present" == true || "$present" == false ]] || return 1
-    if [[ "$name" == SetupMode || "$name" == AuditMode \
-      || "$name" == DeployedMode || "$name" == SecureBoot ]]; then
-      [[ "$present" == true ]] || return 1
-    fi
+    read_lines present raw_file attributes raw_sha256 payload_sha256 payload_size \
+      value < <(jq -r --arg name "$name" '
+        .variables[$name] | .present, (.raw_file // ""), (.attributes // ""),
+          (.raw_sha256 // ""), (.payload_sha256 // ""), (.payload_size // ""),
+          (.value // "")
+      ' <<< "$_firmware_backup_json") || return 1
     if [[ "$present" == true ]]; then
-      raw_file=$(jq -r '.raw_file' <<< "$entry") || return 1
       [[ "$raw_file" == "${name}.efivar" ]] || return 1
       raw_file="${directory}/${raw_file}"
       validate_private_control_file "$raw_file" || return 1
-      inspect_raw_efivar_file "$raw_file" || return 1
-      expected_attributes=$(firmware_variable_expected_attributes "$name") || return 1
-      [[ "$_firmware_raw_attributes" == "$expected_attributes" \
-        && "$_firmware_raw_attributes" == "$(jq -r '.attributes' <<< "$entry")" \
-        && "$_firmware_raw_hash" == "$(jq -r '.raw_sha256' <<< "$entry")" \
-        && "$_firmware_payload_hash" == "$(jq -r '.payload_sha256' <<< "$entry")" \
-        && "$_firmware_payload_size" == "$(jq -r '.payload_size' <<< "$entry")" ]] \
-        || return 1
-      if [[ "$name" == SetupMode || "$name" == AuditMode \
-        || "$name" == DeployedMode || "$name" == SecureBoot ]]; then
-        [[ $_firmware_payload_size -eq 1 \
-          && "$_firmware_state_value" == "$(jq -r '.value' <<< "$entry")" \
-          && ( "$_firmware_state_value" == 0 || "$_firmware_state_value" == 1 ) ]] \
-          || return 1
-      fi
+      inspect_firmware_variable_file "$name" "$raw_file" || return 1
+      [[ "$_firmware_raw_attributes" == "$attributes" \
+        && "$_firmware_raw_hash" == "$raw_sha256" \
+        && "$_firmware_payload_hash" == "$payload_sha256" \
+        && "$_firmware_payload_size" == "$payload_size" ]] || return 1
+      ! firmware_variable_is_state "$name" \
+        || [[ "$_firmware_state_value" == "$value" ]] || return 1
     else
-      jq -e '.raw_file == null and .attributes == null and .raw_sha256 == null and
-        .payload_sha256 == null and .payload_size == null and .value == null' \
-        <<< "$entry" >/dev/null || return 1
+      ! firmware_variable_is_state "$name" || return 1
       [[ ! -e "${directory}/${name}.efivar" \
         && ! -L "${directory}/${name}.efivar" ]] || return 1
     fi
@@ -565,42 +505,27 @@ read_current_firmware_variable() {
 }
 
 current_firmware_backup_status() {
-  local backup_id="$1" name="$2" expected_present current_present runtime current
+  local backup_id="$1" name="$2" expected_present expected_hash current_present
   validate_firmware_backup "$backup_id" || return 1
-  expected_present=$(jq -r --arg name "$name" '.variables[$name].present' \
+  read_lines expected_present expected_hash < <(jq -r --arg name "$name" \
+    '.variables[$name] | .present, (.raw_sha256 // "")' \
     <<< "$_firmware_backup_json") || return 1
   current_present=$(firmware_variable_presence "$name") || return 1
-  if [[ "$expected_present" == false ]]; then
-    if [[ "$current_present" == absent ]]; then
+  if [[ "$expected_present" == false || "$current_present" == absent ]]; then
+    if [[ "$expected_present" == false && "$current_present" == absent ]]; then
       printf 'exact\n'
     else
       printf 'different\n'
     fi
-    return
+    return 0
   fi
-  if [[ "$current_present" == absent ]]; then
-    printf 'different\n'
-    return
-  fi
-  ensure_firmware_runtime_dir || return 1
-  runtime=$(firmware_runtime_dir_path) || return 1
-  current=$(mktemp "${runtime}/.${name}.XXXXXX") || return 1
-  rm -f "$current"
-  if ! read_current_firmware_variable "$name" "$current"; then
-    rm -f "$current"
-    return 1
-  fi
-  inspect_raw_efivar_file "$current" || {
-    rm -f "$current"
-    return 1
-  }
-  if [[ "$_firmware_raw_hash" == "$(jq -r --arg name "$name" \
-    '.variables[$name].raw_sha256' <<< "$_firmware_backup_json")" ]]; then
+  inspect_current_firmware_variable "$name" || return 1
+  rm -f "$_firmware_current_file"
+  if [[ "$_firmware_raw_hash" == "$expected_hash" ]]; then
     printf 'exact\n'
   else
     printf 'different\n'
   fi
-  rm -f "$current"
 }
 
 current_firmware_variable_matches_backup() {
@@ -634,116 +559,66 @@ validate_esl_x509_entry() {
 }
 
 canonicalize_esl() {
-  local input="$1" output="$2" hex total offset=0 type list_hex header_hex signature_hex
-  local list_size header_size signature_size entries_size entry_count index entry_offset
-  local owner_hex data_offset data_size data_hash remainder temporary parent old_umask
+  local input="$1" output="$2" parent temporary
   validate_private_control_file "$input" || return 1
   parent=$(dirname "$output")
   validate_private_control_directory "$parent" || return 1
+  temporary=$(umask 077; mktemp "${parent}/.$(basename "$output").XXXXXX") || return 1
+  if ! canonical_esl_rows "$input" > "$temporary" \
+    || ! LC_ALL=C sort -o "$temporary" "$temporary" \
+    || ! chmod 600 "$temporary" \
+    || ! durable_sync "$temporary" \
+    || ! mv "$temporary" "$output"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  durable_sync "$parent"
+}
+
+# Prints one "type size owner data_size data_sha256" row per signature entry
+# of an EFI_SIGNATURE_LIST sequence; only X.509 and SHA-256 lists are accepted.
+canonical_esl_rows() {
+  local input="$1" hex total offset=0 type list_size header_size signature_size
+  local entries_size entry_count index entry_offset data_offset data_size data_hash
   hex=$(od -An -v -t x1 "$input" 2>/dev/null | tr -d '[:space:]') || return 1
   [[ "$hex" =~ ^([0-9a-f]{2})+$ ]] || return 1
   total=$(stat -Lc '%s' "$input" 2>/dev/null) || return 1
   [[ "$total" =~ ^[0-9]+$ && ${#hex} -eq $((total * 2)) ]] || return 1
-  old_umask=$(umask)
-  umask 077
-  temporary=$(mktemp "${parent}/.$(basename "$output").XXXXXX") || {
-    umask "$old_umask"
-    return 1
-  }
-  umask "$old_umask"
-
   while (( offset < total )); do
-    (( total - offset >= 28 )) || {
-      rm -f "$temporary"
-      return 1
-    }
+    (( total - offset >= 28 )) || return 1
     type=${hex:$((offset * 2)):32}
-    list_hex=${hex:$(((offset + 16) * 2)):8}
-    header_hex=${hex:$(((offset + 20) * 2)):8}
-    signature_hex=${hex:$(((offset + 24) * 2)):8}
-    list_size=$(le32_hex_to_decimal "$list_hex") || return 1
-    header_size=$(le32_hex_to_decimal "$header_hex") || return 1
-    signature_size=$(le32_hex_to_decimal "$signature_hex") || return 1
-    (( list_size >= 28 && list_size <= total - offset )) || {
-      rm -f "$temporary"
-      return 1
-    }
-    (( header_size == 0 && signature_size > 16 )) || {
-      rm -f "$temporary"
-      return 1
-    }
+    list_size=$(le32_hex_to_decimal "${hex:$(((offset + 16) * 2)):8}") || return 1
+    header_size=$(le32_hex_to_decimal "${hex:$(((offset + 20) * 2)):8}") || return 1
+    signature_size=$(le32_hex_to_decimal "${hex:$(((offset + 24) * 2)):8}") || return 1
+    (( list_size >= 28 && list_size <= total - offset )) || return 1
+    (( header_size == 0 && signature_size > 16 )) || return 1
     entries_size=$((list_size - 28 - header_size))
-    (( entries_size > 0 && entries_size % signature_size == 0 )) || {
-      rm -f "$temporary"
-      return 1
-    }
+    (( entries_size > 0 && entries_size % signature_size == 0 )) || return 1
     case "$type" in
-      "$EFI_SIGNATURE_X509_BYTES")
-        data_size=$((signature_size - 16))
-        [[ $data_size -gt 0 ]] || {
-          rm -f "$temporary"
-          return 1
-        }
-        ;;
+      "$EFI_SIGNATURE_X509_BYTES") data_size=$((signature_size - 16)) ;;
       "$EFI_SIGNATURE_SHA256_BYTES")
-        [[ $signature_size -eq 48 ]] || {
-          rm -f "$temporary"
-          return 1
-        }
+        (( signature_size == 48 )) || return 1
         data_size=32
         ;;
-      *)
-        rm -f "$temporary"
-        return 1
-        ;;
+      *) return 1 ;;
     esac
     entry_count=$((entries_size / signature_size))
     for ((index = 0; index < entry_count; index++)); do
       entry_offset=$((offset + 28 + header_size + index * signature_size))
-      owner_hex=${hex:$((entry_offset * 2)):32}
       data_offset=$((entry_offset + 16))
       if [[ "$type" == "$EFI_SIGNATURE_X509_BYTES" ]]; then
-        validate_esl_x509_entry "$input" "$data_offset" "$data_size" || {
-          rm -f "$temporary"
-          return 1
-        }
+        validate_esl_x509_entry "$input" "$data_offset" "$data_size" || return 1
       fi
       data_hash=$(dd if="$input" bs=1 skip="$data_offset" count="$data_size" \
-        status=none 2>/dev/null | sha256sum) || {
-        rm -f "$temporary"
-        return 1
-      }
-      read -r data_hash remainder <<< "$data_hash"
-      [[ "$data_hash" =~ ^[0-9a-f]{64}$ ]] || {
-        rm -f "$temporary"
-        return 1
-      }
+        status=none 2>/dev/null | sha256sum) || return 1
+      data_hash=${data_hash%% *}
+      [[ "$data_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
       printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$signature_size" \
-        "$owner_hex" "$data_size" "$data_hash" >> "$temporary" || {
-        rm -f "$temporary"
-        return 1
-      }
+        "${hex:$((entry_offset * 2)):32}" "$data_size" "$data_hash"
     done
     offset=$((offset + list_size))
   done
-  [[ $offset -eq $total ]] || {
-    rm -f "$temporary"
-    return 1
-  }
-  LC_ALL=C sort -o "$temporary" "$temporary" || {
-    rm -f "$temporary"
-    return 1
-  }
-  chmod 600 "$temporary" || {
-    rm -f "$temporary"
-    return 1
-  }
-  durable_sync "$temporary" || {
-    rm -f "$temporary"
-    return 1
-  }
-  mv "$temporary" "$output" || return 1
-  durable_sync "$parent"
+  (( offset == total ))
 }
 
 canonical_entries_have_duplicates() {
@@ -764,79 +639,6 @@ canonical_entries_are_equal() {
   cmp -s "$1" "$2"
 }
 
-sbctl_config_enrollment_values() {
-  local config="$1" line trimmed key candidate value
-  local keydir="/var/lib/sbctl/keys" guid="/var/lib/sbctl/GUID"
-  local additions_seen=0 keydir_seen=0 guid_seen=0 content_seen=false marker_seen=false
-  validate_control_file "$config" || return 1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    trimmed=${line#"${line%%[![:space:]]*}"}
-    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
-    if [[ "$line" == --- ]]; then
-      [[ "$marker_seen" == false && "$content_seen" == false ]] || return 1
-      marker_seen=true
-      continue
-    fi
-    [[ "$line" != ... ]] || return 1
-    if [[ "$line" != [[:space:]]* ]]; then
-      [[ "$line" =~ ^([a-z_][a-z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]] \
-        || return 1
-      key=${BASH_REMATCH[1]}
-      candidate=${BASH_REMATCH[2]}
-      content_seen=true
-      case "$key" in
-        db_additions)
-          additions_seen=$((additions_seen + 1))
-          [[ $additions_seen -eq 1 \
-            && "$candidate" =~ ^\[\][[:space:]]*(#.*)?$ ]] || return 1
-          ;;
-        keydir|guid|files_db|bundles_db)
-          if [[ "$key" == keydir ]]; then
-            keydir_seen=$((keydir_seen + 1))
-            [[ $keydir_seen -eq 1 ]] || return 1
-          elif [[ "$key" == guid ]]; then
-            guid_seen=$((guid_seen + 1))
-            [[ $guid_seen -eq 1 ]] || return 1
-          fi
-          candidate=${candidate#"${candidate%%[![:space:]]*}"}
-          candidate=${candidate%"${candidate##*[![:space:]]}"}
-          if [[ "$candidate" =~ ^\"([^\"\\]*)\"([[:space:]]+#.*)?$ ]]; then
-            value=${BASH_REMATCH[1]}
-          elif [[ "$candidate" =~ ^\'([^\']*)\'([[:space:]]+#.*)?$ ]]; then
-            value=${BASH_REMATCH[1]}
-          elif [[ "$candidate" =~ ^(/[^[:space:]#]*)([[:space:]]+#.*)?$ ]]; then
-            value=${BASH_REMATCH[1]}
-          else
-            return 1
-          fi
-          [[ "$value" =~ ^/[^[:cntrl:]]+$ ]] || return 1
-          if [[ "$key" == keydir ]]; then
-            keydir=$value
-          elif [[ "$key" == guid ]]; then
-            guid=$value
-          fi
-          ;;
-        landlock)
-          candidate=${candidate%%[[:space:]]#*}
-          candidate=${candidate%"${candidate##*[![:space:]]}"}
-          [[ "$candidate" == true || "$candidate" == false ]] || return 1
-          ;;
-        files)
-          [[ "$candidate" =~ ^\[\][[:space:]]*(#.*)?$ ]] || return 1
-          ;;
-        keys)
-          return 1
-          ;;
-        *) return 1 ;;
-      esac
-      continue
-    fi
-    return 1
-  done < "$config"
-  _sbctl_keydir="$keydir"
-  _sbctl_guid_path="$guid"
-}
-
 validate_sbctl_enrollment_boundary() {
   local package executable config owner path
   package=$(pacman -Q sbctl 2>/dev/null) || return 1
@@ -849,7 +651,7 @@ validate_sbctl_enrollment_boundary() {
   [[ "$owner" == sbctl ]] || return 1
   config=$(sbctl_config_path) || return 1
   if [[ -e "$config" || -L "$config" ]]; then
-    sbctl_config_enrollment_values "$config" || return 1
+    parse_sbctl_config "$config" true || return 1
     _sbctl_config_state=present
     _sbctl_config_hash=$(sha256_file "$config") || return 1
   else
@@ -1009,63 +811,47 @@ canonicalize_backup_database() {
   rm -f "$payload"
 }
 
+# The hash of the single X.509 entry in a canonical PK entries file.
+single_x509_pk_hash() {
+  local file="$1" type size owner data_size hash
+  [[ $(wc -l < "$file") -eq 1 ]] || return 1
+  IFS=$'\t' read -r type size owner data_size hash < "$file" || return 1
+  [[ "$type" == "$EFI_SIGNATURE_X509_BYTES" && "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$hash"
+}
+
 validate_planned_trust_preserves_backup() {
-  local backup_id="$1" plan_dir="$2" name current planned count type current_pk
-  local runtime current_dir rc=0
+  local backup_id="$1" plan_dir="$2" runtime current_dir rc=0
   _validated_current_pk_hash=""
   ensure_firmware_runtime_dir || return 1
   runtime=$(firmware_runtime_dir_path) || return 1
   current_dir=$(mktemp -d "${runtime}/current-plan.XXXXXX") || return 1
-  chmod 700 "$current_dir" || {
-    rm -rf "$current_dir"
-    return 1
-  }
-  validate_private_control_directory "$current_dir" || {
-    rm -rf "$current_dir"
-    return 1
-  }
+  planned_trust_preserves_backup "$backup_id" "$plan_dir" "$current_dir" || rc=1
+  rm -rf "$current_dir" || return 1
+  return "$rc"
+}
+
+# Every backed-up KEK and db entry must survive in the plan, and both the
+# current and the planned PK must be one X.509 certificate.
+planned_trust_preserves_backup() {
+  local backup_id="$1" plan_dir="$2" current_dir="$3" name current planned
+  chmod 700 "$current_dir" || return 1
+  validate_private_control_directory "$current_dir" || return 1
   for name in PK KEK db; do
     current="${current_dir}/${name}.entries"
     planned="${plan_dir}/${name}.entries"
-    if ! canonicalize_backup_database "$backup_id" "$name" "$current" \
-      || ! validate_private_control_file "$current" \
-      || ! validate_private_control_file "$planned" \
-      || canonical_entries_have_duplicates "$planned"; then
-      rc=1
-      break
-    fi
+    canonicalize_backup_database "$backup_id" "$name" "$current" || return 1
+    validate_private_control_file "$current" || return 1
+    validate_private_control_file "$planned" || return 1
+    ! canonical_entries_have_duplicates "$planned" || return 1
   done
-  if (( rc == 0 )); then
-    count=$(wc -l < "${current_dir}/PK.entries") || rc=1
-    [[ $rc -eq 0 && $count -eq 1 ]] || rc=1
-  fi
-  if (( rc == 0 )); then
-    type=$(cut -f1 "${current_dir}/PK.entries") || rc=1
-    [[ $rc -eq 0 && "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || rc=1
-  fi
-  if (( rc == 0 )); then
-    current_pk=$(cut -f5 "${current_dir}/PK.entries") || rc=1
-    [[ $rc -eq 0 && "$current_pk" =~ ^[0-9a-f]{64}$ ]] || rc=1
-  fi
-  if (( rc == 0 )); then
-    count=$(wc -l < "${plan_dir}/PK.entries") || rc=1
-    [[ $rc -eq 0 && $count -eq 1 ]] || rc=1
-  fi
-  if (( rc == 0 )); then
-    type=$(cut -f1 "${plan_dir}/PK.entries") || rc=1
-    [[ $rc -eq 0 && "$type" == "$EFI_SIGNATURE_X509_BYTES" ]] || rc=1
-  fi
-  if (( rc == 0 )) && ! canonical_entries_are_subset \
-    "${current_dir}/KEK.entries" "${plan_dir}/KEK.entries"; then
-    rc=1
-  fi
-  if (( rc == 0 )) && ! canonical_entries_are_subset \
-    "${current_dir}/db.entries" "${plan_dir}/db.entries"; then
-    rc=1
-  fi
-  rm -rf "$current_dir" || return 1
-  (( rc == 0 )) || return 1
-  _validated_current_pk_hash="$current_pk"
+  single_x509_pk_hash "${plan_dir}/PK.entries" >/dev/null || return 1
+  canonical_entries_are_subset "${current_dir}/KEK.entries" \
+    "${plan_dir}/KEK.entries" || return 1
+  canonical_entries_are_subset "${current_dir}/db.entries" \
+    "${plan_dir}/db.entries" || return 1
+  _validated_current_pk_hash=$(single_x509_pk_hash "${current_dir}/PK.entries") \
+    || return 1
 }
 
 build_enrollment_plan() {
@@ -1156,10 +942,18 @@ build_enrollment_plan() {
   durable_sync "$plan_dir"
 }
 
+# The plan manifest hash that a confirmation binds: everything but itself.
+enrollment_plan_hash() {
+  local hash
+  hash=$(jq -c 'del(.confirmation)' "$1" | sha256sum) || return 1
+  printf '%s\n' "${hash%% *}"
+}
+
 validate_enrollment_plan() {
-  local backup_id="$1" require_confirmed="${2:-false}" plan_dir manifest name entry path
-  local hash config expected_config_hash key_path key_hash key_rows current_pk planned_pk
-  local key_count=0
+  local backup_id="$1" require_confirmed="${2:-false}" plan_dir manifest name
+  local config config_state expected_config_hash package executable executable_hash
+  local keydir guid esl_file esl_hash entries_file entries_hash entry_count
+  local hash key_path key_hash key_rows current_pk planned_pk key_count=0
   local -A expected_keys=()
   [[ "$require_confirmed" == true || "$require_confirmed" == false ]] || return 1
   validate_firmware_backup "$backup_id" || return 1
@@ -1216,19 +1010,20 @@ validate_enrollment_plan() {
       (.confirmation.planned_pk_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
       (.confirmation.plan_sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
   ' "$manifest" >/dev/null || return 1
+  read_lines config_state expected_config_hash package executable executable_hash \
+    keydir guid < <(jq -r '
+      .sbctl | .config_state, (.config_sha256 // ""), .package, .executable,
+        .executable_sha256, .keydir, .guid
+    ' "$manifest") || return 1
   config=$(sbctl_config_path) || return 1
-  expected_config_hash=$(jq -r '.sbctl.config_sha256 // ""' "$manifest") || return 1
-  if [[ "$(jq -r '.sbctl.config_state' "$manifest")" == present ]]; then
+  if [[ "$config_state" == present ]]; then
     [[ -e "$config" && "$(sha256_file "$config")" == "$expected_config_hash" ]] || return 1
   else
     [[ ! -e "$config" && ! -L "$config" && -z "$expected_config_hash" ]] || return 1
   fi
-  [[ "$(jq -r '.sbctl.package' "$manifest")" == "$_sbctl_package_identity" \
-    && "$(jq -r '.sbctl.executable' "$manifest")" == "$_sbctl_executable" \
-    && "$(jq -r '.sbctl.executable_sha256' "$manifest")" == \
-      "$_sbctl_executable_hash" \
-    && "$(jq -r '.sbctl.keydir' "$manifest")" == "$_sbctl_keydir" \
-    && "$(jq -r '.sbctl.guid' "$manifest")" == "$_sbctl_guid_path" ]] || return 1
+  [[ "$package" == "$_sbctl_package_identity" && "$executable" == "$_sbctl_executable" \
+    && "$executable_hash" == "$_sbctl_executable_hash" \
+    && "$keydir" == "$_sbctl_keydir" && "$guid" == "$_sbctl_guid_path" ]] || return 1
   for key_path in "$_sbctl_guid_path" \
     "$_sbctl_keydir/PK/PK.key" "$_sbctl_keydir/PK/PK.pem" \
     "$_sbctl_keydir/KEK/KEK.key" "$_sbctl_keydir/KEK/KEK.pem" \
@@ -1250,29 +1045,27 @@ validate_enrollment_plan() {
   [[ $key_count -eq 7 ]] || return 1
   validate_local_key_hierarchy || return 1
   for name in PK KEK db; do
-    entry=$(jq -c --arg name "$name" '.variables[$name]' "$manifest") || return 1
-    [[ "$(jq -r '.esl_file' <<< "$entry")" == "${name}.esl" \
-      && "$(jq -r '.entries_file' <<< "$entry")" == "${name}.entries" ]] || return 1
-    for path in "${plan_dir}/${name}.esl" "${plan_dir}/${name}.entries"; do
-      validate_private_control_file "$path" || return 1
-    done
-    [[ "$(sha256_file "${plan_dir}/${name}.esl")" == \
-      "$(jq -r '.esl_sha256' <<< "$entry")" \
-      && "$(sha256_file "${plan_dir}/${name}.entries")" == \
-        "$(jq -r '.entries_sha256' <<< "$entry")" \
-      && "$(wc -l < "${plan_dir}/${name}.entries")" == \
-        "$(jq -r '.entry_count' <<< "$entry")" ]] || return 1
+    read_lines esl_file esl_hash entries_file entries_hash entry_count \
+      < <(jq -r --arg name "$name" '
+        .variables[$name] | .esl_file, .esl_sha256, .entries_file, .entries_sha256,
+          .entry_count
+      ' "$manifest") || return 1
+    [[ "$esl_file" == "${name}.esl" && "$entries_file" == "${name}.entries" ]] \
+      || return 1
+    validate_private_control_file "${plan_dir}/${name}.esl" || return 1
+    validate_private_control_file "${plan_dir}/${name}.entries" || return 1
+    [[ $(sha256_file "${plan_dir}/${name}.esl") == "$esl_hash" \
+      && $(sha256_file "${plan_dir}/${name}.entries") == "$entries_hash" \
+      && $(wc -l < "${plan_dir}/${name}.entries") == "$entry_count" ]] || return 1
   done
   validate_planned_trust_preserves_backup "$backup_id" "$plan_dir" || return 1
   if jq -e '.confirmation != null' "$manifest" >/dev/null; then
-    hash=$(jq -c 'del(.confirmation)' "$manifest" | sha256sum) || return 1
-    read -r hash _ <<< "$hash"
-    [[ "$hash" == "$(jq -r '.confirmation.plan_sha256' "$manifest")" ]] || return 1
-    current_pk="$_validated_current_pk_hash"
-    planned_pk=$(cut -f5 "${plan_dir}/PK.entries") || return 1
-    [[ "$current_pk" == "$(jq -r '.confirmation.current_pk_sha256' "$manifest")" \
-      && "$planned_pk" == "$(jq -r '.confirmation.planned_pk_sha256' "$manifest")" ]] \
-      || return 1
+    read_lines hash current_pk planned_pk < <(jq -r '
+      .confirmation | .plan_sha256, .current_pk_sha256, .planned_pk_sha256
+    ' "$manifest") || return 1
+    [[ $(enrollment_plan_hash "$manifest") == "$hash" \
+      && "$_validated_current_pk_hash" == "$current_pk" \
+      && $(cut -f5 "${plan_dir}/PK.entries") == "$planned_pk" ]] || return 1
   elif [[ "$require_confirmed" == true ]]; then
     return 1
   fi
@@ -1299,8 +1092,7 @@ record_enrollment_plan_confirmation() {
   manifest="${plan_dir}/manifest.json"
   transaction_backup_file "$manifest" || return 1
   timestamp=$(utc_timestamp) || return 1
-  hash=$(jq -c 'del(.confirmation)' "$manifest" | sha256sum) || return 1
-  read -r hash _ <<< "$hash"
+  hash=$(enrollment_plan_hash "$manifest") || return 1
   current_pk="$_validated_current_pk_hash"
   planned_pk=$(cut -f5 "${plan_dir}/PK.entries") || return 1
   [[ "$current_pk" =~ ^[0-9a-f]{64}$ && "$planned_pk" =~ ^[0-9a-f]{64}$ ]] \
@@ -1354,34 +1146,17 @@ revalidate_enrollment_plan_export() {
 }
 
 read_current_firmware_modes() {
-  local runtime name path value
-  ensure_firmware_runtime_dir || return 1
-  runtime=$(firmware_runtime_dir_path) || return 1
+  local name
   for name in SetupMode AuditMode DeployedMode SecureBoot; do
-    path=$(mktemp "${runtime}/.${name}.XXXXXX") || return 1
-    rm -f "$path"
-    read_current_firmware_variable "$name" "$path" || {
-      rm -f "$path"
-      return 1
-    }
-    inspect_raw_efivar_file "$path" || {
-      rm -f "$path"
-      return 1
-    }
-    [[ "$_firmware_raw_attributes" == "$EFI_STATE_ATTRIBUTES" \
-      && $_firmware_payload_size -eq 1 \
-      && ( "$_firmware_state_value" == 0 || "$_firmware_state_value" == 1 ) ]] || {
-      rm -f "$path"
-      return 1
-    }
-    value="$_firmware_state_value"
+    inspect_current_firmware_variable "$name" || return 1
+    rm -f "$_firmware_current_file"
+    firmware_inspection_is_expected "$name" || return 1
     case "$name" in
-      SetupMode) _setup_mode=$value ;;
-      AuditMode) _audit_mode=$value ;;
-      DeployedMode) _deployed_mode=$value ;;
-      SecureBoot) _secure_boot_mode=$value ;;
+      SetupMode) _setup_mode=$_firmware_state_value ;;
+      AuditMode) _audit_mode=$_firmware_state_value ;;
+      DeployedMode) _deployed_mode=$_firmware_state_value ;;
+      SecureBoot) _secure_boot_mode=$_firmware_state_value ;;
     esac
-    rm -f "$path"
   done
   [[ "$_setup_mode" != 1 || "$_secure_boot_mode" != 1 ]]
 }
@@ -1511,48 +1286,27 @@ activate_confirmed_enrollment_plan() {
 }
 
 current_database_plan_status() {
-  local backup_id="$1" name="$2" runtime raw payload entries plan_dir expected_attributes
-  local presence status=different
+  local backup_id="$1" name="$2" plan_dir presence raw payload entries status=""
   plan_dir=$(firmware_plan_path "$backup_id") || return 1
   presence=$(firmware_variable_presence "$name") || return 1
   if [[ "$presence" == absent ]]; then
     printf 'different\n'
     return 0
   fi
-  ensure_firmware_runtime_dir || return 1
-  runtime=$(firmware_runtime_dir_path) || return 1
-  raw=$(mktemp "${runtime}/.${name}.raw.XXXXXX") || return 1
-  rm -f "$raw"
-  read_current_firmware_variable "$name" "$raw" || {
-    rm -f "$raw"
-    return 1
-  }
-  inspect_raw_efivar_file "$raw" || {
-    rm -f "$raw"
-    return 1
-  }
-  expected_attributes=$(firmware_variable_expected_attributes "$name") || {
-    rm -f "$raw"
-    return 1
-  }
-  [[ "$_firmware_raw_attributes" == "$expected_attributes" ]] || {
-    rm -f "$raw"
-    return 1
-  }
+  inspect_current_firmware_variable "$name" || return 1
+  raw="$_firmware_current_file"
   payload="${raw}.payload"
   entries="${raw}.entries"
-  write_backup_payload "$raw" "$payload" || {
-    rm -f "$raw" "$payload" "$entries"
-    return 1
-  }
-  canonicalize_esl "$payload" "$entries" || {
-    rm -f "$raw" "$payload" "$entries"
-    return 1
-  }
-  if canonical_entries_are_equal "$entries" "${plan_dir}/${name}.entries"; then
-    status=exact
+  if firmware_inspection_is_expected "$name" \
+    && write_backup_payload "$raw" "$payload" \
+    && canonicalize_esl "$payload" "$entries"; then
+    status=different
+    if canonical_entries_are_equal "$entries" "${plan_dir}/${name}.entries"; then
+      status=exact
+    fi
   fi
   rm -f "$raw" "$payload" "$entries"
+  [[ -n "$status" ]] || return 1
   printf '%s\n' "$status"
 }
 

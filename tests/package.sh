@@ -84,7 +84,6 @@ limine-snapper-sync>=1.31.0
 openssl
 pacman
 sbctl>=0.18
-sbsigntools
 systemd
 util-linux
 EOF

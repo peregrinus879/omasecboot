@@ -663,19 +663,19 @@ test_config_boundary_parser() {
     'db_additions: []' \
     'files: []' > "$config"
   chmod 600 "$config"
-  sbctl_config_enrollment_values "$config" \
+  parse_sbctl_config "$config" true \
     || fail_test "audited plain sbctl config was rejected"
   [[ "$_sbctl_keydir" == /var/lib/sbctl/keys \
     && "$_sbctl_guid_path" == /var/lib/sbctl/GUID ]] \
     || fail_test "sbctl config paths were parsed incorrectly"
   printf '%s\n' 'db_additions:' '  - custom' > "$config"
   chmod 600 "$config"
-  if sbctl_config_enrollment_values "$config"; then
+  if parse_sbctl_config "$config" true; then
     fail_test "nonempty db additions were accepted"
   fi
   printf '%s\n' 'keys:' '  pk:' '    type: tpm' > "$config"
   chmod 600 "$config"
-  if sbctl_config_enrollment_values "$config"; then
+  if parse_sbctl_config "$config" true; then
     fail_test "custom key backend was accepted"
   fi
 }

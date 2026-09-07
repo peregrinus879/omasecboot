@@ -26,67 +26,81 @@ sbctl_config_path() {
   printf '%s\n' /etc/sbctl/sbctl.conf
 }
 
-sbctl_config_files_db_path() {
-  local config="$1" line trimmed key last_top_key="" value="" candidate count=0
-  local document_marker_seen=false content_seen=false
+# Reads the plain top-level scalars OmaSecBoot understands in sbctl.conf
+# (keydir, guid, files_db, bundles_db) into _sbctl_* and fails closed on YAML
+# it cannot read literally: flow syntax, anchors, multi-line values, duplicate
+# keys, and multiple documents. Strict mode additionally rejects anything that
+# changes what sbctl would enroll or sign: nested content, unknown keys, custom
+# key backends, and nonempty db_additions or files lists.
+parse_sbctl_config() {
+  local config="$1" strict="${2:-false}" line trimmed key candidate value last_key=""
+  local -A seen=()
+  local marker_seen=false content_seen=false
+  _sbctl_keydir=/var/lib/sbctl/keys
+  _sbctl_guid_path=/var/lib/sbctl/GUID
+  _sbctl_files_db=""
   validate_control_file "$config" || return 1
-
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed=${line#"${line%%[![:space:]]*}"}
     [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
     if [[ "$line" == --- ]]; then
-      [[ "$document_marker_seen" == false && "$content_seen" == false ]] || return 1
-      document_marker_seen=true
+      [[ "$marker_seen" == false && "$content_seen" == false ]] || return 1
+      marker_seen=true
       continue
     fi
     [[ "$line" != ... ]] || return 1
-
-    if [[ "$line" != [[:space:]]* ]]; then
-      [[ "$line" =~ ^([a-z_][a-z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]] \
-        || return 1
-      key=${BASH_REMATCH[1]}
-      last_top_key=$key
-      content_seen=true
-      [[ "$key" == files_db ]] || continue
-      count=$((count + 1))
-      [[ $count -eq 1 ]] || return 1
-      candidate=${BASH_REMATCH[2]}
-      candidate=${candidate#"${candidate%%[![:space:]]*}"}
-      candidate=${candidate%"${candidate##*[![:space:]]}"}
-
-      if [[ "$candidate" =~ ^\"([^\"\\]*)\"([[:space:]]+#.*)?$ ]]; then
-        value=${BASH_REMATCH[1]}
-      elif [[ "$candidate" =~ ^\'([^\']*)\'([[:space:]]+#.*)?$ ]]; then
-        value=${BASH_REMATCH[1]}
-      elif [[ "$candidate" =~ ^(/[^[:space:]#]*)([[:space:]]+#.*)?$ ]]; then
-        value=${BASH_REMATCH[1]}
-      else
-        return 1
-      fi
+    content_seen=true
+    if [[ "$line" == [[:space:]]* ]]; then
+      [[ "$strict" == false && "$last_key" != files_db ]] || return 1
       continue
     fi
-    [[ "$last_top_key" != files_db ]] || return 1
-    content_seen=true
+    [[ "$line" =~ ^([a-z_][a-z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]] || return 1
+    key=${BASH_REMATCH[1]}
+    candidate=${BASH_REMATCH[2]}
+    candidate=${candidate%"${candidate##*[![:space:]]}"}
+    last_key=$key
+    [[ -z "${seen[$key]:-}" ]] || return 1
+    seen["$key"]=1
+    case "$key" in
+      keydir|guid|files_db|bundles_db)
+        if [[ "$candidate" =~ ^\"([^\"\\]*)\"([[:space:]]+#.*)?$ ]] \
+          || [[ "$candidate" =~ ^\'([^\']*)\'([[:space:]]+#.*)?$ ]] \
+          || [[ "$candidate" =~ ^(/[^[:space:]#]*)([[:space:]]+#.*)?$ ]]; then
+          value=${BASH_REMATCH[1]}
+        else
+          return 1
+        fi
+        [[ "$value" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+        case "$key" in
+          keydir) _sbctl_keydir=$value ;;
+          guid) _sbctl_guid_path=$value ;;
+          files_db) _sbctl_files_db=$value ;;
+        esac
+        ;;
+      db_additions|files)
+        [[ "$strict" == false || "$candidate" =~ ^\[\][[:space:]]*(#.*)?$ ]] || return 1
+        ;;
+      landlock)
+        [[ "$strict" == false \
+          || "${candidate%%[[:space:]]#*}" =~ ^(true|false)[[:space:]]*$ ]] || return 1
+        ;;
+      *) [[ "$strict" == false ]] || return 1 ;;
+    esac
   done < "$config"
-
-  [[ $count -eq 1 ]] || return 1
-  [[ "$value" =~ ^/[^[:cntrl:]]+$ ]] || return 1
-  printf '%s\n' "$value"
 }
 
 # Resolve the sbctl file database path using the same configured field as
 # sbctl. Unsupported YAML scalar forms fail closed instead of guessing.
+# Prefers the explicit files_db of an existing config; without a config file,
+# matches sbctl 0.18's legacy selection or its default.
 resolve_sbctl_files_db_path() {
-  local config files_db=""
+  local config
   config=$(sbctl_config_path) || return 1
-
   if [[ -e "$config" || -L "$config" ]]; then
-    files_db=$(sbctl_config_files_db_path "$config") || return 1
-    printf '%s\n' "$files_db"
-    return 0
-  fi
-
-  if [[ -d /usr/share/secureboot ]]; then
+    parse_sbctl_config "$config" || return 1
+    [[ -n "$_sbctl_files_db" ]] || return 1
+    printf '%s\n' "$_sbctl_files_db"
+  elif [[ -d /usr/share/secureboot ]]; then
     printf '%s\n' /usr/share/secureboot/files.db
   else
     printf '%s\n' /var/lib/sbctl/files.json

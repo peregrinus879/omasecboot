@@ -46,7 +46,6 @@ TARGET_PARTUUID='11111111-2222-3333-4444-555555555555'
 RESOLVE_CALLS=0
 RESOLVE_FAIL_AT=0
 RESOLVE_ALWAYS_FAIL=false
-RESOLVE_BOOTNEXT_CHANGE_AT=0
 ARTIFACT_FAIL=false
 PREFLIGHT_FAIL=false
 CONFIG_SYNC_FAIL=false
@@ -256,10 +255,6 @@ resolve_windows_target() {
     || (( RESOLVE_FAIL_AT > 0 && RESOLVE_CALLS == RESOLVE_FAIL_AT )); then
     return 1
   fi
-  if (( RESOLVE_BOOTNEXT_CHANGE_AT > 0 \
-    && RESOLVE_CALLS == RESOLVE_BOOTNEXT_CHANGE_AT )); then
-    write_bootnext_variable 0008 || return 1
-  fi
   _windows_boot_number="$TARGET_BOOT"
   _windows_label="$TARGET_LABEL"
   _windows_partuuid="$TARGET_PARTUUID"
@@ -337,7 +332,6 @@ setup_fixture() {
   RESOLVE_CALLS=0
   RESOLVE_FAIL_AT=0
   RESOLVE_ALWAYS_FAIL=false
-  RESOLVE_BOOTNEXT_CHANGE_AT=0
   ARTIFACT_FAIL=false
   PREFLIGHT_FAIL=false
   CONFIG_SYNC_FAIL=false
@@ -1242,21 +1236,6 @@ test_bootnext_readback_and_interruption() {
   BOOTNEXT_FAIL_ACTION=corrupt-attributes
   if run_dormant_windows_bootnext >/dev/null 2>&1; then
     fail_test "malformed post-write BootNext readback reported success"
-  fi
-  assert_bootnext_recovery set-bootnext
-
-  setup_bootnext_fixture bootnext-postwrite-target
-  BOOTNEXT_FAILPOINT=after-bootnext-command
-  BOOTNEXT_FAIL_ACTION=change-target
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
-    fail_test "post-write Windows target drift reported success"
-  fi
-  assert_bootnext_recovery set-bootnext
-
-  setup_bootnext_fixture bootnext-final-readback-race
-  RESOLVE_BOOTNEXT_CHANGE_AT=4
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
-    fail_test "BootNext change during final target proof reported success"
   fi
   assert_bootnext_recovery set-bootnext
 

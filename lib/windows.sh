@@ -30,22 +30,11 @@ _windows_block_count=0
 _windows_owned_mount_active=false
 _windows_owned_mount_path=""
 _windows_reusable_mount=""
-_windows_reusable_mount_id=""
-_windows_reusable_mount_access=""
-_windows_target_mount_id=""
-_windows_descriptor_mount_id=""
 _windows_runtime_mount_override=""
-_windows_inspection_file=""
 _windows_preflight_result=""
 _windows_preflight_firmware_state=absent
 _windows_preflight_bitlocker_state=absent
 _windows_preflight_loader_state=absent
-_windows_preflight_firmware_seen=false
-_windows_preflight_firmware_unknown=false
-_windows_preflight_bitlocker_seen=false
-_windows_preflight_bitlocker_unknown=false
-_windows_preflight_loader_seen=false
-_windows_preflight_loader_unknown=false
 _windows_preflight_gum=""
 _windows_bootnext_record_json=""
 _windows_bootnext_record_path=""
@@ -69,7 +58,7 @@ declare -Ag _windows_inventory_start=()
 declare -Ag _windows_inventory_size=()
 declare -ag _windows_preflight_bitlocker_devices=()
 declare -ag _windows_preflight_esp_candidates=()
-declare -ag _windows_preflight_signer_records=()
+declare -ag _windows_preflight_loader_devices=()
 declare -ag _windows_preflight_unknown_reasons=()
 
 windows_bootnext_failpoint() {
@@ -157,29 +146,6 @@ windows_label_is_safe() {
     && "$label" != *' ' && "$label" != *\$\{* ]]
 }
 
-windows_decimal_fits_limit() {
-  local value="$1" maximum="$2"
-  [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
-  (( ${#value} < ${#maximum} )) && return 0
-  (( ${#value} == ${#maximum} )) || return 1
-  local index digit maximum_digit
-  for ((index=0; index < ${#maximum}; index++)); do
-    digit=${value:$index:1}
-    maximum_digit=${maximum:$index:1}
-    (( digit < maximum_digit )) && return 0
-    (( digit > maximum_digit )) && return 1
-  done
-  return 0
-}
-
-windows_decimal_fits_int64() {
-  windows_decimal_fits_limit "$1" 9223372036854775807
-}
-
-windows_decimal_fits_json_integer() {
-  windows_decimal_fits_limit "$1" 9007199254740991
-}
-
 windows_le_unsigned() {
   local -a bytes=("$@")
   local index hex=""
@@ -204,53 +170,6 @@ windows_guid_from_bytes() {
     "${6,,}" "${5,,}" "${8,,}" "${7,,}" \
     "${9,,}" "${10,,}" "${11,,}" "${12,,}" \
     "${13,,}" "${14,,}" "${15,,}" "${16,,}"
-}
-
-windows_prefix_node_is_allowed() {
-  local type="${1,,}" subtype="${2,,}" node_length="$3" raw="${4,,}"
-  local index null_count=0
-  local -a bytes=()
-  read -r -a bytes <<< "$raw"
-  (( ${#bytes[@]} == node_length )) || return 1
-  case "${type}:${subtype}" in
-    01:01) (( node_length == 6 )) ;;
-    01:02) (( node_length == 5 )) ;;
-    01:03) (( node_length == 24 )) ;;
-    01:04) (( node_length >= 20 )) ;;
-    01:05) (( node_length == 8 )) ;;
-    01:06) (( node_length == 13 )) ;;
-    02:01) (( node_length == 12 )) ;;
-    02:02)
-      (( node_length >= 19 )) || return 1
-      for ((index=16; index < node_length; index++)); do
-        if [[ "${bytes[$index]}" == 00 ]]; then
-          null_count=$((null_count + 1))
-        elif (( 16#${bytes[$index]} > 127 )); then
-          return 1
-        fi
-      done
-      (( null_count == 3 )) && [[ "${bytes[-1]}" == 00 ]]
-      ;;
-    02:03) (( node_length >= 8 && (node_length - 4) % 4 == 0 )) ;;
-    02:04) (( node_length == 8 )) ;;
-    03:01|03:02) (( node_length == 8 )) ;;
-    03:03|03:15|03:16) (( node_length == 24 )) ;;
-    03:04|03:17) (( node_length == 16 )) ;;
-    03:05|03:19) (( node_length == 6 )) ;;
-    03:06) (( node_length == 8 )) ;;
-    03:0a)
-      (( node_length == 44 )) \
-        && [[ "${bytes[*]:4:16}" == \
-          'b4 dd 87 d4 8b 00 d9 11 af dc 00 10 83 ff ca 4d' ]]
-      ;;
-    03:0f) (( node_length == 11 )) ;;
-    03:10) (( node_length >= 12 && node_length <= 138 \
-      && (node_length - 10) % 2 == 0 )) ;;
-    03:11|03:1a|03:1d) (( node_length == 5 )) ;;
-    03:12) (( node_length == 10 )) ;;
-    03:20) (( node_length == 20 )) ;;
-    *) return 1 ;;
-  esac
 }
 
 windows_parse_device_path() {
@@ -355,13 +274,7 @@ windows_parse_device_path() {
           exact_file_count=$((exact_file_count + 1))
         fi
         ;;
-      *)
-        if [[ "$stage" != prefix ]] \
-          || ! windows_prefix_node_is_allowed \
-            "$type" "$subtype" "$node_length" "${bytes[*]}"; then
-          sequence_valid=false
-        fi
-        ;;
+      *) [[ "$stage" == prefix ]] || sequence_valid=false ;;
     esac
   done
 
@@ -400,9 +313,6 @@ windows_reset_target() {
   _windows_device_path=""
   _windows_maj_min=""
   _windows_reusable_mount=""
-  _windows_reusable_mount_id=""
-  _windows_reusable_mount_access=""
-  _windows_target_mount_id=""
 }
 
 windows_parse_firmware_inventory() {
@@ -672,20 +582,17 @@ windows_map_target_esp() {
     return 1
   }
   jq -e '
+    def uint: . == null or
+      (type == "number" and . >= 0 and . <= 9007199254740991 and floor == .);
+    def text: . == null or type == "string";
     (.blockdevices | type) == "array" and
     all(.blockdevices[];
       type == "object" and
       (keys == ["fstype", "log-sec", "maj:min", "partn", "parttype", "partuuid", "path", "size", "start", "type"]) and
-      (.path | type) == "string" and
-      (."maj:min" | type) == "string" and
-      (.type | type) == "string" and
-      (.partn == null or ((.partn | type) == "number" and .partn >= 0 and .partn <= 9007199254740991 and (.partn | floor) == .partn)) and
-      (.partuuid == null or (.partuuid | type) == "string") and
-      (.parttype == null or (.parttype | type) == "string") and
-      (.start == null or ((.start | type) == "number" and .start >= 0 and .start <= 9007199254740991 and (.start | floor) == .start)) and
-      (.size == null or ((.size | type) == "number" and .size >= 0 and .size <= 9007199254740991 and (.size | floor) == .size)) and
-      (."log-sec" == null or ((."log-sec" | type) == "number" and ."log-sec" >= 0 and ."log-sec" <= 9007199254740991 and (."log-sec" | floor) == ."log-sec")) and
-      (.fstype == null or (.fstype | type) == "string"))
+      (.path | type) == "string" and (."maj:min" | type) == "string" and
+      (.type | type) == "string" and (.partn | uint) and (.partuuid | text) and
+      (.parttype | text) and (.start | uint) and (.size | uint) and
+      (."log-sec" | uint) and (.fstype | text))
   ' <<< "$json" >/dev/null 2>&1 || {
     windows_reject "Block-device inventory has an unsupported JSON shape"
     return 1
@@ -701,27 +608,17 @@ windows_map_target_esp() {
   }
   row=${candidates[0]}
   jq -e '
-    (.partn | type) == "number" and
-    (.partuuid | type) == "string" and
-    (.parttype | type) == "string" and
-    (.start | type) == "number" and
-    (.size | type) == "number" and
-    (."log-sec" | type) == "number" and
+    (.partn | type) == "number" and (.partuuid | type) == "string" and
+    (.parttype | type) == "string" and (.start | type) == "number" and
+    (.size | type) == "number" and (."log-sec" | type) == "number" and
     (.fstype | type) == "string"
   ' <<< "$row" >/dev/null || {
     windows_reject "Windows ESP mapping is incomplete"
     return 1
   }
-
-  path=$(jq -r '.path' <<< "$row") || return 1
-  maj_min=$(jq -r '."maj:min"' <<< "$row") || return 1
-  partn=$(jq -r '.partn' <<< "$row") || return 1
-  partuuid=$(jq -r '.partuuid' <<< "$row") || return 1
-  parttype=$(jq -r '.parttype' <<< "$row") || return 1
-  start=$(jq -r '.start' <<< "$row") || return 1
-  size=$(jq -r '.size' <<< "$row") || return 1
-  log_sec=$(jq -r '."log-sec"' <<< "$row") || return 1
-  fstype=$(jq -r '.fstype' <<< "$row") || return 1
+  read_lines path maj_min partn partuuid parttype start size log_sec fstype \
+    < <(jq -r '.path, ."maj:min", .partn, .partuuid, .parttype, .start, .size,
+      ."log-sec", .fstype' <<< "$row") || return 1
 
   [[ "$path" =~ ^/dev/[A-Za-z0-9._/+:-]+$ \
     && "$maj_min" =~ ^[0-9]+:[0-9]+$ \
@@ -732,12 +629,6 @@ windows_map_target_esp() {
     windows_reject "Windows target does not map to the expected FAT ESP"
     return 1
   }
-  if ! windows_decimal_fits_json_integer "$start" \
-    || ! windows_decimal_fits_json_integer "$size" \
-    || ! windows_decimal_fits_json_integer "$log_sec"; then
-    windows_reject "Windows ESP geometry is out of range"
-    return 1
-  fi
   case "$log_sec" in
     512|1024|2048|4096) ;;
     *)
@@ -799,106 +690,38 @@ windows_reconcile_runtime_mount() {
   rmdir -- "$mount_path" || return 1
 }
 
+# Reuses the one whole-filesystem mount of the target ESP when it exists;
+# more than one is ambiguous, and none means a private read-only mount.
 windows_find_reusable_mount() {
-  local owned json rows row target mount_id fstype fsroot vfs_options mount_access
-  local -a mounts=() candidates=()
+  local owned json targets
+  local -a candidates=()
+  _windows_reusable_mount=""
   owned=$(windows_runtime_mount_path) || return 1
-  json=$(LC_ALL=C findmnt --json --list \
-    --output TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS 2>/dev/null) || {
+  json=$(LC_ALL=C findmnt --json --list --output TARGET,MAJ:MIN,FSTYPE,FSROOT \
+    2>/dev/null) || {
     windows_reject "Could not read mount inventory"
     return 1
   }
-  jq -e '
-    (.filesystems | type) == "array" and
-    all(.filesystems[];
-      type == "object" and
-      (keys == ["fsroot", "fstype", "id", "maj:min", "target", "vfs-options"]) and
-      (.target | type) == "string" and
-      (.id | type) == "number" and .id >= 1 and (.id | floor) == .id and
-      (."maj:min" | type) == "string" and
-      (.fstype | type) == "string" and
-      (.fsroot | type) == "string" and
-      (."vfs-options" | type) == "string")
-  ' <<< "$json" >/dev/null 2>&1 || {
+  targets=$(jq -r --arg maj "$_windows_maj_min" --arg owned "$owned" '
+    .filesystems[] |
+    select(."maj:min" == $maj and .target != $owned
+      and .fstype == "vfat" and .fsroot == "/") | .target
+  ' <<< "$json" 2>/dev/null) || {
     windows_reject "Mount inventory has an unsupported JSON shape"
     return 1
   }
-  rows=$(jq -c --arg maj "$_windows_maj_min" --arg owned "$owned" '
-    .filesystems[] |
-    select(."maj:min" == $maj and .target != $owned)
-  ' <<< "$json") || return 1
-  [[ -z "$rows" ]] || mapfile -t mounts <<< "$rows"
-  for row in "${mounts[@]}"; do
-    target=$(jq -r '.target' <<< "$row") || return 1
-    mount_id=$(jq -r '.id' <<< "$row") || return 1
-    fstype=$(jq -r '.fstype' <<< "$row") || return 1
-    fsroot=$(jq -r '.fsroot' <<< "$row") || return 1
-    vfs_options=$(jq -r '."vfs-options"' <<< "$row") || return 1
-    [[ "$fstype" == vfat && "$fsroot" == / ]] || {
-      windows_reject "Windows ESP has an unsupported same-device mount alias"
-      return 1
-    }
-    if [[ ! ( ",${vfs_options}," == *,ro,* && ",${vfs_options}," != *,rw,* ) \
-      && ! ( ",${vfs_options}," == *,rw,* && ",${vfs_options}," != *,ro,* ) ]]; then
-      windows_reject "Windows ESP mount has unsupported VFS access options"
-      return 1
-    fi
-    candidates+=("$row")
-  done
+  [[ -z "$targets" ]] || mapfile -t candidates <<< "$targets"
   (( ${#candidates[@]} <= 1 )) || {
     windows_reject "Windows ESP has multiple reusable mounts"
     return 1
   }
-  if (( ${#candidates[@]} == 0 )); then
-    _windows_reusable_mount=""
-    _windows_reusable_mount_id=""
-    _windows_reusable_mount_access=""
-    return 0
-  fi
-  row=${candidates[0]}
-  target=$(jq -r '.target' <<< "$row") || return 1
-  mount_id=$(jq -r '.id' <<< "$row") || return 1
-  vfs_options=$(jq -r '."vfs-options"' <<< "$row") || return 1
-  if [[ ",${vfs_options}," == *,ro,* && ",${vfs_options}," != *,rw,* ]]; then
-    mount_access=ro
-  else
-    mount_access=rw
-  fi
-  if [[ "$target" =~ ^/[^[:cntrl:]]+$ ]] \
-    && windows_path_has_controlled_ancestors "$target"; then
-    _windows_reusable_mount="$target"
-    _windows_reusable_mount_id="$mount_id"
-    _windows_reusable_mount_access="$mount_access"
-  elif [[ "$mount_access" == rw ]]; then
-    windows_reject "Windows ESP has an uncontrolled writable mount"
+  (( ${#candidates[@]} == 1 )) || return 0
+  if [[ ! "${candidates[0]}" =~ ^/[^[:cntrl:]]+$ || ! -d "${candidates[0]}" ]] \
+    || ! path_has_no_symlink_components "${candidates[0]}"; then
+    windows_reject "Windows ESP mount path is unsafe"
     return 1
-  else
-    _windows_reusable_mount=""
-    _windows_reusable_mount_id=""
-    _windows_reusable_mount_access=""
   fi
-}
-
-windows_path_has_controlled_ancestors() {
-  local path="$1" owner uid mode parent
-  path_has_no_symlink_components "$path" || return 1
-  owner=$(control_owner_uid) || return 1
-  while true; do
-    [[ -d "$path" && ! -L "$path" ]] || return 1
-    read -r uid mode < <(stat -Lc '%u %a' "$path" 2>/dev/null) || return 1
-    if [[ "$uid" == "$owner" ]] && mode_is_control_safe "$mode"; then
-      :
-    elif [[ "$uid" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] \
-      && { mode_is_control_safe "$mode" || (( (8#$mode & 01000) != 0 )); }; then
-      :
-    else
-      return 1
-    fi
-    [[ "$path" == / ]] && return 0
-    parent=$(dirname -- "$path") || return 1
-    [[ "$parent" != "$path" ]] || return 1
-    path="$parent"
-  done
+  _windows_reusable_mount="${candidates[0]}"
 }
 
 windows_prepare_runtime_directory() {
@@ -920,71 +743,19 @@ windows_prepare_runtime_mountpoint() {
 }
 
 windows_target_mount_is_valid() {
-  local mount_path="$1" expected_id="$2" expected_access="$3" json mount_id
-  [[ "$expected_access" == ro || "$expected_access" == rw ]] || return 1
+  local mount_path="$1" json
   json=$(LC_ALL=C findmnt --json --list --mountpoint "$mount_path" \
-    --output TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS 2>/dev/null) || return 1
-  jq -e --arg target "$mount_path" --arg maj "$_windows_maj_min" \
-    --arg expected_id "$expected_id" --arg expected_access "$expected_access" '
-    (.filesystems | type) == "array" and
+    --output TARGET,MAJ:MIN,FSTYPE,FSROOT 2>/dev/null) || return 1
+  jq -e --arg target "$mount_path" --arg maj "$_windows_maj_min" '
     (.filesystems | length) == 1 and
-    (.filesystems[0] | keys) == ["fsroot", "fstype", "id", "maj:min", "target", "vfs-options"] and
-    .filesystems[0].target == $target and
-    (.filesystems[0].id | type) == "number" and
-    .filesystems[0].id >= 1 and
-    (.filesystems[0].id | floor) == .filesystems[0].id and
-    ($expected_id == "" or (.filesystems[0].id | tostring) == $expected_id) and
-    .filesystems[0]."maj:min" == $maj and
-    .filesystems[0].fstype == "vfat" and
-    .filesystems[0].fsroot == "/" and
-    (
-      ($expected_access == "ro" and
-        (("," + .filesystems[0]."vfs-options" + ",") | contains(",ro,")) and
-        ((("," + .filesystems[0]."vfs-options" + ",") | contains(",rw,")) | not)) or
-      ($expected_access == "rw" and
-        (("," + .filesystems[0]."vfs-options" + ",") | contains(",rw,")) and
-        ((("," + .filesystems[0]."vfs-options" + ",") | contains(",ro,")) | not))
-    )
-  ' <<< "$json" >/dev/null || return 1
-  mount_id=$(jq -r '.filesystems[0].id' <<< "$json") || return 1
-  _windows_target_mount_id="$mount_id"
-}
-
-windows_descriptor_mount_id() {
-  local fd_path="$1" pattern fd_number line mount_id="" count=0
-  _windows_descriptor_mount_id=""
-  pattern="^/proc/${BASHPID}/fd/([0-9]+)$"
-  [[ "$fd_path" =~ $pattern ]] || return 1
-  fd_number=${BASH_REMATCH[1]}
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^mnt_id:[[:space:]]+([1-9][0-9]*)$ ]]; then
-      mount_id=${BASH_REMATCH[1]}
-      count=$((count + 1))
-    fi
-  done < "/proc/${BASHPID}/fdinfo/${fd_number}" || return 1
-  (( count == 1 )) || return 1
-  _windows_descriptor_mount_id="$mount_id"
-}
-
-windows_loader_descriptor_mount_is_valid() {
-  local fd_path="$1" expected_mount_id="$2"
-  windows_descriptor_mount_id "$fd_path" || return 1
-  [[ "$_windows_descriptor_mount_id" == "$expected_mount_id" ]]
+    (.filesystems[0] | .target == $target and ."maj:min" == $maj
+      and .fstype == "vfat" and .fsroot == "/")
+  ' <<< "$json" >/dev/null
 }
 
 windows_loader_mount_cleanup() {
-  local rc="$1" cleanup_rc=0 runtime
+  local rc="$1" cleanup_rc=0
   trap - EXIT INT TERM HUP
-  if [[ -n "$_windows_inspection_file" ]]; then
-    runtime=$(windows_runtime_dir_path) || cleanup_rc=1
-    case "$_windows_inspection_file" in
-      "${runtime}"/bootmgfw.*)
-        rm -f -- "$_windows_inspection_file" || cleanup_rc=1
-        ;;
-      *) cleanup_rc=1 ;;
-    esac
-    _windows_inspection_file=""
-  fi
   if [[ "$_windows_owned_mount_active" == true ]]; then
     if LC_ALL=C findmnt --mountpoint "$_windows_owned_mount_path" >/dev/null 2>&1; then
       umount -- "$_windows_owned_mount_path" || cleanup_rc=1
@@ -995,57 +766,33 @@ windows_loader_mount_cleanup() {
   exit "$rc"
 }
 
+# The mounted target holds a PE image at the Windows loader path on the
+# mapped device; the read follows no symlink and leaves the access time alone.
 windows_verify_loader_file() {
-  local mount_path="$1" mount_id="$2" loader loader_fd fd_path
-  local identity_before identity_after path_identity_before path_identity_after
-  local maj_min inode size magic
+  local mount_path="$1" loader loader_fd maj_min size magic rc=1
   loader="${mount_path}${WINDOWS_LOADER_POSIX}"
   [[ -f "$loader" && ! -L "$loader" ]] || return 1
   exec {loader_fd}< "$loader" || return 1
-  fd_path="/proc/${BASHPID}/fd/${loader_fd}"
-  if ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
-    || [[ ! -f "$fd_path" ]] \
-    || ! read -r maj_min inode size \
-      < <(stat -Lc '%Hd:%Ld %i %s' "$fd_path" 2>/dev/null) \
-    || [[ "$maj_min" != "$_windows_maj_min" ]] \
-    || ! windows_decimal_fits_int64 "$size" \
-    || (( size < 64 )); then
-    exec {loader_fd}<&-
-    return 1
-  fi
-  identity_before="${maj_min}:${inode}:${size}"
-  if ! path_identity_before=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null) \
-    || [[ "$identity_before" != "$path_identity_before" ]]; then
-    exec {loader_fd}<&-
-    return 1
-  fi
-  magic=$(dd bs=2 count=1 iflag=fullblock,noatime status=none \
-    <&"$loader_fd" 2>/dev/null \
-    | od -An -tx1 | tr -d '[:space:]') || {
-    exec {loader_fd}<&-
-    return 1
-  }
-  if [[ "$magic" != 4d5a ]] \
-    || ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
-    || ! identity_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$fd_path" 2>/dev/null) \
-    || [[ -L "$loader" ]] \
-    || ! path_identity_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null); then
-    exec {loader_fd}<&-
-    return 1
+  if read -r maj_min size \
+      < <(stat -Lc '%Hd:%Ld %s' "/proc/${BASHPID}/fd/${loader_fd}" 2>/dev/null) \
+    && [[ "$maj_min" == "$_windows_maj_min" && "$size" =~ ^[0-9]+$ ]] \
+    && (( size >= 64 )) \
+    && magic=$(dd bs=2 count=1 iflag=fullblock,noatime status=none \
+      <&"$loader_fd" 2>/dev/null | od -An -tx1 | tr -d '[:space:]') \
+    && [[ "$magic" == 4d5a ]]; then
+    rc=0
   fi
   exec {loader_fd}<&-
-  [[ "$identity_before" == "$identity_after" \
-    && "$identity_before" == "$path_identity_after" ]]
+  return "$rc"
 }
 
 windows_with_target_mount() {
   local callback="$1" mount_override="${2:-}"
   (
-    local mount_path expected_mount_id="" expected_mount_access=ro callback_rc=0
+    local mount_path callback_rc=0
     _windows_runtime_mount_override="$mount_override"
     _windows_owned_mount_active=false
     _windows_owned_mount_path=""
-    _windows_inspection_file=""
     trap 'windows_loader_mount_cleanup $?' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -1056,8 +803,6 @@ windows_with_target_mount() {
     windows_find_reusable_mount || exit 1
     if [[ -n "$_windows_reusable_mount" ]]; then
       mount_path="$_windows_reusable_mount"
-      expected_mount_id="$_windows_reusable_mount_id"
-      expected_mount_access="$_windows_reusable_mount_access"
     else
       windows_prepare_runtime_mountpoint || exit 1
       mount_path=$(windows_runtime_mount_path) || exit 1
@@ -1066,15 +811,13 @@ windows_with_target_mount() {
       mount -t vfat -o ro,nosuid,nodev,noexec,noatime,dmask=0077,fmask=0177 -- \
         "$_windows_device_path" "$mount_path" || exit 1
     fi
-    windows_target_mount_is_valid \
-      "$mount_path" "$expected_mount_id" "$expected_mount_access" || exit 1
-    "$callback" "$mount_path" "$_windows_target_mount_id" || callback_rc=$?
+    windows_target_mount_is_valid "$mount_path" || exit 1
+    "$callback" "$mount_path" || callback_rc=$?
     case "$callback_rc" in
       0|2) ;;
       *) exit "$callback_rc" ;;
     esac
-    windows_target_mount_is_valid \
-      "$mount_path" "$_windows_target_mount_id" "$expected_mount_access" || exit 1
+    windows_target_mount_is_valid "$mount_path" || exit 1
     exit "$callback_rc"
   )
 }
@@ -1090,8 +833,8 @@ windows_verify_target_loader() {
 
 resolve_windows_target() {
   local command
-  for command in dd dirname efibootmgr findmnt install jq lsblk mktemp mount od \
-    readlink rm rmdir stat tr umount; do
+  for command in dd efibootmgr findmnt install jq lsblk mount od rmdir stat tr \
+    umount; do
     command -v "$command" >/dev/null 2>&1 || {
       windows_reject "Required Windows target tool is unavailable: ${command}"
       return 1
@@ -1108,60 +851,28 @@ windows_preflight_reset() {
   _windows_preflight_firmware_state=absent
   _windows_preflight_bitlocker_state=absent
   _windows_preflight_loader_state=absent
-  _windows_preflight_firmware_seen=false
-  _windows_preflight_firmware_unknown=false
-  _windows_preflight_bitlocker_seen=false
-  _windows_preflight_bitlocker_unknown=false
-  _windows_preflight_loader_seen=false
-  _windows_preflight_loader_unknown=false
   _windows_preflight_gum=""
   _windows_preflight_bitlocker_devices=()
+  _windows_preflight_loader_devices=()
   _windows_preflight_esp_candidates=()
-  _windows_preflight_signer_records=()
   _windows_preflight_unknown_reasons=()
+}
+
+# A detector ends as present when it saw its signal, unknown when any probe
+# was inconclusive, and absent otherwise; unknown wins over present.
+windows_preflight_mark_seen() {
+  local variable="_windows_preflight_${1}_state"
+  [[ "${!variable}" == unknown ]] || printf -v "$variable" '%s' present
 }
 
 windows_preflight_mark_unknown() {
   local detector="$1" reason="$2"
   case "$detector" in
-    firmware) _windows_preflight_firmware_unknown=true ;;
-    bitlocker) _windows_preflight_bitlocker_unknown=true ;;
-    loader) _windows_preflight_loader_unknown=true ;;
+    firmware|bitlocker|loader) ;;
     *) return 1 ;;
   esac
+  printf -v "_windows_preflight_${detector}_state" '%s' unknown
   _windows_preflight_unknown_reasons+=("$reason")
-}
-
-windows_preflight_finalize_states() {
-  local detector seen unknown state
-  for detector in firmware bitlocker loader; do
-    case "$detector" in
-      firmware)
-        seen=$_windows_preflight_firmware_seen
-        unknown=$_windows_preflight_firmware_unknown
-        ;;
-      bitlocker)
-        seen=$_windows_preflight_bitlocker_seen
-        unknown=$_windows_preflight_bitlocker_unknown
-        ;;
-      loader)
-        seen=$_windows_preflight_loader_seen
-        unknown=$_windows_preflight_loader_unknown
-        ;;
-    esac
-    if [[ "$unknown" == true ]]; then
-      state=unknown
-    elif [[ "$seen" == true ]]; then
-      state=present
-    else
-      state=absent
-    fi
-    case "$detector" in
-      firmware) _windows_preflight_firmware_state=$state ;;
-      bitlocker) _windows_preflight_bitlocker_state=$state ;;
-      loader) _windows_preflight_loader_state=$state ;;
-    esac
-  done
 }
 
 windows_preflight_detect_firmware() {
@@ -1175,7 +886,7 @@ windows_preflight_detect_firmware() {
     label=${_windows_inventory_label[$boot_number]}
     if [[ "${_windows_inventory_exact[$boot_number]:-false}" == true \
       || "${label,,}" == "windows boot manager" ]]; then
-      _windows_preflight_firmware_seen=true
+      windows_preflight_mark_seen firmware
     fi
   done
 }
@@ -1251,12 +962,9 @@ windows_preflight_read_block_inventory() {
   [[ -z "$rows" ]] || mapfile -t partitions <<< "$rows"
 
   for row in "${partitions[@]}"; do
-    path=$(jq -r '.path' <<< "$row") || return 1
-    maj_min=$(jq -r '."maj:min"' <<< "$row") || return 1
-    parttype=$(jq -r '.parttype // ""' <<< "$row") || return 1
-    removable=$(jq -r '.rm' <<< "$row") || return 1
-    transport=$(jq -r '.tran // ""' <<< "$row") || return 1
-    subsystems=$(jq -r '.subsystems // ""' <<< "$row") || return 1
+    read_lines path maj_min parttype removable transport subsystems \
+      < <(jq -r '.path, ."maj:min", (.parttype // ""), .rm, (.tran // ""),
+        (.subsystems // "")' <<< "$row") || return 1
     if [[ ! "$path" =~ ^/dev/[A-Za-z0-9._/+:-]+$ \
       || ! "$maj_min" =~ ^[0-9]+:[0-9]+$ \
       || -n "${seen_paths[$path]:-}" \
@@ -1277,7 +985,7 @@ windows_preflight_read_block_inventory() {
     windows_preflight_probe_type "$path" BitLocker || rc=$?
     case "$rc" in
       0)
-        _windows_preflight_bitlocker_seen=true
+        windows_preflight_mark_seen bitlocker
         _windows_preflight_bitlocker_devices+=("$path")
         ;;
       2) ;;
@@ -1317,229 +1025,19 @@ windows_preflight_mount_path() {
     "$(windows_runtime_dir_path)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
 }
 
-windows_copy_loader_for_inspection() {
-  local mount_path="$1" mount_id="$2" loader loader_fd fd_path runtime
-  local maj_min inode size identity_before identity_after path_before path_after
-  local copy_size magic old_umask
-  loader="${mount_path}${WINDOWS_LOADER_POSIX}"
-  [[ -f "$loader" && ! -L "$loader" ]] || return 1
-  exec {loader_fd}< "$loader" || return 1
-  fd_path="/proc/${BASHPID}/fd/${loader_fd}"
-  if ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
-    || [[ ! -f "$fd_path" ]] \
-    || ! read -r maj_min inode size \
-      < <(stat -Lc '%Hd:%Ld %i %s' "$fd_path" 2>/dev/null) \
-    || [[ "$maj_min" != "$_windows_maj_min" ]] \
-    || ! windows_decimal_fits_int64 "$size" \
-    || (( size < 64 || size > 67108864 )); then
-    exec {loader_fd}<&-
-    return 1
-  fi
-  identity_before="${maj_min}:${inode}:${size}"
-  if ! path_before=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null) \
-    || [[ "$identity_before" != "$path_before" ]] \
-    || ! windows_prepare_runtime_directory; then
-    exec {loader_fd}<&-
-    return 1
-  fi
-  runtime=$(windows_runtime_dir_path) || {
-    exec {loader_fd}<&-
-    return 1
-  }
-  old_umask=$(umask) || {
-    exec {loader_fd}<&-
-    return 1
-  }
-  umask 077
-  _windows_inspection_file=$(mktemp "${runtime}/bootmgfw.XXXXXX" 2>/dev/null) || {
-    umask "$old_umask"
-    exec {loader_fd}<&-
-    return 1
-  }
-  umask "$old_umask"
-  if ! dd bs=1M iflag=fullblock,noatime status=none \
-    <&"$loader_fd" > "$_windows_inspection_file" 2>/dev/null \
-    || ! copy_size=$(stat -Lc '%s' "$_windows_inspection_file" 2>/dev/null) \
-    || [[ "$copy_size" != "$size" ]] \
-    || ! magic=$(od -An -N2 -tx1 "$_windows_inspection_file" 2>/dev/null \
-      | tr -d '[:space:]') \
-    || [[ "$magic" != 4d5a ]] \
-    || ! windows_loader_descriptor_mount_is_valid "$fd_path" "$mount_id" \
-    || ! identity_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$fd_path" 2>/dev/null) \
-    || [[ -L "$loader" ]] \
-    || ! path_after=$(stat -Lc '%Hd:%Ld:%i:%s' "$loader" 2>/dev/null); then
-    exec {loader_fd}<&-
-    return 1
-  fi
-  exec {loader_fd}<&-
-  [[ "$identity_before" == "$identity_after" \
-    && "$identity_before" == "$path_after" ]]
-}
-
-windows_preflight_setpriv_path() {
-  printf '/usr/bin/setpriv\n'
-}
-
-windows_preflight_sbverify_path() {
-  printf '/usr/bin/sbverify\n'
-}
-
-windows_preflight_prepare_inspection_owner() {
-  local file="$1" uid gid actual_uid actual_gid mode links
-  uid=$(/usr/bin/id -u nobody 2>/dev/null) || return 1
-  gid=$(/usr/bin/id -g nobody 2>/dev/null) || return 1
-  [[ "$uid" =~ ^[1-9][0-9]*$ && "$gid" =~ ^[1-9][0-9]*$ ]] || return 1
-  chown "${uid}:${gid}" -- "$file" || return 1
-  chmod 400 -- "$file" || return 1
-  read -r actual_uid actual_gid mode links \
-    < <(stat -Lc '%u %g %a %h' "$file" 2>/dev/null) || return 1
-  [[ "$actual_uid" == "$uid" && "$actual_gid" == "$gid" \
-    && "$mode" == 400 && "$links" == 1 && -f "$file" && ! -L "$file" ]]
-}
-
-windows_preflight_run_sbverify() {
-  local file="$1" setpriv_path sbverify_path
-  setpriv_path=$(windows_preflight_setpriv_path) || return 1
-  sbverify_path=$(windows_preflight_sbverify_path) || return 1
-  [[ "$setpriv_path" == /* && -x "$setpriv_path" \
-    && "$sbverify_path" == /* && -x "$sbverify_path" ]] || return 1
-  windows_preflight_prepare_inspection_owner "$file" || return 1
-  "$setpriv_path" --reuid=nobody --regid=nobody --clear-groups \
-    --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
-    --no-new-privs --reset-env -- /usr/bin/env -i LC_ALL=C \
-    PATH=/usr/bin:/bin "$sbverify_path" --list /proc/self/fd/3 \
-    3< "$file" 2>/dev/null
-}
-
-windows_preflight_parse_signers() {
-  local output="$1" line normalized issuer joined="" classification
-  local in_issuers=false seen_issuer_header=false seen_certificate_header=false
-  local seen_2011=false seen_2023=false seen_unknown=false
-  local -a issuers=()
-  local LC_ALL=C
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ ! "$line" =~ [[:cntrl:]] ]] || return 1
-    normalized=${line#"${line%%[! ]*}"}
-    case "$normalized" in
-      'image signature issuers:')
-        in_issuers=true
-        seen_issuer_header=true
-        ;;
-      'image signature certificates:')
-        in_issuers=false
-        seen_certificate_header=true
-        ;;
-      '- '*)
-        [[ "$in_issuers" == true ]] || continue
-        issuer=${normalized#'- '}
-        [[ -n "$issuer" && ${#issuer} -le 512 \
-          && ${#issuers[@]} -lt 64 ]] || return 1
-        issuers+=("$issuer")
-        case "$issuer" in
-          *'/CN=Microsoft Windows Production PCA 2011'*) seen_2011=true ;;
-          *'/CN=Windows UEFI CA 2023'*) seen_2023=true ;;
-          *) seen_unknown=true ;;
-        esac
-        ;;
-    esac
-  done <<< "$output"
-  [[ "$seen_issuer_header" == true && "$seen_certificate_header" == true ]] \
-    && (( ${#issuers[@]} > 0 )) || return 1
-  for issuer in "${issuers[@]}"; do
-    [[ -z "$joined" ]] || joined+=' | '
-    joined+="$issuer"
-  done
-  if [[ "$seen_unknown" == true ]]; then
-    classification="unknown-issuer"
-  elif [[ "$seen_2011" == true && "$seen_2023" == true ]]; then
-    classification=known-both
-  elif [[ "$seen_2011" == true ]]; then
-    classification=known-2011
-  elif [[ "$seen_2023" == true ]]; then
-    classification=known-2023
-  else
-    classification="unknown-issuer"
-  fi
-  printf '%s\t%s\n' "$classification" "$joined"
-}
-
+# 0: a Microsoft loader is present on the mounted ESP; 2: none; 1: unsafe.
 windows_preflight_inspect_loader() {
-  local mount_path="$1" mount_id="$2" loader output setpriv_path sbverify_path
+  local mount_path="$1" loader
   loader="${mount_path}${WINDOWS_LOADER_POSIX}"
-  if [[ ! -e "$loader" && ! -L "$loader" ]]; then
-    return 2
-  fi
-  setpriv_path=$(windows_preflight_setpriv_path) || return 1
-  sbverify_path=$(windows_preflight_sbverify_path) || return 1
-  if [[ ! -x "$sbverify_path" ]]; then
-    printf 'unknown-missing-sbverify\t\n'
-    return 0
-  fi
-  if [[ ! -x "$setpriv_path" ]]; then
-    printf 'unknown-missing-setpriv\t\n'
-    return 0
-  fi
-  if ! /usr/bin/id -u nobody >/dev/null 2>&1 \
-    || ! /usr/bin/id -g nobody >/dev/null 2>&1; then
-    printf 'unknown-missing-nobody\t\n'
-    return 0
-  fi
-  windows_copy_loader_for_inspection "$mount_path" "$mount_id" || return 1
-  if ! output=$(windows_preflight_run_sbverify "$_windows_inspection_file"); then
-    printf 'unknown-sbverify\t\n'
-    return 0
-  fi
-  if ! windows_preflight_parse_signers "$output"; then
-    printf 'unknown-sbverify-output\t\n'
-  fi
-}
-
-windows_preflight_record_inspection() {
-  local device="$1" inspection="$2" classification issuers
-  [[ "$inspection" == *$'\t'* && "$inspection" != *$'\n'* ]] || return 1
-  classification=${inspection%%$'\t'*}
-  issuers=${inspection#*$'\t'}
-  case "$classification" in
-    known-2011|known-2023|known-both)
-      _windows_preflight_loader_seen=true
-      ;;
-    unknown-missing-sbverify)
-      _windows_preflight_loader_seen=true
-      windows_preflight_mark_unknown loader \
-        "Signer inspection requires sbsigntools (/usr/bin/sbverify)"
-      ;;
-    unknown-missing-setpriv)
-      _windows_preflight_loader_seen=true
-      windows_preflight_mark_unknown loader \
-        "Signer inspection requires util-linux (/usr/bin/setpriv)"
-      ;;
-    unknown-missing-nobody)
-      _windows_preflight_loader_seen=true
-      windows_preflight_mark_unknown loader \
-        "Signer inspection requires the system nobody identity"
-      ;;
-    unknown-sbverify|unknown-sbverify-output)
-      _windows_preflight_loader_seen=true
-      windows_preflight_mark_unknown loader \
-        "Boot manager signer metadata could not be inspected on ${device}"
-      ;;
-    unknown-issuer)
-      _windows_preflight_loader_seen=true
-      windows_preflight_mark_unknown loader \
-        "Boot manager ${device} has unrecognized signer issuer metadata; maintainer review is required"
-      ;;
-    *) return 1 ;;
-  esac
-  _windows_preflight_signer_records+=(
-    "${device}"$'\t'"${classification}"$'\t'"${issuers}"
-  )
+  [[ -e "$loader" || -L "$loader" ]] || return 2
+  windows_verify_loader_file "$mount_path"
 }
 
 windows_preflight_scan_esps() {
   local prior_limine="$_OMASECBOOT_LIMINE_LOCK_OWNED"
   local prior_repair="$_OMASECBOOT_REPAIR_LOCK_OWNED"
   local acquired_limine=false acquired_repair=false candidate device maj_min
-  local mount_path inspection rc=0 scan_rc=0
+  local mount_path rc=0 scan_rc=0
   (( ${#_windows_preflight_esp_candidates[@]} > 0 )) || return 0
 
   if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false ]]; then
@@ -1577,8 +1075,7 @@ windows_preflight_scan_esps() {
       continue
     fi
     rc=0
-    inspection=$(windows_with_target_mount \
-      windows_preflight_inspect_loader "$mount_path") || rc=$?
+    windows_with_target_mount windows_preflight_inspect_loader "$mount_path" || rc=$?
     if ! windows_block_device_matches "$device" "$maj_min"; then
       windows_preflight_mark_unknown loader \
         "ESP ${device} changed identity during loader inspection"
@@ -1586,10 +1083,8 @@ windows_preflight_scan_esps() {
     fi
     case "$rc" in
       0)
-        if ! windows_preflight_record_inspection "$device" "$inspection"; then
-          windows_preflight_mark_unknown loader \
-            "ESP ${device} returned malformed signer inspection data"
-        fi
+        windows_preflight_mark_seen loader
+        _windows_preflight_loader_devices+=("$device")
         ;;
       2) ;;
       129|130|143)
@@ -1624,13 +1119,11 @@ windows_collect_encryption_preflight() {
     windows_preflight_mark_unknown loader \
       "ESP inventory processing failed safely"
   fi
-  windows_preflight_scan_esps || rc=$?
-  [[ $rc -eq 0 ]] || return "$rc"
-  windows_preflight_finalize_states
+  windows_preflight_scan_esps
 }
 
 windows_preflight_print_summary() {
-  local device record classification issuers
+  local device
   printf '  Detection summary:\n'
   printf '    Firmware option: %s\n' "$_windows_preflight_firmware_state"
   printf '    BitLocker signature: %s\n' "$_windows_preflight_bitlocker_state"
@@ -1638,13 +1131,10 @@ windows_preflight_print_summary() {
   for device in "${_windows_preflight_bitlocker_devices[@]}"; do
     printf '    BitLocker-format volume: %s\n' "$device"
   done
-  for record in "${_windows_preflight_signer_records[@]}"; do
-    IFS=$'\t' read -r device classification issuers <<< "$record"
-    printf '    Boot manager: %s (%s)\n' "$device" "$classification"
-    [[ -z "$issuers" ]] || printf '      Embedded issuer metadata: %s\n' "$issuers"
+  for device in "${_windows_preflight_loader_devices[@]}"; do
+    printf '    Boot manager: %s\n' "$device"
   done
   echo
-  warn "Boot-manager signer metadata is advisory and does not evaluate firmware db, dbx, revocation, or bootability"
 }
 
 windows_preflight_print_home_guidance() {
@@ -1936,90 +1426,50 @@ windows_validate_efivarfs_mount() {
 }
 
 read_windows_bootnext_state() {
-  local directory path basename directory_identity matches owner uid mode size device inode
-  local extra mode_value fd bytes_text
-  local post_uid post_mode post_size post_device post_inode post_extra number
+  local directory path uid mode size bytes_text number present=false
   local -a bytes=()
   windows_validate_efivarfs_mount || return 1
   directory=$(windows_bootnext_efivars_dir) || return 1
   path=$(windows_bootnext_variable_path) || return 1
-  basename=${path##*/}
   [[ "$path" == "${directory}/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c" ]] \
     || return 1
   validate_control_directory "$directory" || {
     windows_reject "EFI variable filesystem permissions are unsafe"
     return 1
   }
-  directory_identity=$(stat -Lc '%d:%i' "$directory" 2>/dev/null) || return 1
-  matches=$(find -P "$directory" -mindepth 1 -maxdepth 1 -name "$basename" \
-    -printf '%p\n' 2>/dev/null) || {
-      windows_reject "Cannot scan the EFI variable filesystem"
-      return 1
-    }
-  windows_validate_efivarfs_mount || return 1
-  [[ $(stat -Lc '%d:%i' "$directory" 2>/dev/null) == "$directory_identity" ]] || {
+  [[ ! -e "$path" && ! -L "$path" ]] || present=true
+  windows_validate_efivarfs_mount || {
     windows_reject "EFI variable filesystem changed while it was scanned"
     return 1
   }
-  if [[ -z "$matches" ]]; then
+  if [[ "$present" == false ]]; then
     jq -cn '{boot_number:null,present:false}'
     return
   fi
-  [[ "$matches" == "$path" ]] || {
-    windows_reject "BootNext EFI variable lookup is ambiguous"
-    return 1
-  }
   [[ -f "$path" && ! -L "$path" ]] || {
     windows_reject "BootNext EFI variable is not a safe regular file"
     return 1
   }
-  owner=$(control_owner_uid) || return 1
-  read -r uid mode size device inode extra \
-    < <(stat -Lc '%u %a %s %d %i' "$path" 2>/dev/null) || {
-      windows_reject "Cannot inspect the BootNext EFI variable"
-      return 1
-    }
-  [[ -z "$extra" && "$uid" == "$owner" && "$mode" =~ ^[0-7]{3,4}$ \
-    && "$size" == 6 && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || {
+  read -r uid mode size < <(stat -Lc '%u %a %s' "$path" 2>/dev/null) || {
+    windows_reject "Cannot inspect the BootNext EFI variable"
+    return 1
+  }
+  if [[ "$uid" != "$(control_owner_uid)" || ! "$mode" =~ ^[0-7]{3,4}$ || "$size" != 6 ]] \
+    || (( (8#$mode & 0022) != 0 )); then
     windows_reject "BootNext EFI variable metadata is invalid"
     return 1
-  }
-  mode_value=$((8#$mode))
-  (( (mode_value & 0022) == 0 )) || {
-    windows_reject "BootNext EFI variable permissions are unsafe"
-    return 1
-  }
-  exec {fd}< "$path" || {
-    windows_reject "Cannot open the BootNext EFI variable"
-    return 1
-  }
-  if ! bytes_text=$(od -An -v -tu1 -N 6 "/proc/self/fd/${fd}" 2>/dev/null); then
-    exec {fd}<&-
+  fi
+  bytes_text=$(od -An -v -tu1 -N 6 "$path" 2>/dev/null) || {
     windows_reject "Cannot read the BootNext EFI variable"
     return 1
-  fi
-  read -r -a bytes <<< "$bytes_text"
-  read -r post_uid post_mode post_size post_device post_inode post_extra \
-    < <(stat -Lc '%u %a %s %d %i' "/proc/self/fd/${fd}" 2>/dev/null) || {
-      exec {fd}<&-
-      windows_reject "Cannot revalidate the BootNext EFI variable"
-      return 1
-    }
-  exec {fd}<&-
-  [[ -z "$post_extra" && "$post_uid" == "$uid" && "$post_mode" == "$mode" \
-    && "$post_size" == "$size" && "$post_device" == "$device" \
-    && "$post_inode" == "$inode" \
-    && $(stat -Lc '%d:%i' "$path" 2>/dev/null) == "${device}:${inode}" \
-    && ${#bytes[@]} -eq 6 ]] || {
-    windows_reject "BootNext EFI variable changed while it was read"
-    return 1
   }
-  (( bytes[0] == 7 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0 )) || {
+  read -r -a bytes <<< "$bytes_text"
+  if [[ ${#bytes[@]} -ne 6 ]] \
+    || (( bytes[0] != 7 || bytes[1] != 0 || bytes[2] != 0 || bytes[3] != 0 )); then
     windows_reject "BootNext EFI variable attributes are unsupported"
     return 1
-  }
-  number=$((bytes[4] + (bytes[5] << 8)))
-  printf -v number '%04X' "$number"
+  fi
+  printf -v number '%04X' "$((bytes[4] + (bytes[5] << 8)))"
   jq -cn --arg number "$number" '{boot_number:$number,present:true}'
 }
 
@@ -2765,7 +2215,7 @@ load_windows_bootnext_record() {
 }
 
 record_and_set_windows_bootnext() {
-  local prior executable_hash boot_id current_hash target_number command_rc observed
+  local prior executable_hash rc=0
   transaction_phase_start "record-bootnext" || return 1
   read_windows_target_state || return 1
   resolve_windows_target || {
@@ -2792,125 +2242,64 @@ record_and_set_windows_bootnext() {
 
   transaction_phase_start "set-bootnext" || return 1
   load_windows_bootnext_record || return 1
-  boot_id=$(boot_id_value) || return 1
-  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
-    windows_reject "The system boot changed before the BootNext write"
-    return 1
-  }
   validate_windows_efibootmgr_boundary || {
     windows_report_error
     return 1
   }
-  windows_bootnext_failpoint "before-target-revalidation" || {
-    close_windows_efibootmgr_boundary
-    return 1
-  }
-  windows_bootnext_exact_target_is_current "$_windows_bootnext_record_json" || {
-    close_windows_efibootmgr_boundary
+  write_windows_bootnext_bound || rc=$?
+  close_windows_efibootmgr_boundary
+  [[ $rc -eq 0 ]] || {
     windows_report_error
+    return "$rc"
+  }
+  transaction_phase_complete "set-bootnext"
+}
+
+# The open efibootmgr inode still matches the record and this is still the
+# boot the record was published in.
+windows_bootnext_record_matches_boundary() {
+  local record="$1" current_hash boot_id
+  current_hash=$(hash_bound_windows_efibootmgr) || return 1
+  boot_id=$(boot_id_value) || return 1
+  jq -e --arg hash "$current_hash" --arg boot_id "$boot_id" \
+    '.efibootmgr.executable_sha256 == $hash and .boot_id == $boot_id' \
+    <<< "$record" >/dev/null || {
+    windows_reject "The efibootmgr executable or the system boot changed before the BootNext write"
     return 1
   }
-  current_hash=$(hash_bound_windows_efibootmgr) || {
-    close_windows_efibootmgr_boundary
+}
+
+# Runs with the efibootmgr boundary open; the caller closes it. Every proof
+# is repeated immediately before the only write, and the write is accepted
+# only on exact direct readback.
+write_windows_bootnext_bound() {
+  local record="$_windows_bootnext_record_json" target_number prior observed
+  local command_rc=0
+  windows_bootnext_failpoint "before-target-revalidation" || return 1
+  windows_bootnext_exact_target_is_current "$record" || return 1
+  windows_bootnext_record_matches_boundary "$record" || return 1
+  prior=$(read_windows_bootnext_state) || return 1
+  jq -e --argjson prior "$prior" '.prior == $prior' <<< "$record" >/dev/null || {
+    windows_reject "BootNext changed after its prior value was recorded"
     return 1
   }
-  jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
-    <<< "$_windows_bootnext_record_json" >/dev/null || {
-      close_windows_efibootmgr_boundary
-      windows_reject "The efibootmgr executable changed before the BootNext write"
-      return 1
-    }
-  boot_id=$(boot_id_value) || {
-    close_windows_efibootmgr_boundary
-    return 1
-  }
-  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
-    close_windows_efibootmgr_boundary
-    windows_reject "The system boot changed before the BootNext write"
-    return 1
-  }
-  prior=$(read_windows_bootnext_state) || {
-    close_windows_efibootmgr_boundary
-    windows_report_error
-    return 1
-  }
-  jq -e --argjson prior "$prior" '.prior == $prior' \
-    <<< "$_windows_bootnext_record_json" >/dev/null || {
-      close_windows_efibootmgr_boundary
-      windows_reject "BootNext changed after its prior value was recorded"
-      return 1
-    }
   windows_bootnext_mutation_is_available || {
-    close_windows_efibootmgr_boundary
-    fail "Windows BootNext mutation is not available in this build"
+    windows_reject "Windows BootNext mutation is not available in this build"
     return 1
   }
-  target_number=$(jq -r '.target.boot_number' <<< "$_windows_bootnext_record_json") \
-    || {
-      close_windows_efibootmgr_boundary
-      return 1
-    }
-  command_rc=0
+  target_number=$(jq -r '.target.boot_number' <<< "$record") || return 1
   run_windows_efibootmgr -n "$target_number" || command_rc=$?
-  windows_bootnext_failpoint "after-bootnext-command" || {
-    close_windows_efibootmgr_boundary
-    return 1
-  }
-  observed=$(read_windows_bootnext_state) || {
-    close_windows_efibootmgr_boundary
-    windows_report_error
-    return 1
-  }
+  windows_bootnext_failpoint "after-bootnext-command" || return 1
+  observed=$(read_windows_bootnext_state) || return 1
   [[ $command_rc -eq 0 ]] || {
-    close_windows_efibootmgr_boundary
-    fail "efibootmgr failed while setting BootNext"
+    windows_reject "efibootmgr failed while setting BootNext"
     return "$command_rc"
   }
   jq -e --arg target "$target_number" \
     '.present == true and .boot_number == $target' <<< "$observed" >/dev/null || {
-      close_windows_efibootmgr_boundary
-      windows_reject "BootNext readback does not match the requested Windows target"
-      windows_report_error
-      return 1
-    }
-  windows_bootnext_exact_target_is_current "$_windows_bootnext_record_json" || {
-    close_windows_efibootmgr_boundary
-    windows_report_error
+    windows_reject "BootNext readback does not match the requested Windows target"
     return 1
   }
-  current_hash=$(hash_bound_windows_efibootmgr) || {
-    close_windows_efibootmgr_boundary
-    return 1
-  }
-  jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
-    <<< "$_windows_bootnext_record_json" >/dev/null || {
-      close_windows_efibootmgr_boundary
-      windows_reject "The efibootmgr executable changed after the BootNext write"
-      return 1
-    }
-  boot_id=$(boot_id_value) || {
-    close_windows_efibootmgr_boundary
-    return 1
-  }
-  [[ $(jq -r '.boot_id' <<< "$_windows_bootnext_record_json") == "$boot_id" ]] || {
-    close_windows_efibootmgr_boundary
-    windows_reject "The system boot changed after the BootNext write"
-    return 1
-  }
-  observed=$(read_windows_bootnext_state) || {
-    close_windows_efibootmgr_boundary
-    windows_report_error
-    return 1
-  }
-  jq -e --arg target "$target_number" \
-    '.present == true and .boot_number == $target' <<< "$observed" >/dev/null || {
-      close_windows_efibootmgr_boundary
-      windows_reject "BootNext changed during final target verification"
-      windows_report_error
-      return 1
-    }
-  close_windows_efibootmgr_boundary
-  transaction_phase_complete "set-bootnext"
 }
 
 run_dormant_windows_bootnext() {

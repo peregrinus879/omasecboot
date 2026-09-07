@@ -39,7 +39,7 @@ validate_activation_hook() {
   case "$key" in
     removal)
       expected="Exec = ${command} --quiet guard removal"
-      expected_hash=f2c7847bbcc8052717d7a42592a84a3b4ca1c5ab1254795d17d492012f8fa9fe
+      expected_hash=f04654910c43de6a1f5487ba87bac02bb84c0bcc19650db4ad542f81100eac52
       ;;
     transaction)
       expected="Exec = ${command} --quiet guard transaction"

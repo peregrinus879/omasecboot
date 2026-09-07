@@ -88,24 +88,9 @@ if [[ "$query" == mountpoint ]]; then
   calls=$((calls + 1))
   printf '%s\n' "$calls" > "$FINDMNT_CALL_COUNT"
   if [[ -e "$MOUNT_MARKER" ]]; then
-    if [[ "$columns" == 'TARGET,MAJ:MIN,FSTYPE,FSROOT' ]]; then
-      jq -cn --arg target "$target" --arg maj "$MOUNT_MARKER_MAJ_MIN" '{
-        filesystems: [{target: $target, "maj:min": $maj, fstype: "vfat", fsroot: "/"}]
-      }'
-      exit 0
-    fi
-    [[ -z "$columns" || "$columns" == 'TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS' ]] \
-      || exit 2
-    jq -cn --arg target "$target" --arg maj "$TEST_MAJ_MIN" \
-      --argjson id "$TEST_MOUNT_ID" '{
-      filesystems: [{
-        target: $target,
-        id: $id,
-        "maj:min": $maj,
-        fstype: "vfat",
-        fsroot: "/",
-        "vfs-options": "ro,nosuid,nodev,noexec,noatime"
-      }]
+    [[ -z "$columns" || "$columns" == 'TARGET,MAJ:MIN,FSTYPE,FSROOT' ]] || exit 2
+    jq -cn --arg target "$target" --arg maj "$MOUNT_MARKER_MAJ_MIN" '{
+      filesystems: [{target: $target, "maj:min": $maj, fstype: "vfat", fsroot: "/"}]
     }'
     exit 0
   fi
@@ -120,13 +105,12 @@ if [[ "$query" == mountpoint ]]; then
   if [[ "$columns" == TARGET ]]; then
     jq -c '{filesystems: [.filesystems[] | {target}]}' <<< "$result"
   else
-    [[ -z "$columns" || "$columns" == 'TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS' ]] \
-      || exit 2
+    [[ -z "$columns" || "$columns" == 'TARGET,MAJ:MIN,FSTYPE,FSROOT' ]] || exit 2
     printf '%s\n' "$result"
   fi
   exit 0
 fi
-[[ "$columns" == 'TARGET,ID,MAJ:MIN,FSTYPE,FSROOT,VFS-OPTIONS' ]] || exit 2
+[[ "$columns" == 'TARGET,MAJ:MIN,FSTYPE,FSROOT' ]] || exit 2
 cat "$FINDMNT_FIXTURE"
 EOF
 
@@ -284,18 +268,6 @@ make_odd_file_node() {
   printf '%s\n' "${bytes[*]}"
 }
 
-make_usb_wwid_node() {
-  local character_count="$1" index length low high result
-  length=$((10 + character_count * 2))
-  printf -v low '%02x' "$((length & 255))"
-  printf -v high '%02x' "$((length >> 8))"
-  result="03 10 ${low} ${high} 00 00 34 12 78 56"
-  for ((index=0; index < character_count; index++)); do
-    result+=' 41 00'
-  done
-  printf '%s\n' "$result"
-}
-
 HD_NODE='04 01 2a 00 01 00 00 00 00 08 00 00 00 00 00 00 00 00 10 00 00 00 00 00 33 22 11 00 55 44 77 66 88 99 aa bb cc dd ee ff 02 02'
 END_NODE='7f ff 04 00'
 END_INSTANCE_NODE='7f 01 04 00'
@@ -311,14 +283,6 @@ TOOLS_DP="${HD_NODE} / ${TOOLS_FILE_NODE} / ${END_NODE}"
 NVME_NODE='03 17 10 00 01 00 00 00 11 22 33 44 55 66 77 88'
 PCI_NODE='01 01 06 00 03 14'
 ACPI_NODE='02 01 0c 00 d0 41 03 0a 00 00 00 00'
-ACPI_EXTENDED_NODE='02 02 13 00 d0 41 03 0a 00 00 00 00 00 00 00 00 00 00 00'
-SAS_NODE='03 0a 2c 00 b4 dd 87 d4 8b 00 d9 11 af dc 00 10 83 ff ca 4d 00 00 00 00 01 02 03 04 05 06 07 08 00 00 00 00 00 00 00 00 00 00 00 00'
-UNKNOWN_VENDOR_NODE=${SAS_NODE/b4 dd/b5 dd}
-USB_WWID_NODE=$(make_usb_wwid_node 1)
-USB_WWID_MAX_NODE=$(make_usb_wwid_node 64)
-USB_WWID_EMPTY_NODE=$(make_usb_wwid_node 0)
-USB_WWID_LONG_NODE=$(make_usb_wwid_node 65)
-IPV4_NODE='03 0c 1b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00'
 
 begin_inventory() {
   printf 'BootOrder: %s\n' "$1" > "$EFI_FIXTURE"
@@ -494,59 +458,8 @@ find_windows_boot_entry >/dev/null \
   || fail_test "structurally valid local prefix was rejected"
 
 begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "${ACPI_EXTENDED_NODE} / ${SAS_NODE} / ${USB_WWID_NODE} / ${WINDOWS_DP}"
-find_windows_boot_entry >/dev/null \
-  || fail_test "valid variable-length local prefix was rejected"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "${USB_WWID_MAX_NODE} / ${WINDOWS_DP}"
-find_windows_boot_entry >/dev/null \
-  || fail_test "maximum-length USB WWID prefix was rejected"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' "01 01 04 00 / ${WINDOWS_DP}"
-expect_inventory_failure "short PCI prefix node was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "02 01 08 00 d0 41 03 0a / ${WINDOWS_DP}"
-expect_inventory_failure "short ACPI prefix node was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "02 02 10 00 d0 41 03 0a 00 00 00 00 00 00 00 00 / ${WINDOWS_DP}"
-expect_inventory_failure "unterminated Expanded ACPI prefix node was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "02 02 14 00 d0 41 03 0a 00 00 00 00 00 00 00 00 80 00 00 00 / ${WINDOWS_DP}"
-expect_inventory_failure "non-ASCII Expanded ACPI prefix node was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "03 17 0c 00 01 00 00 00 11 22 33 44 / ${WINDOWS_DP}"
-expect_inventory_failure "short NVMe prefix node was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' "${IPV4_NODE} / ${WINDOWS_DP}"
-expect_inventory_failure "network-prefixed Windows target was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "${UNKNOWN_VENDOR_NODE} / ${WINDOWS_DP}"
-expect_inventory_failure "unknown vendor-defined messaging prefix was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "${USB_WWID_EMPTY_NODE} / ${WINDOWS_DP}"
-expect_inventory_failure "empty USB WWID prefix was accepted"
-
-begin_inventory '0007'
-add_entry 0007 '*' 'Windows Boot Manager' \
-  "${USB_WWID_LONG_NODE} / ${WINDOWS_DP}"
-expect_inventory_failure "oversized USB WWID prefix was accepted"
+add_entry 0007 '*' 'Windows Boot Manager' "01 01 06 00 03 / ${WINDOWS_DP}"
+expect_inventory_failure "prefix node with a wrong declared length was accepted"
 
 begin_inventory '0007'
 add_entry 0007 '*' 'Windows Boot Manager' "${WINDOWS_DP/04 01 2a 00/04 01 29 00}"
@@ -743,7 +656,6 @@ atime_updates=false
 
 DD_NOATIME_MARKER="${TEST_DIR}/dd-noatime"
 DD_NOATIME_FAIL=false
-DD_REPLACE_LOADER=false
 dd() {
   local argument noatime=false
   for argument in "$@"; do
@@ -754,11 +666,7 @@ dd() {
   [[ "$noatime" == true ]] || return 97
   [[ "$DD_NOATIME_FAIL" != true ]] || return 98
   : > "$DD_NOATIME_MARKER"
-  command dd "$@" || return
-  if [[ "$DD_REPLACE_LOADER" == true ]]; then
-    cp "$LOADER_SOURCE" "${loader_path}.replacement"
-    mv -f "${loader_path}.replacement" "$loader_path"
-  fi
+  command dd "$@"
 }
 touch -a -d '@946684800' "$loader_path"
 loader_atime_before=$(stat -Lc '%X' "$loader_path")
@@ -779,44 +687,7 @@ if resolve_windows_target >/dev/null 2>&1; then
   fail_test "controlled writable-mount proof ignored a noatime flag failure"
 fi
 DD_NOATIME_FAIL=false
-DD_REPLACE_LOADER=true
-reset_findmnt_calls
-if resolve_windows_target >/dev/null 2>&1; then
-  fail_test "loader proof ignored a concurrent path replacement"
-fi
-DD_REPLACE_LOADER=false
-cp "$LOADER_SOURCE" "$loader_path"
 unset -f dd
-
-write_existing_mount 'rw,relatime'
-chmod 777 "$EXISTING_ESP"
-reset_findmnt_calls
-: > "$CALL_LOG"
-if resolve_windows_target >/dev/null 2>&1; then
-  fail_test "uncontrolled writable Windows ESP mount was accepted"
-fi
-[[ ! -s "$CALL_LOG" ]] \
-  || fail_test "uncontrolled writable-mount refusal invoked mount mutation"
-chmod 755 "$EXISTING_ESP"
-
-write_existing_mount
-chmod 777 "$EXISTING_ESP"
-reset_findmnt_calls
-: > "$CALL_LOG"
-resolve_windows_target || fail_test "unsafe reusable path did not fall back to an owned mount"
-/usr/bin/grep -Fq 'mount:-t vfat -o ro,nosuid,nodev,noexec,noatime,dmask=0077,fmask=0177 -- /dev/windows-esp' \
-  "$CALL_LOG" || fail_test "unsafe reusable path was read directly"
-chmod 755 "$EXISTING_ESP"
-
-write_existing_mount
-reset_findmnt_calls
-write_existing_mount 'rw,relatime' "$EXISTING_ESP" "$TEST_MAJ_MIN" \
-  "$FINDMNT_REPLACEMENT_FIXTURE"
-FINDMNT_REPLACE_AT=2
-export FINDMNT_REPLACE_AT
-if resolve_windows_target >/dev/null 2>&1; then
-  fail_test "Windows ESP mount access change after loader read was accepted"
-fi
 
 write_existing_mount
 reset_findmnt_calls
@@ -830,25 +701,12 @@ fi
 
 write_existing_mount
 reset_findmnt_calls
-windows_parse_firmware_inventory || fail_test "descriptor fixture inventory did not parse"
-windows_select_firmware_target || fail_test "descriptor fixture target was not selected"
-windows_map_target_esp || fail_test "descriptor fixture mapping failed"
-exec {descriptor_fd}< "${EXISTING_ESP}/EFI/Microsoft/Boot/bootmgfw.efi"
-descriptor_path="/proc/${BASHPID}/fd/${descriptor_fd}"
-windows_descriptor_mount_id "$descriptor_path" \
-  || fail_test "loader descriptor mount ID could not be read"
-[[ "$_windows_descriptor_mount_id" == "$TEST_MOUNT_ID" ]] \
-  || fail_test "loader descriptor returned the wrong kernel mount ID"
-if windows_loader_descriptor_mount_is_valid \
-  "$descriptor_path" "$((TEST_MOUNT_ID + 1))"; then
-  fail_test "loader descriptor accepted a different mount ID"
-fi
-exec {descriptor_fd}<&-
-
+windows_parse_firmware_inventory || fail_test "loader fixture inventory did not parse"
+windows_select_firmware_target || fail_test "loader fixture target was not selected"
+windows_map_target_esp || fail_test "loader fixture mapping failed"
 _windows_maj_min=9:9
-if windows_verify_loader_file \
-  "$EXISTING_ESP" "$TEST_MOUNT_ID" >/dev/null 2>&1; then
-  fail_test "loader descriptor from a different filesystem was accepted"
+if windows_verify_loader_file "$EXISTING_ESP" >/dev/null 2>&1; then
+  fail_test "loader from a different filesystem was accepted"
 fi
 
 printf 'ZZ' | dd of="${EXISTING_ESP}/EFI/Microsoft/Boot/bootmgfw.efi" \
@@ -859,25 +717,6 @@ if resolve_windows_target >/dev/null 2>&1; then
   fail_test "non-MZ Windows loader was accepted"
 fi
 cp "$LOADER_SOURCE" "${EXISTING_ESP}/EFI/Microsoft/Boot/bootmgfw.efi"
-
-write_existing_mount
-jq --arg second "${TEST_DIR}/same-device-subroot" \
-  --arg maj "$TEST_MAJ_MIN" '
-  .filesystems += [{
-    target: $second,
-    id: 601,
-    "maj:min": $maj,
-    fstype: "vfat",
-    fsroot: "/EFI/Fake",
-    "vfs-options": "ro"
-  }]' \
-  "$FINDMNT_FIXTURE" > "${TEST_DIR}/same-device-alias.json"
-mkdir -p "${TEST_DIR}/same-device-subroot"
-cp "${TEST_DIR}/same-device-alias.json" "$FINDMNT_FIXTURE"
-reset_findmnt_calls
-if resolve_windows_target >/dev/null 2>&1; then
-  fail_test "same-device subroot mount alias was accepted"
-fi
 
 write_existing_mount
 jq --arg second "${TEST_DIR}/second-esp" \
