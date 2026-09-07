@@ -87,16 +87,22 @@ if grep -Fq 'OMASECBOOT_IN_LIMINE_HOOK' "$limine_post_hook"; then
 fi
 [[ ! -e "${STAGE_DIR}/etc/pacman.d/hooks" ]] \
   || fail "install wrote hooks into the administrator hook directory"
+status_hooks=0
 while IFS= read -r status_hook; do
+  status_hooks=$((status_hooks + 1))
   [[ "$status_hook" == */zz-sbctl.hook || -f "${STAGE_DIR}${status_hook}" ]] \
     || fail "status expects a hook the package does not install: ${status_hook}"
 done < <(grep -o '"/\(usr/share/libalpm/hooks\|etc/boot/hooks\)/[^|"]*|' \
   "${ROOT_DIR}/lib/status.sh" | tr -d '"|')
+[[ $status_hooks -eq 6 ]] || fail "status hook list could not be read from lib/status.sh (${status_hooks})"
+shadow_hooks=0
 while IFS= read -r status_hook; do
+  shadow_hooks=$((shadow_hooks + 1))
   [[ -f "${hook_dir}/${status_hook}" ]] \
     || fail "status shadow check names a hook the package does not install: ${status_hook}"
 done < <(sed -n '/for hook_name in/,/; do/p' "${ROOT_DIR}/lib/status.sh" \
   | grep -o '[0-9a-z-]*omasecboot[0-9a-z-]*\.hook')
+[[ $shadow_hooks -eq 3 ]] || fail "status shadow list could not be read from lib/status.sh (${shadow_hooks})"
 
 [[ -x "${STAGE_DIR}${PREFIX}/bin/omasecboot" ]] \
   || fail "rendered hook target is not executable in the stage"

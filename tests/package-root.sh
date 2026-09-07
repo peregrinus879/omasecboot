@@ -19,14 +19,15 @@ fail_test() {
 [[ "${OMASECBOOT_DISPOSABLE_ROOT:-}" == 1 ]] \
   || fail_test "refusing to mutate a system that is not a declared disposable root"
 [[ $EUID -eq 0 ]] || fail_test "the privileged package check requires root"
-[[ -f /.dockerenv || -f /run/.containerenv || -n "${GITHUB_ACTIONS:-}" ]] \
-  || fail_test "refusing to run outside a container or CI job"
+[[ -f /.dockerenv || -f /run/.containerenv ]] \
+  || fail_test "refusing to run outside a container"
 [[ ! -e /var/lib/sbctl/keys ]] \
   || fail_test "refusing to run where sbctl keys already exist"
 
 pkgname=omasecboot
 pkgver=$(sed -n 's/^pkgver=//p' "${ROOT_DIR}/PKGBUILD")
 BUILD_DIR=$(mktemp -d /tmp/omasecboot-package-root.XXXXXX)
+trap 'rm -rf "$BUILD_DIR"' EXIT
 builder=omasecboot-build
 id "$builder" >/dev/null 2>&1 || useradd --system --create-home "$builder"
 chown -R "$builder" "$BUILD_DIR"
@@ -167,5 +168,4 @@ done
 [[ $(find "$state" /var/lib/sbctl -type f -exec sha256sum {} + | sort) == "$before" ]] \
   || fail_test "removal changed durable lifecycle, recovery, Windows, or key state"
 
-rm -rf "$BUILD_DIR"
 printf 'privileged package tests passed\n'

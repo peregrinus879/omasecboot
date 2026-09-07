@@ -339,8 +339,11 @@ stage_pacman -Udd "$upgrade" > "${BUILD_DIR}/upgrade.out" 2>&1 \
 assert_installed 2
 [[ $(durable_snapshot) == "$before" ]] || fail_test "upgrade changed durable state"
 
-# Failure injection: a failing AbortOnFail removal guard must leave the package,
-# its files, and durable state exactly as they were.
+# Failure injection: an AbortOnFail removal guard that cannot succeed must leave
+# the package, its files, and durable state exactly as they were. Under fakeroot
+# the hook child cannot chroot into the stage, so this proves that a failing
+# PreTransaction hook aborts the removal, not how its exit status propagates;
+# tests/package-root.sh covers the real execution.
 cat > "${override_hooks}/00-omasecboot-removal-guard.hook" <<'HOOK'
 [Trigger]
 Type = Package

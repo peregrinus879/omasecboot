@@ -11,8 +11,10 @@
 # ${OMASECBOOT_ACCEPTANCE_DIR:-$PWD/acceptance-records}. Without a command it
 # records a state checkpoint only, for rows that are firmware-menu steps.
 #
-# It never records serial numbers, DMI UUIDs, MAC addresses, recovery keys, or
-# the raw firmware backup payloads; it lists that directory by name and size.
+# It never records DMI serial numbers or UUIDs, MAC or NVMe device-path nodes,
+# recovery keys, or raw firmware backup payloads (that directory is listed by
+# name and size). It does record partition identifiers, boot IDs, and the
+# lifecycle records, which the review needs.
 set -uo pipefail
 
 usage() {
@@ -83,7 +85,7 @@ capture_state() {
   block "sbctl verify" sbctl verify
   block "omasecboot status" bash -c 'command -v omasecboot >/dev/null && omasecboot status || echo "omasecboot is not installed"'
   block "omasecboot version" bash -c 'command -v omasecboot >/dev/null && omasecboot version || echo "omasecboot is not installed"'
-  block "Boot entries (MAC nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([0-9a-fA-F]+,[0-9]+\)/MAC(redacted)/g"'
+  block "Boot entries (MAC and NVMe nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
   block "ESP mount" findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS /boot
   block "Installed hooks" bash -c 'ls -la /usr/share/libalpm/hooks/*omasecboot* /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/pre.d/*omasecboot* /etc/boot/hooks/post.d/*omasecboot* 2>&1; sha256sum /usr/share/libalpm/hooks/*omasecboot* /etc/boot/hooks/*/*omasecboot* 2>/dev/null'
   block "Stale source install" bash -c 'ls -la /usr/local/bin/omasecboot /usr/local/lib/omasecboot 2>&1'

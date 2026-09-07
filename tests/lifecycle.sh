@@ -23,6 +23,10 @@ source "${ROOT_DIR}/lib/lifecycle.sh"
 [[ $(windows_bootnext_variable_path) == \
   /sys/firmware/efi/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c ]] \
   || fail_test "lifecycle does not own the canonical BootNext variable path"
+[[ $(limine_lock_path) == /run/lock/boot-partition.lock ]] \
+  || fail_test "lifecycle does not use the boot-partition lock shared with the Limine tools"
+[[ $(snapshot_restore_lock_path) == /run/lock/limine-snapper-restore.lock ]] \
+  || fail_test "lifecycle does not watch the limine-snapper-restore marker pathname"
 
 state_dir_path() {
   printf '%s/state\n' "$TEST_DIR"
@@ -973,7 +977,7 @@ release_boot_repair_lock
   || fail_test "rejected root write changed the manifest"
 if declare -F run_lifecycle_recovery_attempt >/dev/null \
   || declare -F run_lifecycle_recovery_attempt_with_preflight >/dev/null; then
-  fail_test "T-6.1 exposed a generic stable-state recovery runner"
+  fail_test "a generic stable-state recovery runner must not exist"
 fi
 
 previous_attempt=null
