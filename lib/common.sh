@@ -326,6 +326,34 @@ durable_sync() {
   sync -f "$1"
 }
 
+# --- Pacman hook directories --------------------------------------------------
+
+# pacman always reads /usr/share/libalpm/hooks/ and then every configured
+# HookDir; a same-named hook in a later directory replaces the earlier one.
+pacman_system_hook_dir() {
+  printf '/usr/share/libalpm/hooks\n'
+}
+
+pacman_configured_hook_dirs() {
+  validate_control_file /usr/bin/pacman-conf || return 1
+  /usr/bin/pacman-conf HookDir
+}
+
+# Succeeds when a same-named file in a configured hook directory would shadow
+# the packaged hook at the given system path, or when the directories cannot
+# be determined. Callers treat success as "not proven unshadowed".
+pacman_hook_is_shadowed() {
+  local path="$1" name dirs dir
+  name=${path##*/}
+  dirs=$(pacman_configured_hook_dirs) || return 0
+  while IFS= read -r dir; do
+    dir=${dir%/}
+    [[ -n "$dir" && "$dir" != "$(pacman_system_hook_dir)" ]] || continue
+    [[ ! -e "${dir}/${name}" && ! -L "${dir}/${name}" ]] || return 0
+  done <<< "$dirs"
+  return 1
+}
+
 limine_version() {
   command -v limine >/dev/null 2>&1 || return 1
 

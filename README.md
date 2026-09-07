@@ -2,10 +2,10 @@
 
 **[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, tested artifact proof, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, recoverable mutations with immutable evidence and direct readback, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, guarded enrollment proof, and public mutation commands. Package delivery and uninstall remain later release gates.
+The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, tested artifact proof, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, recoverable mutations with immutable evidence and direct readback, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, guarded enrollment proof, and public mutation commands. The Arch package layout is in place; a tagged release, a published package, and the Omarchy integration are later release gates.
 
 > [!CAUTION]
-> **Development status, 2026-09-04:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, producer quiescing, transition guards, explicit adoption, bounded package/Limine/snapshot/restore, firmware, Windows BootNext, software, and unconfiguration recovery, immutable expected-EFI proof, validated Windows targeting and preflight, raw firmware backup, strict trust planning, guarded enrollment proof, public mutation commands, and active producer automation are implemented. Package delivery and uninstall remain release gates, and this source tree has no supported installation path. Do not install it over an existing Secure Boot setup or treat hermetic tests as real-machine firmware validation. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-09-07:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, producer quiescing, transition guards, explicit adoption, bounded package/Limine/snapshot/restore, firmware, Windows BootNext, software, and unconfiguration recovery, immutable expected-EFI proof, validated Windows targeting and preflight, raw firmware backup, strict trust planning, guarded enrollment proof, public mutation commands, and active producer automation are implemented. No tagged release or published package exists yet. The supported deployment will be the Arch package built from `PKGBUILD` at the release tag; source installation is refused, and package removal is guarded by pacman's PreTransaction hook. Do not install it over an existing Secure Boot setup or treat hermetic tests as real-machine firmware validation. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
 
 ## Why This Tool
 
@@ -93,7 +93,7 @@ OmaSecBoot does not mount or modify NTFS and does not diagnose Windows hibernati
 
 `OmaSecBoot` is the product name; `omasecboot` is the command, repository slug, and machine-facing namespace.
 
-There is no supported installation from the current branch. Do not run `make install`: the package layout, dependency contract, staged upgrade, and uninstall work have not landed.
+The supported deployment will be the Arch package built from `PKGBUILD` at the release tag. `make install` refuses a live root, and no tagged release or published package exists yet, so there is no supported end-user installation from this branch; `tests/package.sh` shows how the package is built from a working tree.
 
 For source review only:
 
@@ -117,7 +117,7 @@ The activated source implementation follows this guarded workflow; the supported
 
 ## Commands
 
-The current implementation exposes read-only status and Windows preflight plus guarded setup, adoption, enrollment, signing, cleanup, recovery, unconfiguration, and Windows handoff mutations. Package uninstall remains unavailable until packaging lands.
+The current implementation exposes read-only status and Windows preflight plus guarded setup, adoption, enrollment, signing, cleanup, recovery, unconfiguration, and Windows handoff mutations. Package removal runs through pacman and is allowed only from verified `disabled` or pristine lifecycle state.
 
 ### `setup`
 
@@ -311,9 +311,9 @@ Do not re-enable Secure Boot from a status result alone. Follow only the instruc
 
 ### Full rollback
 
-`sudo omasecboot unconfigure` is the verified software-management rollback. `make uninstall` remains unavailable until the package layout, staged removal, and package removal tests land. Do not remove installed files manually or treat package removal as unconfiguration.
+`sudo omasecboot unconfigure` is the verified software-management rollback. Package removal (`sudo pacman -R omasecboot`) is allowed only from verified `disabled` or pristine state, and `make uninstall` is refused. Do not remove installed files manually or treat package removal as unconfiguration.
 
-The `unconfigure` transaction requires Secure Boot off, restores only settings whose current values still match OmaSecBoot's recorded values, removes the managed Windows block, resets config enrollment, rebuilds and verifies stock boot state, and commits `disabled` last. The future packaged release allows package removal only from verified `disabled` or pristine state; it removes package trigger hooks and only the `omasecboot` package while preserving lifecycle, transaction, recovery, firmware-backup, Windows-opt-in, lock-path, and local-key state.
+The `unconfigure` transaction requires Secure Boot off, restores only settings whose current values still match OmaSecBoot's recorded values, removes the managed Windows block, resets config enrollment, rebuilds and verifies stock boot state, and commits `disabled` last. The package allows removal only from verified `disabled` or pristine state; it removes package trigger hooks and only the `omasecboot` package while preserving lifecycle, transaction, recovery, firmware-backup, Windows-opt-in, lock-path, and local-key state.
 
 Software unconfiguration, PK reset, recovery from raw pre-change variables, and firmware factory restoration are distinct procedures. A pre-change backup is not necessarily a factory-key set.
 

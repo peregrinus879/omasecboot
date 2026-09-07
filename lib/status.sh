@@ -226,21 +226,21 @@ show_status() {
 
   # Hook status
   echo
-  if [[ -f /etc/pacman.d/hooks/00-omasecboot-removal-guard.hook ]]; then
+  if [[ -f /usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook ]]; then
     pass "00-omasecboot-removal-guard.hook present (dependency removal guard)"
   else
     warn "00-omasecboot-removal-guard.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
-  if [[ -f /etc/pacman.d/hooks/00-omasecboot-transition-guard.hook ]]; then
+  if [[ -f /usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook ]]; then
     pass "00-omasecboot-transition-guard.hook present (transaction guard)"
   else
     warn "00-omasecboot-transition-guard.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
-  if [[ -f /etc/pacman.d/hooks/zz-omasecboot-cleanup.hook ]]; then
+  if [[ -f /usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook ]]; then
     pass "zz-omasecboot-cleanup.hook present (pre-sbctl lifecycle checkpoint)"
   else
     warn "zz-omasecboot-cleanup.hook missing; install the packaged OmaSecBoot release before activation"
@@ -254,11 +254,25 @@ show_status() {
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
-  if [[ -f /etc/pacman.d/hooks/zzz-omasecboot.hook ]]; then
+  if [[ -f /usr/share/libalpm/hooks/zzz-omasecboot.hook ]]; then
     pass "zzz-omasecboot.hook present (post-sbctl lifecycle checkpoint)"
   else
     warn "zzz-omasecboot.hook missing; install the packaged OmaSecBoot release before activation"
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
+  fi
+
+  local hook_name shadow_dir
+  for hook_name in 00-omasecboot-removal-guard.hook 00-omasecboot-transition-guard.hook \
+    zz-omasecboot-cleanup.hook zzz-omasecboot.hook; do
+    if pacman_hook_is_shadowed "$(pacman_system_hook_dir)/${hook_name}"; then
+      shadow_dir=$(pacman_configured_hook_dirs 2>/dev/null | tr '\n' ' ')
+      fail "${hook_name} is shadowed by a same-named hook in a configured HookDir (${shadow_dir% }); remove the stale copy"
+      all_ok=false
+    fi
+  done
+  if [[ -e /usr/local/bin/omasecboot || -e /usr/local/lib/omasecboot ]]; then
+    fail "Stale source install under /usr/local; remove it and its hooks before activation"
+    all_ok=false
   fi
 
   if [[ -x /etc/boot/hooks/pre.d/000-omasecboot-guard ]]; then

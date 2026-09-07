@@ -169,9 +169,11 @@ JUDGMENT: Package removal is allowed only after the guard verifies disabled or p
 
 JUDGMENT: The Omarchy Remove wizard drops only `omasecboot`. A separately installed or dependency-retained `sbctl` is not part of the removal contract.
 
+JUDGMENT: The package deploys its four pacman hooks to the system hook directory `/usr/share/libalpm/hooks/`, which pacman always reads and which Omarchy and sbctl already use, and its two Limine hooks under `/etc/boot/hooks/`. `/var/lib/omasecboot` and the stable repair lock are declared through tmpfiles rather than owned by the package, and there is no install scriptlet. `PKGBUILD` dependencies are resolver floors; exact `=version-release` pins would make pacman refuse every system update that rebuilds one of those packages, for every user regardless of lifecycle state. Exact enforcement stays at runtime.
+
 ## 9. Omarchy Integration Contract
 
-JUDGMENT: The setup wrapper performs UEFI, Limine, Apple firmware, stale `/usr/local`, candidate availability, repository provenance, dependency, and candidate-version checks before package mutation. It then installs only `omasecboot` and executes `/usr/bin/omasecboot setup`.
+JUDGMENT: The setup wrapper performs UEFI, Limine, Apple firmware, stale source-install (`/usr/local/bin/omasecboot`, `/usr/local/lib/omasecboot/`, same-named hooks in `/etc/pacman.d/hooks/`, and an unowned `/etc/boot/hooks/post.d/zzz-omasecboot-sign`), candidate availability, repository provenance, dependency, and candidate-version checks before package mutation. It then installs only `omasecboot` and executes `/usr/bin/omasecboot setup`.
 
 JUDGMENT: Use the existing Apple `bios_vendor` guard pattern and refuse Intel Mac firmware, whose documented Omarchy path requires Apple's Secure Boot disabled.
 
@@ -215,7 +217,7 @@ JUDGMENT: Borrowing another distribution's dual-signed shim is technically viabl
 11. **T-6.6 `feat: add software unconfiguration`**: conflict-detecting three-way restore of owned settings, verification of both Limine targets, durable-state preservation, and final `disabled` commit.
 12. **T-6.7 `feat: add recoverable Secure Boot commands`**: setup, signing, enrollment, Windows mutation, cleanup, and unconfiguration through the recovery registry while the consolidated production gate remains closed.
 13. **T-6.8 `feat: activate recoverable Secure Boot lifecycle`**: production capability after interrupted-recovery, ownership, producer, firmware, Windows, and unconfiguration tests prove the complete lifecycle contract.
-14. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, package script, tmpfiles, hook deployment, and staged install, upgrade, and removal tests.
+14. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, tmpfiles, system hook deployment, and package build, inspection, and staged install, upgrade, and removal tests.
 15. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, and end-user boundaries.
 16. **T-9 `ci: verify shell and package builds`**: tests, syntax, ShellCheck, and package build workflow.
 17. **P-1 `build: add omasecboot`**: tagged release recipe and `source: local` metadata in omarchy-pkgs.
@@ -229,7 +231,7 @@ Touched code conforms to each repository's style as part of its functional unit.
 
 - Every T unit runs `make test`, Bash syntax checks, and ShellCheck over all shipped shell files.
 - Lock, lifecycle, firmware, Windows, and package tests include failure injection and assert state after every failed phase.
-- T-7 receives staged install, upgrade, and removal tests plus package inspection. P-1 receives a clean-chroot build against the release tag.
+- T-7 receives a working-tree package build, payload inspection, and staged install, upgrade, and removal tests; hook execution against the built package requires a privileged container run. P-1 receives a clean-chroot build against the release tag.
 - Real-machine mutation is not implied by hermetic tests. Privileged hardware checks must be run and recorded separately; real enrollment, reset, dbx restoration, and factory restoration remain explicitly unexercised until records establish otherwise.
 - Omarchy runs focused command, style, menu, guard, and aggregate tests, running-UI screenshots, and the fresh local ISO acceptance suite unless maintainers explicitly approve a deviation.
 - No pull request opens with validation placeholders or claims that exceed recorded results.

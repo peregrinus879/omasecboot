@@ -1,39 +1,50 @@
-PREFIX   ?= /usr/local
-BINDIR    = $(PREFIX)/bin
-LIBDIR    = $(PREFIX)/lib/omasecboot
-HOOKDIR   = /etc/pacman.d/hooks
-LIMINEPREHOOKDIR = /etc/boot/hooks/pre.d
+PREFIX     ?= /usr
+BINDIR      = $(PREFIX)/bin
+LIBDIR      = $(PREFIX)/lib/omasecboot
+LICENSEDIR  = $(PREFIX)/share/licenses/omasecboot
+DOCDIR      = $(PREFIX)/share/doc/omasecboot
+# pacman always reads the system hook directory (configured HookDir entries
+# take precedence for same-named hooks, so activation refuses shadowed hooks),
+# and systemd-tmpfiles reads only its own directories, so these do not follow PREFIX.
+HOOKDIR     = /usr/share/libalpm/hooks
+TMPFILESDIR = /usr/lib/tmpfiles.d
+LIMINEPREHOOKDIR  = /etc/boot/hooks/pre.d
 LIMINEPOSTHOOKDIR = /etc/boot/hooks/post.d
-STATEDIR  = /var/lib/omasecboot
+PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
+               00-omasecboot-transition-guard.hook \
+               zz-omasecboot-cleanup.hook \
+               zzz-omasecboot.hook
 
 .PHONY: install uninstall test
 
+# Installation is package staging only: DESTDIR must be an absolute path that
+# does not resolve to the live root. The Arch package built from PKGBUILD is the
+# supported deployment; durable state under /var/lib/omasecboot is declared
+# through tmpfiles and is never package content.
 install:
 	@case "$(DESTDIR)" in /*) test "$$(realpath -m -- "$(DESTDIR)")" != / ;; *) false ;; esac || { echo "Refusing live source install; use a package build with an absolute non-root DESTDIR" >&2; exit 1; }
 	install -Dm644 -t "$(DESTDIR)$(LIBDIR)/" lib/*.sh
-	install -d -m 755 "$(DESTDIR)$(STATEDIR)"
 	install -Dm755 bin/omasecboot "$(DESTDIR)$(BINDIR)/omasecboot"
 	install -d "$(DESTDIR)$(HOOKDIR)"
-	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/00-omasecboot-removal-guard.hook > "$(DESTDIR)$(HOOKDIR)/00-omasecboot-removal-guard.hook"
-	chmod 644 "$(DESTDIR)$(HOOKDIR)/00-omasecboot-removal-guard.hook"
-	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/00-omasecboot-transition-guard.hook > "$(DESTDIR)$(HOOKDIR)/00-omasecboot-transition-guard.hook"
-	chmod 644 "$(DESTDIR)$(HOOKDIR)/00-omasecboot-transition-guard.hook"
-	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/zz-omasecboot-cleanup.hook > "$(DESTDIR)$(HOOKDIR)/zz-omasecboot-cleanup.hook"
-	chmod 644 "$(DESTDIR)$(HOOKDIR)/zz-omasecboot-cleanup.hook"
-	sed 's|@BINDIR@|$(BINDIR)|g' pacman-hooks/zzz-omasecboot.hook > "$(DESTDIR)$(HOOKDIR)/zzz-omasecboot.hook"
-	chmod 644 "$(DESTDIR)$(HOOKDIR)/zzz-omasecboot.hook"
+	@for hook in $(PACMAN_HOOKS); do \
+	  sed 's|@BINDIR@|$(BINDIR)|g' "pacman-hooks/$$hook" > "$(DESTDIR)$(HOOKDIR)/$$hook" || exit 1; \
+	  chmod 644 "$(DESTDIR)$(HOOKDIR)/$$hook" || exit 1; \
+	done
 	install -d "$(DESTDIR)$(LIMINEPREHOOKDIR)"
 	sed 's|@BINDIR@|$(BINDIR)|g' limine-hooks/000-omasecboot-guard > "$(DESTDIR)$(LIMINEPREHOOKDIR)/000-omasecboot-guard"
 	chmod 755 "$(DESTDIR)$(LIMINEPREHOOKDIR)/000-omasecboot-guard"
 	install -d "$(DESTDIR)$(LIMINEPOSTHOOKDIR)"
 	sed 's|@BINDIR@|$(BINDIR)|g' limine-hooks/zzz-omasecboot-sign > "$(DESTDIR)$(LIMINEPOSTHOOKDIR)/zzz-omasecboot-sign"
 	chmod 755 "$(DESTDIR)$(LIMINEPOSTHOOKDIR)/zzz-omasecboot-sign"
-	@echo
-	@echo "Installed omasecboot to $(BINDIR)"
-	@echo "Run: sudo omasecboot help"
+	install -Dm644 omasecboot.tmpfiles "$(DESTDIR)$(TMPFILESDIR)/omasecboot.conf"
+	install -Dm644 LICENSE "$(DESTDIR)$(LICENSEDIR)/LICENSE"
+	install -Dm644 README.md "$(DESTDIR)$(DOCDIR)/README.md"
 
+# Package removal through pacman is the supported removal path. Its
+# PreTransaction guard allows removal only from verified disabled or pristine
+# lifecycle state and preserves durable state, local sbctl keys, and the lock.
 uninstall:
-	@echo "Refusing uninstall until concurrency-safe package removal is available" >&2
+	@echo "Refusing source uninstall; remove the omasecboot package with pacman" >&2
 	@false
 
 test:
@@ -49,6 +60,7 @@ test:
 	bash tests/guards.sh
 	bash tests/dispatcher.sh
 	bash tests/install.sh
+	bash tests/package.sh
 	bash tests/windows.sh
 	bash tests/windows-preflight.sh
 	bash tests/windows-entry.sh

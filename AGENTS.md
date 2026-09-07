@@ -17,14 +17,17 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `bin/omasecboot` - Entry point and command dispatcher
 - `lib/*.sh` - Modular function libraries (common, lifecycle, producers, checks, discover, sign, enroll, windows, status)
 - `lib/producers.sh` - Producer admission, durable records, fixed recovery registry, and expected-EFI obligations
+- `PKGBUILD` - Arch package recipe: `any` architecture, resolver-floor dependencies, `make DESTDIR=... install` payload; the omarchy-pkgs release recipe pins the tagged archive hash
+- `omasecboot.tmpfiles` - tmpfiles declaration for the durable state directory and stable repair lock, installed as `/usr/lib/tmpfiles.d/omasecboot.conf`
 - `pacman-hooks/00-omasecboot-removal-guard.hook` - PreTransaction guard for recovery-dependency removal
 - `pacman-hooks/00-omasecboot-transition-guard.hook` - PreTransaction guard for boot paths and producer packages
 - `pacman-hooks/zz-omasecboot-cleanup.hook` - Pre-sbctl lifecycle checkpoint, ordered before `zz-sbctl.hook`
-- `pacman-hooks/zzz-omasecboot.hook` - Post-sbctl lifecycle checkpoint for boot paths and producer packages
+- `pacman-hooks/zzz-omasecboot.hook` - Post-sbctl lifecycle checkpoint for boot paths and producer packages (all four pacman hooks deploy to `/usr/share/libalpm/hooks/`)
 - `limine-hooks/000-omasecboot-guard` - Limine pre-hook for lifecycle and FD 200 ownership validation
 - `limine-hooks/zzz-omasecboot-sign` - Limine post-hook for owned suppression or serialized recovery recording
 - `tests/lifecycle.sh`, `tests/producers.sh`, `tests/producer-repair.sh`, `tests/producer-ownership.sh`, `tests/recovery-publication.sh`, `tests/software-recovery.sh`, `tests/unconfigure.sh`, `tests/unconfigure-tools.sh`, `tests/artifacts.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, producer-recovery, integrated producer repair, ownership-lineage, recovery-publication, software-recovery, unconfiguration, artifact-proof, and failure-injection checks
-- `tests/install.sh` - Staged install, idempotent reinstall, hook-target, and blocked-uninstall contract checks
+- `tests/install.sh` - Staged install, idempotent reinstall, hook-target, tmpfiles, and refused source uninstall contract checks
+- `tests/package.sh` - Package build, payload and mode inspection, dependency floors against runtime pins, packaged-hook activation acceptance, and staged pacman install, reinstall, upgrade, and removal preservation checks
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-preflight.sh` - Hermetic Windows signal, encryption guidance, advisory signer, privilege-drop, and no-NTFS checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
@@ -32,7 +35,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `omarchy/omarchy-menu.jsonc` - Quattro user-menu fragment for graceful reboot-to-Windows handoff
 - `docs/implementation-contract.md` - Remaining implementation and release-gate contract
 - `docs/maintenance.md` - On-demand sources, compatibility findings, removal triggers, and deferred work
-- `Makefile` - Install/uninstall targets
+- `Makefile` - Package staging install (refuses a live root and any source uninstall) and the test aggregate
 
 ## Architecture
 
@@ -49,15 +52,15 @@ Single dispatcher sources lib modules. Each lib file owns one concern:
 
 ## Dependencies
 
-sbctl, jq, OpenSSL, gum (interactive only), efibootmgr, util-linux, and sbsigntools. Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`).
+sbctl, jq, OpenSSL, gum (interactive only), efibootmgr, util-linux, sbsigntools, diffutils, and the base toolchain (bash, coreutils, findutils, gawk, grep, pacman, systemd). Omarchy provides the rest (`limine-update`, `limine-enroll-config`, `limine-reset-enroll`, `limine-snapper-sync`). `PKGBUILD` declares resolver floors only; lifecycle activation and producer admission enforce the exact audited versions at runtime.
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. Packaging and uninstall remain unavailable until T-7 and later release units land. The remaining contracts are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. The Arch package layout (T-7) is implemented: `PKGBUILD` builds the only supported deployment, and pacman removal is guarded by the PreTransaction removal guard. No tagged release, published package, CI, or Omarchy integration exists yet. The remaining contracts (T-8, T-9, the `v1.0.0` tag, P-1, and O-1 through O-3) are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults or permit public adoption with an `unknown` original.
-- Before setup or adoption may publish `active`, prove the exact supported recovery package versions, the pinned unconfiguration tool inodes, and all six current OmaSecBoot hooks by canonical content and executing installed command target. A checkout, stale package set, or incomplete deployment must fail before transition publication.
+- Before setup or adoption may publish `active`, prove the exact supported recovery package versions, the pinned unconfiguration tool inodes, and all six current OmaSecBoot hooks by canonical content and executing installed command target. pacman gives configured HookDir entries precedence over the system hook directory for same-named hooks, so a same-named file in any configured HookDir, or an unreadable HookDir list, fails activation. A checkout, stale package set, stale source install, or incomplete deployment must fail before transition publication.
 - Top-level OmaSecBoot hook suppression is valid only for an owned transition whose token, boot ID, owner PID and process start time, ancestry, and root-owned manifest agree. An environment boolean is not ownership proof.
 - `setup` and `sign` maintain signed EFI binaries plus enrolled `limine.conf` checksums with `ENABLE_VERIFICATION=no` and `ENABLE_ENROLL_LIMINE_CONFIG=yes`. Keep `ensure_limine_secure_boot_settings` in the sign path and keep its Quattro write target at `/etc/default/limine`, outside package-owned drop-ins.
 - Do not reintroduce Limine `path: ...#hash` management while Omarchy boots UKIs through `protocol: efi`. Warn on incompatible non-EFI paths instead of mutating them automatically.
@@ -91,16 +94,17 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 - Windows Home follows Microsoft's documented Device Encryption decryption workflow; do not offer undocumented Home suspension. Pro, Enterprise, and Education may use documented BitLocker suspension. Managed devices require administrator approval.
 - The Windows preflight evaluates firmware options, direct BitLocker signatures, and Microsoft loaders on internal GPT ESPs independently as `present`, `absent`, or `unknown`. A complete negative is a bounded observation, not firmware clearance. Every positive or unknown run requires an encryption-state check and recovery-key preparation acknowledgment. Any technical unknown prints preparation guidance, returns nonzero, and has no override that a firmware-mutating command may consume.
 - External ESPs are not mounted or PE-parsed. Internal boot managers are copied under the boot and repair locks, then inspected through inherited FD 3 by `sbverify --list` after `setpriv` drops to `nobody`, clears groups and capabilities, resets the environment, and sets `no_new_privs`. Signer output is untrusted input and recognized issuer metadata never relaxes the preparation checklist.
-- Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof. Keep util-linux and sbsigntools in the T-7 package dependencies; recheck current Microsoft sources before recognizing a new issuer.
+- Windows boot-manager signature inspection is advisory unless a complete db and dbx verifier is implemented and tested. Stock `sbverify --cert` is not firmware-bootability proof. Keep util-linux and sbsigntools in the package dependencies; recheck current Microsoft sources before recognizing a new issuer.
 - Before any Setup Mode instruction, back up raw PK, KEK, db, and dbx data, attributes, hashes, absence records, raw SetupMode/AuditMode/DeployedMode/SecureBoot state, and DMI product UUID. The conforming single OEM PK may be replaced only as an explicitly confirmed exception. Every current supported KEK/db entry must remain in the exact planned `-m -f` set; unknown or unsupported trust entries block v1. Never preserve by subject name or repair with `--append`.
 - V1 has no dbx writer and supports only a confirmed PK-only firmware operation with present zero AuditMode and DeployedMode values. Missing mode variables, clear-all-only firmware, or changed KEK/db/dbx state blocks before enrollment. Root db, KEK, and PK writes remain guarded by the firmware-enrollment predicate; check it at entry, before artifact mutation, and before every firmware write. The internal firmware-recovery predicate authorizes only validated continuation attempts and does not independently authorize a fresh root enrollment.
 - Bind each enrollment transaction to the firmware-backup and confirmed-plan hashes before artifact mutation. Record every firmware-write attempt before invoking the pinned sbctl executable and record its command result plus direct readback. Before the first possible firmware write, durably disable restoration of pre-repair boot artifacts; preserve the proved boot-artifact set across later failures. Firmware recovery may retain `restore` only while the cumulative ledger is empty and direct observation remains F0; otherwise it preserves files.
 - Dedicated unconfigure recovery derives immutable settings, tracking, Windows, UKI-obligation, stock-source, and package-tool evidence from the preserved root intent. Revalidate the exact package version, path, device/inode, and hash immediately before executing each validated open Limine tool inode. Every phase is idempotent, and only a final direct proof may publish `disabled`.
 - Keep software `unconfigure`, PK reset, raw-key recovery, and firmware factory restoration distinct. Package removal is permitted from verified `disabled` or pristine state, preserves lifecycle, transactions, firmware backups, durable Windows opt-in, local sbctl keys, and the stable lock pathname, and removes only `omasecboot`.
+- The package owns `/usr/bin/omasecboot`, `/usr/lib/omasecboot/`, the four pacman hooks in `/usr/share/libalpm/hooks/`, the two Limine hooks under `/etc/boot/hooks/`, the tmpfiles declaration, license, and README. `/var/lib/omasecboot` is declared through tmpfiles and is never package content. There is no install scriptlet. `PKGBUILD` dependencies are resolver floors; do not convert them to exact `=version-release` pins without resolving the active-lifecycle update path recorded in `docs/maintenance.md`.
 
 ## Post-Change Verification
 
-- Run `make test` after code, hook, install, or menu changes.
+- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate.
 - Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck` over the same shell files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 

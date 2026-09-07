@@ -1,0 +1,5 @@
+# OmaSecBoot durable lifecycle state and the stable repair lock.
+# The package does not own this directory, so package removal never touches
+# lifecycle records, transaction manifests, firmware backups, or Windows opt-in.
+d /var/lib/omasecboot 0755 root root -
+f /var/lib/omasecboot/repair.lock 0644 root root -

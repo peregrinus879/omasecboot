@@ -4,7 +4,8 @@ set -euo pipefail
 
 # OmaSecBoot: lifecycle boundary for Secure Boot state and boot mutation hooks.
 
-# Resolve lib directory (handles symlinks from /usr/local/bin -> /usr/local/lib)
+# Resolve the library directory relative to the installed command
+# (/usr/bin/omasecboot -> /usr/lib/omasecboot)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
 # Fallback for development (running from repo checkout)
@@ -21,10 +22,10 @@ current_omasecboot_executable_path() {
 
 activation_hook_path() {
   case "$1" in
-    removal) printf '/etc/pacman.d/hooks/00-omasecboot-removal-guard.hook\n' ;;
-    transaction) printf '/etc/pacman.d/hooks/00-omasecboot-transition-guard.hook\n' ;;
-    package-cleanup) printf '/etc/pacman.d/hooks/zz-omasecboot-cleanup.hook\n' ;;
-    package-sign) printf '/etc/pacman.d/hooks/zzz-omasecboot.hook\n' ;;
+    removal) printf '/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook\n' ;;
+    transaction) printf '/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook\n' ;;
+    package-cleanup) printf '/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook\n' ;;
+    package-sign) printf '/usr/share/libalpm/hooks/zzz-omasecboot.hook\n' ;;
     limine-pre) printf '/etc/boot/hooks/pre.d/000-omasecboot-guard\n' ;;
     limine-post) printf '/etc/boot/hooks/post.d/zzz-omasecboot-sign\n' ;;
     *) return 1 ;;
@@ -66,6 +67,9 @@ validate_activation_hook() {
   esac
   validate_control_file "$path" || return 1
   [[ "$executable" == false || -x "$path" ]] || return 1
+  if [[ "$executable" == false ]] && pacman_hook_is_shadowed "$path"; then
+    return 1
+  fi
   document=$(<"$path") || return 1
   [[ "$document" == *"$expected"* ]] || return 1
   template=${expected/"$command"/@BINDIR@\/omasecboot}
@@ -96,7 +100,7 @@ lifecycle_activation_environment_is_ready() {
   }
   for key in removal transaction package-cleanup package-sign limine-pre limine-post; do
     validate_activation_hook "$key" "$command" || {
-      fail "Lifecycle activation requires the current installed ${key} hook"
+      fail "Lifecycle activation requires the current installed, unshadowed ${key} hook"
       return 1
     }
   done

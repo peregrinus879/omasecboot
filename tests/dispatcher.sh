@@ -108,6 +108,9 @@ ACTIVATION_PACKAGES_SUPPORTED=true
 ACTIVATION_UNCONFIGURE_SUPPORTED=true
 current_omasecboot_executable_path() { printf '%s\n' "$activation_command"; }
 activation_hook_path() { printf '%s/%s\n' "$activation_hook_dir" "$1"; }
+activation_admin_hook_dir="${TEST_DIR}/admin-hooks"
+mkdir -p "$activation_admin_hook_dir"
+pacman_configured_hook_dirs() { printf '%s/\n' "$activation_admin_hook_dir"; }
 producer_package_version() {
   [[ "$ACTIVATION_PACKAGES_SUPPORTED" == true ]] || return 1
   case "$1" in
@@ -173,6 +176,24 @@ if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "semantically altered activation hook was accepted"
 fi
 write_activation_hook transaction
+: > "${activation_admin_hook_dir}/package-sign"
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "a same-named hook in a configured HookDir did not block activation"
+fi
+rm -f "${activation_admin_hook_dir}/package-sign"
+ln -s /nonexistent "${activation_admin_hook_dir}/transaction"
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "a dangling same-named symlink in a configured HookDir did not block activation"
+fi
+rm -f "${activation_admin_hook_dir}/transaction"
+real_pacman_configured_hook_dirs=$(declare -f pacman_configured_hook_dirs)
+pacman_configured_hook_dirs() { return 1; }
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "unknown hook directories were accepted for activation"
+fi
+eval "$real_pacman_configured_hook_dirs"
+lifecycle_activation_environment_is_ready \
+  || fail_test "unshadowed activation environment was rejected after shadow checks"
 ACTIVATION_PACKAGES_SUPPORTED=false
 if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "unsupported activation packages were accepted"
