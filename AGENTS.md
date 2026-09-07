@@ -107,7 +107,7 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 
 ## Post-Change Verification
 
-- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push.
+- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
 - Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck` over the same shell files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 
