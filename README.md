@@ -1,36 +1,37 @@
 # OmaSecBoot
 
-**[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.**
+**[Omarchy](https://omarchy.com) Secure Boot: sbctl signing, Limine enrollment, pacman hooks, and Windows BootNext handoff.**
 
-The target release provisions signing keys, proves Limine and EFI artifacts, enrolls firmware trust, and adds a validated Windows BootNext handoff. The current implementation provides the durable lifecycle boundary, tested artifact proof, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, recoverable mutations with immutable evidence and direct readback, validated Windows firmware target identity, a read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state observation, guarded enrollment proof, and public mutation commands. The Arch package layout is in place; a tagged release, a published package, and the Omarchy integration are later release gates.
+OmaSecBoot provisions signing keys, signs every EFI artifact Omarchy boots, enrolls the current Limine configuration checksum into both Limine executables, backs up and replaces firmware trust under explicit confirmation, and adds a validated Windows firmware handoff for dual-boot systems. Every mutation runs as a durable transaction that can be resumed or rolled back, and every firmware instruction is printed only after a direct read-back proof.
 
 > [!CAUTION]
-> **Development status, 2026-09-07:** lifecycle manifests, file rollback and post-write preservation, stale-owner handling, validated hook ownership, shared-lock enforcement, transition guards, explicit adoption, bounded package/Limine/snapshot/restore, firmware, Windows BootNext, software, and unconfiguration recovery, immutable artifact proof, validated Windows targeting and preflight, raw firmware backup, strict trust planning, guarded enrollment proof, public mutation commands, and active producer automation are implemented. No tagged release or published package exists yet. The supported deployment will be the Arch package built from `PKGBUILD` at the release tag; source installation is refused, and package removal is guarded by pacman's PreTransaction hook. Do not install it over an existing Secure Boot setup or treat hermetic tests as real-machine firmware validation. The remaining release gates are defined in the [implementation contract](docs/implementation-contract.md).
+> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI is being added, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [implementation contract](docs/implementation-contract.md) and the [release checklist](docs/release-checklist.md).
 
 ## Why This Tool
 
-[Omarchy Quattro](https://github.com/omacom/omarchy/releases/tag/v4.0.0) supports installation into free space alongside Windows, and its [dual-boot guide](https://omarchy.org/manual/dual-boot-install/) documents `limine-scan` for adding Windows to Limine. The current scanner creates a generic `protocol: efi` chainload entry. OmaSecBoot builds on that native dual-boot foundation with a firmware BootNext path designed for Secure Boot and BitLocker-sensitive systems.
+[Omarchy Quattro](https://github.com/omacom/omarchy/releases/tag/v4.0.0) installs alongside Windows and documents `limine-scan` for adding Windows to Limine. Its boot stack is Limine with Unified Kernel Images (UKIs) and Snapper snapshot entries. That stack has Secure Boot gaps that no single upstream tool closes:
 
-Omarchy uses Limine with Unified Kernel Images (UKIs) and Snapper snapshots. That stack still has Secure Boot lifecycle gaps:
+- **sbctl** creates keys and signs EFI binaries, but does not enroll the Limine configuration checksum, discover snapshot UKIs, or manage a Windows firmware handoff.
+- **shim and MOK** target the GRUB and systemd-boot chains. Limine on Omarchy uses direct UEFI verification with user-owned keys.
+- **Windows dual boot** under Secure Boot interacts with BitLocker and Device Encryption, so the order of operations and the preparation steps matter.
 
-- **sbctl** manages keys and signs EFI binaries, but does not handle Limine config enrollment, snapshot UKI discovery, or durable Windows BootNext entries.
-- **shim/MOK** is designed for the GRUB and systemd-boot chains. Limine uses direct UEFI Secure Boot verification with custom keys enrolled via sbctl.
-- **systemd-boot** is not Omarchy's bootloader. This tool is specific to the Limine + UKI + Snapper stack that Omarchy ships.
-
-The target release is intended to fill those gaps with verified Limine enrollment, snapshot UKI discovery, a fail-closed Windows firmware handoff, durable recovery, and guarded package and Limine repair.
+OmaSecBoot fills those gaps for this exact stack and delegates everything else to the tools Omarchy already ships.
 
 ## Table of Contents
 
-- [Why This Tool](#why-this-tool)
-- [Development Status](#development-status)
-- [Prerequisites](#prerequisites)
+- [Requirements](#requirements)
 - [Installation](#installation)
-- [Planned Release Workflow](#planned-release-workflow)
+- [Lifecycle](#lifecycle)
+- [Setting Up Secure Boot](#setting-up-secure-boot)
+- [Adopting an Existing Configuration](#adopting-an-existing-configuration)
+- [Windows Dual Boot](#windows-dual-boot)
+- [Day-to-Day Operation](#day-to-day-operation)
 - [Commands](#commands)
-- [How It Works](#how-it-works)
+- [Recovery](#recovery)
+- [Undoing OmaSecBoot](#undoing-omasecboot)
 - [Troubleshooting](#troubleshooting)
-- [Recovery / Rollback](#recovery--rollback)
-- [Design Philosophy](#design-philosophy)
+- [Boundaries](#boundaries)
+- [How It Works](#how-it-works)
 - [License](#license)
 - [Credits](#credits)
 
@@ -39,304 +40,268 @@ The target release is intended to fill those gaps with verified Limine enrollmen
 
 | Term | Definition |
 |------|------------|
-| **ESP** | EFI System Partition. FAT32 partition used by UEFI firmware to find boot loaders. Mounted at `/boot` on Omarchy. |
-| **Setup Mode** | UEFI firmware state with no enrolled PK. OmaSecBoot v1 supports only a separately confirmed firmware-local PK deletion that leaves KEK, db, and dbx unchanged. |
-| **UKI** | Unified Kernel Image. Single EFI file containing kernel, initramfs, and command line. Built by `mkinitcpio` on Omarchy. |
-| **BootNext** | UEFI firmware variable that overrides the boot order for one boot only. Used by `efi_boot_entry` and `efibootmgr -n` to boot Windows directly from firmware. |
-| **Config enrollment** | Embedding `limine.conf`'s checksum into the Limine EFI binary so it can verify config integrity at boot. |
-| **Signing** | Attaching a cryptographic signature to an EFI binary so UEFI firmware can verify it has not been tampered with. |
+| **ESP** | EFI System Partition. The FAT partition firmware reads boot loaders from. Mounted at `/boot` on Omarchy. |
+| **PK, KEK, db, dbx** | The UEFI trust hierarchy: Platform Key, Key Exchange Keys, the allowed-signature database, and the forbidden-signature database. |
+| **Setup Mode** | The firmware state with no PK enrolled. OmaSecBoot supports only a PK-only delete that leaves KEK, db, and dbx unchanged. |
+| **UKI** | Unified Kernel Image. One EFI file containing kernel, initramfs, and command line. Built by `mkinitcpio` through limine-mkinitcpio-hook on Omarchy. |
+| **Config enrollment** | Embedding the checksum of `limine.conf` into the Limine EFI binary so Limine can verify its configuration at boot. |
+| **BootNext** | A UEFI variable that selects the boot entry for the next boot only. Used by Limine's `efi_boot_entry` protocol and by `efibootmgr -n` to hand off to Windows. |
+| **Lifecycle** | OmaSecBoot's durable record of whether it manages this system, separate from the firmware's Secure Boot state. |
 
 </details>
 
-## Development Status
+## Requirements
 
-The package-first release uses five durable lifecycle states: `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. Root-owned manifests and backups precede mutation; stable state is committed last. Consolidated recovery selects only producer, firmware, Windows BootNext, supported software rollback, or preserved unconfiguration from immutable incident evidence. Producer completion requires the schema-2 artifact proof. Firmware recovery follows hash-bound setup lineage, inherits one cumulative write ledger, and completes only after direct F0-F3 and EFI proof. Windows recovery restores only the recorded prior BootNext state or classifies later-boot absence as `consumed-unknown`. Unconfiguration restores owned state, executes intent-bound Limine tool inodes, and commits `disabled` only after direct proof. Public mutation commands route through that registry and return after completing recovery instead of starting a second mutation.
+- [Omarchy](https://omarchy.com) 4.x with the Limine bootloader, UKIs, and btrfs with Snapper.
+- UEFI firmware that can delete only the PK from its Secure Boot menu without clearing KEK, db, and dbx. Firmware that offers only "clear all keys" is not supported.
+- The ESP mounted at `/boot`.
+- For dual boot: Windows Boot Manager present in the firmware boot entries, and the Windows recovery keys backed up before any firmware change.
 
-The consolidated registry handles its supported producer, firmware, Windows, software, and unconfiguration boundaries. Firmware factory restoration and package removal remain separate unfinished paths. Until package delivery and operational documentation land, this README is a development reference rather than an installation guide.
+OmaSecBoot drives three boot-artifact producers whose hook protocol it audits per version, so lifecycle activation and the package guard pin them exactly; anything else fails closed until a new OmaSecBoot release audits it. efibootmgr only needs to be new enough.
 
-## Prerequisites
+| Package | Supported version | Source |
+|---|---|---|
+| `limine-mkinitcpio-hook` | 1.38.0-1 | Omarchy Package Repository |
+| `limine-snapper-sync` | 1.31.0-1 | Omarchy Package Repository |
+| `sbctl` | 0.18-2 | Arch `extra` |
+| `efibootmgr` | 18 or newer | Arch `core` |
 
-- **[Omarchy](https://omarchy.com)** with Limine bootloader, UKI, and btrfs/Snapper
-- [sbctl](https://github.com/Foxboron/sbctl) - Secure Boot key manager
-- [jq](https://jqlang.github.io/jq/) - JSON parser
-- [OpenSSL](https://www.openssl.org/) - strict X.509 DER and local key-pair validation
-- [gum](https://github.com/charmbracelet/gum) - interactive adoption and Windows preflight prompts
-- [efibootmgr](https://github.com/rhboot/efibootmgr) and util-linux - firmware, block-device, filesystem, lock, and mount inspection
-- UEFI firmware with Secure Boot support
-- EFI System Partition mounted at `/boot`
-- For dual-boot: Windows Boot Manager present in the firmware boot entries
-
-```bash
-sudo pacman -S --needed sbctl jq openssl gum efibootmgr util-linux
-```
-
-### Windows Preflight
-
-`sudo omasecboot windows preflight` is the implemented read-only preparation gate. It independently inspects Windows firmware options, direct BitLocker filesystem signatures, and Microsoft boot-manager files on internal GPT ESPs. It never mounts a Windows volume. It may temporarily mount an internal FAT ESP read-only under a private runtime path and reads only the loader header, with `O_NOATIME`, to confirm a boot manager is present.
-
-A complete three-detector negative returns success only as a bounded observation; it is not proof that Windows is absent and is not firmware clearance. Any positive or unknown signal requires confirmation that the Windows encryption state was checked and every available recovery key was backed up. A user decline returns 1. Missing tools, ambiguous probes, external ESPs, or unsafe mounts print the applicable preparation guidance and return 2 without an override. A present Microsoft loader is a signal only, not proof of firmware db/dbx acceptance or bootability.
-
-These preparations are required before every firmware mutation. Do not change Windows solely to evaluate this development source tree.
-
-If Windows uses BitLocker or Device Encryption:
-
-1. **Back up and verify the recovery key** before starting. Find it at [aka.ms/myrecoverykey](https://aka.ms/myrecoverykey) or in its existing USB, print, Active Directory, or Microsoft Entra ID backup.
-2. On Windows Home, use Microsoft's documented [Device Encryption Settings](https://support.microsoft.com/en-us/windows/device-encryption-in-windows-cf7e2b6f-3e70-4882-9532-18633605b7df) to turn Device Encryption off and wait for decryption to finish. Microsoft does not document Home suspension, so OmaSecBoot must not improvise one.
-3. On Pro, Enterprise, or Education, inspect protection in an administrator PowerShell and use Microsoft's documented BitLocker suspension workflow when appropriate. Managed-device users must obtain administrator approval.
-4. Boot Windows directly after enrollment, verify Secure Boot and protection state, then resume protection if it was suspended.
-5. Keep the recovery key available. Secure Boot changes can trigger recovery; BootNext and direct firmware handoff do not guarantee a quiet boot or stable PCR measurements.
-
-OmaSecBoot does not mount or modify NTFS and does not diagnose Windows hibernation from a failed Linux mount.
+The package also depends on bash, coreutils, util-linux, diffutils, findutils, gawk, grep, jq, OpenSSL, gum, limine, pacman, and systemd.
 
 ## Installation
 
-`OmaSecBoot` is the product name; `omasecboot` is the command, repository slug, and machine-facing namespace.
+`OmaSecBoot` is the product name; `omasecboot` is the command, package, and namespace.
 
-The supported deployment will be the Arch package built from `PKGBUILD` at the release tag. `make install` refuses a live root, and no tagged release or published package exists yet, so there is no supported end-user installation from this branch; `tests/package.sh` shows how the package is built from a working tree.
-
-For source review only:
+The supported deployment is the Arch package built from `PKGBUILD` at a release tag. No package has been published yet, so today a package can only be built from this repository:
 
 ```bash
 git clone https://github.com/peregrinus879/omasecboot.git
 cd omasecboot
+bash tests/package.sh        # builds and inspects the package in a temporary directory
 ```
 
-The first supported installation will be the tagged package from the Omarchy Package Repository, installed through the planned Omarchy setup wrapper after all read-only prechecks pass.
+`tests/package.sh` discards its build. To keep a package, build it the way the test does: create `omasecboot-1.0.0.tar.gz` from the tree with the `omasecboot-1.0.0/` prefix, place it next to a copy of `PKGBUILD`, and run `makepkg`. Install the result with `sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst`.
 
-## Planned Release Workflow
+`make install` refuses to write to a live root; it exists only for package staging. If an older copy was ever installed under `/usr/local`, remove `/usr/local/bin/omasecboot`, `/usr/local/lib/omasecboot/`, its hooks in `/etc/pacman.d/hooks/`, and `/etc/boot/hooks/post.d/zzz-omasecboot-sign` before installing the package: pacman refuses to overwrite the unowned Limine hook, same-named hooks in `/etc/pacman.d/hooks/` take precedence over the packaged ones, and the lifecycle refuses to activate while any hook is shadowed or targets a command other than `/usr/bin/omasecboot`. `status` reports both conditions.
 
-The activated source implementation follows this guarded workflow; the supported package and Omarchy wrapper have not landed. Before either setup or adoption may publish `active`, OmaSecBoot requires the three exact producer package versions, efibootmgr 18 or newer, and all five hooks to match their current canonical contents and target the executing installed command. A checkout or incomplete deployment therefore cannot activate lifecycle management:
+The planned Omarchy integration installs the package from the Omarchy Package Repository through a setup wizard that performs the read-only prechecks first. It has not shipped.
 
-1. Classify durable lifecycle state and require explicit adoption of an existing unrecorded configuration.
-2. Complete Windows edition, recovery-key, management, firmware inventory, and raw PK/KEK/db/dbx backup gates before printing any Setup Mode instruction.
-3. Provision keys and boot state in a durable transaction, enroll and directly verify the current Limine config checksum in both bootable executables, sign last, and verify signatures plus sbctl tracking.
-4. Enter Setup Mode only after the planned trust set has been compared with the recorded firmware trust; enroll and compare the resulting PK, KEK, db, and dbx state.
-5. Enable Secure Boot only after the final read-only proof passes. Verify Linux directly, then request one direct Windows firmware handoff and complete Windows-side Secure Boot and protection checks.
-6. Use guarded repair for later package, Limine, and snapshot mutations. A failed rollback enters `recovery-required` and blocks other mutation producers.
+## Lifecycle
+
+OmaSecBoot keeps a durable record under `/var/lib/omasecboot` that says whether it manages this system. That record is separate from whether firmware Secure Boot is on.
+
+| State | Meaning |
+|---|---|
+| `unmanaged` | No record. Existing settings need explicit adoption or a fresh setup. |
+| `active` | OmaSecBoot manages the Limine settings and repairs boot artifacts after package and Limine changes. It does not mean keys are enrolled or Secure Boot is on. |
+| `disabled` | Settings were restored by `unconfigure`. Package removal is permitted. |
+| `transition` | A transaction is running. Other boot mutations are refused until it finishes. |
+| `recovery-required` | A transaction or its rollback failed. Only `repair` and the recovery built into every command may proceed. |
+
+Every mutating command first writes a transaction manifest and backups, then mutates, then commits the stable state last. If a command finds an interrupted transaction, it completes that recovery and returns without starting new work; run the command again afterwards.
+
+## Setting Up Secure Boot
+
+Run these steps in order. Each command prints the next instruction only after it has proved the current state by direct read-back.
+
+1. **Prepare Windows first** if Windows is installed: `sudo omasecboot windows preflight`. See [Windows Dual Boot](#windows-dual-boot). Nothing below prints a firmware instruction until this gate passes.
+2. **Set up**: `sudo omasecboot setup`. On a machine without local keys this backs up the raw PK, KEK, db, dbx, and mode variables, creates the sbctl keys, builds the planned trust set (`sbctl enroll-keys -m -f --export esl`), compares it entry by entry with the current firmware trust, shows the current and planned PK fingerprints, and asks you to confirm the PK replacement, the firmware's PK-only delete capability, and the review of retained trust entries and recovery preparation. It then repairs and signs every boot artifact and prints exactly one firmware instruction: delete only the PK.
+3. **In firmware settings**, delete only the PK to enter Setup Mode. Do not clear KEK, db, or dbx. Reboot into Linux.
+4. **Enroll**: `sudo omasecboot enroll`. This verifies that KEK, db, and dbx are unchanged from the backup, proves every boot artifact again, writes db, then KEK, then PK, reads each back, proves the artifacts once more, and prints the enablement instruction.
+5. **In firmware settings**, enable Secure Boot. Boot Linux.
+6. **Verify**: `sudo omasecboot status` should report Secure Boot enabled, the lifecycle `active`, both Limine executables carrying the current configuration checksum, and every artifact signed and tracked.
+7. **Windows**: boot Windows directly once, verify its Secure Boot and encryption state, then set up the handoff as described below.
+
+`setup` is idempotent and classifies the machine into one of five states each time it runs:
+
+| State | Observation | What `setup` does |
+|---|---|---|
+| 1 | No local keys | Backup, key creation, plan comparison, artifact proof, PK-delete instruction |
+| 2 | Keys exist, firmware in Setup Mode, plan not enrolled | Tells you to run `enroll` |
+| 3 | Keys exist, firmware in user mode, plan not enrolled | Backup, plan comparison, artifact proof, PK-delete instruction |
+| 4 | Plan enrolled, Secure Boot off | Artifact proof, enablement instruction |
+| 5 | Plan enrolled, Secure Boot on | Verification only |
+
+Contradictory or indeterminate observations fail closed with a message instead of being assigned to a state.
+
+What blocks setup before any firmware instruction:
+
+- A current KEK or db entry that the plan would drop, an unknown organizational certificate, or an unsupported signature-list type. OmaSecBoot never preserves trust by subject name and never repairs with `--append`.
+- Missing or non-zero AuditMode or DeployedMode values.
+- Firmware already in Setup Mode without a validated backup from this tool.
+- A Windows preflight that did not pass.
+
+## Adopting an Existing Configuration
+
+If Limine is already configured with `ENABLE_VERIFICATION`, `ENABLE_ENROLL_LIMINE_CONFIG`, or the enrollment commands in `/etc/default/limine`, the lifecycle is `unmanaged` and `setup` refuses to guess the original values. Run `sudo omasecboot adopt` instead. It shows the current managed settings and asks for the original value of each one (`yes`, `no`, or `unset` for the two switches; `present` or `absent` for the two command tokens). The originals can also be passed as `--verification-original`, `--enrollment-original`, `--before-save-original`, and `--after-save-original`.
+
+Adoption refuses `unknown` for any value, because `unconfigure` must always be able to restore them. Adoption also requires the supported package versions and all five installed hooks, and it does not claim anything about firmware enrollment; it only activates guarded repair for the recorded configuration.
+
+## Windows Dual Boot
+
+### Preflight
+
+`sudo omasecboot windows preflight` is a read-only preparation gate. It inspects three independent signals: a Windows entry in the firmware boot options, a BitLocker filesystem signature on any internal partition, and a Microsoft boot manager on an internal GPT ESP. It never mounts or modifies NTFS. It may mount an internal FAT ESP read-only under a private path and reads only the boot manager's header to confirm it is present.
+
+Exit status:
+
+| Status | Meaning |
+|---|---|
+| 0 | Either all three signals are absent (a bounded observation, not proof that Windows is absent), or Windows was detected and you confirmed that the encryption state was checked and every recovery key was backed up |
+| 1 | You declined a confirmation |
+| 2 | A technical uncertainty: a missing tool, an ambiguous probe, an external ESP, or an unsafe mount. There is no override; resolve the cause and rerun |
+
+If Windows uses BitLocker or Device Encryption:
+
+1. Back up and verify the recovery key before starting. Find it at [aka.ms/myrecoverykey](https://aka.ms/myrecoverykey) or in its existing USB, print, Active Directory, or Microsoft Entra ID backup.
+2. On Windows Home, use Microsoft's documented [Device Encryption Settings](https://support.microsoft.com/en-us/windows/device-encryption-in-windows-cf7e2b6f-3e70-4882-9532-18633605b7df) to turn Device Encryption off and wait for decryption to finish. Microsoft documents no Home suspension workflow, so OmaSecBoot does not offer one.
+3. On Pro, Enterprise, or Education, inspect protection in an administrator PowerShell and use Microsoft's documented BitLocker suspension when appropriate. Managed devices require administrator approval.
+4. After enrollment, boot Windows directly, verify Secure Boot and protection state, then resume protection if it was suspended.
+5. Keep the recovery key available. Secure Boot changes can trigger recovery; a firmware handoff does not guarantee a quiet boot or stable measurements.
+
+A present boot manager is a signal that Windows is installed. It is not proof that the firmware db and dbx accept that boot manager.
+
+### Handoff
+
+`sudo omasecboot windows setup` records the Windows target and writes a managed Limine entry that uses `protocol: efi_boot_entry`. Selecting Windows in the Limine menu then sets the firmware BootNext variable and reboots, so firmware loads `bootmgfw.efi` directly instead of Limine chainloading it. `sudo omasecboot windows bootnext` requests the same one-boot handoff from Linux without the menu.
+
+The target is validated structurally, not by matching text: the command parses `BootOrder` and each boot option's device path, requires the exact `\EFI\Microsoft\Boot\bootmgfw.efi` file node, maps the partition node to exactly one FAT ESP by PARTUUID and geometry, reads the loader's header without writing, and requires one active Windows target whose label resolves identically under Limine's rules. Duplicate labels, multiple Windows installations, entries outside `BootOrder`, localized labels, and ambiguous mounts fail closed. OmaSecBoot never creates or relabels firmware entries. If a recorded target stops resolving, `sudo omasecboot windows suppress` removes the managed Limine block while keeping the opt-in.
+
+Quattro's own `limine-scan` writes a `protocol: efi` chainload entry for Windows. `status` reports such entries but never removes them.
+
+The tracked `omarchy/omarchy-menu.jsonc` file is a reference for a Quattro menu entry, "Reboot to Windows". Do not merge it into `~/.config/omarchy/extensions/omarchy-menu.jsonc` yet; the packaged Omarchy integration will ship the final guard and action. If the reboot is cancelled after BootNext is armed, firmware keeps the one-boot request.
+
+## Day-to-Day Operation
+
+Once the lifecycle is `active`, package and Limine hooks keep the boot artifacts signed and the configuration checksum enrolled:
+
+| Hook | When | Purpose |
+|---|---|---|
+| `00-omasecboot-removal-guard.hook` | Before removing a recovery dependency or `omasecboot` | Refuses unless the lifecycle is verified `disabled` or pristine |
+| `00-omasecboot-transition-guard.hook` | Before a transaction that touches boot paths or producer packages | Refuses during `transition` or `recovery-required`; refuses changes to the three pinned producer packages while `active`; otherwise records the producer lease |
+| `zz-sbctl.hook` (from sbctl) | After the transaction | Re-signs files sbctl already tracks |
+| `zzz-omasecboot.hook` | After `zz-sbctl.hook` | Repairs and re-enrolls Limine, signs and tracks new artifacts, and proves the result |
+| `000-omasecboot-guard` | Limine pre-hook | Validates ownership and locking before a Limine or snapshot mutation |
+| `zzz-omasecboot-sign` | Limine post-hook | Completes the matching Limine, snapshot, or restore repair |
+
+Kernel, Limine, and snapshot updates therefore need no manual action. Two situations do:
+
+- **A supported package update.** While the lifecycle is `active`, a pacman transaction that changes `limine-mkinitcpio-hook`, `limine-snapper-sync`, or `sbctl` is refused with `disable lifecycle before changing pinned producers`. Wait for an OmaSecBoot release that supports the new version, install it, and if the refusal persists, disable Secure Boot in firmware, run `sudo omasecboot unconfigure`, update, and run `setup` again. This is a known cost of the exact-version model and is recorded as an open release decision in `docs/maintenance.md`.
+- **Template resets.** `omarchy refresh limine`, config reinstalls, and factory resets can replace `limine.conf` and drop the Windows entry. Run `sudo omasecboot sign` afterwards; it re-enrolls the checksum, and `status` reports a missing Windows block.
+
+Updating `omasecboot` itself is not a boot mutation and is allowed in any stable state.
 
 ## Commands
 
-The current implementation exposes read-only status and Windows preflight plus guarded setup, adoption, enrollment, signing, cleanup, recovery, unconfiguration, and Windows handoff mutations. Package removal runs through pacman and is allowed only from verified `disabled` or pristine lifecycle state.
+All mutating commands require root, refuse extra arguments, and complete any pending recovery before doing new work.
 
-### `setup`
-
-Prepares or finds a validated plan, confirms exact PK fingerprints, repairs and proves EFI artifacts, and revalidates every instruction boundary before printing a firmware instruction.
-
-### `enroll`
-
-Enrolls only a confirmed plan. The guarded path binds the raw PK/KEK/db/dbx backup, confirmed plan, each firmware-write attempt, and direct readback.
-
-### `adopt`
-
-Records an existing untracked configuration as an `active` lifecycle after displaying managed Limine settings and collecting every confirmed original value. Public adoption rejects `unknown` because automatic unconfiguration must remain possible. It revalidates the observations and complete activation environment under the shared boot and repair locks before committing. Adoption does not claim firmware enrollment; it activates guarded producer repair for the adopted lifecycle.
-
-### `windows`
-
-Provides explicit Windows firmware handoff operations:
-
-- `windows available` silently parses BootOrder and raw EFI device-path nodes without root. It requires one active, structurally unambiguous Windows target and Limine-equivalent label resolution, but does not inspect the block-device mapping or loader file.
-- `windows preflight` requires root and runs the read-only three-signal encryption preparation gate. It prints edition-specific Home decryption or Pro/Enterprise/Education suspension and resume guidance, requires administrator approval for managed devices, and fails closed on technical uncertainty.
-- `windows setup` records the validated target and managed Limine handoff, `windows suppress` removes an unsafe managed block without deleting the opt-in, and `windows bootnext` requests one direct firmware handoff.
-
-The setup transaction parses BootOrder and raw UEFI device-path nodes, maps the GPT HD node by PARTUUID and geometry to one FAT ESP, validates the exact loader read-only, persists strict target identity, and composes the managed Limine block with artifact repair in one lifecycle transaction. Standard HD short-form paths rely on point-in-time uniqueness across the current Linux block inventory, and every write revalidates that mapping. The single whole-filesystem mount of the mapped ESP is reused without writing, even when writable; the loader read applies `O_NOATIME` and fails closed if that flag cannot be set. Without such a mount the ESP is mounted `ro,noatime` under the owned runtime path, and multiple mounts fail closed. The opened loader must be on the mapped filesystem and start with the `MZ` header, and the mount is proved again after the read. The transaction also rejects efibootmgr diagnostics, malformed paths, duplicate installations or labels, unsupported localized labels, missing BootOrder records, and geometry or loader changes. Selecting Windows from the Limine boot menu requests a one-boot firmware handoff; it does not prove that Windows booted successfully. Requires `efibootmgr`, `jq`, GNU coreutils, and util-linux.
-
-### `status`
-
-Shows Secure Boot state, ESP mount state, hook status, direct current-checksum proof in both Limine binaries, Limine 12 readiness diagnostics, Windows entry, Omarchy Direct Boot firmware entries, stale sbctl tracking entries, and enrolled file verification. Works without root for basic info; stale tracking diagnostics and file verification require root.
-
-### `sign`
-
-Repairs configuration enrollment and signs last without rebuilding UKIs. Recovery runs first when a prior mutation is incomplete.
-
-### `cleanup`
-
-Removes stale sbctl tracking entries through consolidated recovery before fresh cleanup.
-
-### `unconfigure`
-
-Restores recorded settings and commits `disabled` only after direct proof. Pre-preservation failures use software rollback; preserved failures resume through dedicated recovery.
-
-### `repair`
-
-Resumes only the operation selected from the immutable incident root, never from the command used to request repair.
-
-### `version`
-
-Prints the machine-readable release contract, currently `omasecboot 1.0.0`.
-
-### `help`
-
-Lists the guarded command surface. It does not print firmware-key mutation instructions.
-
-## How It Works
-
-### EFI File Discovery
-
-Finds all `.efi`/`.EFI` files under `/boot`, plus snapshot UKIs with hash suffixes such as `*.efi_sha256_*`, `*.efi_sha1_*`, `*.efi_b3_*`, and `*.efi_xxh_*` (created by limine-snapper-sync with a content hash in the filename). Excludes:
-
-| Pattern | Reason |
+| Command | Purpose |
 |---|---|
-| `*/Microsoft/*` | Excluded from local signing; the path alone does not prove signer identity, db acceptance, or dbx status |
-| `BOOTIA32.EFI` | 32-bit bootloader; irrelevant on x86_64 |
-| `*.bak` | Backup files; not loaded by firmware |
+| `setup` | Prepare or reuse a validated plan, confirm PK fingerprints, prove artifacts, and print the next firmware instruction |
+| `enroll` | Write the confirmed db, KEK, and PK plan from Setup Mode with per-write read-back |
+| `adopt [--...-original VALUE]` | Record an existing configuration as `active` with its original values |
+| `status` | Show Secure Boot state, lifecycle, hooks, both Limine checksums, Limine 12 readiness, Windows entries, stale sbctl entries, and file verification. Basic information works without root |
+| `sign` | Repair `/etc/default/limine`, re-enroll the checksum into both Limine executables, clean stale tracking, sign and track every artifact, and prove the result. Never rebuilds UKIs or runs `limine-update` |
+| `cleanup` | Remove stale sbctl tracking entries |
+| `windows available` | Exit 0 silently if one valid Windows target resolves; no root required |
+| `windows preflight` | The read-only encryption preparation gate |
+| `windows setup` | Record the validated target and write the managed Limine entry |
+| `windows suppress` | Remove the managed Limine entry, keep the opt-in |
+| `windows bootnext` | Request one firmware handoff to Windows |
+| `unconfigure` | Restore recorded settings and stock boot state, commit `disabled` |
+| `repair` | Resume the interrupted operation recorded in the lifecycle |
+| `version` | Print `omasecboot 1.0.0` |
+| `help` | List commands |
 
-### Signing and Database Registration
+## Recovery
 
-The artifact transaction is available through `setup` and `sign`, with interrupted recovery resolved before fresh mutation.
+An interrupted or failed mutation leaves the lifecycle in `transition` (the owning process may still be running) or `recovery-required` (it failed, its owner is gone, or its rollback failed). `status` reports which, with the transaction ID. Every mutating command, and `sudo omasecboot repair` on its own, resumes the recovery that the immutable incident record selects; the command you typed does not choose it.
 
-This repo treats **signature state** and **tracking state** as separate concerns:
-
-- A file can be correctly signed but still missing from sbctl's tracked-file database.
-- `zz-sbctl.hook` only re-signs files that are tracked by sbctl.
-
-For normal unsigned files, `sbctl sign -s` both signs and tracks the file.
-
-Each Limine target is rebuilt from the package's unsigned executable in a same-directory staging file. OmaSecBoot enrolls the current config checksum, signs and verifies the staged executable, then atomically replaces the target. A repair never durably publishes an unsigned Limine target. Proof also rejects higher-priority `limine.conf` candidates on the ESP that could shadow `/boot/limine.conf` at boot.
-
-For already-signed files, Arch's current `sbctl` (0.18) has an upstream bug where `--save` may be ignored. Snapshot UKIs can hit exactly that case, because limine-snapper-sync may copy already-signed EFI files into snapshot history. When that happens, this repo writes the expected sbctl file entry directly so the file becomes truly tracked and future `zz-sbctl.hook` runs include it.
-
-This is why `sign` may report a snapshot UKI as `registered` instead of `signed`.
-
-Tracking reads use `sbctl list-files` first, then fall back to the on-disk sbctl file database only when needed. Stale-entry cleanup also merges in readable database entries so deleted snapshot UKIs do not remain hidden from cleanup if sbctl's CLI view is incomplete. The database path comes from one explicit plain top-level `files_db` scalar in `/etc/sbctl/sbctl.conf`; without that file, resolution follows sbctl 0.18's legacy-directory or default-path selection and rejects unsupported config syntax rather than guessing.
-
-### Lifecycle Guards
-
-Package and Limine hooks implement active producer admission and completion through the consolidated recovery boundary:
-
-| Trigger | Scope | Purpose |
+| Incident root | Recovery | What it does |
 |---|---|---|
-| `00-omasecboot-removal-guard.hook` (ours) | Recovery dependencies | Blocks removal unless lifecycle state is verified `disabled` or pristine |
-| `00-omasecboot-transition-guard.hook` (ours) | Boot paths and producer packages | Consumes `NeedsTargets`, validates lifecycle state, and publishes an immutable package-producer lease when automation is available |
-| `zz-sbctl.hook` (sbctl built-in) | Boot/EFI path changes | Re-signs files already in sbctl's database |
-| `zzz-omasecboot.hook` (ours) | Boot paths and producer packages | Completes the owned package lease with artifact repair and the final proof; recovery reruns the fixed-registry reconstruction first |
-| `000-omasecboot-guard` (ours) | Limine pre-hook | Resolves the fixed producer class and validates lifecycle ownership, ancestry, FD 200, and the durable lease |
-| `zzz-omasecboot-sign` (ours) | Limine post-hook | Suppresses matching nested work or completes the matching Limine, snapshot, or restore producer lease |
+| Package, Limine, snapshot, or restore producer | Producer recovery | Reruns the interrupted producer's own build (`limine-mkinitcpio` or `limine-snapper-sync`), repairs and proves artifacts, completes or fails the lease |
+| Firmware enrollment | Firmware recovery | Resolves the pending write by direct read-back, proves artifacts, then continues only the remaining db, KEK, or PK writes |
+| Windows BootNext | Windows recovery | Restores the recorded prior BootNext value, or records `consumed-unknown` when the variable is absent after a later boot |
+| Software mutation before its preservation point | Software rollback | Restores backed-up files and settings |
+| Unconfiguration after its preservation point | Unconfigure recovery | Resumes the idempotent restoration phases to a proved `disabled` state |
 
-Pacman hook ordering remains `zz-sbctl` < `zzz-omasecboot`. The two package hooks use the same exact boot-path and producer-package registry without dependency-based skip conditions; only the transition guard consumes `NeedsTargets`. The transition guard acquires both boot locks and re-reads even an initially inactive lifecycle, while generic lifecycle mutation checks pacman's database lock before publication, so concurrent activation cannot cross an allowed package transaction. The separate removal guard evaluates verified `disabled` or pristine state under both boot locks. Active lifecycle rejects direct changes to the three pinned producer packages: `limine-mkinitcpio-hook`, `limine-snapper-sync`, and `sbctl`; disabled or pristine state is the upgrade path after the pins are revalidated. Nested hooks under an OmaSecBoot top-level transition validate the root-owned token, boot ID, owner process start time, ancestry, manifest, parent descriptor, and current lock-path inode. Independent producer hooks validate the external coordinator's immutable producer record, exact identity, boot ID, process start time, and current ancestry. Full snapshot restore is admitted only in stable state while its runtime marker exists; no other lease, reconciliation, or recovery runs while the marker exists, and OmaSecBoot never removes it. The upstream mutation window remains lockless and is admitted only through the specialized stable-state path.
+Bounds and outcomes you may see:
 
-**Why this matters:** The current Omarchy stack works with three separate pieces:
+- Each incident allows 32 recovery attempts. After that, automatic recovery stops and the state stays `recovery-required` for expert review.
+- Firmware recovery allows six write attempts per incident and two per hierarchy. A firmware state outside the expected before and after values is recorded as failed and left for expert review; recovery never guesses.
+- Windows recovery classifies a BootNext value that is neither the recorded prior nor the recorded target as unrelated state and leaves it alone.
+- Uncertain read-back keeps evidence pending rather than resolving it.
 
-- UEFI firmware verifies EFI binaries, so Omarchy UKIs, Limine EFI binaries, and the fallback loader must be signed.
-- Limine config enrollment embeds the current `limine.conf` checksum into the Limine EFI binary.
-- Limine path-hash generation is kept disabled with `ENABLE_VERIFICATION=no` for Omarchy's current UKI flow. Limine 12 and newer can still enforce BLAKE2B path hashes when Secure Boot and config checksum enrollment are both active; `status` reports this without changing current Omarchy behavior.
+Do not edit files under `/var/lib/omasecboot`, run `sbctl reset`, clear firmware keys, or hand-edit `limine.conf` to escape a recovery state. Record the `status` output and seek review. Keep Secure Boot disabled in firmware if the system will not boot.
 
-**Why config enrollment is required:** Limine protects Secure Boot systems by embedding the checksum of `limine.conf` into the Limine EFI binary. Any time `limine.conf` changes, the checksum must be re-enrolled with `limine-enroll-config`. The audited release verifies the current checksum directly in both `/EFI/limine/limine_x64.efi` and `/EFI/BOOT/BOOTX64.EFI` before final signing. Windows uses firmware BootNext rather than a managed Limine chainload, but this choice does not guarantee PCR7 binding or prevent BitLocker recovery.
+## Undoing OmaSecBoot
 
-**Why path hashes are not managed here:** Limine also supports `path: ...#<blake2b>` suffixes, but Omarchy's current working state uses `ENABLE_VERIFICATION=no` and boots UKIs through EFI paths, which Limine 12 exempts from path-hash enforcement. Snapshot filenames such as `omarchy_linux.efi_sha256_<hex>` come from `limine-snapper-sync`; that SHA256 is part of the filename, not a Limine `path:` hash suffix. If future Omarchy entries load non-EFI paths under Limine 12 Secure Boot enforcement, `status` flags the missing BLAKE2B suffixes.
+These are four different operations. None of them is a factory reset.
 
-**Why the repo does not rely only on sbctl internals:** sbctl deployments may store tracking state in either `files.json` or `files.db`, while the public `sbctl list-files` CLI is the normal read path for tracking state. This repo reads tracking state from the CLI first, and only falls back to or merges the database for cleanup and compatibility logic.
-
-### Windows Boot Path
-
-Quattro's documented `limine-scan` path adds Windows through `protocol: efi`, which chainloads `bootmgfw.efi` from Limine. OmaSecBoot instead uses Limine's `efi_boot_entry` protocol. When you select Windows from the Limine menu, Limine sets the firmware BootNext variable and triggers a reboot. On that reboot, firmware loads `bootmgfw.efi` directly, bypassing `limine_x64.efi` entirely.
-
-This requests a direct firmware handoff instead of a Limine-managed chainload. `limine-snapper-sync` can mutate `limine_x64.efi` as snapshot state changes. The design avoids relying on that mutable binary as the Windows launcher, but no collected evidence proves stable PCR measurements, successful Windows boot, or absence of BitLocker recovery.
-
-Windows mutation handlers and operation-selected recovery are active in the source implementation.
-
-Current `limine-update` and `limine-snapper-sync` update the existing configuration tree. Template-reset paths such as `omarchy refresh limine`, config reinstall, factory reset, or owner provisioning can replace `limine.conf` and remove the Windows entry. Durable target identity and stale-target suppression are implemented behind the recovery gate. `status` validates the recorded identity schema and bounded managed block without mounting the Windows ESP, and warns about Windows EFI chainload entries (`protocol: efi`, `efi_chainload`, or `uefi`) that may still need manual cleanup.
-
-### Quattro Menu Integration
-
-The tracked `omarchy/omarchy-menu.jsonc` fragment is a pre-contract reference for `Reboot to Windows`; do not merge it into the user-owned `~/.config/omarchy/extensions/omarchy-menu.jsonc`. The audited Omarchy integration will ship a package-aware guard and durable opt-in contract. Quattro's user file remains relevant evidence because its parser strips only whole-line `//` comments and silently drops every user entry on parse failure.
-
-Do not install or invoke the current menu fragment. The audited action first revalidates the recorded target, requests BootNext in a visible terminal, then returns to user context for `omarchy system reboot`. If reboot is cancelled after BootNext is armed, firmware retains a one-attempt request; that does not guarantee the target will boot successfully.
-
-### Current Producer Flow
-
-```
-Boot-mutating package transaction
-  -> dependency removal guard requires verified disabled or pristine state
-  -> 00-omasecboot-transition-guard consumes targets and checks lifecycle
-  -> unmanaged or disabled: automation remains inactive
-  -> active: publish an ancestor-bound lease and its immutable producer record
-  -> transition or recovery-required: transaction aborts
-  -> final hook repairs artifacts and proves every discovered artifact
-
-Hook-aware Limine or snapshot mutation
-  -> 000-omasecboot-guard resolves a fixed producer and validates FD 200 plus FD 201 policy
-  -> active: publish an ancestor-bound Limine, snapshot, or restore lease
-  -> owned nested transition: mutation may proceed and nested post-repair is suppressed
-  -> external transition or recovery-required: mutation aborts fatally
-  -> matching post-hook completes fixed-registry repair and schema-2 proof
-```
-
-### Code Structure
-
-Single dispatcher (`bin/omasecboot`) sources modular libraries:
-
-- `common.sh` -- output helpers, quiet mode, backup/restore
-- `lifecycle.sh` -- versioned lifecycle state, manifests, locks, hook ownership, and transaction guards
-- `producers.sh` -- ancestor-bound producer leases and the fixed recovery registry
-- `checks.sh` -- prerequisite validation (root, deps, EFI mount)
-- `discover.sh` -- EFI file discovery and sbctl database queries
-- `sign.sh` -- key creation, signing, Limine config management
-- `enroll.sh` -- raw firmware backup, strict trust planning, setup-state observation, and guarded enrollment
-- `windows.sh` -- Windows encryption preflight, firmware BootNext handoff, and Limine `efi_boot_entry` management
-- `status.sh` -- status display and file verification
-
-Maintainer-facing reference sources, versioned compatibility findings, workaround removal triggers, and deferred work live in [docs/maintenance.md](docs/maintenance.md). Remaining implementation and release gates live in [docs/implementation-contract.md](docs/implementation-contract.md), with operational invariants in `AGENTS.md`.
+| Operation | Command | Effect |
+|---|---|---|
+| Software unconfiguration | `sudo omasecboot unconfigure` | Requires Secure Boot off. Restores the recorded Limine settings by three-way merge (a conflicting manual edit stops it), removes the managed Windows entry, removes owned sbctl tracking, resets config enrollment, rebuilds stock Limine executables from the package, proves them, and commits `disabled`. Keys and firmware trust are untouched. |
+| Package removal | `sudo pacman -R omasecboot` | Allowed only from verified `disabled` or pristine state. Removes the command, library, and hooks. Preserves `/var/lib/omasecboot` (lifecycle history, transactions, firmware backups, Windows opt-in, repair lock) and `/var/lib/sbctl`. Does not remove sbctl. |
+| PK reset | `sbctl reset` (not run by OmaSecBoot) | Removes the PK and enters Setup Mode. KEK, db, and dbx stay as they are. |
+| Factory restoration | Firmware vendor procedure | Restores the vendor trust set. The raw pre-change backup under `/var/lib/omasecboot` is what the firmware had before OmaSecBoot, which is not necessarily the factory set. |
 
 ## Troubleshooting
 
-The source implementation has recoverable mutation commands, but this branch has no supported installation or machine-specific troubleshooting procedure. Do not install it over an existing setup or clear firmware keys, edit `limine.conf`, arm BootNext, or re-enable Secure Boot outside its validated command flow.
+| Message or symptom | Meaning | Action |
+|---|---|---|
+| `Lifecycle: unmanaged (explicit setup or adoption required)` | No lifecycle record | Run `setup`, or `adopt` if Limine was already configured |
+| `Lifecycle activation requires the exact supported producer packages` | One of the three pinned producer packages is not at its supported version, or efibootmgr is older than 18 | Update or downgrade from disabled or pristine state; see Requirements |
+| `sign` or `status` reports that `/EFI/BOOT/BOOTX64.EFI` carries no Limine config checksum | On a shared ESP, Windows repair or a Windows installer rewrote the fallback loader with its own copy | Rerun Omarchy's `limine-update` to restore Limine's fallback copy, then `sudo omasecboot sign` |
+| `Lifecycle activation requires the current installed ... hook` | A hook is missing, altered, or targets a command other than `/usr/bin/omasecboot` | Reinstall the package; remove any `/usr/local` copy |
+| `Boot-mutating package transaction blocked: ... disable lifecycle before changing pinned producers` | A pacman transaction would change a supported package while active | See Day-to-Day Operation |
+| `Boot-mutating package transaction blocked: lifecycle is transition ...` | Another OmaSecBoot transaction is running or was interrupted | Wait, then `sudo omasecboot repair` |
+| `Package removal requires verified disabled or pristine lifecycle state` | The removal guard refused | Run `unconfigure` first |
+| `Lifecycle: recovery-required (...)` | A mutation or rollback failed | `sudo omasecboot repair`; do not intervene manually |
+| `Enrollment requires validated Setup Mode; current setup state is N` | `enroll` was run outside state 2 | Follow the instruction `setup` prints for that state |
+| `The current Secure Boot enrollment plan is invalid` | The saved plan no longer matches the firmware or keys | Run `setup` again to rebuild it |
+| `windows preflight` exits 2 | Technical uncertainty | Read the printed guidance, fix the cause, rerun; there is no override |
+| System will not boot with Secure Boot on | Artifact or trust mismatch | Disable Secure Boot in firmware, boot Linux, run `sudo omasecboot status`, and keep Secure Boot off until the proof passes |
 
-Read-only observations remain useful for an expert-led recovery:
+Read-only helpers: `sbctl status`, `sbctl list-files`, `sbctl verify`, `efibootmgr -v`, and `findmnt`. They report state; they do not authorize a firmware change.
 
-- `omasecboot status` reports the implemented read-only checks but does not by itself authorize a firmware change.
-- `sbctl status`, `sbctl list-files`, and `sbctl verify` report local state; they do not prove complete firmware trust or dbx acceptance.
-- `efibootmgr -v` is diagnostic input. Do not select a target by the first label or `bootmgfw.efi` text match.
-- `sudo omasecboot windows preflight` reports its bounded Windows and BitLocker observations without independently authorizing firmware changes. Exit 2 means a technical uncertainty must be resolved rather than overridden.
-- `findmnt` can show whether Windows volumes or ESPs are mounted. Target proof can reuse a controlled `ro` or `rw` ESP mount, applying `O_NOATIME` for a writable-mount loader read, or create an owned `ro,noatime` mount; OmaSecBoot never mounts or modifies NTFS.
-- Windows disk-check prompts and BitLocker recovery are separate. Diagnose Windows volume state from Windows, not from a failed Linux mount.
+## Boundaries
 
-Record the exact state and seek machine-specific recovery review before any manual write. T-8 will add the complete operator-facing lifecycle procedures.
+- Lifecycle `active` means OmaSecBoot manages this system. It does not mean keys are enrolled or Secure Boot is on.
+- BootNext is a one-boot request. It does not prove Windows booted, keep BitLocker quiet, or preserve PCR7 measurements. Secure Boot changes can trigger BitLocker recovery; they do not always do so.
+- A negative Windows preflight is a bounded observation, not firmware clearance.
+- The raw pre-change firmware backup is not a factory key set. OmaSecBoot has no dbx writer and does not promise OEM PK, dbx, or factory-state restoration.
+- After the OEM PK is replaced, Microsoft's Secure Boot certificate servicing is the user's responsibility.
+- Hermetic tests prove the software contract, not firmware behavior. See the [release checklist](docs/release-checklist.md) for the hardware evidence a release requires.
+- The Omarchy installer ISO is not Secure Boot bootable; OmaSecBoot applies to installed systems only.
+- Eligible Windows 11 devices may enable Device Encryption after qualifying; this is not universal. Intune policy can mark a device noncompliant; this does not imply universal loss of access.
 
-## Recovery / Rollback
+## How It Works
 
-### Emergency boot recovery
+### Proof sequence
 
-If the system will not boot with Secure Boot enabled:
+Every `setup` and `sign` performs the same sequence: repair the managed `/etc/default/limine` settings (`ENABLE_VERIFICATION=no`, `ENABLE_ENROLL_LIMINE_CONFIG=yes`), enroll the current `/boot/limine.conf` checksum into both `/EFI/limine/limine_x64.efi` and `/EFI/BOOT/BOOTX64.EFI`, verify the embedded checksum directly in both, clean stale sbctl tracking, sign and track every discovered non-Microsoft EFI artifact as the last mutation, then read everything back. Each Limine target is rebuilt from the unsigned package executable in a staging file, enrolled, signed, verified, and synced before it atomically replaces the target, so an unsigned or wrongly enrolled Limine is never published. Higher-priority `limine.conf` candidates on the ESP that could shadow `/boot/limine.conf` are rejected.
 
-1. Enter BIOS/UEFI firmware settings
-2. Disable Secure Boot temporarily
-3. Boot into Linux normally
-4. Diagnose with `sudo omasecboot status`
-5. Keep Secure Boot disabled until the state and available backups have been reviewed; use `sudo omasecboot repair` only for a validated OmaSecBoot incident
+Snapshot UKIs created by limine-snapper-sync end in `.efi_sha256_<hash>` or a similar suffix; that is part of the filename, not a Limine path hash. Limine path hashes are not managed because Omarchy boots UKIs through `protocol: efi`, which Limine exempts from path-hash enforcement.
 
-Do not re-enable Secure Boot from a status result alone. Follow only the instruction printed after setup directly proves both Limine checksums plus final signatures and tracking.
+Arch's sbctl 0.18 ignores `--save` for an already-signed file, so a copied snapshot UKI can be signed but untracked. OmaSecBoot writes the tracking entry directly in that case, which is why `sign` may report a snapshot UKI as `registered`.
 
-### Full rollback
+### Locking and ownership
 
-`sudo omasecboot unconfigure` is the verified software-management rollback. Package removal (`sudo pacman -R omasecboot`) is allowed only from verified `disabled` or pristine state, and `make uninstall` is refused. Do not remove installed files manually or treat package removal as unconfiguration.
+Limine, limine-entry-tool, and limine-snapper-sync share `/run/lock/boot-partition.lock`. OmaSecBoot validates an inherited descriptor's identity and locks it, or acquires the lock itself, before any boot mutation, and holds its own repair lock under `/var/lib/omasecboot`. Hooks decide whether a mutation is theirs by the transaction token, boot ID, owner process identity, ancestry, and the durable manifest, never by an environment variable. A full snapshot restore is admitted only in stable state, because upstream runs it without a parent lock.
 
-The `unconfigure` transaction requires Secure Boot off, restores only settings whose current values still match OmaSecBoot's recorded values, removes the managed Windows block, resets config enrollment, rebuilds and verifies stock boot state, and commits `disabled` last. The package allows removal only from verified `disabled` or pristine state; it removes package trigger hooks and only the `omasecboot` package while preserving lifecycle, transaction, recovery, firmware-backup, Windows-opt-in, lock-path, and local-key state.
+### Firmware
 
-Software unconfiguration, PK reset, recovery from raw pre-change variables, and firmware factory restoration are distinct procedures. A pre-change backup is not necessarily a factory-key set.
+Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode, AuditMode, DeployedMode, and SecureBoot values, and the DMI product UUID are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
 
-### Re-enrollment after key reset
+### Code structure
 
-Do not equate clearing keys, entering Setup Mode, resetting the PK, or restoring firmware factory keys. Recovery instructions must start from the recorded raw-variable backup and current firmware state. Local sbctl keys can be inspected with `sbctl status`, but their presence alone does not prove that re-enrollment preserves the machine's required trust.
+`bin/omasecboot` dispatches to modules in `lib/`: `common.sh` (constants, output, locks), `lifecycle.sh` (state, transactions, incidents, guards), `producers.sh` (producer leases and recovery), `checks.sh`, `discover.sh`, `sign.sh` (enrollment, signing, unconfiguration), `enroll.sh` (firmware backup, planning, enrollment, firmware recovery), `windows.sh` (target proof, preflight, BootNext, Windows recovery), and `status.sh`.
 
-## Design Philosophy
+Reference sources, versioned compatibility findings, workaround removal triggers, and deferred decisions are in [docs/maintenance.md](docs/maintenance.md). The implementation and release contract is [docs/implementation-contract.md](docs/implementation-contract.md). Operational invariants for contributors are in `AGENTS.md`. Verification runs `make test`, `bash -n`, and `shellcheck` over all shell files.
 
-The approved design handles the parts of Secure Boot that Omarchy does not fully automate for this exact dual-boot flow:
+### Design philosophy
 
-- **One-time setup**: Key creation, Limine verification/enrollment settings, initial signing, key enrollment, Windows boot entry via `efi_boot_entry` protocol
-- **Ongoing repair**: Enrolling and verifying the current Limine config, signing new EFI files (especially snapshots), and restoring the Windows entry. Windows uses a direct firmware handoff while recovery remains possible
-
-It deliberately delegates everything else:
-
-- **Ongoing re-signing** of known files: `zz-sbctl.hook`
-- **UKI building**: `mkinitcpio`
-- **Kernel and generic EFI entry management** in limine.conf: `limine-entry-tool`
-- **Snapshot boot entries**: `limine-snapper-sync`
-
-Don't automate what's already automated. Fill the gaps that aren't.
-
-The approved package owns guarded pacman-triggered maintenance and Limine-originated repair through validated pre-hook and post-hook mechanisms.
-
-`zz-sbctl.hook` works on Omarchy because UKIs use `CUSTOM_UKI_NAME="omarchy"` and live at `/boot/EFI/Linux/omarchy_linux.efi`.
+Handle the parts of Secure Boot that Omarchy does not automate for this dual-boot flow: one-time key creation and enrollment, config checksum enrollment and verification in both Limine executables, signing of new and snapshot artifacts, and the Windows handoff. Delegate everything else: re-signing of tracked files to `zz-sbctl.hook`, UKI building to `mkinitcpio`, kernel entries to `limine-entry-tool`, snapshot entries to `limine-snapper-sync`. Don't automate what's already automated. Fill the gaps that aren't.
 
 ## License
 

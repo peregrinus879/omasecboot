@@ -218,7 +218,7 @@ JUDGMENT: Borrowing another distribution's dual-signed shim is technically viabl
 12. **T-6.7 `feat: add recoverable Secure Boot commands`**: setup, signing, enrollment, Windows mutation, cleanup, and unconfiguration through the recovery registry while the consolidated production gate remains closed.
 13. **T-6.8 `feat: activate recoverable Secure Boot lifecycle`**: production capability after interrupted-recovery, ownership, producer, firmware, Windows, and unconfiguration tests prove the complete lifecycle contract.
 14. **T-7 `build: add the Arch package layout`**: FHS install, PKGBUILD, tmpfiles, system hook deployment, and package build, inspection, and staged install, upgrade, and removal tests.
-15. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, and end-user boundaries.
+15. **T-8 `docs: document lifecycle and recovery`**: README, maintenance ledger, operational invariants, end-user boundaries, and the release checklist with the privileged acceptance matrix.
 16. **T-9 `ci: verify shell and package builds`**: tests, syntax, ShellCheck, and package build workflow.
 17. **P-1 `build: add omasecboot`**: tagged release recipe and `source: local` metadata in omarchy-pkgs.
 18. **O-1 `feat: add Secure Boot setup and removal`**: both Omarchy wrappers and focused shell tests.

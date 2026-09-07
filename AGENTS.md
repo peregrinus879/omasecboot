@@ -9,6 +9,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `README.md` carries user-facing setup, commands, design, recovery, and troubleshooting guidance.
 - `docs/maintenance.md` is the on-demand ledger for primary sources, versioned compatibility findings, workaround removal triggers, and deferred work. Read it before changing Secure Boot flow, sbctl tracking, Limine configuration semantics, pacman hooks, UKI handling, Windows dual-boot behavior, or a deferred item; re-fetch changeable facts at change time.
 - `docs/implementation-contract.md` is the package-first implementation contract for lifecycle, firmware, Windows, packaging, Omarchy integration, public claims, and atomic delivery.
+- `docs/release-checklist.md` defines the hermetic, package, and privileged hardware evidence a release tag requires and where acceptance records live.
 - Reference repository purposes and upstream sources are recorded in the maintenance ledger; do not assume a contributor's local checkout layout.
 
 ## Key Files
@@ -34,6 +35,8 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `omarchy/omarchy-menu.jsonc` - Quattro user-menu fragment for graceful reboot-to-Windows handoff
 - `docs/implementation-contract.md` - Remaining implementation and release-gate contract
 - `docs/maintenance.md` - On-demand sources, compatibility findings, removal triggers, and deferred work
+- `docs/release-checklist.md` - Release gates, the privileged hardware acceptance matrix, evidence format, and the tag procedure
+- `tests/acceptance-capture.sh` - Root-run per-row acceptance recorder: state before, terminal transcript, state after, one file per row; never part of `make test`
 - `Makefile` - Package staging install (refuses a live root and any source uninstall) and the test aggregate
 
 ## Architecture
@@ -55,7 +58,7 @@ sbctl, jq, OpenSSL, gum (interactive only), efibootmgr, util-linux, diffutils, a
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. The Arch package layout (T-7) is implemented: `PKGBUILD` builds the only supported deployment, and pacman removal is guarded by the PreTransaction removal guard. No tagged release, published package, CI, or Omarchy integration exists yet. The remaining contracts (T-8, T-9, the `v1.0.0` tag, P-1, and O-1 through O-3) are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. The Arch package layout (T-7) is implemented: `PKGBUILD` builds the only supported deployment, and pacman removal is guarded by the PreTransaction removal guard. Operator documentation (T-8) is current. No tagged release, published package, CI, or Omarchy integration exists yet. The remaining contracts (T-9, the `v1.0.0` tag, P-1, and O-1 through O-3) are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults or permit public adoption with an `unknown` original.
