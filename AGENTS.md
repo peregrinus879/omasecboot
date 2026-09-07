@@ -28,6 +28,8 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `tests/lifecycle.sh`, `tests/producers.sh`, `tests/producer-repair.sh`, `tests/producer-ownership.sh`, `tests/recovery-publication.sh`, `tests/software-recovery.sh`, `tests/unconfigure.sh`, `tests/unconfigure-tools.sh`, `tests/artifacts.sh`, `tests/guards.sh`, `tests/dispatcher.sh` - Hermetic lifecycle, producer-recovery, integrated producer repair, ownership-lineage, recovery-publication, software-recovery, unconfiguration, artifact-proof, and failure-injection checks
 - `tests/install.sh` - Staged install, idempotent reinstall, hook-target, tmpfiles, and refused source uninstall contract checks
 - `tests/package.sh` - Package build, payload and mode inspection, dependency floors against runtime pins, packaged-hook activation acceptance, and staged pacman install, reinstall, upgrade, and removal preservation checks
+- `tests/package-root.sh` - Privileged disposable-container check: real hook execution on install, guarded removal, blocked producer transaction, upgrade, and preservation; never part of `make test`
+- `.github/workflows/ci.yml` - Lint, one job per hermetic suite, the package build, and the privileged container check
 - `tests/windows.sh` - Hermetic Windows firmware handoff and Quattro menu contract checks
 - `tests/windows-preflight.sh` - Hermetic Windows signal, encryption guidance, ESP loader, and no-NTFS checks
 - `tests/windows-entry.sh` - Hermetic managed-marker and idempotence checks
@@ -58,7 +60,7 @@ sbctl, jq, OpenSSL, gum (interactive only), efibootmgr, util-linux, diffutils, a
 
 ## Approved Implementation Contracts
 
-The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. The Arch package layout (T-7) is implemented: `PKGBUILD` builds the only supported deployment, and pacman removal is guarded by the PreTransaction removal guard. Operator documentation (T-8) is current. No tagged release, published package, CI, or Omarchy integration exists yet. The remaining contracts (T-9, the `v1.0.0` tag, P-1, and O-1 through O-3) are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
+The current implementation provides the lifecycle boundary, tested artifact-proof transaction, bounded active producer automation, operation-selected producer, firmware, Windows, software, and unconfiguration recovery, BootNext mutation with immutable evidence and direct readback, validated Windows target identity, read-only Windows encryption preflight, raw firmware backup, strict trust planning, five-state classification, guarded enrollment failure proof, and recoverable public mutation commands. The Arch package layout (T-7) is implemented: `PKGBUILD` builds the only supported deployment, and pacman removal is guarded by the PreTransaction removal guard. Operator documentation (T-8) and CI (T-9) are in place. No tagged release, published package, or Omarchy integration exists yet. The remaining contracts (the `v1.0.0` tag, P-1, and O-1 through O-3) are mandatory for the package-first release and must not be described as shipped until their implementation and tests land.
 
 - Preserve the naming and deployment contracts above, including the durable Windows opt-in in canonical state.
 - Durable lifecycle state distinguishes `unmanaged`, `disabled`, `active`, `transition`, and `recovery-required`. A top-level mutation writes its root-owned manifest and backups before mutation, commits stable state last, and leaves `recovery-required` when rollback fails. Existing unrecorded configurations require explicit adoption; never infer their original defaults or permit public adoption with an `unknown` original.
@@ -105,7 +107,7 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 
 ## Post-Change Verification
 
-- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate.
+- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push.
 - Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck` over the same shell files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 

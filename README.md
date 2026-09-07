@@ -5,7 +5,7 @@
 OmaSecBoot provisions signing keys, signs every EFI artifact Omarchy boots, enrolls the current Limine configuration checksum into both Limine executables, backs up and replaces firmware trust under explicit confirmation, and adds a validated Windows firmware handoff for dual-boot systems. Every mutation runs as a durable transaction that can be resumed or rolled back, and every firmware instruction is printed only after a direct read-back proof.
 
 > [!CAUTION]
-> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI is being added, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [implementation contract](docs/implementation-contract.md) and the [release checklist](docs/release-checklist.md).
+> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI covers only the hermetic suites and a container package check, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [implementation contract](docs/implementation-contract.md) and the [release checklist](docs/release-checklist.md).
 
 ## Why This Tool
 

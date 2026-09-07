@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Syntax, ShellCheck, and menu JSONC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git jq shellcheck
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Bash syntax
+        run: bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh
+      - name: ShellCheck
+        run: shellcheck -x bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh
+      - name: Menu fragment parses
+        run: jq empty omarchy/omarchy-menu.jsonc
+
+  hermetic:
+    name: Hermetic suite (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - lifecycle
+          - producers
+          - producer-repair
+          - producer-ownership
+          - recovery-publication
+          - software-recovery
+          - artifacts
+          - unconfigure
+          - unconfigure-tools
+          - guards
+          - dispatcher
+          - install
+          - windows
+          - windows-preflight
+          - windows-entry
+          - enrollment
+    steps:
+      - name: Install tools
+        run: >-
+          pacman -Syu --noconfirm --needed
+          git jq openssl diffutils util-linux efibootmgr sbctl limine gum
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run suite as an unprivileged user
+        run: |
+          useradd --create-home builder
+          chown -R builder .
+          runuser -u builder -- env HOME=/home/builder bash "tests/${{ matrix.suite }}.sh"
+
+  package:
+    name: Package build, staged lifecycle, and privileged lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git jq diffutils util-linux libarchive
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Unprivileged package build and staged lifecycle
+        run: |
+          useradd --create-home builder
+          chown -R builder .
+          runuser -u builder -- env HOME=/home/builder bash tests/package.sh
+      - name: Privileged install, guarded removal, upgrade, and preservation
+        env:
+          OMASECBOOT_DISPOSABLE_ROOT: "1"
+        run: bash tests/package-root.sh
