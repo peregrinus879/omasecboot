@@ -8,11 +8,11 @@ arch=('any')
 url='https://github.com/peregrinus879/omasecboot'
 license=('MIT')
 # These are resolver floors so that ordinary system updates keep resolving.
-# The exact audited recovery toolchain (limine-mkinitcpio-hook 1.38.0-1,
-# limine-snapper-sync 1.31.0-1, sbctl 0.18-2, efibootmgr 18-4, and coreutils
-# 9.11-2) is enforced at runtime: lifecycle activation and producer admission
-# refuse any other version, and the package guard blocks changes to those five
-# packages while the lifecycle is active.
+# The audited producer set (limine-mkinitcpio-hook 1.38.0-1,
+# limine-snapper-sync 1.31.0-1, sbctl 0.18-2) is enforced exactly at runtime:
+# lifecycle activation refuses any other version and the package guard blocks
+# changes to those three packages while the lifecycle is active. efibootmgr
+# only needs release 18 or newer.
 depends=(
   'bash'
   'coreutils>=9.5'
