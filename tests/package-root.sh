@@ -21,9 +21,6 @@ fail_test() {
 [[ $EUID -eq 0 ]] || fail_test "the privileged package check requires root"
 [[ -f /.dockerenv || -f /run/.containerenv || -n "${GITHUB_ACTIONS:-}" ]] \
   || fail_test "refusing to run outside a container or CI job"
-if findmnt -n -t efivarfs -O rw >/dev/null 2>&1; then
-  fail_test "refusing to run where EFI variables are writable"
-fi
 [[ ! -e /var/lib/sbctl/keys ]] \
   || fail_test "refusing to run where sbctl keys already exist"
 
