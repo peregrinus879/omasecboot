@@ -494,39 +494,22 @@ read_lifecycle || fail_test "adopted lifecycle could not be read"
 state_file=$(lifecycle_file_path)
 [[ $(stat -Lc '%a' "$state_file") == 644 ]] \
   || fail_test "lifecycle state is not safely readable"
+jq -e '.schema_version == 2 and .writer_version == "1.0.0" and .managed_settings != null' \
+  "$state_file" >/dev/null || fail_test "adoption did not record managed settings"
+adoption_record=$(jq -r '.managed_settings.path' "$state_file")
 jq -e '
-  .schema_version == 2 and
-  .writer_version == "1.0.0" and
-  .adoption.source == "explicit" and
-  .adoption.managed_settings == [
-    {
-      "path": "/etc/default/limine",
-      "key": "ENABLE_VERIFICATION",
-      "observed": "no",
-      "original": "unknown"
-    },
-    {
-      "path": "/etc/default/limine",
-      "key": "ENABLE_ENROLL_LIMINE_CONFIG",
-      "observed": "yes",
-      "original": "unset"
-    },
-    {
-      "path": "/etc/default/limine",
-      "key": "COMMANDS_BEFORE_SAVE",
-      "token": "limine-reset-enroll",
-      "observed": "absent",
-      "original": "unknown"
-    },
-    {
-      "path": "/etc/default/limine",
-      "key": "COMMANDS_AFTER_SAVE",
-      "token": "limine-enroll-config",
-      "observed": "absent",
-      "original": "unknown"
-    }
+  .source == "adoption" and
+  .settings == [
+    {"path": "/etc/default/limine", "key": "ENABLE_VERIFICATION", "managed": "no",
+      "original": "unknown"},
+    {"path": "/etc/default/limine", "key": "ENABLE_ENROLL_LIMINE_CONFIG", "managed": "yes",
+      "original": "unset"},
+    {"path": "/etc/default/limine", "key": "COMMANDS_BEFORE_SAVE", "token": "limine-reset-enroll",
+      "managed": "absent", "original": "unknown"},
+    {"path": "/etc/default/limine", "key": "COMMANDS_AFTER_SAVE", "token": "limine-enroll-config",
+      "managed": "absent", "original": "unknown"}
   ]
-' "$state_file" >/dev/null || fail_test "adoption record is incomplete"
+' "$adoption_record" >/dev/null || fail_test "adoption record is incomplete"
 
 adoption_id=$(jq -r '.last_transaction.id' "$state_file")
 adoption_manifest="$(transactions_dir_path)/${adoption_id}/manifest.json"
@@ -1653,102 +1636,6 @@ printf '%s\n' "$schema2_disabled_state" \
 if lifecycle_removal_is_allowed; then
   fail_test "restored schema-2 disabled state bypassed unconfiguration proof"
 fi
-legacy_manifest_document=$(jq -c '{
-  schema_version: 1,
-  writer_version,
-  id,
-  operation,
-  target_state,
-  status,
-  created_at,
-  completed_at,
-  boot_id,
-  token_sha256,
-  owner,
-  prior_state,
-  current_phase,
-  completed_phases,
-  backups,
-  service_state,
-  file_rollback_policy,
-  firmware_backup,
-  enrollment_plan,
-  firmware_writes,
-  failure,
-  rollback
-}' "$legacy_manifest")
-printf '%s\n' "$legacy_manifest_document" \
-  | atomic_write_control_file "$legacy_manifest" 600
-legacy_lifecycle_document=$(jq -c '{
-  schema_version: 1,
-  writer_version,
-  generation,
-  state,
-  transaction: null,
-  last_transaction: {
-    id: .last_transaction.id,
-    operation: .last_transaction.operation,
-    manifest: .last_transaction.manifest,
-    completed_at: .last_transaction.completed_at
-  },
-  adoption,
-  updated_at
-}' "$legacy_state_file")
-printf '%s\n' "$legacy_lifecycle_document" \
-  | atomic_write_control_file "$legacy_state_file" 644
-if read_lifecycle >/dev/null 2>&1; then
-  fail_test "normal lifecycle reader accepted legacy schema 1"
-fi
-[[ "$_lifecycle_read_status" == unsupported-schema ]] \
-  || fail_test "legacy schema was not classified as unsupported"
-lifecycle_removal_is_allowed \
-  || fail_test "exact legacy schema-1 disabled state blocked removal"
-chmod 644 "$legacy_manifest"
-if lifecycle_removal_is_allowed; then
-  fail_test "publicly readable legacy manifest authorized removal"
-fi
-chmod 600 "$legacy_manifest"
-legacy_failed_rollback_manifest=$(jq -c '
-  .rollback = {
-    status: "failed",
-    attempted_at: .completed_at,
-    failures: ["/boot"]
-  }
-' <<< "$legacy_manifest_document")
-printf '%s\n' "$legacy_failed_rollback_manifest" \
-  | atomic_write_control_file "$legacy_manifest" 600
-if lifecycle_removal_is_allowed; then
-  fail_test "legacy completed transaction with failed rollback authorized removal"
-fi
-printf '%s\n' "$legacy_manifest_document" \
-  | atomic_write_control_file "$legacy_manifest" 600
-legacy_active_document=$(jq -c '.state = "active"' <<< "$legacy_lifecycle_document")
-printf '%s\n' "$legacy_active_document" \
-  | atomic_write_control_file "$legacy_state_file" 644
-if lifecycle_removal_is_allowed; then
-  fail_test "legacy active state authorized removal"
-fi
-legacy_extra_document=$(jq -c '.unexpected = null' <<< "$legacy_lifecycle_document")
-printf '%s\n' "$legacy_extra_document" \
-  | atomic_write_control_file "$legacy_state_file" 644
-if lifecycle_removal_is_allowed; then
-  fail_test "legacy disabled state with an extra field authorized removal"
-fi
-legacy_value_document=$(jq -c \
-  '.adoption.managed_settings[0].observed = "invented"' \
-  <<< "$legacy_lifecycle_document")
-printf '%s\n' "$legacy_value_document" \
-  | atomic_write_control_file "$legacy_state_file" 644
-if lifecycle_removal_is_allowed; then
-  fail_test "legacy disabled state with an invalid setting authorized removal"
-fi
-legacy_null_transaction=$(jq -c '.last_transaction = null' \
-  <<< "$legacy_lifecycle_document")
-printf '%s\n' "$legacy_null_transaction" \
-  | atomic_write_control_file "$legacy_state_file" 644
-if lifecycle_removal_is_allowed; then
-  fail_test "legacy disabled state without completion proof authorized removal"
-fi
 reset_state
 lifecycle_removal_is_allowed || fail_test "pristine state blocked removal"
 package_lock=$(pacman_database_lock_path)
@@ -1890,11 +1777,6 @@ read_lifecycle() {
   _lifecycle_state=invented
   return 0
 }
-if lifecycle_automation_is_active >/dev/null 2>&1; then
-  fail_test "automation accepted an unrecognized lifecycle state"
-else
-  [[ $? -eq 2 ]] || fail_test "automation did not classify unknown state as unsafe"
-fi
 if show_lifecycle_status >/dev/null 2>&1; then
   fail_test "status accepted an unrecognized lifecycle state"
 fi

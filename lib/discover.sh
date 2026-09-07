@@ -93,13 +93,6 @@ resolve_sbctl_files_db_path() {
   fi
 }
 
-resolve_sbctl_files_db() {
-  local files_db
-  files_db=$(resolve_sbctl_files_db_path) || return 1
-  [[ -f "$files_db" ]] || return 1
-  printf '%s\n' "$files_db"
-}
-
 sbctl_database_candidate_paths() {
   local resolved candidate
   resolved=$(resolve_sbctl_files_db_path) || return 1
@@ -160,12 +153,9 @@ list_enrolled_entries_from_cli() {
 # Query tracked files from sbctl's on-disk database: a fallback path for
 # stale-entry cleanup and sbctl compatibility logic.
 list_enrolled_entries_from_db() {
-  local files_db db_rc=0 json
-  files_db=$(resolve_sbctl_files_db) || db_rc=$?
-  if [[ $db_rc -ne 0 ]]; then
-    return 1
-  fi
-
+  local files_db json
+  files_db=$(resolve_sbctl_files_db_path) || return 1
+  [[ -f "$files_db" ]] || return 1
   json=$(<"$files_db") || return 1
 
   if [[ "$json" == "null" || -z "$json" ]]; then

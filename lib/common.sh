@@ -43,6 +43,30 @@ qpass() { [[ "$QUIET" == true ]] || pass "$@"; }
 qact()  { [[ "$QUIET" == true ]] || act "$@"; }
 qheader() { [[ "$QUIET" == true ]] || header "$@"; }
 
+# --- Shared jq definitions --------------------------------------------------
+
+# Prepended to every jq program that validates lifecycle documents.
+# shellcheck disable=SC2034 # Consumed by the sourced lib modules.
+readonly OMASECBOOT_JQ_DEFS='
+  def uuid:
+    type == "string" and
+    test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+  def timestamp:
+    type == "string" and
+    test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+  def digest: type == "string" and test("^[0-9a-f]{64}$");
+  def checksum: type == "string" and test("^[0-9a-f]{128}$");
+  def identity: type == "string" and test("^[0-9]+:[0-9]+$");
+  def boot_number: type == "string" and test("^[0-9A-F]{4}$");
+  def absolute_path:
+    type == "string" and length > 1 and length <= 4096 and startswith("/") and
+    (explode | all(.[]; . >= 32 and . != 127));
+  def operation:
+    type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
+  def phase:
+    type == "string" and length <= 128 and test("^[a-z0-9][a-z0-9-]*$");
+'
+
 # --- Locking ----------------------------------------------------------------
 
 _OMASECBOOT_LIMINE_LOCK_OWNED=false
@@ -253,6 +277,11 @@ with_limine_lock() {
   _OMASECBOOT_LIMINE_LOCK_OWNED=local
 }
 
+boot_locks_are_held() {
+  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
+    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]]
+}
+
 with_boot_repair_lock() {
   with_limine_lock || return 1
   with_repair_lock || {
@@ -367,26 +396,4 @@ limine_major_version() {
   local version
   version=$(limine_version) || return 1
   printf '%s\n' "${version%%.*}"
-}
-
-# --- File helpers -----------------------------------------------------------
-
-backup_file() {
-  local file="$1" backup
-  [[ -f "$file" ]] || return 1
-  backup=$(mktemp "/tmp/omasecboot.$(basename "$file").XXXXXX") || return 1
-  cp -p "$file" "$backup" || {
-    rm -f "$backup"
-    return 1
-  }
-  printf '%s\n' "$backup"
-}
-
-restore_file_backup() {
-  local backup="$1" file="$2"
-  cp -p "$backup" "$file"
-}
-
-discard_file_backup() {
-  rm -f "$1"
 }

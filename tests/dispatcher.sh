@@ -204,16 +204,16 @@ if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "unsupported unconfiguration tools were accepted for activation"
 fi
 ACTIVATION_UNCONFIGURE_SUPPORTED=true
-real_observed_limine_setting=$(declare -f observed_limine_setting)
-real_observed_limine_token=$(declare -f observed_limine_token)
-observed_limine_setting() {
+real_limine_managed_setting_state=$(declare -f limine_managed_setting_state)
+real_limine_managed_token_state=$(declare -f limine_managed_token_state)
+limine_managed_setting_state() {
   case "$1" in
     ENABLE_VERIFICATION) printf 'yes # unsupported\n' ;;
     ENABLE_ENROLL_LIMINE_CONFIG) printf 'no\n' ;;
     *) return 1 ;;
   esac
 }
-observed_limine_token() { printf 'absent\n'; }
+limine_managed_token_state() { printf 'absent\n'; }
 if adopt_lifecycle verify_adoption_observations \
   'yes # unsupported' yes no no absent absent absent absent \
   >/dev/null 2>&1; then
@@ -221,8 +221,8 @@ if adopt_lifecycle verify_adoption_observations \
 fi
 [[ ! -e "$(lifecycle_file_path)" ]] \
   || fail_test "unsupported observed adoption value published lifecycle state"
-eval "$real_observed_limine_setting"
-eval "$real_observed_limine_token"
+eval "$real_limine_managed_setting_state"
+eval "$real_limine_managed_token_state"
 eval "$real_current_omasecboot_executable_path"
 eval "$real_activation_hook_path"
 eval "$real_producer_package_version"

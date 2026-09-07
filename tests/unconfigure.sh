@@ -34,6 +34,12 @@ source "${ROOT_DIR}/lib/windows.sh"
 QUIET=true
 UNCONFIGURE_RECOVERY_FAILPOINT=""
 
+limine_targets_are_unenrolled() {
+  [[ $(read_limine_embedded_checksum "$(limine_primary_binary_path)") == "$LIMINE_ZERO_CHECKSUM" \
+    && $(read_limine_embedded_checksum "$(limine_fallback_binary_path)") == \
+      "$LIMINE_ZERO_CHECKSUM" ]]
+}
+
 unconfigure_recovery_failpoint() {
   [[ "$1" != "$UNCONFIGURE_RECOVERY_FAILPOINT" ]]
 }
@@ -506,7 +512,8 @@ test_recovery_phase_failpoints() (
       printf '%s ' "${phases[$index]}"
     done
   }
-  unconfigure_recovery_inputs_are_current() { return 0; }
+  unconfigure_inputs_are_current() { return 0; }
+  preserve_transaction_files_on_failure() { return 0; }
   transaction_phase_start() { current_phase="$1"; }
   transaction_phase_complete() {
     completed_log+="${1} "

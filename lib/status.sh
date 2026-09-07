@@ -1,21 +1,6 @@
 #!/bin/bash
 # OmaSecBoot: status display and file verification
 
-strip_outer_quotes() {
-  local value="$1"
-  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-    value=${value:1:${#value}-2}
-  fi
-  printf '%s\n' "$value"
-}
-
-limine_default_has_command() {
-  local value
-  load_limine_default_entry "$1" || return 1
-  value=$(strip_outer_quotes "${_limine_default_raw:-}") || return 1
-  [[ " $value " == *" $2 "* ]]
-}
-
 list_limine_unhashed_paths() {
   [[ -f "$LIMINE_CONF" ]] || return 0
 
@@ -169,14 +154,6 @@ list_omarchy_direct_boot_entries() {
   efibootmgr -v 2>/dev/null | grep -Ei '^Boot[0-9A-Fa-f]+\*?[[:space:]]+Omarchy.*\\EFI\\Linux\\omarchy.*\.efi' || true
 }
 
-count_nonempty_lines() {
-  local count=0 line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] || count=$((count + 1))
-  done <<< "$1"
-  printf '%s\n' "$count"
-}
-
 show_status() {
   header "Secure Boot Status"
   local all_ok=true
@@ -226,40 +203,28 @@ show_status() {
 
   # Hook status
   echo
-  if [[ -f /usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook ]]; then
-    pass "00-omasecboot-removal-guard.hook present (dependency removal guard)"
-  else
-    warn "00-omasecboot-removal-guard.hook missing; install the packaged OmaSecBoot release before activation"
+  local hook_entry hook_path hook_label
+  for hook_entry in \
+    "/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook|dependency removal guard" \
+    "/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook|transaction guard" \
+    "/usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook|pre-sbctl lifecycle checkpoint" \
+    "/usr/share/libalpm/hooks/zz-sbctl.hook|re-signing" \
+    "/usr/share/libalpm/hooks/zzz-omasecboot.hook|post-sbctl lifecycle checkpoint" \
+    "/etc/boot/hooks/pre.d/000-omasecboot-guard|Limine pre-mutation guard" \
+    "/etc/boot/hooks/post.d/zzz-omasecboot-sign|Limine post-mutation checkpoint"; do
+    hook_path=${hook_entry%%|*}
+    hook_label=${hook_entry#*|}
+    if [[ -f "$hook_path" && ( "$hook_path" != /etc/boot/* || -x "$hook_path" ) ]]; then
+      pass "${hook_path##*/} present (${hook_label})"
+      continue
+    fi
+    if [[ "$hook_path" == */zz-sbctl.hook ]]; then
+      warn "zz-sbctl.hook missing. Run: ${BOLD}sudo pacman -S sbctl${NC}"
+    else
+      warn "${hook_path##*/} missing; install the packaged OmaSecBoot release before activation"
+    fi
     [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
-
-  if [[ -f /usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook ]]; then
-    pass "00-omasecboot-transition-guard.hook present (transaction guard)"
-  else
-    warn "00-omasecboot-transition-guard.hook missing; install the packaged OmaSecBoot release before activation"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
-
-  if [[ -f /usr/share/libalpm/hooks/zz-omasecboot-cleanup.hook ]]; then
-    pass "zz-omasecboot-cleanup.hook present (pre-sbctl lifecycle checkpoint)"
-  else
-    warn "zz-omasecboot-cleanup.hook missing; install the packaged OmaSecBoot release before activation"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
-
-  if [[ -f /usr/share/libalpm/hooks/zz-sbctl.hook ]]; then
-    pass "zz-sbctl.hook present (re-signing)"
-  else
-    warn "zz-sbctl.hook missing. Run: ${BOLD}sudo pacman -S sbctl${NC}"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
-
-  if [[ -f /usr/share/libalpm/hooks/zzz-omasecboot.hook ]]; then
-    pass "zzz-omasecboot.hook present (post-sbctl lifecycle checkpoint)"
-  else
-    warn "zzz-omasecboot.hook missing; install the packaged OmaSecBoot release before activation"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
+  done
 
   local hook_name shadow_dir
   for hook_name in 00-omasecboot-removal-guard.hook 00-omasecboot-transition-guard.hook \
@@ -273,20 +238,6 @@ show_status() {
   if [[ -e /usr/local/bin/omasecboot || -e /usr/local/lib/omasecboot ]]; then
     fail "Stale source install under /usr/local; remove it and its hooks before activation"
     all_ok=false
-  fi
-
-  if [[ -x /etc/boot/hooks/pre.d/000-omasecboot-guard ]]; then
-    pass "000-omasecboot-guard present (Limine pre-mutation guard)"
-  else
-    warn "000-omasecboot-guard missing; install the packaged OmaSecBoot release before activation"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
-  fi
-
-  if [[ -x /etc/boot/hooks/post.d/zzz-omasecboot-sign ]]; then
-    pass "zzz-omasecboot-sign present (Limine post-mutation checkpoint)"
-  else
-    warn "zzz-omasecboot-sign missing; install the packaged OmaSecBoot release before activation"
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
@@ -330,51 +281,42 @@ show_status() {
 
   echo
   echo -e "  ${BOLD}Limine Config${NC}"
-  if [[ -f /etc/default/limine ]]; then
-    local enable_verification enable_verification_count
-    load_limine_default_entry "ENABLE_VERIFICATION"
-    enable_verification=$(strip_outer_quotes "${_limine_default_raw:-}")
-    enable_verification_count=${_limine_default_count:-0}
-    if [[ "$enable_verification" == "no" ]]; then
+  if [[ -f "$(limine_default_config_path)" ]]; then
+    local enable_verification enable_enroll before_save after_save
+    enable_verification=$(limine_managed_setting_state ENABLE_VERIFICATION 2>/dev/null) \
+      || enable_verification=invalid
+    if [[ "$enable_verification" == no ]]; then
       pass "ENABLE_VERIFICATION=no"
     else
-      fail "ENABLE_VERIFICATION is not set to no"
+      fail "ENABLE_VERIFICATION is not one clean no (${enable_verification})"
       all_ok=false
     fi
-    if [[ $enable_verification_count -gt 1 ]]; then
-      warn "ENABLE_VERIFICATION appears multiple times; sign will collapse it to one effective value"
-    fi
-
-    local enable_enroll enable_enroll_count
-    load_limine_default_entry "ENABLE_ENROLL_LIMINE_CONFIG"
-    enable_enroll=$(strip_outer_quotes "${_limine_default_raw:-}")
-    enable_enroll_count=${_limine_default_count:-0}
-    if [[ "$enable_enroll" == "yes" ]]; then
+    enable_enroll=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG 2>/dev/null) \
+      || enable_enroll=invalid
+    if [[ "$enable_enroll" == yes ]]; then
       pass "ENABLE_ENROLL_LIMINE_CONFIG=yes"
     else
-      fail "ENABLE_ENROLL_LIMINE_CONFIG is missing"
+      fail "ENABLE_ENROLL_LIMINE_CONFIG is not one clean yes (${enable_enroll})"
       all_ok=false
     fi
-    if [[ $enable_enroll_count -gt 1 ]]; then
-      warn "ENABLE_ENROLL_LIMINE_CONFIG appears multiple times; sign will collapse it to one effective value"
-    fi
-
+    before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll \
+      2>/dev/null) || before_save=invalid
+    after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config \
+      2>/dev/null) || after_save=invalid
     if limine_enrollment_hooks_present; then
       pass "Limine enrollment hooks present"
-      if limine_default_has_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll" \
-        || limine_default_has_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"; then
+      if [[ "$before_save" != absent || "$after_save" != absent ]]; then
         warn "deprecated COMMANDS_* enrollment entries remain; run sudo omasecboot sign to remove them safely"
       fi
     else
       warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
-      if limine_default_has_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll"; then
+      if [[ "$before_save" == present ]]; then
         pass "COMMANDS_BEFORE_SAVE includes limine-reset-enroll"
       else
         fail "COMMANDS_BEFORE_SAVE is missing limine-reset-enroll fallback"
         all_ok=false
       fi
-
-      if limine_default_has_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"; then
+      if [[ "$after_save" == present ]]; then
         pass "COMMANDS_AFTER_SAVE includes limine-enroll-config"
       else
         fail "COMMANDS_AFTER_SAVE is missing limine-enroll-config fallback"
@@ -424,7 +366,7 @@ show_status() {
       echo -e "  ${DIM}Limine 12 path-hash enforcement inactive unless config enrollment is active${NC}"
     fi
   else
-    fail "/etc/default/limine not found"
+    fail "$(limine_default_config_path) not found"
     all_ok=false
   fi
 
@@ -461,7 +403,7 @@ show_status() {
   local windows_boot_entries windows_boot_count windows_target windows_target_rc=0
   windows_target=$(find_windows_boot_entry 2>/dev/null) || windows_target_rc=$?
   windows_boot_entries=$(list_windows_firmware_entries)
-  windows_boot_count=$(count_nonempty_lines "$windows_boot_entries")
+  windows_boot_count=$(grep -c . <<< "$windows_boot_entries") || windows_boot_count=0
   if [[ $windows_target_rc -eq 0 && -n "$windows_target" ]]; then
     pass "Unique active Windows firmware handoff target"
   elif [[ $windows_boot_count -gt 0 ]]; then
@@ -539,7 +481,7 @@ show_status() {
     local -a enrolled=()
     local -a discovered
     local -a untracked=()
-    local file is_signed
+    local file
     local enrolled_raw enrolled_rc=0
     local stale_entries stale_rc=0 stale_file stale_output
     declare -A enrolled_map=()
@@ -590,10 +532,7 @@ show_status() {
       done
 
       for file in "${enrolled[@]}"; do
-        # sbctl verify exits 0 regardless of result; parse JSON for actual status
-        is_signed=$(sbctl verify --json "$file" 2>/dev/null \
-          | jq -r '.[0].is_signed // empty') || true
-        if [[ "$is_signed" == "1" ]]; then
+        if sbctl_file_signature_state "$file"; then
           echo -e "    ${GREEN}✓${NC} $file"
         else
           echo -e "    ${RED}✗${NC} $file"

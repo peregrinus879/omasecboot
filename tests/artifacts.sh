@@ -454,6 +454,27 @@ test_mapping_validation() {
   fi
 }
 
+test_managed_setting_drift_repair() {
+  local obligations
+  obligations=$(jq -cn --arg path "$SNAPSHOT" \
+    '{kind: "snapshot-manifest", paths: [$path]}')
+  # A value that drifted back to its recorded original is repaired, not refused.
+  set_limine_default_value ENABLE_VERIFICATION yes || fail_test "drift fixture failed"
+  run_artifact_repair "artifact-drift-original" "$obligations" \
+    || fail_test "repair refused a managed setting that drifted to its recorded original"
+  [[ $(grep -Fxc 'ENABLE_VERIFICATION=no' "$(limine_default_config_path)") -eq 1 ]] \
+    || fail_test "drift repair did not re-apply the managed value"
+  # A value outside {managed, original} is a conflict and is refused.
+  replace_limine_default_entry ENABLE_VERIFICATION 'ENABLE_VERIFICATION=maybe' \
+    || fail_test "conflict fixture failed"
+  if run_artifact_repair "artifact-drift-conflict" "$obligations" >/dev/null 2>&1; then
+    fail_test "repair accepted a managed setting outside its recorded values"
+  fi
+  set_limine_default_value ENABLE_VERIFICATION no || fail_test "conflict cleanup failed"
+  read_lifecycle || fail_test "drift repair damaged lifecycle readability"
+  [[ "$_lifecycle_state" == active ]] || fail_test "drift conflict left lifecycle ${_lifecycle_state}"
+}
+
 test_staged_limine_install() {
   local checksum database_hash
   checksum=$(current_limine_config_checksum) || fail_test "staging checksum failed"
@@ -472,8 +493,7 @@ test_staged_limine_install() {
 }
 
 test_successful_repair() {
-  local checksum manifest last_enroll first_sign artifact proof legacy obligations
-  local original transaction_id legacy_reference root_manifest recovery_manifest
+  local checksum manifest last_enroll first_sign artifact proof obligations
   obligations=$(jq -cn --arg path "$SNAPSHOT" \
     '{kind: "snapshot-manifest", paths: [$path]}')
   run_artifact_repair "artifact-success" "$obligations" \
@@ -532,51 +552,6 @@ test_successful_repair() {
     .obligations == {kind: "snapshot-manifest", paths: [$path]} and
     any(.artifacts[]; .path == $path)
   ' "$proof" >/dev/null || fail_test "final proof omitted producer obligations"
-  legacy=$(jq ".schema_version = ${LEGACY_FINAL_PROOF_SCHEMA_VERSION} | del(.obligations)" \
-    "$proof")
-  transaction_id=$(jq -r '.transaction_id' "$proof")
-  validate_final_proof_json "$transaction_id" "$legacy" \
-    || fail_test "historical schema-1 final proof became unreadable"
-  original=$(< "$proof")
-  printf '%s\n' "$legacy" | atomic_write_control_file "$proof" 600
-  legacy_reference=$(transaction_artifact_reference "$proof" \
-    "$LEGACY_FINAL_PROOF_SCHEMA_VERSION")
-  root_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
-    kind: "root",
-    operation: "artifact-success",
-    status: "completed",
-    domain_records: {
-      bootnext: null,
-      final_proof: $proof,
-      firmware: null,
-      managed_settings: null,
-      producer: null,
-      tracking_ownership: null,
-      unconfigure: null,
-      windows: null
-    }
-  }')
-  validate_transaction_domain_records "$transaction_id" "$root_manifest" \
-    || fail_test "historical schema-1 root final proof became unreadable"
-  recovery_manifest=$(jq -cn --argjson proof "$legacy_reference" '{
-    kind: "recovery-attempt",
-    operation: "producer-recovery",
-    status: "transition",
-    domain_records: {
-      bootnext: null,
-      final_proof: $proof,
-      firmware: null,
-      managed_settings: null,
-      producer: null,
-      tracking_ownership: null,
-      unconfigure: null,
-      windows: null
-    }
-  }')
-  if validate_transaction_domain_records "$transaction_id" "$recovery_manifest"; then
-    fail_test "producer recovery accepted a schema-1 final proof"
-  fi
-  printf '%s\n' "$original" | atomic_write_control_file "$proof" 600
   if validate_efi_obligations_json \
     '{"kind":"uki-inventory","paths":["/boot/EFI/Linux/A.efi","/boot/EFI/Linux/a.efi"]}'; then
     fail_test "case-insensitive duplicate EFI obligations were accepted"

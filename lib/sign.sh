@@ -4,6 +4,18 @@
 
 readonly LIMINE_DEFAULT_CONF="/etc/default/limine"
 readonly LIMINE_CONFIG_MARKER='++CONFIG_B2SUM_SIGNATURE++'
+LIMINE_ZERO_CHECKSUM=$(printf '0%.0s' {1..128})
+readonly LIMINE_ZERO_CHECKSUM
+_limine_settings_changed=false
+
+# Runs a command, discarding its standard output in quiet mode.
+run_visible() {
+  if [[ "$QUIET" == true ]]; then
+    "$@" >/dev/null
+  else
+    "$@"
+  fi
+}
 
 limine_default_config_path() {
   printf '%s\n' "$LIMINE_DEFAULT_CONF"
@@ -205,6 +217,22 @@ limine_enrollment_hooks_present() {
     && -x /etc/boot/hooks/post.d/90-limine-enroll-config ]]
 }
 
+# Applies one settings mutation that returns 0 when it changed the file, 1 when
+# the file was already correct, and 2 on failure.
+apply_limine_setting() {
+  local message="$1" rc=0
+  shift
+  "$@" || rc=$?
+  case "$rc" in
+    0) _limine_settings_changed=true ;;
+    1) ;;
+    *)
+      fail "$message"
+      return 1
+      ;;
+  esac
+}
+
 # Ensure Limine is configured for Omarchy's current Secure Boot model:
 # signed EFI binaries, enrolled limine.conf checksum, and disabled Limine
 # path-hash generation. Limine >= 12 may still enforce path hashes
@@ -216,97 +244,30 @@ ensure_limine_secure_boot_settings() {
     fail "${config} not found"
     return 1
   }
-
-  local changed=1
-  local rc
-
   transaction_backup_file "$config" || {
     fail "Could not record ${config} before repair"
     return 1
   }
-
-  set_limine_default_value "ENABLE_VERIFICATION" "no"
-  rc=$?
-  if [[ $rc -eq 0 ]]; then
-    changed=0
-  elif [[ $rc -ne 1 ]]; then
-    fail "Could not update ENABLE_VERIFICATION in ${config}"
-    return 1
-  fi
-
-  set_limine_default_value "ENABLE_ENROLL_LIMINE_CONFIG" "yes"
-  rc=$?
-  if [[ $rc -eq 0 ]]; then
-    changed=0
-  elif [[ $rc -ne 1 ]]; then
-    fail "Could not update ENABLE_ENROLL_LIMINE_CONFIG in ${config}"
-    return 1
-  fi
-
+  _limine_settings_changed=false
+  apply_limine_setting "Could not update ENABLE_VERIFICATION in ${config}" \
+    set_limine_default_value ENABLE_VERIFICATION no || return 1
+  apply_limine_setting "Could not update ENABLE_ENROLL_LIMINE_CONFIG in ${config}" \
+    set_limine_default_value ENABLE_ENROLL_LIMINE_CONFIG yes || return 1
   if limine_enrollment_hooks_present; then
-    remove_limine_default_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      fail "Could not remove deprecated COMMANDS_BEFORE_SAVE entry in ${config}"
-      return 1
-    fi
-
-    remove_limine_default_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      fail "Could not remove deprecated COMMANDS_AFTER_SAVE entry in ${config}"
-      return 1
-    fi
+    apply_limine_setting "Could not remove deprecated COMMANDS_BEFORE_SAVE entry in ${config}" \
+      remove_limine_default_command COMMANDS_BEFORE_SAVE limine-reset-enroll || return 1
+    apply_limine_setting "Could not remove deprecated COMMANDS_AFTER_SAVE entry in ${config}" \
+      remove_limine_default_command COMMANDS_AFTER_SAVE limine-enroll-config || return 1
   else
-    ensure_limine_default_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      fail "Could not update COMMANDS_BEFORE_SAVE in ${config}"
-      return 1
-    fi
-
-    ensure_limine_default_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      fail "Could not update COMMANDS_AFTER_SAVE in ${config}"
-      return 1
-    fi
+    apply_limine_setting "Could not update COMMANDS_BEFORE_SAVE in ${config}" \
+      ensure_limine_default_command COMMANDS_BEFORE_SAVE limine-reset-enroll || return 1
+    apply_limine_setting "Could not update COMMANDS_AFTER_SAVE in ${config}" \
+      ensure_limine_default_command COMMANDS_AFTER_SAVE limine-enroll-config || return 1
   fi
-
-  if [[ $changed -eq 0 ]]; then
+  if [[ "$_limine_settings_changed" == true ]]; then
     qact "Updated Limine Secure Boot settings"
-    return 0
-  fi
-
-  qpass "Limine Secure Boot settings already configured"
-  return 0
-}
-
-# Regenerate Limine entries during setup or explicit rebuild flows.
-refresh_limine_config() {
-  command -v limine-update >/dev/null 2>&1 || return 1
-  qact "Regenerating Limine boot entries"
-  if [[ "$QUIET" == true ]]; then
-    limine-update >/dev/null || return 1
   else
-    limine-update || return 1
-  fi
-
-  if command -v limine-snapper-sync >/dev/null 2>&1; then
-    qact "Refreshing Limine snapshot entries"
-    if [[ "$QUIET" == true ]]; then
-      limine-snapper-sync >/dev/null || return 1
-    else
-      limine-snapper-sync || return 1
-    fi
+    qpass "Limine Secure Boot settings already configured"
   fi
 }
 
@@ -377,24 +338,10 @@ install_enrolled_limine_binary() {
   fi
 
   qact "Enrolling Limine config checksum in ${target#"$(esp_path)"/}"
-  if [[ "$QUIET" == true ]]; then
-    limine enroll-config --quiet "$temporary" "$checksum" >/dev/null || {
-      rm -f "$temporary"
-      return 1
-    }
-    sbctl sign "$temporary" >/dev/null || {
-      rm -f "$temporary"
-      return 1
-    }
-  else
-    limine enroll-config "$temporary" "$checksum" || {
-      rm -f "$temporary"
-      return 1
-    }
-    sbctl sign "$temporary" || {
-      rm -f "$temporary"
-      return 1
-    }
+  if ! run_visible limine enroll-config "$temporary" "$checksum" \
+    || ! run_visible sbctl sign "$temporary"; then
+    rm -f "$temporary"
+    return 1
   fi
   durable_sync "$temporary" || {
     rm -f "$temporary"
@@ -761,6 +708,23 @@ limine_managed_token_state() {
   fi
 }
 
+# Current state of one managed setting: yes, no, or unset for a value key,
+# present or absent for a command token.
+limine_managed_setting_current() {
+  local key="$1" token="${2:-}"
+  if [[ -n "$token" ]]; then
+    limine_managed_token_state "$key" "$token"
+  else
+    limine_managed_setting_state "$key"
+  fi
+}
+
+# Emits a settings record as "key managed original token" rows; the token
+# column is last because it may be empty.
+managed_settings_rows() {
+  jq -r '.[] | [.key, .managed, .original, (.token // "")] | @tsv' <<< "$1"
+}
+
 current_limine_managed_settings_record() {
   local verification enrollment before_save after_save
   local managed_before=present managed_after=present
@@ -799,21 +763,6 @@ current_limine_managed_settings_record() {
         original: $after_save
       }
     ]'
-}
-
-current_limine_settings_match_record() {
-  local settings="$1" setting key token expected current
-  while IFS= read -r setting; do
-    key=$(jq -r '.key' <<< "$setting") || return 1
-    expected=$(jq -r '.managed' <<< "$setting") || return 1
-    token=$(jq -r '.token // ""' <<< "$setting") || return 1
-    if [[ -n "$token" ]]; then
-      current=$(limine_managed_token_state "$key" "$token") || return 1
-    else
-      current=$(limine_managed_setting_state "$key") || return 1
-    fi
-    [[ "$current" == "$expected" ]] || return 1
-  done < <(jq -c '.[]' <<< "$settings")
 }
 
 load_latest_recovery_ownership_records() {
@@ -879,7 +828,7 @@ prepare_artifact_ownership() {
     [[ "$managed_reference" != null && "$tracking_reference" != null ]] || return 1
     [[ "$previous_ownership" == true ]] || load_lifecycle_ownership_records || return 1
     settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
-    current_limine_settings_match_record "$settings" || {
+    limine_managed_settings_are_repairable "$settings" || {
       fail "Managed Limine settings conflict with recorded OmaSecBoot ownership"
       return 1
     }
@@ -934,143 +883,109 @@ managed_settings_have_known_originals() {
     <<< "$settings" >/dev/null
 }
 
+# Every setting is either at its managed value or at its known original.
 limine_managed_settings_are_restorable() {
-  local settings="$1" setting key token managed original current
-  managed_settings_have_known_originals "$settings" || return 1
-  while IFS= read -r setting; do
-    key=$(jq -r '.key' <<< "$setting") || return 1
-    token=$(jq -r '.token // ""' <<< "$setting") || return 1
-    managed=$(jq -r '.managed' <<< "$setting") || return 1
-    original=$(jq -r '.original' <<< "$setting") || return 1
-    if [[ -n "$token" ]]; then
-      current=$(limine_managed_token_state "$key" "$token") || return 1
-    else
-      current=$(limine_managed_setting_state "$key") || return 1
-    fi
+  local key managed original token current
+  managed_settings_have_known_originals "$1" || return 1
+  while IFS=$'\t' read -r key managed original token; do
+    current=$(limine_managed_setting_current "$key" "$token") || return 1
     [[ "$current" == "$managed" || "$current" == "$original" ]] || return 1
-  done < <(jq -c '.[]' <<< "$settings")
+  done < <(managed_settings_rows "$1")
+}
+
+# Every setting is at its managed value or, when the original is known, at
+# that original; repair may then re-apply the managed value.
+limine_managed_settings_are_repairable() {
+  local key managed original token current
+  while IFS=$'\t' read -r key managed original token; do
+    current=$(limine_managed_setting_current "$key" "$token") || return 1
+    [[ "$current" == "$managed" \
+      || ( "$original" != unknown && "$current" == "$original" ) ]] || return 1
+  done < <(managed_settings_rows "$1")
 }
 
 restore_limine_managed_settings() {
-  local settings="$1" setting key token managed original current rc
+  local settings="$1" key managed original token current rc
   limine_managed_settings_are_restorable "$settings" || return 1
-  while IFS= read -r setting; do
-    key=$(jq -r '.key' <<< "$setting") || return 1
-    token=$(jq -r '.token // ""' <<< "$setting") || return 1
-    managed=$(jq -r '.managed' <<< "$setting") || return 1
-    original=$(jq -r '.original' <<< "$setting") || return 1
-    if [[ -n "$token" ]]; then
-      current=$(limine_managed_token_state "$key" "$token") || return 1
-      [[ "$current" == "$original" ]] && continue
-      [[ "$current" == "$managed" ]] || return 1
-      rc=0
-      if [[ "$original" == present ]]; then
-        ensure_limine_default_command "$key" "$token" || rc=$?
-      else
-        remove_limine_default_command "$key" "$token" || rc=$?
-      fi
+  while IFS=$'\t' read -r key managed original token; do
+    current=$(limine_managed_setting_current "$key" "$token") || return 1
+    [[ "$current" == "$original" ]] && continue
+    [[ "$current" == "$managed" ]] || return 1
+    rc=0
+    if [[ -n "$token" && "$original" == present ]]; then
+      ensure_limine_default_command "$key" "$token" || rc=$?
+    elif [[ -n "$token" ]]; then
+      remove_limine_default_command "$key" "$token" || rc=$?
+    elif [[ "$original" == unset ]]; then
+      replace_limine_default_entry "$key" || rc=$?
     else
-      current=$(limine_managed_setting_state "$key") || return 1
-      [[ "$current" == "$original" ]] && continue
-      [[ "$current" == "$managed" ]] || return 1
-      rc=0
-      if [[ "$original" == unset ]]; then
-        replace_limine_default_entry "$key" || rc=$?
-      else
-        set_limine_default_value "$key" "$original" || rc=$?
-      fi
+      set_limine_default_value "$key" "$original" || rc=$?
     fi
     [[ $rc -eq 0 || $rc -eq 1 ]] || return 1
-  done < <(jq -c '.[]' <<< "$settings")
+  done < <(managed_settings_rows "$settings")
   limine_managed_settings_are_original "$settings"
 }
 
 limine_managed_settings_are_original() {
-  local settings="$1" setting key token original current
-  managed_settings_have_known_originals "$settings" || return 1
-  while IFS= read -r setting; do
-    key=$(jq -r '.key' <<< "$setting") || return 1
-    token=$(jq -r '.token // ""' <<< "$setting") || return 1
-    original=$(jq -r '.original' <<< "$setting") || return 1
-    if [[ -n "$token" ]]; then
-      current=$(limine_managed_token_state "$key" "$token") || return 1
-    else
-      current=$(limine_managed_setting_state "$key") || return 1
-    fi
+  local key managed original token current
+  managed_settings_have_known_originals "$1" || return 1
+  while IFS=$'\t' read -r key managed original token; do
+    current=$(limine_managed_setting_current "$key" "$token") || return 1
     [[ "$current" == "$original" ]] || return 1
-  done < <(jq -c '.[]' <<< "$settings")
+  done < <(managed_settings_rows "$1")
 }
 
-owned_tracking_state_is_safe() {
-  local paths="$1" rows path file output count
+# Tracked entries as a JSON array of {file, output}, read once.
+tracked_entries_json() {
+  local rows
   rows=$(list_enrolled_entries_for_cleanup) || return 1
-  while IFS= read -r path; do
-    count=0
-    while IFS=$'\t' read -r file output; do
-      [[ -n "$file" ]] || continue
-      output=${output:-$file}
-      if [[ "$file" == "$path" || "$output" == "$path" ]]; then
-        [[ "$file" == "$path" && "$output" == "$path" ]] || return 1
-        count=$((count + 1))
-      fi
-    done <<< "$rows"
-    (( count <= 1 )) || return 1
-  done < <(jq -r '.[]' <<< "$paths")
+  jq -Rsc '
+    split("\n") | map(select(length > 0) | split("\t") |
+      {file: .[0], output: (if (.[1] // "") == "" then .[0] else .[1] end)})
+  ' <<< "$rows"
+}
+
+# Each owned path is tracked at most once, and only as its own output.
+owned_tracking_state_is_safe() {
+  local entries
+  entries=$(tracked_entries_json) || return 1
+  jq -en --argjson paths "$1" --argjson entries "$entries" '
+    all($paths[]; . as $path |
+      [$entries[] | select(.file == $path or .output == $path)] |
+      length <= 1 and all(.[]; .file == $path and .output == $path))
+  ' >/dev/null
 }
 
 owned_tracking_is_absent() {
-  local paths="$1" rows path file output
-  rows=$(list_enrolled_entries_for_cleanup) || return 1
-  while IFS= read -r path; do
-    while IFS=$'\t' read -r file output; do
-      [[ -n "$file" ]] || continue
-      output=${output:-$file}
-      [[ "$file" != "$path" && "$output" != "$path" ]] || return 1
-    done <<< "$rows"
-  done < <(jq -r '.[]' <<< "$paths")
+  local entries
+  entries=$(tracked_entries_json) || return 1
+  jq -en --argjson paths "$1" --argjson entries "$entries" '
+    all($paths[]; . as $path | all($entries[]; .file != $path and .output != $path))
+  ' >/dev/null
 }
 
 remove_owned_tracking_entries() {
-  local paths="$1" rows path file output present
+  local paths="$1" entries path files_db
   owned_tracking_state_is_safe "$paths" || return 1
-  rows=$(list_enrolled_entries_for_cleanup) || return 1
+  entries=$(tracked_entries_json) || return 1
   while IFS= read -r path; do
-    present=false
-    while IFS=$'\t' read -r file output; do
-      [[ -n "$file" ]] || continue
-      output=${output:-$file}
-      [[ "$file" == "$path" && "$output" == "$path" ]] && present=true
-    done <<< "$rows"
-    [[ "$present" == false ]] || sbctl remove-file "$path" >/dev/null || return 1
-  done < <(jq -r '.[]' <<< "$paths")
-  local files_db
+    [[ -n "$path" ]] || continue
+    sbctl remove-file "$path" >/dev/null || return 1
+  done < <(jq -r --argjson entries "$entries" \
+    '.[] | select(. as $path | any($entries[]; .file == $path and .output == $path))' \
+    <<< "$paths")
   files_db=$(resolve_sbctl_files_db_path) || return 1
   [[ ! -f "$files_db" ]] || durable_sync "$files_db" || return 1
   owned_tracking_is_absent "$paths"
 }
 
-limine_targets_are_unenrolled() {
-  local reset_checksum primary fallback
-  reset_checksum=$(printf '0%.0s' {1..128})
-  primary=$(read_limine_embedded_checksum "$(limine_primary_binary_path)") || return 1
-  fallback=$(read_limine_embedded_checksum "$(limine_fallback_binary_path)") || return 1
-  [[ "$primary" == "$reset_checksum" && "$fallback" == "$reset_checksum" ]]
-}
-
 capture_unconfigure_limine_source() {
-  local source checksum identity current_identity hash current_hash zero_checksum
+  local source
   source=$(limine_unsigned_binary_path) || return 1
   validate_control_file "$source" || return 1
-  zero_checksum=$(printf '0%.0s' {1..128})
-  checksum=$(read_limine_embedded_checksum "$source") || return 1
-  [[ "$checksum" == "$zero_checksum" ]] || return 1
-  identity=$(control_file_identity "$source") || return 1
-  hash=$(sha256_file "$source") || return 1
-  current_identity=$(control_file_identity "$source") || return 1
-  current_hash=$(sha256_file "$source") || return 1
-  [[ "$current_identity" == "$identity" && "$current_hash" == "$hash" ]] || return 1
-  _unconfigure_limine_source_identity="$identity"
-  _unconfigure_limine_source_hash="$hash"
+  [[ $(read_limine_embedded_checksum "$source") == "$LIMINE_ZERO_CHECKSUM" ]] || return 1
+  _unconfigure_limine_source_identity=$(control_file_identity "$source") || return 1
+  _unconfigure_limine_source_hash=$(sha256_file "$source") || return 1
 }
 
 unconfigure_limine_source_is_unchanged() {
@@ -1082,70 +997,70 @@ unconfigure_limine_source_is_unchanged() {
 }
 
 unconfigured_limine_targets_match_source() {
-  local target checksum identity current_identity hash current_hash zero_checksum
+  local target hash
   unconfigure_limine_source_is_unchanged || return 1
-  zero_checksum=$(printf '0%.0s' {1..128})
   for target in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
     validate_control_file "$target" || return 1
-    checksum=$(read_limine_embedded_checksum "$target") || return 1
-    identity=$(control_file_identity "$target") || return 1
+    [[ $(read_limine_embedded_checksum "$target") == "$LIMINE_ZERO_CHECKSUM" ]] || return 1
     hash=$(sha256_file "$target") || return 1
-    current_identity=$(control_file_identity "$target") || return 1
-    current_hash=$(sha256_file "$target") || return 1
-    [[ "$checksum" == "$zero_checksum" && "$identity" == "$current_identity" \
-      && "$hash" == "$current_hash" && "$hash" == "$_unconfigure_limine_source_hash" ]] \
-      || return 1
+    [[ "$hash" == "$_unconfigure_limine_source_hash" ]] || return 1
     if [[ "$target" == "$(limine_primary_binary_path)" ]]; then
       _unconfigure_primary_hash="$hash"
     else
       _unconfigure_fallback_hash="$hash"
     fi
   done
-  unconfigure_limine_source_is_unchanged
 }
 
 unconfigure_windows_state_identity() {
-  local path identity current_identity hash
+  local path
   path=$(windows_target_state_path) || return 1
   if [[ -e "$path" || -L "$path" ]]; then
     validate_control_file "$path" || return 1
-    identity=$(control_file_identity "$path") || return 1
-    hash=$(sha256_file "$path") || return 1
-    current_identity=$(control_file_identity "$path") || return 1
-    [[ "$current_identity" == "$identity" ]] || return 1
-    printf 'present:%s:%s\n' "$identity" "$hash"
+    printf 'present:%s:%s\n' "$(control_file_identity "$path")" "$(sha256_file "$path")"
   else
     printf 'absent\n'
   fi
 }
 
-unconfigure_validate_all_conflicts() {
-  local settings paths managed_reference tracking_reference current_obligations
-  load_lifecycle_ownership_records || return 1
-  settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
-  paths=$(jq -c '.paths' <<< "$_tracking_ownership_record_json") || return 1
-  managed_reference=$(jq -c '.managed_settings' <<< "$_lifecycle_json") || return 1
-  tracking_reference=$(jq -c '.tracking_ownership' <<< "$_lifecycle_json") || return 1
-  [[ "$(jq -Sc . <<< "$settings")" == \
-      "$(jq -Sc . <<< "$_unconfigure_managed_settings_json")" \
-    && "$(jq -Sc . <<< "$paths")" == \
-      "$(jq -Sc . <<< "$_unconfigure_tracking_paths_json")" \
-    && "$(jq -Sc . <<< "$managed_reference")" == \
-      "$(jq -Sc . <<< "$_unconfigure_managed_reference_json")" \
-    && "$(jq -Sc . <<< "$tracking_reference")" == \
-      "$(jq -Sc . <<< "$_unconfigure_tracking_reference_json")" ]] || return 1
+# Everything an unconfiguration mutates must still match what its intent
+# captured. Shared by the root transaction and by recovery.
+unconfigure_inputs_are_current() {
+  local current_obligations
+  unconfigure_limine_tools_match_intent || return 1
+  artifact_esp_is_mounted || return 1
+  validate_control_file "$(limine_default_config_path)" || return 1
+  validate_control_file "$(limine_config_path)" || return 1
+  unconfigure_limine_source_is_unchanged || return 1
   read_current_firmware_modes || return 1
   [[ "$_secure_boot_mode" == 0 ]] || return 1
-  limine_managed_settings_are_restorable "$settings" || return 1
-  owned_tracking_state_is_safe "$paths" || return 1
+  limine_managed_settings_are_restorable "$_unconfigure_managed_settings_json" || return 1
+  owned_tracking_state_is_safe "$_unconfigure_tracking_paths_json" || return 1
   windows_unconfigure_preflight || return 1
   [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
     || return 1
-  unconfigure_limine_source_is_unchanged || return 1
   current_obligations=$(derive_uki_inventory_obligations) || return 1
   validate_efi_obligations_json "$current_obligations" || return 1
   [[ "$(jq -Sc . <<< "$current_obligations")" == \
     "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]]
+}
+
+# The root transaction also requires the lifecycle's ownership records to be
+# exactly the ones the preflight captured.
+unconfigure_validate_all_conflicts() {
+  load_lifecycle_ownership_records || return 1
+  jq -en --argjson settings "$(jq -c '.settings' <<< "$_managed_settings_record_json")" \
+    --argjson paths "$(jq -c '.paths' <<< "$_tracking_ownership_record_json")" \
+    --argjson lifecycle "$_lifecycle_json" \
+    --argjson expected_settings "$_unconfigure_managed_settings_json" \
+    --argjson expected_paths "$_unconfigure_tracking_paths_json" \
+    --argjson expected_managed "$_unconfigure_managed_reference_json" \
+    --argjson expected_tracking "$_unconfigure_tracking_reference_json" '
+      $settings == $expected_settings and $paths == $expected_paths and
+      $lifecycle.managed_settings == $expected_managed and
+      $lifecycle.tracking_ownership == $expected_tracking
+    ' >/dev/null || return 1
+  unconfigure_inputs_are_current
 }
 
 unconfigure_limine_tools_are_pinned() {
@@ -1160,40 +1075,31 @@ unconfigure_limine_tools_are_pinned() {
   done
 }
 
+# Path, device/inode identity, and hash of one pinned tool; the identity is
+# read again after hashing so a replacement during the read is rejected.
+pinned_tool_evidence_json() {
+  local path="$1" identity hash
+  identity=$(control_file_identity "$path") || return 1
+  hash=$(sha256_file "$path") || return 1
+  [[ $(control_file_identity "$path") == "$identity" ]] || return 1
+  jq -cn --arg path "$path" --arg identity "$identity" --arg hash "$hash" \
+    '{path: $path, identity: $identity, sha256: $hash}'
+}
+
 capture_unconfigure_limine_tools() {
-  local version install mkinitcpio reset
-  local install_identity install_hash mkinitcpio_identity mkinitcpio_hash
-  local reset_identity reset_hash
+  local version entry key evidence document
   unconfigure_limine_tools_are_pinned || return 1
   version=$(producer_package_version limine-mkinitcpio-hook) || return 1
-  install=$(limine_install_path) || return 1
-  mkinitcpio=$(limine_mkinitcpio_path) || return 1
-  reset=$(limine_reset_enroll_path) || return 1
-  install_identity=$(control_file_identity "$install") || return 1
-  install_hash=$(sha256_file "$install") || return 1
-  [[ $(control_file_identity "$install") == "$install_identity" ]] || return 1
-  mkinitcpio_identity=$(control_file_identity "$mkinitcpio") || return 1
-  mkinitcpio_hash=$(sha256_file "$mkinitcpio") || return 1
-  [[ $(control_file_identity "$mkinitcpio") == "$mkinitcpio_identity" ]] || return 1
-  reset_identity=$(control_file_identity "$reset") || return 1
-  reset_hash=$(sha256_file "$reset") || return 1
-  [[ $(control_file_identity "$reset") == "$reset_identity" ]] || return 1
-  jq -cn --arg version "$version" \
-    --arg install "$install" --arg install_identity "$install_identity" \
-    --arg install_hash "$install_hash" --arg mkinitcpio "$mkinitcpio" \
-    --arg mkinitcpio_identity "$mkinitcpio_identity" \
-    --arg mkinitcpio_hash "$mkinitcpio_hash" --arg reset "$reset" \
-    --arg reset_identity "$reset_identity" --arg reset_hash "$reset_hash" '{
-      package: "limine-mkinitcpio-hook",
-      version: $version,
-      install: {path: $install, identity: $install_identity, sha256: $install_hash},
-      mkinitcpio: {
-        path: $mkinitcpio,
-        identity: $mkinitcpio_identity,
-        sha256: $mkinitcpio_hash
-      },
-      reset: {path: $reset, identity: $reset_identity, sha256: $reset_hash}
-    }'
+  document=$(jq -cn --arg version "$version" \
+    '{package: "limine-mkinitcpio-hook", version: $version}') || return 1
+  for entry in install:limine_install_path mkinitcpio:limine_mkinitcpio_path \
+    reset:limine_reset_enroll_path; do
+    key=${entry%%:*}
+    evidence=$(pinned_tool_evidence_json "$("${entry#*:}")") || return 1
+    document=$(jq -c --arg key "$key" --argjson evidence "$evidence" \
+      '.[$key] = $evidence' <<< "$document") || return 1
+  done
+  printf '%s\n' "$document"
 }
 
 unconfigure_limine_tools_match_intent() {
@@ -1274,17 +1180,51 @@ unconfigure_preflight() {
   }
 }
 
-persist_unconfigure_intent() {
-  local transaction_dir path timestamp source document existing reference current_reference
+# Publishes a transaction-local domain record create-once, accepts an existing
+# record that equals the candidate apart from ignore_key, and binds its
+# reference into the manifest exactly once. The validator receives the
+# transaction id, the document, and the current manifest.
+persist_transaction_domain_record() {
+  local name="$1" schema="$2" validator="$3" ignore_key="$4" document="$5"
+  local filename transaction_dir path existing reference current_reference
+  case "$name" in
+    unconfigure) filename=unconfigure-intent.json ;;
+    final_proof) filename=final-proof.json ;;
+    *) return 1 ;;
+  esac
   transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/unconfigure-intent.json"
-  timestamp=$(utc_timestamp) || return 1
-  source=$(limine_unsigned_binary_path) || return 1
+  path="${transaction_dir}/${filename}"
+  read_transaction_manifest "$_transaction_id" || return 1
+  "$validator" "$_transaction_id" "$document" "$_manifest_json" || return 1
+  if [[ -e "$path" || -L "$path" ]]; then
+    existing=$(read_control_document "$path") || return 1
+    "$validator" "$_transaction_id" "$existing" "$_manifest_json" || return 1
+    jq -en --argjson existing "$existing" --argjson candidate "$document" \
+      --arg key "$ignore_key" \
+      '($existing | del(.[$key])) == ($candidate | del(.[$key]))' >/dev/null || return 1
+  else
+    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
+  fi
+  reference=$(transaction_artifact_reference "$path" "$schema") || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  current_reference=$(jq -c --arg name "$name" '.domain_records[$name]' \
+    <<< "$_manifest_json") || return 1
+  if [[ "$current_reference" == null ]]; then
+    transaction_set_domain_record "$name" "$reference" || return 1
+  else
+    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]] \
+      || return 1
+  fi
+  _persisted_record_reference="$reference"
+}
+
+persist_unconfigure_intent() {
+  local document
   unconfigure_validate_all_conflicts || return 1
   document=$(jq -cn \
     --argjson schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
     --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
-    --arg timestamp "$timestamp" --arg source "$source" \
+    --arg timestamp "$(utc_timestamp)" --arg source "$(limine_unsigned_binary_path)" \
     --arg source_identity "$_unconfigure_limine_source_identity" \
     --arg source_hash "$_unconfigure_limine_source_hash" \
     --arg windows_identity "$_unconfigure_windows_identity" \
@@ -1300,54 +1240,21 @@ persist_unconfigure_intent() {
       managed_settings: $managed,
       tracking_ownership: $tracking,
       windows_state_identity: $windows_identity,
-      limine_source: {
-        path: $source,
-        identity: $source_identity,
-        sha256: $source_hash
-      },
+      limine_source: {path: $source, identity: $source_identity, sha256: $source_hash},
       limine_tools: $tools,
       rebuild_obligations: $obligations
     }') || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  validate_unconfigure_intent_json "$_transaction_id" "$document" "$_manifest_json" \
-    || return 1
-  if [[ -e "$path" || -L "$path" ]]; then
-    existing=$(read_control_document "$path") || return 1
-    validate_unconfigure_intent_json "$_transaction_id" "$existing" "$_manifest_json" \
-      || return 1
-    jq -en --argjson existing "$existing" --argjson candidate "$document" '
-      ($existing | del(.recorded_at)) == ($candidate | del(.recorded_at))
-    ' >/dev/null || return 1
-  else
-    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  fi
-  unconfigure_validate_all_conflicts || return 1
-  reference=$(transaction_artifact_reference "$path" "$UNCONFIGURE_INTENT_SCHEMA_VERSION") \
-    || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c '.domain_records.unconfigure' <<< "$_manifest_json") || return 1
-  if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record unconfigure "$reference" || return 1
-  else
-    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]] \
-      || return 1
-  fi
-  _unconfigure_intent_reference_json="$reference"
+  persist_transaction_domain_record unconfigure "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+    validate_unconfigure_intent_json recorded_at "$document" || return 1
+  _unconfigure_intent_reference_json="$_persisted_record_reference"
 }
 
 run_checked_stock_limine_rebuild() {
   local final_obligations
-  if [[ "$QUIET" == true ]]; then
-    run_bound_unconfigure_limine_tool install true \
-      --no-efi-register --fallback >/dev/null || return 1
-    run_bound_unconfigure_limine_tool mkinitcpio true >/dev/null || return 1
-    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
-  else
-    run_bound_unconfigure_limine_tool install true \
-      --no-efi-register --fallback || return 1
-    run_bound_unconfigure_limine_tool mkinitcpio true || return 1
-    run_bound_unconfigure_limine_tool reset false || return 1
-  fi
+  run_visible run_bound_unconfigure_limine_tool install true \
+    --no-efi-register --fallback || return 1
+  run_visible run_bound_unconfigure_limine_tool mkinitcpio true || return 1
+  run_visible run_bound_unconfigure_limine_tool reset false || return 1
   durable_sync "$(esp_path)" || return 1
   final_obligations=$(derive_uki_inventory_obligations) || return 1
   [[ "$(jq -Sc . <<< "$final_obligations")" == \
@@ -1357,41 +1264,26 @@ run_checked_stock_limine_rebuild() {
 }
 
 persist_unconfigure_proof() {
-  local transaction_dir path timestamp document existing reference current_reference
-  local primary fallback primary_hash fallback_hash zero_checksum
-  local source source_hash root_incident operation current_obligations
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/final-proof.json"
-  timestamp=$(utc_timestamp) || return 1
-  primary=$(limine_primary_binary_path) || return 1
-  fallback=$(limine_fallback_binary_path) || return 1
-  source=$(limine_unsigned_binary_path) || return 1
-  unconfigured_limine_targets_match_source || return 1
-  primary_hash="$_unconfigure_primary_hash"
-  fallback_hash="$_unconfigure_fallback_hash"
-  source_hash="$_unconfigure_limine_source_hash"
-  operation="$_transaction_operation"
+  local document root_incident current_obligations operation="$_transaction_operation"
   [[ "$operation" == unconfigure || "$operation" == unconfigure-recovery ]] || return 1
+  unconfigured_limine_targets_match_source || return 1
   current_obligations=$(derive_uki_inventory_obligations) || return 1
   validate_efi_obligations_json "$current_obligations" || return 1
   [[ "$(jq -Sc . <<< "$current_obligations")" == \
     "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
   verify_obligated_efi_artifacts_exist "$current_obligations" || return 1
-  if [[ "$operation" == unconfigure ]]; then
-    root_incident=null
-  else
-    root_incident="$_recovery_root_reference"
-  fi
-  zero_checksum=$(printf '0%.0s' {1..128})
+  root_incident=null
+  [[ "$operation" == unconfigure ]] || root_incident="$_recovery_root_reference"
   document=$(jq -cn \
     --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
     --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
-    --arg timestamp "$timestamp" \
-    --arg primary "$primary" --arg primary_hash "$primary_hash" \
-    --arg fallback "$fallback" --arg fallback_hash "$fallback_hash" \
-    --arg source "$source" --arg source_hash "$source_hash" \
-    --arg zero_checksum "$zero_checksum" \
-    --arg operation "$operation" \
+    --arg timestamp "$(utc_timestamp)" --arg operation "$operation" \
+    --arg primary "$(limine_primary_binary_path)" --arg primary_hash "$_unconfigure_primary_hash" \
+    --arg fallback "$(limine_fallback_binary_path)" \
+    --arg fallback_hash "$_unconfigure_fallback_hash" \
+    --arg source "$(limine_unsigned_binary_path)" \
+    --arg source_hash "$_unconfigure_limine_source_hash" \
+    --arg zero_checksum "$LIMINE_ZERO_CHECKSUM" \
     --argjson intent "$_unconfigure_intent_reference_json" \
     --argjson root_incident "$root_incident" \
     --argjson managed_settings "$_unconfigure_managed_reference_json" \
@@ -1416,54 +1308,8 @@ persist_unconfigure_proof() {
         fallback: {path: $fallback, config_checksum: $zero_checksum, sha256: $fallback_hash}
       }
     }') || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  validate_unconfigure_proof_json "$_transaction_id" "$document" "$_manifest_json" \
-    || return 1
-  if [[ -e "$path" || -L "$path" ]]; then
-    existing=$(read_control_document "$path") || return 1
-    validate_unconfigure_proof_json "$_transaction_id" "$existing" "$_manifest_json" \
-      || return 1
-    jq -en --argjson existing "$existing" --argjson candidate "$document" '
-      ($existing | del(.proved_at)) == ($candidate | del(.proved_at))
-    ' >/dev/null || return 1
-  else
-    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  fi
-  unconfigured_limine_targets_match_source || return 1
-  [[ "$_unconfigure_primary_hash" == "$primary_hash" \
-    && "$_unconfigure_fallback_hash" == "$fallback_hash" ]] || return 1
-  current_obligations=$(derive_uki_inventory_obligations) || return 1
-  [[ "$(jq -Sc . <<< "$current_obligations")" == \
-    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]] || return 1
-  verify_obligated_efi_artifacts_exist "$current_obligations" || return 1
-  reference=$(transaction_artifact_reference "$path" "$UNCONFIGURE_PROOF_SCHEMA_VERSION") \
-    || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
-  if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record final_proof "$reference"
-  else
-    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
-  fi
-}
-
-unconfigure_recovery_inputs_are_current() {
-  local current_obligations
-  unconfigure_limine_tools_match_intent || return 1
-  artifact_esp_is_mounted || return 1
-  validate_control_file "$(limine_default_config_path)" || return 1
-  validate_control_file "$(limine_config_path)" || return 1
-  unconfigure_limine_source_is_unchanged || return 1
-  read_current_firmware_modes || return 1
-  [[ "$_secure_boot_mode" == 0 ]] || return 1
-  limine_managed_settings_are_restorable "$_unconfigure_managed_settings_json" || return 1
-  owned_tracking_state_is_safe "$_unconfigure_tracking_paths_json" || return 1
-  windows_unconfigure_preflight || return 1
-  [[ "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
-    || return 1
-  current_obligations=$(derive_uki_inventory_obligations) || return 1
-  [[ "$(jq -Sc . <<< "$current_obligations")" == \
-    "$(jq -Sc . <<< "$_unconfigure_rebuild_obligations_json")" ]]
+  persist_transaction_domain_record final_proof "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    validate_unconfigure_proof_json proved_at "$document"
 }
 
 unconfigure_recovery_failpoint() {
@@ -1510,12 +1356,12 @@ load_unconfigure_recovery_context() {
   tracking_document=$(read_control_document "$tracking_path") || return 1
   _unconfigure_managed_settings_json=$(jq -c '.settings' <<< "$managed_document") || return 1
   _unconfigure_tracking_paths_json=$(jq -c '.paths' <<< "$tracking_document") || return 1
-  unconfigure_recovery_inputs_are_current
+  unconfigure_inputs_are_current
 }
 
-unconfigure_recovery_transaction() {
-  unconfigure_recovery_inputs_are_current || return 1
-
+# Restores the recorded settings and stock Limine state phase by phase. Every
+# phase is idempotent, so a recovery attempt can run the whole sequence again.
+unconfigure_apply_phases() {
   transaction_phase_start restore-managed-settings || return 1
   restore_limine_managed_settings "$_unconfigure_managed_settings_json" || return 1
   unconfigure_recovery_failpoint after-restore-managed-settings || return 1
@@ -1532,11 +1378,8 @@ unconfigure_recovery_transaction() {
   transaction_phase_complete remove-owned-tracking || return 1
 
   transaction_phase_start reset-config-enrollment || return 1
-  if [[ "$QUIET" == true ]]; then
-    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
-  else
-    run_bound_unconfigure_limine_tool reset false || return 1
-  fi
+  preserve_transaction_files_on_failure || return 1
+  run_visible run_bound_unconfigure_limine_tool reset false || return 1
   unconfigure_recovery_failpoint after-reset-config-enrollment || return 1
   transaction_phase_complete reset-config-enrollment || return 1
 
@@ -1554,45 +1397,21 @@ unconfigure_recovery_transaction() {
   [[ "$_windows_block_state" == absent \
     && "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
     || return 1
-  unconfigured_limine_targets_match_source || return 1
   persist_unconfigure_proof || return 1
   unconfigure_recovery_failpoint after-prove-unconfigured || return 1
   transaction_phase_complete prove-unconfigured
 }
 
+unconfigure_recovery_transaction() {
+  unconfigure_inputs_are_current || return 1
+  unconfigure_apply_phases
+}
+
 run_unconfigure_recovery_locked() {
-  local callback_rc=0 commit_rc=0 begin_rc=0
-  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
-    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  boot_locks_are_held || return 1
   load_unconfigure_recovery_context || return $?
-  arm_transaction_traps
-  begin_lifecycle_recovery_attempt unconfigure-recovery || begin_rc=$?
-  if [[ $begin_rc -ne 0 ]]; then
-    if [[ "$_transaction_active" == true ]]; then
-      if read_lifecycle && [[ "$_lifecycle_state" == transition \
-        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-        rollback_and_mark_recovery "$begin_rc" \
-          "unconfigure recovery attempt initialization failed" failed || true
-      else
-        detach_transaction_context
-      fi
-    fi
-    restore_transaction_traps
-    return "$begin_rc"
-  fi
-  unconfigure_recovery_transaction || callback_rc=$?
-  if [[ $callback_rc -eq 0 ]]; then
-    commit_lifecycle_recovery_attempt || commit_rc=$?
-    if [[ $commit_rc -ne 0 ]]; then
-      rollback_and_mark_recovery "$commit_rc" \
-        "stable unconfigure recovery publication failed" failed || true
-      callback_rc=$commit_rc
-    fi
-  else
-    rollback_and_mark_recovery "$callback_rc" "unconfigure recovery failed" failed || true
-  fi
-  restore_transaction_traps
-  return "$callback_rc"
+  run_recovery_attempt_locked unconfigure-recovery unconfigure_recovery_transaction \
+    "unconfigure recovery"
 }
 
 unconfigure_software_state() {
@@ -1613,43 +1432,7 @@ unconfigure_software_state() {
   transaction_phase_complete backup-software-state || return 1
 
   unconfigure_validate_all_conflicts || return 1
-  transaction_phase_start restore-managed-settings || return 1
-  restore_limine_managed_settings "$_unconfigure_managed_settings_json" || return 1
-  transaction_phase_complete restore-managed-settings || return 1
-
-  transaction_phase_start remove-windows-entry || return 1
-  remove_windows_managed_block_for_unconfigure || return 1
-  transaction_phase_complete remove-windows-entry || return 1
-
-  transaction_phase_start remove-owned-tracking || return 1
-  remove_owned_tracking_entries "$_unconfigure_tracking_paths_json" || return 1
-  transaction_phase_complete remove-owned-tracking || return 1
-
-  transaction_phase_start reset-config-enrollment || return 1
-  preserve_transaction_files_on_failure || return 1
-  if [[ "$QUIET" == true ]]; then
-    run_bound_unconfigure_limine_tool reset false >/dev/null || return 1
-  else
-    run_bound_unconfigure_limine_tool reset false || return 1
-  fi
-  transaction_phase_complete reset-config-enrollment || return 1
-
-  transaction_phase_start rebuild-stock-limine || return 1
-  run_checked_stock_limine_rebuild || return 1
-  transaction_phase_complete rebuild-stock-limine || return 1
-
-  transaction_phase_start prove-unconfigured || return 1
-  read_current_firmware_modes || return 1
-  [[ "$_secure_boot_mode" == 0 ]] || return 1
-  limine_managed_settings_are_original "$_unconfigure_managed_settings_json" || return 1
-  owned_tracking_is_absent "$_unconfigure_tracking_paths_json" || return 1
-  windows_unconfigure_preflight || return 1
-  [[ "$_windows_block_state" == absent \
-    && "$(unconfigure_windows_state_identity)" == "$_unconfigure_windows_identity" ]] \
-    || return 1
-  unconfigured_limine_targets_match_source || return 1
-  persist_unconfigure_proof || return 1
-  transaction_phase_complete prove-unconfigured
+  unconfigure_apply_phases
 }
 
 run_dormant_unconfigure() {
@@ -1657,8 +1440,11 @@ run_dormant_unconfigure() {
     unconfigure_preflight unconfigure_software_state
 }
 
-artifact_repair_preflight() {
-  local file embedded source primary_found=false fallback_found=false
+# Checks shared by every artifact mutation: tools, the mounted ESP, no
+# shadowing Limine config, the managed defaults file, the unsigned Limine
+# package binary with its checksum slot, and a usable sbctl tracking store.
+artifact_environment_preflight() {
+  local command source
   for command in b2sum chmod chown cp dd find grep limine ln mktemp mountpoint \
     findmnt mv sbctl sync jq; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -1681,13 +1467,21 @@ artifact_repair_preflight() {
     fail "Unsigned Limine package binary has no unique config checksum slot"
     return 1
   }
+  sbctl_tracking_preflight || {
+    fail "sbctl tracking state is unavailable or unsafe"
+    return 1
+  }
+}
+
+artifact_repair_preflight() {
+  local file primary_found=false fallback_found=false
+  artifact_environment_preflight || return 1
   _repair_config_checksum=$(current_limine_config_checksum) || return 1
   for file in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
-    embedded=$(read_limine_embedded_checksum "$file") || {
+    read_limine_embedded_checksum "$file" >/dev/null || {
       fail "Could not find one valid Limine config checksum slot in ${file}"
       return 1
     }
-    [[ "$embedded" =~ ^[0-9a-f]{128}$ ]] || return 1
   done
   collect_discovered_efi_files || {
     fail "Could not discover a complete EFI artifact set under $(esp_path)"
@@ -1701,10 +1495,6 @@ artifact_repair_preflight() {
     fail "Both bootable Limine x64 binaries must be present in EFI discovery"
     return 1
   }
-  sbctl_tracking_preflight || {
-    fail "sbctl tracking state is unavailable or unsafe"
-    return 1
-  }
   validate_discovered_sbctl_mappings || {
     fail "sbctl source and output mappings are ambiguous for EFI repair"
     return 1
@@ -1716,35 +1506,9 @@ artifact_repair_preflight() {
 }
 
 producer_reconstruction_preflight() {
-  local source
-  for command in b2sum chmod chown cp dd find grep limine ln mktemp mountpoint \
-    findmnt mv sbctl sync jq; do
-    command -v "$command" >/dev/null 2>&1 || {
-      fail "Required producer recovery command not found: ${command}"
-      return 1
-    }
-  done
-  artifact_esp_is_mounted || {
-    fail "$(esp_path) is not the mounted FAT32 ESP"
-    return 1
-  }
-  validate_no_limine_shadow_configs || return 1
-  validate_control_file "$(limine_default_config_path)" || return 1
+  artifact_environment_preflight || return 1
   validate_control_file "$(limine_config_path)" || return 1
-  source=$(limine_unsigned_binary_path) || return 1
-  validate_control_file "$source" || {
-    fail "Unsigned Limine package binary is unavailable or unsafe: ${source}"
-    return 1
-  }
-  read_limine_embedded_checksum "$source" >/dev/null || {
-    fail "Unsigned Limine package binary has no unique config checksum slot"
-    return 1
-  }
-  current_limine_config_checksum >/dev/null || return 1
-  sbctl_tracking_preflight || {
-    fail "sbctl tracking state is unavailable or unsafe"
-    return 1
-  }
+  current_limine_config_checksum >/dev/null
 }
 
 cleanup_tracking_transaction() {
@@ -1798,14 +1562,10 @@ sign_all_efi() {
         ;;
       1)
         transaction_backup_file "$file" || return 1
-        if [[ "$QUIET" == true ]]; then
-          sbctl sign -s "$file" >/dev/null || {
-            fail "Failed to sign ${file#"$(esp_path)"/}"
-            return 1
-          }
-        else
-          sbctl sign -s "$file" || return 1
-        fi
+        run_visible sbctl sign -s "$file" || {
+          fail "Failed to sign ${file#"$(esp_path)"/}"
+          return 1
+        }
         durable_sync "$file" || return 1
         files_db=$(resolve_sbctl_files_db_path) || return 1
         [[ ! -f "$files_db" ]] || durable_sync "$files_db" || return 1
@@ -1823,25 +1583,22 @@ sign_all_efi() {
 }
 
 verify_all_efi_artifacts() {
-  local expected="$1" persist_proof="${2:-false}"
-  local obligations="${3:-}"
-  local enrolled_raw file signature_rc config config_hash config_identity
-  local current_hash current_identity
+  local expected="$1" persist_proof="${2:-false}" obligations="${3:-}"
+  local enrolled_raw file config config_hash config_identity hash identity
   local proved_artifacts='[]'
-  local -a enrolled=() proved_files=()
-  local -A enrolled_map=() proved_map=() proved_hash=() proved_identity=()
+  local -A enrolled_map=() discovered_map=()
 
+  [[ "$persist_proof" == true || "$persist_proof" == false ]] || return 1
   [[ -n "$obligations" ]] || obligations='{"kind":"not-applicable","paths":[]}'
   validate_efi_obligations_json "$obligations" || return 1
   verify_limine_config_targets "$expected" || return 1
   collect_discovered_efi_files || return 1
   validate_discovered_sbctl_mappings || return 1
-  proved_files=("${_discovered_efi_files[@]}")
-  for file in "${proved_files[@]}"; do
-    proved_map["$file"]=1
+  for file in "${_discovered_efi_files[@]}"; do
+    discovered_map["$file"]=1
   done
   while IFS= read -r file; do
-    [[ -n "${proved_map[$file]:-}" ]] || {
+    [[ -n "${discovered_map[$file]:-}" ]] || {
       fail "Expected EFI artifact is missing from discovery: ${file}"
       return 1
     }
@@ -1850,148 +1607,75 @@ verify_all_efi_artifacts() {
     fail "Could not read final sbctl tracking state"
     return 1
   }
-  [[ -z "$enrolled_raw" ]] || mapfile -t enrolled <<< "$enrolled_raw"
-  for file in "${enrolled[@]}"; do
-    enrolled_map["$file"]=1
-  done
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && enrolled_map["$file"]=1
+  done <<< "$enrolled_raw"
 
-  for file in "${proved_files[@]}"; do
+  for file in "${_discovered_efi_files[@]}"; do
     [[ -n "${enrolled_map[$file]:-}" ]] || {
       fail "EFI artifact is not tracked by sbctl: ${file}"
       return 1
     }
-    signature_rc=0
-    sbctl_file_signature_state "$file" || signature_rc=$?
-    [[ $signature_rc -eq 0 ]] || {
+    sbctl_file_signature_state "$file" || {
       fail "EFI artifact lacks the local signature: ${file}"
       return 1
     }
-    proved_hash["$file"]=$(sha256_file "$file") || return 1
-    proved_identity["$file"]=$(control_file_identity "$file") || return 1
+    hash=$(sha256_file "$file") || return 1
+    identity=$(control_file_identity "$file") || return 1
+    proved_artifacts=$(jq -c --arg path "$file" --arg hash "$hash" --arg identity "$identity" \
+      '. + [{identity: $identity, path: $path, sha256: $hash, signature: "local",
+        tracking: "tracked"}]' <<< "$proved_artifacts") || return 1
     qpass "${file#"$(esp_path)"/} ${DIM}proved${NC}"
   done
-
-  collect_discovered_efi_files || return 1
-  [[ ${#proved_files[@]} -eq ${#_discovered_efi_files[@]} ]] || return 1
-  for file in "${!proved_files[@]}"; do
-    [[ "${proved_files[$file]}" == "${_discovered_efi_files[$file]}" ]] || return 1
-  done
-  verify_limine_config_targets "$expected" || return 1
-  config=$(limine_config_path) || return 1
-  validate_control_file "$config" || return 1
-  config_hash=$(sha256_file "$config") || return 1
-  config_identity=$(control_file_identity "$config") || return 1
-  enrolled=()
-  enrolled_map=()
-  enrolled_raw=$(list_enrolled_paths) || return 1
-  [[ -z "$enrolled_raw" ]] || mapfile -t enrolled <<< "$enrolled_raw"
-  for file in "${enrolled[@]}"; do
-    enrolled_map["$file"]=1
-  done
-  for file in "${proved_files[@]}"; do
-    current_hash=$(sha256_file "$file") || return 1
-    current_identity=$(control_file_identity "$file") || return 1
-    [[ "$current_hash" == "${proved_hash[$file]}" \
-      && "$current_identity" == "${proved_identity[$file]}" \
-      && -n "${enrolled_map[$file]:-}" ]] || return 1
-    signature_rc=0
-    sbctl_file_signature_state "$file" || signature_rc=$?
-    [[ $signature_rc -eq 0 ]] || return 1
-    proved_artifacts=$(jq -c \
-      --arg path "$file" \
-      --arg hash "${proved_hash[$file]}" \
-      --arg identity "${proved_identity[$file]}" '
-        . + [{
-          identity: $identity,
-          path: $path,
-          sha256: $hash,
-          signature: "local",
-          tracking: "tracked"
-        }]
-      ' <<< "$proved_artifacts") || return 1
-  done
   if [[ "$persist_proof" == true ]]; then
+    config=$(limine_config_path) || return 1
+    validate_control_file "$config" || return 1
+    config_hash=$(sha256_file "$config") || return 1
+    config_identity=$(control_file_identity "$config") || return 1
     persist_final_artifact_proof "$expected" "$obligations" "$config" "$config_hash" \
       "$config_identity" "$proved_artifacts" || return 1
-  elif [[ "$persist_proof" != false ]]; then
-    return 1
   fi
   qpass "All discovered EFI artifacts are locally signed and tracked"
 }
 
+# Re-reads every proved artifact and the config once more at the persistence
+# boundary, then publishes the proof create-once.
 persist_final_artifact_proof() {
   local expected="$1" obligations="$2" config="$3" config_hash="$4"
-  local config_identity="$5" artifacts="$6"
-  local transaction_dir path timestamp artifact_rows artifact file expected_hash
-  local expected_identity
-  local document existing reference current_reference
+  local config_identity="$5" artifacts="$6" artifact file document
   [[ "$_transaction_active" == true && "$expected" =~ ^[0-9a-f]{128}$ \
     && "$config_hash" =~ ^[0-9a-f]{64}$ \
     && "$config_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   validate_efi_obligations_json "$obligations" || return 1
   jq -e 'type == "array" and length > 0' <<< "$artifacts" >/dev/null || return 1
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/final-proof.json"
   [[ "$config" == "$(limine_config_path)" ]] || return 1
   validate_control_file "$config" || return 1
   [[ $(sha256_file "$config") == "$config_hash" \
     && $(control_file_identity "$config") == "$config_identity" ]] || return 1
-  artifact_rows=$(jq -c '.[]' <<< "$artifacts") || return 1
   while IFS= read -r artifact; do
     file=$(jq -r '.path' <<< "$artifact") || return 1
-    expected_hash=$(jq -r '.sha256' <<< "$artifact") || return 1
-    expected_identity=$(jq -r '.identity' <<< "$artifact") || return 1
     validate_control_file "$file" || return 1
-    [[ $(sha256_file "$file") == "$expected_hash" \
-      && $(control_file_identity "$file") == "$expected_identity" ]] || return 1
-  done <<< "$artifact_rows"
-  timestamp=$(utc_timestamp) || return 1
+    [[ $(sha256_file "$file") == "$(jq -r '.sha256' <<< "$artifact")" \
+      && $(control_file_identity "$file") == "$(jq -r '.identity' <<< "$artifact")" ]] \
+      || return 1
+  done < <(jq -c '.[]' <<< "$artifacts")
   document=$(jq -cn \
     --argjson schema "$FINAL_PROOF_SCHEMA_VERSION" \
-    --arg version "$OMASECBOOT_VERSION" \
-    --arg id "$_transaction_id" \
-    --arg timestamp "$timestamp" \
-    --arg config "$config" \
-    --arg checksum "$expected" \
-    --arg config_hash "$config_hash" \
-    --arg config_identity "$config_identity" \
-    --argjson obligations "$obligations" \
-    --argjson artifacts "$artifacts" '{
+    --arg version "$OMASECBOOT_VERSION" --arg id "$_transaction_id" \
+    --arg timestamp "$(utc_timestamp)" --arg config "$config" --arg checksum "$expected" \
+    --arg config_hash "$config_hash" --arg config_identity "$config_identity" \
+    --argjson obligations "$obligations" --argjson artifacts "$artifacts" '{
       schema_version: $schema,
       writer_version: $version,
       transaction_id: $id,
       proved_at: $timestamp,
-      config: {
-        path: $config,
-        checksum: $checksum,
-        sha256: $config_hash,
-        identity: $config_identity
-      },
+      config: {path: $config, checksum: $checksum, sha256: $config_hash,
+        identity: $config_identity},
       obligations: $obligations,
       artifacts: $artifacts
     }') || return 1
-  validate_final_proof_json "$_transaction_id" "$document" || return 1
-
-  if [[ -e "$path" || -L "$path" ]]; then
-    existing=$(read_control_document "$path") || return 1
-    validate_final_proof_json "$_transaction_id" "$existing" || return 1
-    jq -en --argjson existing "$existing" --argjson candidate "$document" '
-      $existing.config == $candidate.config and
-      $existing.obligations == $candidate.obligations and
-      $existing.artifacts == $candidate.artifacts
-    ' >/dev/null || return 1
-  else
-    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  fi
-  reference=$(transaction_artifact_reference "$path" "$FINAL_PROOF_SCHEMA_VERSION") \
-    || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c '.domain_records.final_proof' <<< "$_manifest_json") || return 1
-  if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record final_proof "$reference"
-  else
-    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
-  fi
+  persist_transaction_domain_record final_proof "$FINAL_PROOF_SCHEMA_VERSION" \
+    validate_final_proof_json proved_at "$document"
 }
 
 repair_boot_artifacts() {

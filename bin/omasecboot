@@ -106,6 +106,23 @@ lifecycle_activation_environment_is_ready() {
   done
 }
 
+# Shared entry of every recoverable mutation command: root, recovery
+# dependencies, then any pending lifecycle recovery. Callers check
+# _lifecycle_recovery_performed and report instead of starting new work.
+recoverable_command_prelude() {
+  local name="$1"
+  lifecycle_repair_is_available || {
+    fail "${name^} is blocked until recoverable Secure Boot commands are enabled"
+    return 1
+  }
+  check_root "$name"
+  check_recovery_deps
+  recover_lifecycle_if_required || {
+    fail "Lifecycle recovery failed; no new ${name} mutation was attempted"
+    return 1
+  }
+}
+
 # --- Commands ----------------------------------------------------------------
 
 cmd_setup() {
@@ -115,16 +132,7 @@ cmd_setup() {
     return 2
   }
   header "Secure Boot Setup"
-  lifecycle_repair_is_available || {
-    fail "Setup is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "setup"
-  check_recovery_deps
-  recover_lifecycle_if_required || {
-    fail "Lifecycle recovery failed; no new setup mutation was attempted"
-    return 1
-  }
+  recoverable_command_prelude "setup" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run setup again to start a new setup mutation"
     return 0
@@ -190,16 +198,7 @@ cmd_enroll() {
     return 2
   }
   header "Key Enrollment"
-  lifecycle_repair_is_available || {
-    fail "Enrollment is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "enroll"
-  check_recovery_deps
-  recover_lifecycle_if_required || {
-    fail "Lifecycle recovery failed; no new firmware mutation was attempted"
-    return 1
-  }
+  recoverable_command_prelude "enroll" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run enroll again to start a new enrollment"
     return 0
@@ -226,38 +225,6 @@ cmd_enroll() {
   warn "Enrollment is proved; enable Secure Boot in firmware settings."
 }
 
-observed_limine_setting() {
-  local key="$1" value
-  [[ -f "$LIMINE_DEFAULT_CONF" ]] || return 1
-  load_limine_default_entry "$key" || return 1
-  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
-  if [[ ${_limine_default_count:-0} -eq 0 ]]; then
-    printf 'unset\n'
-    return 0
-  fi
-  value=${_limine_default_raw:-}
-  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-    value=${value:1:${#value}-2}
-  fi
-  printf '%s\n' "$value"
-}
-
-observed_limine_token() {
-  local key="$1" token="$2" value
-  [[ -f "$LIMINE_DEFAULT_CONF" ]] || return 1
-  load_limine_default_entry "$key" || return 1
-  [[ ${_limine_default_count:-0} -le 1 ]] || return 1
-  value=${_limine_default_raw:-}
-  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-    value=${value:1:${#value}-2}
-  fi
-  if [[ " $value " == *" $token "* ]]; then
-    printf 'present\n'
-  else
-    printf 'absent\n'
-  fi
-}
-
 verify_adoption_observations() {
   local expected_verification="$1" expected_enrollment="$3"
   local expected_before_save="$5" expected_after_save="$7"
@@ -270,13 +237,13 @@ verify_adoption_observations() {
   [[ "$expected_after_save" == present || "$expected_after_save" == absent ]] \
     || return 1
   lifecycle_activation_environment_is_ready || return 1
-  [[ "$(observed_limine_setting "ENABLE_VERIFICATION")" == \
+  [[ "$(limine_managed_setting_state ENABLE_VERIFICATION)" == \
     "$expected_verification" ]] || return 1
-  [[ "$(observed_limine_setting "ENABLE_ENROLL_LIMINE_CONFIG")" == \
+  [[ "$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG)" == \
     "$expected_enrollment" ]] || return 1
-  [[ "$(observed_limine_token "COMMANDS_BEFORE_SAVE" "limine-reset-enroll")" == \
+  [[ "$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll)" == \
     "$expected_before_save" ]] || return 1
-  [[ "$(observed_limine_token "COMMANDS_AFTER_SAVE" "limine-enroll-config")" == \
+  [[ "$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config)" == \
     "$expected_after_save" ]] || return 1
 }
 
@@ -284,14 +251,9 @@ cmd_adopt() {
   local original_verification="" original_enrollment=""
   local original_before_save="" original_after_save=""
   local observed_verification observed_enrollment
-  local observed_before_save observed_after_save
+  local observed_before_save observed_after_save config
 
   header "Adopt Existing Configuration"
-  lifecycle_repair_is_available || {
-    fail "Adoption is blocked until interrupted recovery is available"
-    return 1
-  }
-
   while (( $# > 0 )); do
     case "$1" in
       --verification-original)
@@ -320,10 +282,7 @@ cmd_adopt() {
     esac
   done
 
-  check_root "adopt"
-  check_recovery_deps
-  recover_lifecycle_if_required \
-    || die "Lifecycle recovery failed; adoption was not attempted"
+  recoverable_command_prelude adopt || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run adopt again to start a new adoption"
     return 0
@@ -338,16 +297,16 @@ cmd_adopt() {
   [[ "$_lifecycle_state" == unmanaged ]] \
     || die "Adoption requires unmanaged state; current state is ${_lifecycle_state}"
 
-  observed_verification=$(observed_limine_setting "ENABLE_VERIFICATION") \
-    || die "Could not read a unique ENABLE_VERIFICATION value from ${LIMINE_DEFAULT_CONF}"
-  observed_enrollment=$(observed_limine_setting "ENABLE_ENROLL_LIMINE_CONFIG") \
-    || die "Could not read a unique ENABLE_ENROLL_LIMINE_CONFIG value from ${LIMINE_DEFAULT_CONF}"
-  observed_before_save=$(observed_limine_token \
-    "COMMANDS_BEFORE_SAVE" "limine-reset-enroll") \
-    || die "Could not read a unique COMMANDS_BEFORE_SAVE value from ${LIMINE_DEFAULT_CONF}"
-  observed_after_save=$(observed_limine_token \
-    "COMMANDS_AFTER_SAVE" "limine-enroll-config") \
-    || die "Could not read a unique COMMANDS_AFTER_SAVE value from ${LIMINE_DEFAULT_CONF}"
+  config=$(limine_default_config_path)
+  [[ -f "$config" ]] || die "${config} not found"
+  observed_verification=$(limine_managed_setting_state ENABLE_VERIFICATION) \
+    || die "Could not read a unique ENABLE_VERIFICATION value from ${config}"
+  observed_enrollment=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG) \
+    || die "Could not read a unique ENABLE_ENROLL_LIMINE_CONFIG value from ${config}"
+  observed_before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll) \
+    || die "Could not read a unique COMMANDS_BEFORE_SAVE value from ${config}"
+  observed_after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config) \
+    || die "Could not read a unique COMMANDS_AFTER_SAVE value from ${config}"
 
   echo "  Existing managed settings:"
   echo "    ENABLE_VERIFICATION=${observed_verification}"
@@ -423,13 +382,7 @@ cmd_windows() {
       cmd_windows_preflight
       ;;
     setup)
-      lifecycle_repair_is_available || {
-        fail "Windows setup is blocked until recoverable Secure Boot commands are enabled"
-        return 1
-      }
-      check_root "windows setup"
-      check_recovery_deps
-      recover_lifecycle_if_required || return 1
+      recoverable_command_prelude "windows setup" || return 1
       if [[ "$_lifecycle_recovery_performed" == true ]]; then
         pass "Lifecycle recovery completed; run windows setup again for a new mutation"
         return 0
@@ -439,13 +392,7 @@ cmd_windows() {
       add_windows_boot_entry
       ;;
     suppress)
-      lifecycle_repair_is_available || {
-        fail "Windows suppression is blocked until recoverable Secure Boot commands are enabled"
-        return 1
-      }
-      check_root "windows suppress"
-      check_recovery_deps
-      recover_lifecycle_if_required || return 1
+      recoverable_command_prelude "windows suppress" || return 1
       if [[ "$_lifecycle_recovery_performed" == true ]]; then
         pass "Lifecycle recovery completed; run windows suppress again for a new mutation"
         return 0
@@ -455,13 +402,7 @@ cmd_windows() {
       suppress_stale_windows_entry
       ;;
     bootnext)
-      lifecycle_repair_is_available || {
-        fail "BootNext is blocked until recoverable Secure Boot commands are enabled"
-        return 1
-      }
-      check_root "windows bootnext"
-      check_recovery_deps
-      recover_lifecycle_if_required || return 1
+      recoverable_command_prelude "windows bootnext" || return 1
       if [[ "$_lifecycle_recovery_performed" == true ]]; then
         pass "Lifecycle recovery completed; BootNext was not armed again"
         return 0
@@ -490,13 +431,7 @@ cmd_cleanup() {
     fail "Cleanup does not accept arguments"
     return 2
   }
-  lifecycle_repair_is_available || {
-    fail "Cleanup is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "cleanup"
-  check_recovery_deps
-  recover_lifecycle_if_required || return 1
+  recoverable_command_prelude "cleanup" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run cleanup again for a new cleanup mutation"
     return 0
@@ -510,13 +445,7 @@ cmd_sign() {
     fail "Signing does not accept arguments"
     return 2
   }
-  lifecycle_repair_is_available || {
-    fail "Signing is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "sign"
-  check_recovery_deps
-  recover_lifecycle_if_required || return 1
+  recoverable_command_prelude "sign" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run sign again for a new signing mutation"
     return 0
@@ -532,13 +461,7 @@ cmd_unconfigure() {
     return 2
   }
   header "Disable OmaSecBoot Management"
-  lifecycle_repair_is_available || {
-    fail "Unconfiguration is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "unconfigure"
-  check_recovery_deps
-  recover_lifecycle_if_required || return 1
+  recoverable_command_prelude "unconfigure" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; no new unconfiguration was started"
     return 0
@@ -555,13 +478,7 @@ cmd_repair() {
     return 2
   }
   header "Lifecycle Recovery"
-  lifecycle_repair_is_available || {
-    fail "Recovery is blocked until recoverable Secure Boot commands are enabled"
-    return 1
-  }
-  check_root "repair"
-  check_recovery_deps
-  recover_lifecycle_if_required || return 1
+  recoverable_command_prelude "repair" || return 1
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed"
   else
