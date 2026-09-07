@@ -21,7 +21,7 @@ fail_test() {
   exit 1
 }
 
-for tool in makepkg fakeroot bsdtar pacman vercmp git tar jq sha256sum; do
+for tool in makepkg fakeroot bsdtar pacman vercmp git tar jq sha256sum make; do
   command -v "$tool" >/dev/null 2>&1 || fail_test "package test requires ${tool}"
 done
 git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -380,5 +380,15 @@ done
 [[ $(durable_snapshot) == "$before" ]] \
   || fail_test "removal changed durable lifecycle, recovery, Windows, or key state"
 [[ -f "${state}/repair.lock" ]] || fail_test "removal deleted the stable repair lock"
+
+# --- make package ------------------------------------------------------------
+
+make_dest="${BUILD_DIR}/make-package"
+make_output=$(make -s -C "$ROOT_DIR" package PKGDEST="$make_dest" 2> "${BUILD_DIR}/make-package.log") \
+  || { cat "${BUILD_DIR}/make-package.log" >&2; fail_test "make package failed"; }
+[[ "$make_output" == "${make_dest}/${pkgname}-${pkgver}-1-any.pkg.tar.zst" && -f "$make_output" ]] \
+  || fail_test "make package did not report the built package path"
+[[ $(bsdtar -tf "$make_output" | grep -v '^\.' | sort) == "$payload" ]] \
+  || fail_test "make package payload differs from the tested build"
 
 printf 'package tests passed\n'

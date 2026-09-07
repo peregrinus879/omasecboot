@@ -26,6 +26,14 @@ This checklist defines what must be true before a release tag is created. It sep
 
 Hermetic tests do not prove firmware behavior. The matrix below is the minimum. Every row is recorded with `tests/acceptance-capture.sh`, which writes one self-contained file per run: firmware and package state before, the full terminal transcript of the row's command, and the state after. Run it from a checkout on the target machine as `sudo bash tests/acceptance-capture.sh <row> -- <command>`; for a firmware-menu step, run it without a command after the reboot to record a checkpoint. The files land in `./acceptance-records/`; copy that directory to the reviewer, who derives pass or fail from the records. The script never records serial numbers, DMI UUIDs, MAC addresses, recovery keys, or raw firmware backup payloads. Reviewed records are stored under `docs/acceptance/`.
 
+Target machine preparation, in this order:
+
+1. Install Windows first, then Omarchy from the ISO alongside it with Secure Boot off. Confirm in the firmware Secure Boot menu that the PK can be deleted on its own; firmware that offers only "clear all keys" is recorded as a refusal for that firmware.
+2. Back up every Windows recovery key (BitLocker or Device Encryption) somewhere off the machine.
+3. Check the producer set and the stale-copy condition before building anything: `pacman -Q limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr` must show exactly 1.38.0-1, 1.31.0-1, and 0.18-2 with efibootmgr at 18 or newer, and `ls /usr/local/bin/omasecboot /usr/local/lib/omasecboot` must report both missing. Any other producer version fails activation by design and needs a re-audit commit before acceptance continues.
+4. Clone the repository at the candidate commit (a git clone, not an archive: the build reads its file list from git), then `make package`, `sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst`, and `omasecboot version`.
+5. Keep a `notes.md` in `acceptance-records/` for what the recorder cannot see: the firmware menu wording, whether Windows asked for a recovery key after the handoff, and anything the firmware refused.
+
 Tier A runs on a dedicated bare-metal laptop that can be wiped, with an Omarchy installation made from the ISO with Secure Boot off and, for the Windows rows, a Windows installation alongside it. Real firmware is the target of this tool, so the mutating path is accepted only on real firmware; an OVMF virtual machine may be used as an optional rehearsal but does not satisfy any row. Record the firmware vendor and version, and record a refusal (for example firmware that offers only "clear all keys") as a valid result for that firmware, not as a pass.
 
 | Row | Check | Expected result | Mandatory |

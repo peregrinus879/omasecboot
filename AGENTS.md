@@ -39,7 +39,7 @@ Naming boundary: `OmaSecBoot` is the product/display name; `omasecboot` is the s
 - `docs/maintenance.md` - On-demand sources, compatibility findings, removal triggers, and deferred work
 - `docs/release-checklist.md` - Release gates, the privileged hardware acceptance matrix, evidence format, and the tag procedure
 - `tests/acceptance-capture.sh` - Root-run per-row acceptance recorder: state before, terminal transcript, state after, one file per row; never part of `make test`
-- `Makefile` - Package staging install (refuses a live root and any source uninstall) and the test aggregate
+- `Makefile` - `package` build from tracked files, package staging install (refuses a live root and any source uninstall), and the test aggregate
 
 ## Architecture
 
@@ -107,7 +107,7 @@ The current implementation provides the lifecycle boundary, tested artifact-proo
 
 ## Post-Change Verification
 
-- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, and git, and runs inside the aggregate. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
+- Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, git, and make, and runs inside the aggregate. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
 - Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck` over the same shell files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 

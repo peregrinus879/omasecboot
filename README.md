@@ -72,15 +72,17 @@ The package also depends on bash, coreutils, util-linux, diffutils, findutils, g
 
 `OmaSecBoot` is the product name; `omasecboot` is the command, package, and namespace.
 
-The supported deployment is the Arch package built from `PKGBUILD` at a release tag. No package has been published yet, so today a package can only be built from this repository:
+The supported deployment is the Arch package built from `PKGBUILD` at a release tag. No package has been published yet, so build it from a git clone of the commit you want to install:
 
 ```bash
 git clone https://github.com/peregrinus879/omasecboot.git
 cd omasecboot
-bash tests/package.sh        # builds and inspects the package in a temporary directory
+make package                                  # writes omasecboot-1.0.0-1-any.pkg.tar.zst here
+sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
+omasecboot version                            # omasecboot 1.0.0
 ```
 
-`tests/package.sh` discards its build. To keep a package, build it the way the test does: create `omasecboot-1.0.0.tar.gz` from the tree with the `omasecboot-1.0.0/` prefix, place it next to a copy of `PKGBUILD`, and run `makepkg`. Install the result with `sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst`.
+`make package` needs `base-devel` and git. It packs the tracked files into the archive layout the recipe expects and runs makepkg without a dependency check, so the package can be built on any Arch machine; pacman checks the dependencies when it installs. `bash tests/package.sh` runs the same build with payload and lifecycle checks and discards it.
 
 `make install` refuses to write to a live root; it exists only for package staging. If an older copy was ever installed under `/usr/local`, remove `/usr/local/bin/omasecboot`, `/usr/local/lib/omasecboot/`, its hooks in `/etc/pacman.d/hooks/`, and `/etc/boot/hooks/post.d/zzz-omasecboot-sign` before installing the package: pacman refuses to overwrite the unowned Limine hook, same-named hooks in `/etc/pacman.d/hooks/` take precedence over the packaged ones, and the lifecycle refuses to activate while any hook is shadowed or targets a command other than `/usr/bin/omasecboot`. `status` reports both conditions.
 

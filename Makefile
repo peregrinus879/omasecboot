@@ -1,4 +1,5 @@
 PREFIX     ?= /usr
+PKGDEST    ?= $(CURDIR)
 BINDIR      = $(PREFIX)/bin
 LIBDIR      = $(PREFIX)/lib/omasecboot
 LICENSEDIR  = $(PREFIX)/share/licenses/omasecboot
@@ -14,7 +15,7 @@ PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
                00-omasecboot-transition-guard.hook \
                zzz-omasecboot.hook
 
-.PHONY: install uninstall test
+.PHONY: install uninstall package test
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -45,6 +46,30 @@ install:
 uninstall:
 	@echo "Refusing source uninstall; remove the omasecboot package with pacman" >&2
 	@false
+
+# Build the Arch package from the tracked files of this checkout. PKGBUILD names
+# the tagged GitHub archive, which does not exist before the release tag, so the
+# same layout (<name>-<version>/ prefix) is produced here and makepkg uses it in
+# place of a download. Dependencies are checked by pacman at install time, not
+# by makepkg, so the build works on any Arch machine with base-devel and git.
+package:
+	@set -eu; \
+	pkgname=$$(sed -n 's/^pkgname=//p' PKGBUILD); \
+	pkgver=$$(sed -n 's/^pkgver=//p' PKGBUILD); \
+	pkgrel=$$(sed -n 's/^pkgrel=//p' PKGBUILD); \
+	dest=$$(realpath -m -- "$(PKGDEST)"); \
+	build=$$(mktemp -d "$${TMPDIR:-/tmp}/omasecboot-package.XXXXXX"); \
+	trap 'rm -rf "$$build"' EXIT; \
+	mkdir -p "$$build/$$pkgname-$$pkgver" "$$dest"; \
+	git ls-files -z | tar --null -T - -cf - | tar -C "$$build/$$pkgname-$$pkgver" -xf -; \
+	tar -C "$$build" -czf "$$build/$$pkgname-$$pkgver.tar.gz" "$$pkgname-$$pkgver"; \
+	cp PKGBUILD "$$build/"; \
+	cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
+	printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
+	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
+	  LOGDEST="$$build" BUILDDIR="$$build/build" \
+	  makepkg --config "$$build/makepkg.conf" --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
+	echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
 
 test:
 	bash tests/lifecycle.sh
