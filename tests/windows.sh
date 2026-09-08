@@ -663,6 +663,21 @@ _OMASECBOOT_REPAIR_LOCK_OWNED=true
 resolve_windows_target || fail_test "full proof rejected an existing read-only ESP mount"
 [[ ! -s "$CALL_LOG" ]] || fail_test "existing-mount proof invoked mount mutation"
 
+# A mount below the ESP, even of the same filesystem, hides the on-disk loader
+# path that firmware resolves, so the target proof refuses it.
+write_existing_mount
+jq -c --arg target "${EXISTING_ESP}/EFI/Microsoft" --arg maj "$TEST_MAJ_MIN" '
+  .filesystems += [{target: $target, id: 99, "maj:min": $maj, fstype: "vfat",
+    fsroot: "/EFI/other", "vfs-options": "ro,relatime"}]
+' "$FINDMNT_FIXTURE" > "${FINDMNT_FIXTURE}.tmp" && mv "${FINDMNT_FIXTURE}.tmp" "$FINDMNT_FIXTURE"
+reset_findmnt_calls
+if resolve_windows_target >/dev/null 2>&1; then
+  fail_test "Windows target proof accepted a bind mount below the ESP"
+fi
+[[ ! -s "$CALL_LOG" ]] || fail_test "submount refusal invoked mount mutation"
+write_existing_mount
+reset_findmnt_calls
+
 write_existing_mount 'rw,relatime'
 reset_findmnt_calls
 : > "$CALL_LOG"

@@ -756,15 +756,23 @@ windows_prepare_runtime_mountpoint() {
   validate_private_control_directory "$mount_path"
 }
 
+# The mount is the whole target ESP at its root, and nothing is mounted below
+# it: a mount under the ESP would show Linux a file firmware never resolves.
 windows_target_mount_is_valid() {
-  local mount_path="$1" json
+  local mount_path="$1" json inventory
+  [[ "$mount_path" != / ]] || return 1
   json=$(LC_ALL=C findmnt --json --list --mountpoint "$mount_path" \
     --output TARGET,MAJ:MIN,FSTYPE,FSROOT 2>/dev/null) || return 1
   jq -e --arg target "$mount_path" --arg maj "$_windows_maj_min" '
     (.filesystems | length) == 1 and
     (.filesystems[0] | .target == $target and ."maj:min" == $maj
       and .fstype == "vfat" and .fsroot == "/")
-  ' <<< "$json" >/dev/null
+  ' <<< "$json" >/dev/null || return 1
+  inventory=$(LC_ALL=C findmnt --json --list --output TARGET,MAJ:MIN,FSTYPE,FSROOT \
+    2>/dev/null) || return 1
+  jq -e --arg prefix "${mount_path%/}/" '
+    all(.filesystems[]; (.target | startswith($prefix)) | not)
+  ' <<< "$inventory" >/dev/null
 }
 
 windows_loader_mount_cleanup() {
