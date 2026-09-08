@@ -2175,7 +2175,7 @@ run_windows_bootnext() {
 
 # Reads the configuration once and counts the managed markers.
 windows_scan_managed_markers() {
-  local config index
+  local config index line trimmed
   _windows_scan_lines=()
   _windows_scan_begin=0
   _windows_scan_end=0
@@ -2188,7 +2188,8 @@ windows_scan_managed_markers() {
   [[ -f "$config" && ! -L "$config" ]] || return 1
   mapfile -t _windows_scan_lines < "$config" || return 1
   for ((index=0; index < ${#_windows_scan_lines[@]}; index++)); do
-    case "${_windows_scan_lines[$index]}" in
+    line=${_windows_scan_lines[$index]}
+    case "$line" in
       "$WINDOWS_ENTRY_MARKER")
         _windows_scan_begin=$((_windows_scan_begin + 1))
         _windows_scan_begin_index=$index
@@ -2201,9 +2202,12 @@ windows_scan_managed_markers() {
         _windows_scan_legacy=$((_windows_scan_legacy + 1))
         _windows_scan_legacy_index=$index
         ;;
-      "$WINDOWS_ENTRY_MARKER"*|"$WINDOWS_ENTRY_END_MARKER"*|\
-      "$WINDOWS_LEGACY_ENTRY_MARKER"*)
-        _windows_scan_suspicious=$((_windows_scan_suspicious + 1))
+      *)
+        # Limine strips leading whitespace, so an indented or extended marker
+        # is live marker text that no exact block owns.
+        trimmed=${line#"${line%%[![:space:]]*}"}
+        [[ "$trimmed" != "$WINDOWS_LEGACY_ENTRY_MARKER"* ]] \
+          || _windows_scan_suspicious=$((_windows_scan_suspicious + 1))
         ;;
     esac
   done
@@ -2218,12 +2222,19 @@ windows_block_body_matches() {
     && "${_windows_scan_lines[start + 4]}" == "    entry: ${label}" ]]
 }
 
-# A legacy block ends at the file's end, an empty line, or an unindented line.
+# After a managed block only blank lines, comments, the end of the file, or
+# the start of another entry may follow: Limine assigns any other line to the
+# preceding entry, so removing the block would hand it to the entry above.
 windows_block_ends_at() {
-  local next="$1"
-  (( next == ${#_windows_scan_lines[@]} )) \
-    || [[ -z "${_windows_scan_lines[$next]}" \
-      || "${_windows_scan_lines[$next]}" != [[:space:]]* ]]
+  local next="$1" line trimmed
+  for ((; next < ${#_windows_scan_lines[@]}; next++)); do
+    line=${_windows_scan_lines[$next]}
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [[ -n "$trimmed" && "$trimmed" != '#'* ]] || continue
+    [[ "$trimmed" == /* ]] && return 0
+    return 1
+  done
+  return 0
 }
 
 windows_managed_block_state() {
@@ -2239,7 +2250,8 @@ windows_managed_block_state() {
   fi
   if (( _windows_scan_begin == 1 && _windows_scan_end == 1 && _windows_scan_legacy == 0 \
     && _windows_scan_end_index == _windows_scan_begin_index + 5 )) \
-    && windows_block_body_matches "$_windows_scan_begin_index" "$label"; then
+    && windows_block_body_matches "$_windows_scan_begin_index" "$label" \
+    && windows_block_ends_at $((_windows_scan_end_index + 1)); then
     _windows_block_state=canonical
     _windows_block_start=$_windows_scan_begin_index
     _windows_block_count=6

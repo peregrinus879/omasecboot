@@ -531,6 +531,56 @@ EOF
   if windows_managed_block_state 'Windows Boot Manager' >/dev/null 2>&1; then
     fail_test "bounded block with a stray marker-like line was accepted"
   fi
+
+  # Limine assigns every option after the block to the Windows entry until the
+  # next entry starts; removal would hand such options to the entry above.
+  local trailer
+  for trailer in '    if_fw_type: BIOS' $'# note\n    if_fw_type: BIOS' \
+    $'\nif_fw_type: BIOS'; do
+    {
+      windows_emit_managed_block 'Windows Boot Manager'
+      printf '%s\n' "$trailer"
+    } > "$CONFIG_FILE"
+    if windows_managed_block_state 'Windows Boot Manager' >/dev/null 2>&1; then
+      fail_test "bounded block followed by an option was accepted: ${trailer//$'\n'/ }"
+    fi
+    {
+      printf '# omasecboot:windows\n/Windows\n    comment: Windows Boot Manager\n'
+      printf '    protocol: efi_boot_entry\n    entry: Windows Boot Manager\n'
+      printf '%s\n' "$trailer"
+    } > "$CONFIG_FILE"
+    if windows_managed_block_state 'Windows Boot Manager' >/dev/null 2>&1; then
+      fail_test "legacy block followed by an option was accepted: ${trailer//$'\n'/ }"
+    fi
+  done
+  {
+    windows_emit_managed_block 'Windows Boot Manager'
+    printf '\n# next entry\n  /Next Entry\n    protocol: efi\n'
+  } > "$CONFIG_FILE"
+  windows_managed_block_state 'Windows Boot Manager' \
+    || fail_test "bounded block followed by a trimmed entry was rejected"
+  [[ "$_windows_block_state" == canonical ]] \
+    || fail_test "bounded block followed by a trimmed entry lost its state"
+
+  # Indented markers are live marker text that no exact block owns.
+  local indent
+  for indent in '  ' $'\t'; do
+    {
+      printf '%s# omasecboot:windows begin\n' "$indent"
+      printf '/Windows\n    comment: Windows Boot Manager\n    protocol: efi_boot_entry\n'
+      printf '    entry: Windows Boot Manager\n%s# omasecboot:windows end\n' "$indent"
+    } > "$CONFIG_FILE"
+    if windows_managed_block_state 'Windows Boot Manager' >/dev/null 2>&1; then
+      fail_test "indented bounded markers were treated as absent"
+    fi
+    {
+      printf '%s# omasecboot:windows\n/Windows\n    comment: Windows Boot Manager\n' "$indent"
+      printf '    protocol: efi_boot_entry\n    entry: Windows Boot Manager\n'
+    } > "$CONFIG_FILE"
+    if windows_managed_block_state 'Windows Boot Manager' >/dev/null 2>&1; then
+      fail_test "indented legacy marker was treated as absent"
+    fi
+  done
 }
 
 test_state_schema_rejection() {
@@ -811,6 +861,30 @@ test_malformed_block_suppression_refusal() {
   read_lifecycle || fail_test "malformed-block refusal damaged lifecycle"
   [[ "$_lifecycle_state" == active ]] \
     || fail_test "malformed-block refusal opened a transaction"
+}
+
+test_trailing_option_suppression_refusal() {
+  local state_file state_hash config_hash
+  setup_fixture suppression-trailing-option
+  run_windows_handoff_setup || fail_test "trailing-option suppression fixture setup failed"
+  state_file=$(windows_target_state_path)
+  sed -i "/^${WINDOWS_ENTRY_END_MARKER}\$/a\\    if_fw_type: BIOS" "$CONFIG_FILE"
+  grep -Fxq '    if_fw_type: BIOS' "$CONFIG_FILE" \
+    || fail_test "trailing-option fixture did not place the option after the block"
+  state_hash=$(sha256_file "$state_file")
+  config_hash=$(sha256_file "$CONFIG_FILE")
+  TARGET_BOOT=0008
+  RESOLVE_CALLS=0
+  REPAIR_BODY_CALLS=0
+  if suppress_stale_windows_entry >/dev/null 2>&1; then
+    fail_test "owned block with a trailing option was suppressed"
+  fi
+  [[ "$(sha256_file "$state_file")" == "$state_hash" \
+    && "$(sha256_file "$CONFIG_FILE")" == "$config_hash" ]] \
+    || fail_test "trailing-option refusal changed Windows files"
+  read_lifecycle || fail_test "trailing-option refusal damaged lifecycle"
+  [[ "$_lifecycle_state" == active ]] \
+    || fail_test "trailing-option refusal opened a transaction"
 }
 
 test_unprovable_target_suppression() {
@@ -1783,6 +1857,7 @@ run_case valid-suppression-refusal test_valid_target_suppression_refusal
 run_case suppression-preflight test_suppression_preflight_failure
 run_case legacy-suppression test_legacy_block_suppression
 run_case malformed-suppression test_malformed_block_suppression_refusal
+run_case trailing-option-suppression test_trailing_option_suppression_refusal
 run_case unprovable-suppression test_unprovable_target_suppression
 run_case suppression-revalidation test_in_transaction_proof_failure_suppression
 run_case valid-again-rollback test_valid_again_suppression_rollback
