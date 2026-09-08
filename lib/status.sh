@@ -198,56 +198,50 @@ show_lifecycle_status() {
   esac
 }
 
-show_status() {
-  header "Secure Boot Status"
-  local all_ok=true line
-
-  # Parse sbctl status
-  local json secure_boot_state="" setup_mode_state="" installed_state=""
-  json=$(sbctl status --json 2>/dev/null) || true
-
+# Firmware and key state from one sbctl status document; prints the raw status
+# when the document is unavailable.
+show_firmware_status() {
+  local json="$1" ok=true installed_state setup_mode_state secure_boot_state vendors
   if [[ -z "$json" || "$json" == "null" ]]; then
-    # Fallback to raw output
     sbctl status
     echo
-  else
-    local vendors
-    read -r installed_state setup_mode_state secure_boot_state < <(
-      echo "$json" | jq -r '[.installed, .setup_mode, .secure_boot] | map(. // false) | @tsv'
-    )
-    vendors=$(echo "$json" | jq -r '
-      .vendors // [] | if type == "array" then
-        map(tostring) | sort | unique | join(", ")
-      else
-        tostring
-      end
-    ')
-
-    if [[ "$installed_state" == "true" ]]; then
-      pass "sbctl keys installed"
-    else
-      fail "sbctl keys not installed"
-      all_ok=false
-    fi
-
-    if [[ "$secure_boot_state" == "true" ]]; then
-      pass "Secure Boot enabled"
-    else
-      fail "Secure Boot disabled"
-      all_ok=false
-    fi
-
-    if [[ "$setup_mode_state" == "true" ]]; then
-      warn "Setup Mode active"
-    else
-      pass "Setup Mode disabled"
-    fi
-    [[ -n "$vendors" && "$vendors" != "null" ]] && echo -e "  ${DIM}Vendor keys: ${vendors}${NC}"
+    return 0
   fi
+  read -r installed_state setup_mode_state secure_boot_state < <(
+    jq -r '[.installed, .setup_mode, .secure_boot] | map(. // false) | @tsv' <<< "$json"
+  )
+  vendors=$(jq -r '
+    .vendors // [] | if type == "array" then
+      map(tostring) | sort | unique | join(", ")
+    else
+      tostring
+    end
+  ' <<< "$json")
+  if [[ "$installed_state" == "true" ]]; then
+    pass "sbctl keys installed"
+  else
+    fail "sbctl keys not installed"
+    ok=false
+  fi
+  if [[ "$secure_boot_state" == "true" ]]; then
+    pass "Secure Boot enabled"
+  else
+    fail "Secure Boot disabled"
+    ok=false
+  fi
+  if [[ "$setup_mode_state" == "true" ]]; then
+    warn "Setup Mode active"
+  else
+    pass "Setup Mode disabled"
+  fi
+  [[ -n "$vendors" && "$vendors" != "null" ]] && echo -e "  ${DIM}Vendor keys: ${vendors}${NC}"
+  [[ "$ok" == true ]]
+}
 
-  # Hook status
-  echo
-  local hook_entry hook_path hook_label
+# Installed hooks, HookDir shadowing, and stale source installs. A missing hook
+# fails only while the lifecycle is active.
+show_hook_status() {
+  local ok=true hook_entry hook_path hook_label hook_name shadow_dir
   for hook_entry in \
     "/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook|dependency removal guard" \
     "/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook|transaction guard" \
@@ -266,171 +260,173 @@ show_status() {
     else
       warn "${hook_path##*/} missing; install the packaged OmaSecBoot release before activation"
     fi
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || all_ok=false
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || ok=false
   done
-
-  local hook_name shadow_dir
   for hook_name in 00-omasecboot-removal-guard.hook 00-omasecboot-transition-guard.hook \
     zzz-omasecboot.hook; do
     if pacman_hook_is_shadowed "$(pacman_system_hook_dir)/${hook_name}"; then
       shadow_dir=$(pacman_configured_hook_dirs 2>/dev/null | tr '\n' ' ')
       fail "${hook_name} is shadowed by a same-named hook in a configured HookDir (${shadow_dir% }); remove the stale copy"
-      all_ok=false
+      ok=false
     fi
   done
   if [[ -e /usr/local/bin/omasecboot || -e /usr/local/lib/omasecboot ]]; then
     fail "Stale source install under /usr/local; remove it and its hooks before activation"
-    all_ok=false
+    ok=false
   fi
+  [[ "$ok" == true ]]
+}
 
-  if command -v systemctl >/dev/null 2>&1; then
-    local load_state enabled_state active_state
-    load_state=$(systemctl show -p LoadState --value limine-snapper-sync.service 2>/dev/null || true)
-    if [[ "$load_state" == "loaded" ]]; then
-      enabled_state=$(systemctl is-enabled limine-snapper-sync.service 2>/dev/null || true)
-      active_state=$(systemctl is-active limine-snapper-sync.service 2>/dev/null || true)
-
-      if [[ "$enabled_state" == "enabled" ]]; then
-        pass "limine-snapper-sync.service enabled"
-      else
-        warn "limine-snapper-sync.service not enabled (${enabled_state:-unknown})"
-      fi
-
-      if [[ "$active_state" == "active" ]]; then
-        pass "limine-snapper-sync.service active"
-      else
-        warn "limine-snapper-sync.service not active (${active_state:-unknown})"
-        if ! command -v inotifywait >/dev/null 2>&1; then
-          echo -e "  ${DIM}limine-snapper-sync's optional file watcher requires ${BOLD}inotify-tools${NC}${DIM} (not needed by this repo's Limine post-hook)${NC}"
-        fi
-      fi
-    fi
-  fi
-
-  echo
-  echo -e "  ${BOLD}ESP Mount${NC}"
-  if command -v mountpoint >/dev/null 2>&1 && command -v findmnt >/dev/null 2>&1; then
-    if esp_is_mounted_vfat; then
-      pass "$(esp_path) mounted as vfat"
-    else
-      fail "$(esp_path) is not mounted as the FAT32 ESP"
-      all_ok=false
-    fi
+# limine-snapper-sync.service state; advisory only.
+show_service_status() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local load_state enabled_state active_state
+  load_state=$(systemctl show -p LoadState --value limine-snapper-sync.service 2>/dev/null || true)
+  [[ "$load_state" == "loaded" ]] || return 0
+  enabled_state=$(systemctl is-enabled limine-snapper-sync.service 2>/dev/null || true)
+  active_state=$(systemctl is-active limine-snapper-sync.service 2>/dev/null || true)
+  if [[ "$enabled_state" == "enabled" ]]; then
+    pass "limine-snapper-sync.service enabled"
   else
+    warn "limine-snapper-sync.service not enabled (${enabled_state:-unknown})"
+  fi
+  if [[ "$active_state" == "active" ]]; then
+    pass "limine-snapper-sync.service active"
+  else
+    warn "limine-snapper-sync.service not active (${active_state:-unknown})"
+    if ! command -v inotifywait >/dev/null 2>&1; then
+      echo -e "  ${DIM}limine-snapper-sync's optional file watcher requires ${BOLD}inotify-tools${NC}${DIM} (not needed by this repo's Limine post-hook)${NC}"
+    fi
+  fi
+}
+
+show_esp_status() {
+  if ! { command -v mountpoint && command -v findmnt; } >/dev/null 2>&1; then
     warn "mountpoint/findmnt unavailable; cannot verify $(esp_path) mount"
+    return 0
   fi
+  if esp_is_mounted_vfat; then
+    pass "$(esp_path) mounted as vfat"
+  else
+    fail "$(esp_path) is not mounted as the FAT32 ESP"
+    return 1
+  fi
+}
 
-  echo
-  echo -e "  ${BOLD}Limine Config${NC}"
-  if [[ -f "$(limine_default_config_path)" ]]; then
-    local enable_verification enable_enroll before_save after_save
-    enable_verification=$(limine_managed_setting_state ENABLE_VERIFICATION 2>/dev/null) \
-      || enable_verification=invalid
-    if [[ "$enable_verification" == no ]]; then
-      pass "ENABLE_VERIFICATION=no"
-    else
-      fail "ENABLE_VERIFICATION is not one clean no (${enable_verification})"
-      all_ok=false
-    fi
-    enable_enroll=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG 2>/dev/null) \
-      || enable_enroll=invalid
-    if [[ "$enable_enroll" == yes ]]; then
-      pass "ENABLE_ENROLL_LIMINE_CONFIG=yes"
-    else
-      fail "ENABLE_ENROLL_LIMINE_CONFIG is not one clean yes (${enable_enroll})"
-      all_ok=false
-    fi
-    before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll \
-      2>/dev/null) || before_save=invalid
-    after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config \
-      2>/dev/null) || after_save=invalid
-    if limine_enrollment_hooks_present; then
-      pass "Limine enrollment hooks present"
-      if [[ "$before_save" != absent || "$after_save" != absent ]]; then
-        warn "deprecated COMMANDS_* enrollment entries remain; run sudo omasecboot sign to remove them safely"
-      fi
-    else
-      warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
-      if [[ "$before_save" == present ]]; then
-        pass "COMMANDS_BEFORE_SAVE includes limine-reset-enroll"
-      else
-        fail "COMMANDS_BEFORE_SAVE is missing limine-reset-enroll fallback"
-        all_ok=false
-      fi
-      if [[ "$after_save" == present ]]; then
-        pass "COMMANDS_AFTER_SAVE includes limine-enroll-config"
-      else
-        fail "COMMANDS_AFTER_SAVE is missing limine-enroll-config fallback"
-        all_ok=false
-      fi
-    fi
-
-    local limine_major="" limine_ver=""
-    limine_ver=$(limine_version 2>/dev/null || true)
-    limine_major=$(limine_major_version 2>/dev/null || true)
-    if [[ -n "$limine_ver" ]]; then
-      pass "Limine ${limine_ver} installed"
-    fi
-
-    local color_warnings unhashed_paths limine_v12_or_newer=false
-    if [[ -n "$limine_major" && $limine_major -ge 12 ]]; then
-      limine_v12_or_newer=true
-    fi
-
-    color_warnings=$(list_limine_v12_color_warnings)
-    if [[ -n "$color_warnings" ]]; then
-      warn "Limine 12 expects interface colors as RRGGBB values"
-      while IFS= read -r line; do
-        echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
-      done <<< "$color_warnings"
-    fi
-
-    if [[ "$enable_enroll" == "yes" ]]; then
-      unhashed_paths=$(list_limine_unhashed_paths)
-      if [[ -n "$unhashed_paths" ]]; then
-        if [[ "$limine_v12_or_newer" == true && "$secure_boot_state" == "true" ]]; then
-          fail "Limine 12 Secure Boot path-hash enforcement may block boot"
-          while IFS= read -r line; do
-            echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
-          done <<< "$unhashed_paths"
-          all_ok=false
-        else
-          warn "Limine 12 readiness: non-EFI loaded paths are missing BLAKE2B hashes"
-          while IFS= read -r line; do
-            echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
-          done <<< "$unhashed_paths"
-        fi
-      else
-        pass "Limine 12 path-hash readiness passed for non-EFI loaded paths"
-      fi
-    else
-      echo -e "  ${DIM}Limine 12 path-hash enforcement inactive unless config enrollment is active${NC}"
+# The managed /etc/default/limine settings, the enrollment hooks, and Limine 12
+# path-hash readiness.
+show_limine_config_status() {
+  local secure_boot_state="$1" ok=true line
+  if [[ ! -f "$(limine_default_config_path)" ]]; then
+    fail "$(limine_default_config_path) not found"
+    return 1
+  fi
+  local enable_verification enable_enroll before_save after_save
+  enable_verification=$(limine_managed_setting_state ENABLE_VERIFICATION 2>/dev/null) \
+    || enable_verification=invalid
+  if [[ "$enable_verification" == no ]]; then
+    pass "ENABLE_VERIFICATION=no"
+  else
+    fail "ENABLE_VERIFICATION is not one clean no (${enable_verification})"
+    ok=false
+  fi
+  enable_enroll=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG 2>/dev/null) \
+    || enable_enroll=invalid
+  if [[ "$enable_enroll" == yes ]]; then
+    pass "ENABLE_ENROLL_LIMINE_CONFIG=yes"
+  else
+    fail "ENABLE_ENROLL_LIMINE_CONFIG is not one clean yes (${enable_enroll})"
+    ok=false
+  fi
+  before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll \
+    2>/dev/null) || before_save=invalid
+  after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config \
+    2>/dev/null) || after_save=invalid
+  if limine_enrollment_hooks_present; then
+    pass "Limine enrollment hooks present"
+    if [[ "$before_save" != absent || "$after_save" != absent ]]; then
+      warn "deprecated COMMANDS_* enrollment entries remain; run sudo omasecboot sign to remove them safely"
     fi
   else
-    fail "$(limine_default_config_path) not found"
-    all_ok=false
+    warn "Limine enrollment hooks missing; checking deprecated COMMANDS_* fallback"
+    if [[ "$before_save" == present ]]; then
+      pass "COMMANDS_BEFORE_SAVE includes limine-reset-enroll"
+    else
+      fail "COMMANDS_BEFORE_SAVE is missing limine-reset-enroll fallback"
+      ok=false
+    fi
+    if [[ "$after_save" == present ]]; then
+      pass "COMMANDS_AFTER_SAVE includes limine-enroll-config"
+    else
+      fail "COMMANDS_AFTER_SAVE is missing limine-enroll-config fallback"
+      ok=false
+    fi
   fi
 
+  local limine_major="" limine_ver=""
+  limine_ver=$(limine_version 2>/dev/null || true)
+  limine_major=$(limine_major_version 2>/dev/null || true)
+  if [[ -n "$limine_ver" ]]; then
+    pass "Limine ${limine_ver} installed"
+  fi
+
+  local color_warnings unhashed_paths limine_v12_or_newer=false
+  if [[ -n "$limine_major" && $limine_major -ge 12 ]]; then
+    limine_v12_or_newer=true
+  fi
+  color_warnings=$(list_limine_v12_color_warnings)
+  if [[ -n "$color_warnings" ]]; then
+    warn "Limine 12 expects interface colors as RRGGBB values"
+    while IFS= read -r line; do
+      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
+    done <<< "$color_warnings"
+  fi
+  if [[ "$enable_enroll" != "yes" ]]; then
+    echo -e "  ${DIM}Limine 12 path-hash enforcement inactive unless config enrollment is active${NC}"
+    [[ "$ok" == true ]]
+    return $?
+  fi
+  unhashed_paths=$(list_limine_unhashed_paths) || unhashed_paths=""
+  if [[ -z "$unhashed_paths" ]]; then
+    pass "Limine 12 path-hash readiness passed for non-EFI loaded paths"
+  elif [[ "$limine_v12_or_newer" == true && "$secure_boot_state" == "true" ]]; then
+    fail "Limine 12 Secure Boot path-hash enforcement may block boot"
+    while IFS= read -r line; do
+      echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
+    done <<< "$unhashed_paths"
+    ok=false
+  else
+    warn "Limine 12 readiness: non-EFI loaded paths are missing BLAKE2B hashes"
+    while IFS= read -r line; do
+      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
+    done <<< "$unhashed_paths"
+  fi
+  [[ "$ok" == true ]]
+}
+
+# Shadowing config candidates on the ESP and the enrolled checksum proof.
+show_limine_checksum_status() {
   local shadow_config shadow_config_found=false current_config_checksum
   while IFS= read -r shadow_config; do
     if [[ -e "$shadow_config" || -L "$shadow_config" ]]; then
       fail "Possible Limine config shadowing file: ${shadow_config}"
       shadow_config_found=true
-      all_ok=false
     fi
   done < <(limine_shadow_config_paths)
-
   if [[ "$shadow_config_found" == false ]] \
     && current_config_checksum=$(current_limine_config_checksum) \
     && verify_limine_config_targets "$current_config_checksum"; then
     pass "Current Limine config checksum enrolled in both boot binaries"
-  else
-    [[ "$shadow_config_found" == true ]] \
-      || fail "Current Limine config checksum is not proved in both boot binaries"
-    all_ok=false
+    return 0
   fi
+  [[ "$shadow_config_found" == true ]] \
+    || fail "Current Limine config checksum is not proved in both boot binaries"
+  return 1
+}
 
-  local direct_boot_entries
+# Firmware boot entries and the managed Windows handoff.
+show_windows_status() {
+  local ok=true line direct_boot_entries
   direct_boot_entries=$(list_omarchy_direct_boot_entries)
   if [[ -n "$direct_boot_entries" ]]; then
     warn "Omarchy Direct Boot firmware entry enabled"
@@ -440,7 +436,6 @@ show_status() {
     echo -e "  ${DIM}Direct Boot bypasses the Limine menu, including snapshots and repo-managed Windows entries.${NC}"
   fi
 
-  # Windows boot path
   local windows_boot_entries windows_boot_count windows_target windows_target_rc=0
   windows_target=$(find_windows_boot_entry 2>/dev/null) || windows_target_rc=$?
   windows_boot_entries=$(list_windows_firmware_entries)
@@ -452,7 +447,7 @@ show_status() {
     while IFS= read -r line; do
       echo -e "    ${YELLOW}!${NC} ${line}"
     done <<< "$windows_boot_entries"
-    all_ok=false
+    ok=false
   else
     echo -e "  ${DIM}No Windows Boot Manager found (check BIOS boot settings)${NC}"
   fi
@@ -472,20 +467,20 @@ show_status() {
           ;;
         legacy)
           warn "Managed Windows entry uses the legacy unbounded marker"
-          all_ok=false
+          ok=false
           ;;
         absent)
           warn "Durable Windows opt-in is recorded but its managed entry is suppressed"
-          all_ok=false
+          ok=false
           ;;
         *)
           fail "Managed Windows entry state is invalid"
-          all_ok=false
+          ok=false
           ;;
       esac
     else
       warn "Managed Windows entry in limine.conf is malformed or mismatched"
-      all_ok=false
+      ok=false
     fi
   elif [[ -e "$windows_state_file" || -L "$windows_state_file" ]]; then
     if windows_classify_target_state && [[ "$_windows_state_kind" == legacy-empty ]]; then
@@ -493,12 +488,12 @@ show_status() {
     else
       fail "Durable Windows target state is invalid or unsafe"
     fi
-    all_ok=false
+    ok=false
   elif grep -Fq "$WINDOWS_ENTRY_MARKER" "$(limine_config_path)" 2>/dev/null \
     || grep -Fq "$WINDOWS_ENTRY_END_MARKER" "$(limine_config_path)" 2>/dev/null \
     || grep -Fq "$WINDOWS_LEGACY_ENTRY_MARKER" "$(limine_config_path)" 2>/dev/null; then
     warn "Managed Windows entry has no durable target identity"
-    all_ok=false
+    ok=false
   else
     echo -e "  ${DIM}No managed Windows firmware handoff configured${NC}"
   fi
@@ -514,113 +509,123 @@ show_status() {
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
     echo -e "  ${DIM}Run sudo omasecboot windows setup to add the validated firmware handoff; remove the chainload entry from limine.conf yourself.${NC}"
   fi
+  [[ "$ok" == true ]]
+}
 
-  # Tracked files (root only)
-  if [[ $EUID -eq 0 ]]; then
-    echo
-    echo -e "  ${BOLD}Tracked Files${NC}"
-    local -a enrolled=()
-    local -a discovered
-    local -a untracked=()
-    local file
-    local enrolled_raw enrolled_rc=0
-    local stale_entries stale_rc=0 stale_file stale_output
-    declare -A enrolled_map=()
-    local -a missing_tracked=()
-    # Scoped to this section so the closing summary reflects file state
-    # only, not unrelated failures (e.g. Secure Boot disabled).
-    local files_ok=true
-
-    enrolled_raw=$(list_enrolled_paths) || enrolled_rc=$?
-    stale_entries=$(list_stale_sbctl_entries) || stale_rc=$?
-    mapfile -t discovered < <(discover_efi_files)
-
-    if [[ $stale_rc -eq 0 && -n "$stale_entries" ]]; then
-      while IFS=$'\t' read -r stale_file stale_output; do
-        stale_output="${stale_output:-$stale_file}"
-        if [[ ! -e "$stale_file" || ! -e "$stale_output" ]]; then
-          if [[ "$stale_file" == "$stale_output" ]]; then
-            missing_tracked+=("$stale_file")
-          else
-            missing_tracked+=("$stale_file -> $stale_output")
-          fi
-        fi
-      done <<< "$stale_entries"
-    fi
-
-    if [[ $enrolled_rc -ne 0 ]]; then
-      fail "Could not read sbctl tracking state"
-      all_ok=false
-      files_ok=false
-    elif [[ -n "$enrolled_raw" ]]; then
-      mapfile -t enrolled <<< "$enrolled_raw"
-    fi
-
-    if [[ $enrolled_rc -ne 0 ]]; then
-      : # already reported above
-    elif [[ ${#enrolled[@]} -eq 0 ]]; then
-      warn "No files in sbctl database"
-      [[ ${#discovered[@]} -eq 0 ]] || { all_ok=false; files_ok=false; }
-    else
-      for file in "${enrolled[@]}"; do
-        enrolled_map["$file"]=1
-      done
-
-      for file in "${discovered[@]}"; do
-        if [[ -z "${enrolled_map[$file]:-}" ]]; then
-          untracked+=("$file")
-        fi
-      done
-
-      for file in "${enrolled[@]}"; do
-        if sbctl_file_signature_state "$file"; then
-          echo -e "    ${GREEN}✓${NC} $file"
-        else
-          echo -e "    ${RED}✗${NC} $file"
-          all_ok=false
-          files_ok=false
-        fi
-      done
-
-      if [[ ${#untracked[@]} -gt 0 ]]; then
-        echo
-        warn "Untracked EFI files found (${#untracked[@]})"
-        for file in "${untracked[@]}"; do
-          echo -e "    ${YELLOW}!${NC} $file"
-        done
-        if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
-          echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Run sudo omasecboot sign before rebooting.${NC}"
-        fi
-        all_ok=false
-        files_ok=false
-      fi
-
-    fi
-
-    if [[ $enrolled_rc -eq 0 && ${#missing_tracked[@]} -gt 0 ]]; then
-      echo
-      warn "Stale sbctl tracked files found"
-      for stale_file in "${missing_tracked[@]}"; do
-        echo -e "    ${YELLOW}!${NC} $stale_file"
-      done
-      echo -e "  ${DIM}Run sudo omasecboot cleanup to remove stale tracking safely.${NC}"
-      all_ok=false
-      files_ok=false
-    fi
-
-    if [[ $enrolled_rc -eq 0 && ${#enrolled[@]} -gt 0 ]]; then
-      echo
-      if $files_ok; then
-        pass "All tracked files signed and all discovered EFI files enrolled"
-      else
-        warn "Some files failed. Run sudo omasecboot sign to repair and prove them"
-      fi
-    fi
-  else
+# Tracked-file verification, root only. The closing line reflects file state
+# alone, not the other sections.
+show_tracked_files_status() {
+  if [[ $EUID -ne 0 ]]; then
     echo
     echo -e "  ${DIM}Run as root for file verification: ${BOLD}sudo omasecboot status${NC}"
+    return 0
   fi
   echo
+  echo -e "  ${BOLD}Tracked Files${NC}"
+  local ok=true file enrolled_raw enrolled_rc=0 stale_entries stale_rc=0
+  local stale_file stale_output
+  local -a enrolled=() discovered untracked=() missing_tracked=()
+  local -A enrolled_map=()
 
+  enrolled_raw=$(list_enrolled_paths) || enrolled_rc=$?
+  stale_entries=$(list_stale_sbctl_entries) || stale_rc=$?
+  mapfile -t discovered < <(discover_efi_files)
+
+  if [[ $stale_rc -eq 0 && -n "$stale_entries" ]]; then
+    while IFS=$'\t' read -r stale_file stale_output; do
+      stale_output="${stale_output:-$stale_file}"
+      if [[ ! -e "$stale_file" || ! -e "$stale_output" ]]; then
+        if [[ "$stale_file" == "$stale_output" ]]; then
+          missing_tracked+=("$stale_file")
+        else
+          missing_tracked+=("$stale_file -> $stale_output")
+        fi
+      fi
+    done <<< "$stale_entries"
+  fi
+
+  if [[ $enrolled_rc -ne 0 ]]; then
+    fail "Could not read sbctl tracking state"
+    ok=false
+  elif [[ -n "$enrolled_raw" ]]; then
+    mapfile -t enrolled <<< "$enrolled_raw"
+  fi
+
+  if [[ $enrolled_rc -ne 0 ]]; then
+    : # already reported above
+  elif [[ ${#enrolled[@]} -eq 0 ]]; then
+    warn "No files in sbctl database"
+    [[ ${#discovered[@]} -eq 0 ]] || ok=false
+  else
+    for file in "${enrolled[@]}"; do
+      enrolled_map["$file"]=1
+    done
+    for file in "${discovered[@]}"; do
+      if [[ -z "${enrolled_map[$file]:-}" ]]; then
+        untracked+=("$file")
+      fi
+    done
+    for file in "${enrolled[@]}"; do
+      if sbctl_file_signature_state "$file"; then
+        echo -e "    ${GREEN}✓${NC} $file"
+      else
+        echo -e "    ${RED}✗${NC} $file"
+        ok=false
+      fi
+    done
+    if [[ ${#untracked[@]} -gt 0 ]]; then
+      echo
+      warn "Untracked EFI files found (${#untracked[@]})"
+      for file in "${untracked[@]}"; do
+        echo -e "    ${YELLOW}!${NC} $file"
+      done
+      if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
+        echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Run sudo omasecboot sign before rebooting.${NC}"
+      fi
+      ok=false
+    fi
+  fi
+
+  if [[ $enrolled_rc -eq 0 && ${#missing_tracked[@]} -gt 0 ]]; then
+    echo
+    warn "Stale sbctl tracked files found"
+    for stale_file in "${missing_tracked[@]}"; do
+      echo -e "    ${YELLOW}!${NC} $stale_file"
+    done
+    echo -e "  ${DIM}Run sudo omasecboot cleanup to remove stale tracking safely.${NC}"
+    ok=false
+  fi
+
+  if [[ $enrolled_rc -eq 0 && ${#enrolled[@]} -gt 0 ]]; then
+    echo
+    if [[ "$ok" == true ]]; then
+      pass "All tracked files signed and all discovered EFI files enrolled"
+    else
+      warn "Some files failed. Run sudo omasecboot sign to repair and prove them"
+    fi
+  fi
+  [[ "$ok" == true ]]
+}
+
+show_status() {
+  header "Secure Boot Status"
+  local all_ok=true json secure_boot_state
+  json=$(sbctl status --json 2>/dev/null) || true
+  show_firmware_status "$json" || all_ok=false
+  secure_boot_state=$(jq -r '.secure_boot // false' <<< "$json" 2>/dev/null) \
+    || secure_boot_state=false
+  echo
+  show_hook_status || all_ok=false
+  show_service_status
+  echo
+  echo -e "  ${BOLD}ESP Mount${NC}"
+  show_esp_status || all_ok=false
+  echo
+  echo -e "  ${BOLD}Limine Config${NC}"
+  show_limine_config_status "$secure_boot_state" || all_ok=false
+  show_limine_checksum_status || all_ok=false
+  show_windows_status || all_ok=false
+  show_tracked_files_status || all_ok=false
+  echo
   [[ "$all_ok" == true ]]
 }

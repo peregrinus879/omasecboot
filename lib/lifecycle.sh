@@ -41,6 +41,104 @@ readonly MAX_TRANSACTION_BACKUPS=4096
 readonly MAX_CONTROL_DOCUMENT_BYTES=1048576
 readonly MAX_FIRMWARE_WRITE_ATTEMPTS=6
 readonly MAX_FIRMWARE_HIERARCHY_ATTEMPTS=2
+# jq definitions of the manifest's compound members and of the evidence
+# predicates the rule functions share; appended to OMASECBOOT_JQ_DEFS.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
+readonly MANIFEST_JQ_DEFS='
+  def no_firmware_evidence:
+    .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [];
+  def ownership_records_paired:
+    (.domain_records.managed_settings == null) ==
+      (.domain_records.tracking_ownership == null);
+  def owner_identity:
+    type == "object" and keys == ["pid","start_time","uid"] and
+    (.pid | type == "number" and . > 0 and floor == .) and
+    (.start_time | type == "string" and test("^[0-9]+$") and length <= 32);
+  def recovery_lineage($max_attempts):
+    type == "object" and keys == ["attempt_number","previous_attempt","root_incident"] and
+    (.attempt_number | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+    (.root_incident | incident_reference($max_attempts)) and .root_incident.kind == "root" and
+    (if .attempt_number == 1 then .previous_attempt == null
+     else (.previous_attempt | incident_reference($max_attempts)) and
+       .previous_attempt.kind == "attempt" and
+       .previous_attempt.ordinal == (.attempt_number - 1)
+     end);
+  def backup_entry:
+    type == "object" and
+    if .kind == "absent-lifecycle" then
+      keys == ["kind","path","sha256","target"] and
+      .path == null and .sha256 == null and .target == null
+    elif .kind == "prior-lifecycle" then
+      keys == ["kind","path","sha256","target"] and
+      (.path | absolute_path) and (.sha256 | digest) and .target == null
+    elif .kind == "file" then
+      keys == ["gid","kind","mode","path","sha256","target","uid"] and
+      (.path | absolute_path) and (.sha256 | digest) and (.target | absolute_path) and
+      (.mode | type == "string" and test("^[0-7]{3,4}$")) and
+      (.uid | type == "number" and . >= 0 and floor == .) and
+      (.gid | type == "number" and . >= 0 and floor == .)
+    elif .kind == "absent-file" then
+      keys == ["gid","kind","mode","path","sha256","target","uid"] and
+      .path == null and .sha256 == null and (.target | absolute_path) and
+      .mode == null and .uid == null and .gid == null
+    else false end;
+  def backup_list($transaction_dir; $max_backups):
+    type == "array" and length >= 1 and length <= $max_backups and
+    all(.[]; backup_entry) and
+    (.[0].kind == "absent-lifecycle" or .[0].kind == "prior-lifecycle") and
+    all(.[1:][]; .kind == "file" or .kind == "absent-file") and
+    all(to_entries[1:][]; .value.kind == "absent-file" or
+      .value.path == ($transaction_dir + "/file-" + (.key | tostring) + ".backup")) and
+    ([.[] | select(.target != null) | .target] as $targets |
+      ($targets | length) == ($targets | unique | length)) and
+    ([.[] | select(.path != null) | .path] as $paths |
+      ($paths | length) == ($paths | unique | length));
+  def firmware_backup:
+    type == "object" and keys == ["id","manifest_sha256","path","status"] and
+    (.id | uuid) and (.path | absolute_path) and
+    (.status == "pending" or .status == "complete") and
+    (if .status == "complete" then (.manifest_sha256 | digest)
+     else .manifest_sha256 == null end);
+  def enrollment_plan:
+    type == "object" and keys == ["backup_id","dbx","manifest_sha256","path","variables"] and
+    (.backup_id | uuid) and (.path | absolute_path) and (.manifest_sha256 | digest) and
+    (.variables | type == "object" and keys == ["KEK","PK","db"]) and
+    all(.variables[]; type == "object" and keys == ["entries_sha256","esl_sha256"] and
+      (.entries_sha256 | digest) and (.esl_sha256 | digest)) and
+    (.dbx | type == "object" and keys == ["present","raw_sha256"]) and
+    (.dbx.present | type == "boolean") and
+    (if .dbx.present then (.dbx.raw_sha256 | digest) else .dbx.raw_sha256 == null end);
+  def firmware_write:
+    type == "object" and
+    keys == ["command_exit_code","completed_at","hierarchy","readback_status","started_at"] and
+    (.hierarchy == "db" or .hierarchy == "KEK" or .hierarchy == "PK") and
+    (.started_at | timestamp) and
+    (.command_exit_code == null or
+      (.command_exit_code | type == "number" and . >= 0 and . <= 255 and floor == .)) and
+    (.readback_status == "pending" or .readback_status == "unchanged" or
+      .readback_status == "verified" or .readback_status == "failed") and
+    (if .readback_status == "pending" then .completed_at == null
+     else (.completed_at | timestamp) end);
+  def firmware_write_sequence($max_writes; $max_hierarchy_writes):
+    type == "array" and length <= $max_writes and all(.[]; firmware_write) and
+    ([.[] | select(.hierarchy == "db")] | length) <= $max_hierarchy_writes and
+    ([.[] | select(.hierarchy == "KEK")] | length) <= $max_hierarchy_writes and
+    ([.[] | select(.hierarchy == "PK")] | length) <= $max_hierarchy_writes and
+    (reduce .[] as $write ({ok: true, next: "db", terminal: false};
+      if ((.ok | not) or .terminal or $write.hierarchy != .next) then .ok = false
+      elif $write.readback_status == "pending" then .terminal = true
+      elif $write.readback_status == "failed" then .terminal = true
+      elif $write.readback_status == "unchanged" then .
+      elif $write.readback_status == "verified" then
+        .next = (if .next == "db" then "KEK" elif .next == "KEK" then "PK" else "complete" end)
+      else .ok = false end) | .ok);
+  def rollback_outcome:
+    type == "object" and keys == ["attempted_at","failures","status"] and
+    (.status == "completed" or .status == "failed" or .status == "preserved") and
+    (.attempted_at | timestamp) and
+    (.failures | type == "array" and length <= 128 and
+      all(.[]; type == "string" and length <= 4096));
+'
 
 _lifecycle_state=unmanaged
 _lifecycle_generation=0
@@ -497,15 +595,10 @@ validate_lifecycle_json() {
   ' <<< "$document" >/dev/null
 }
 
-validate_transaction_manifest_json() {
-  local transaction_id="$1" document="$2" check_files="${3:-true}" transaction_dir
-  local prior_state backup_entry backup_kind backup_path backup_hash backup_target
-  local backup_mode backup_uid backup_gid firmware_backup_id firmware_backup_path
-  local enrollment_backup_id enrollment_plan_path reference
-  local -A backup_targets=()
-  [[ "$check_files" == true || "$check_files" == false ]] || return 1
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
-
+# The manifest schema: identity, kind-specific lineage, phases, backups,
+# firmware evidence, domain-record references, and the status envelope.
+validate_manifest_schema() {
+  local transaction_id="$1" document="$2" transaction_dir="$3"
   jq -e --arg id "$transaction_id" --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
     --argjson owner_uid "$(control_owner_uid)" \
     --arg transaction_dir "$transaction_dir" \
@@ -513,7 +606,8 @@ validate_transaction_manifest_json() {
     --argjson max_backups "$MAX_TRANSACTION_BACKUPS" \
     --argjson max_firmware_writes "$MAX_FIRMWARE_WRITE_ATTEMPTS" \
     --argjson max_hierarchy_writes "$MAX_FIRMWARE_HIERARCHY_ATTEMPTS" \
-    --argjson phases "$OMASECBOOT_OPERATION_PHASES" "$OMASECBOOT_JQ_DEFS"'
+    --argjson phases "$OMASECBOOT_OPERATION_PHASES" \
+    "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
     type == "object" and
     keys == ["backups","boot_id","completed_at","completed_phases","created_at",
       "current_phase","domain_records","enrollment_plan","failure","file_rollback_policy",
@@ -523,169 +617,79 @@ validate_transaction_manifest_json() {
     .schema_version == $schema and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     .id == $id and (.operation | operation) and
-    (if .kind == "root" then
-      (.target_state == "disabled" or .target_state == "active")
-     elif .kind == "recovery-attempt" then
-      (.target_state == "disabled" or .target_state == "active" or
-        (.operation == "software-recovery" and .target_state == "unmanaged"))
-     else false end) and
     (.status == "transition" or .status == "completed" or
       .status == "failed" or .status == "stale") and
     (.created_at | timestamp) and
     (.boot_id | uuid) and (.token_sha256 | digest) and
-    (.owner | type == "object" and keys == ["pid","start_time","uid"]) and
-    (.owner.pid | type == "number" and . > 0 and floor == .) and
-    (.owner.start_time | type == "string" and test("^[0-9]+$") and length <= 32) and
-    .owner.uid == $owner_uid and
+    (.owner | owner_identity) and .owner.uid == $owner_uid and
     (if .kind == "root" then
+      (.target_state == "disabled" or .target_state == "active") and
       (.prior_state == "unmanaged" or .prior_state == "disabled" or .prior_state == "active") and
       .recovery == null
-    elif .kind == "recovery-attempt" then
+     elif .kind == "recovery-attempt" then
+      (.target_state == "disabled" or .target_state == "active" or
+        (.operation == "software-recovery" and .target_state == "unmanaged")) and
       .prior_state == "recovery-required" and
-      (.recovery | type == "object" and
-        keys == ["attempt_number","previous_attempt","root_incident"]) and
-      (.recovery.attempt_number | type == "number" and . >= 1 and
-        . <= $max_attempts and floor == .) and
-      (.recovery.root_incident | incident_reference($max_attempts)) and
-      .recovery.root_incident.kind == "root" and
-      (if .recovery.attempt_number == 1 then .recovery.previous_attempt == null
-       else (.recovery.previous_attempt | incident_reference($max_attempts)) and
-         .recovery.previous_attempt.kind == "attempt" and
-         .recovery.previous_attempt.ordinal == (.recovery.attempt_number - 1)
-       end)
-    else false end) and
+      (.recovery | recovery_lineage($max_attempts))
+     else false end) and
     (.current_phase == null or (.current_phase | phase)) and
     (.completed_phases | type == "array" and length <= 128 and
       all(.[]; phase) and length == (unique | length)) and
     (if (.operation | startswith("producer-")) then
        phase_sequence_valid($phases[.operation]) else true end) and
-    (.backups | type == "array" and length >= 1 and length <= $max_backups) and
-    (all(.backups[];
-      type == "object" and
-      if .kind == "absent-lifecycle" then
-        keys == ["kind","path","sha256","target"] and
-        .path == null and .sha256 == null and .target == null
-      elif .kind == "prior-lifecycle" then
-        keys == ["kind","path","sha256","target"] and
-        (.path | absolute_path) and (.sha256 | digest) and .target == null
-      elif .kind == "file" then
-        keys == ["gid","kind","mode","path","sha256","target","uid"] and
-        (.path | absolute_path) and (.sha256 | digest) and (.target | absolute_path) and
-        (.mode | type == "string" and test("^[0-7]{3,4}$")) and
-        (.uid | type == "number" and . >= 0 and floor == .) and
-        (.gid | type == "number" and . >= 0 and floor == .)
-      elif .kind == "absent-file" then
-        keys == ["gid","kind","mode","path","sha256","target","uid"] and
-        .path == null and .sha256 == null and (.target | absolute_path) and
-        .mode == null and .uid == null and .gid == null
-      else false end)) and
-    (.backups[0].kind == "absent-lifecycle" or
-      .backups[0].kind == "prior-lifecycle") and
-    (all(.backups[1:][]; .kind == "file" or .kind == "absent-file")) and
-    (all(.backups | to_entries[1:][];
-      .value.kind == "absent-file" or
-      .value.path == ($transaction_dir + "/file-" + (.key | tostring) + ".backup"))) and
-    ([.backups[] | select(.target != null) | .target] as $targets |
-      ($targets | length) == ($targets | unique | length)) and
-    ([.backups[] | select(.path != null) | .path] as $paths |
-      ($paths | length) == ($paths | unique | length)) and
+    (.backups | backup_list($transaction_dir; $max_backups)) and
     (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve") and
-    (.firmware_backup == null or (
-      (.firmware_backup | type == "object" and
-        keys == ["id","manifest_sha256","path","status"]) and
-      (.firmware_backup.id | uuid) and (.firmware_backup.path | absolute_path) and
-      (.firmware_backup.status == "pending" or .firmware_backup.status == "complete") and
-      (if .firmware_backup.status == "complete" then
-        (.firmware_backup.manifest_sha256 | digest)
-      else .firmware_backup.manifest_sha256 == null end))) and
+    (.firmware_backup == null or (.firmware_backup | firmware_backup)) and
     (.enrollment_plan == null or (
-      (.enrollment_plan | type == "object" and
-        keys == ["backup_id","dbx","manifest_sha256","path","variables"]) and
-      (.enrollment_plan.backup_id | uuid) and (.enrollment_plan.path | absolute_path) and
-      (.enrollment_plan.manifest_sha256 | digest) and
-      (.enrollment_plan.variables | type == "object" and keys == ["KEK","PK","db"]) and
-      (all(.enrollment_plan.variables[];
-        type == "object" and keys == ["entries_sha256","esl_sha256"] and
-        (.entries_sha256 | digest) and (.esl_sha256 | digest))) and
-      (.enrollment_plan.dbx | type == "object" and keys == ["present","raw_sha256"]) and
-      (.enrollment_plan.dbx.present | type == "boolean") and
-      (if .enrollment_plan.dbx.present then (.enrollment_plan.dbx.raw_sha256 | digest)
-       else .enrollment_plan.dbx.raw_sha256 == null end) and
+      (.enrollment_plan | enrollment_plan) and
       .firmware_backup != null and .firmware_backup.status == "complete" and
       .firmware_backup.id == .enrollment_plan.backup_id)) and
-    (.firmware_writes as $writes |
-      ($writes | type) == "array" and ($writes | length) <= $max_firmware_writes and
-      all($writes[];
-        type == "object" and
-        keys == ["command_exit_code","completed_at","hierarchy","readback_status","started_at"] and
-        (.hierarchy == "db" or .hierarchy == "KEK" or .hierarchy == "PK") and
-        (.started_at | timestamp) and
-        (.command_exit_code == null or
-          (.command_exit_code | type == "number" and . >= 0 and . <= 255 and floor == .)) and
-        (.readback_status == "pending" or .readback_status == "unchanged" or
-          .readback_status == "verified" or .readback_status == "failed") and
-        (if .readback_status == "pending" then .completed_at == null
-         else (.completed_at | timestamp) end)) and
-      ([$writes[] | select(.hierarchy == "db")] | length) <= $max_hierarchy_writes and
-      ([$writes[] | select(.hierarchy == "KEK")] | length) <= $max_hierarchy_writes and
-      ([$writes[] | select(.hierarchy == "PK")] | length) <= $max_hierarchy_writes and
-      (reduce $writes[] as $write (
-        {ok: true, next: "db", terminal: false};
-        if ((.ok | not) or .terminal or $write.hierarchy != .next) then
-          .ok = false
-        elif $write.readback_status == "pending" then
-          .terminal = true
-        elif $write.readback_status == "failed" then
-          .terminal = true
-        elif $write.readback_status == "unchanged" then
-          .
-        elif $write.readback_status == "verified" then
-          .next = (if .next == "db" then "KEK"
-                   elif .next == "KEK" then "PK"
-                   else "complete" end)
-        else
-          .ok = false
-        end
-      ) | .ok)) and
+    (.firmware_writes | firmware_write_sequence($max_firmware_writes; $max_hierarchy_writes)) and
     (if (.firmware_writes | length) > 0 then
       .file_rollback_policy == "preserve" and .enrollment_plan != null
-    else true end) and
+     else true end) and
     (.domain_records | type == "object" and
       keys == ["bootnext","final_proof","firmware","managed_settings","producer",
         "tracking_ownership","unconfigure","windows"]) and
     (all(.domain_records[]; . == null or artifact_reference)) and
     (if .status == "transition" then
       .completed_at == null and .failure == null
-    elif .status == "completed" then
+     elif .status == "completed" then
       (.completed_at | timestamp) and .failure == null and .current_phase == null and
       .rollback == null
-    else
+     else
       (.completed_at | timestamp) and (.failure | failure) and
       .failure.phase == .current_phase
-    end) and
-    (.rollback == null or (
-      (.rollback | type == "object" and keys == ["attempted_at","failures","status"]) and
-      (.rollback.status == "completed" or .rollback.status == "failed" or
-        .rollback.status == "preserved") and
-      (.rollback.attempted_at | timestamp) and
-      (.rollback.failures | type == "array" and length <= 128 and
-        all(.[]; type == "string" and length <= 4096))))
-  ' <<< "$document" >/dev/null || return 1
-  [[ "$check_files" == true ]] || return 0
+     end) and
+    (.rollback == null or (.rollback | rollback_outcome))
+  ' <<< "$document" >/dev/null
+}
 
+# The first backup entry is the prior lifecycle document, or its absence when
+# the transaction started unmanaged.
+validate_manifest_lifecycle_backup() {
+  local document="$1" transaction_dir="$2" prior_state backup_kind backup_path backup_hash
   prior_state=$(jq -r '.prior_state' <<< "$document") || return 1
   backup_kind=$(jq -r '.backups[0].kind' <<< "$document") || return 1
   if [[ "$prior_state" == unmanaged ]]; then
     [[ "$backup_kind" == absent-lifecycle ]] || return 1
-  else
-    backup_path=$(jq -r '.backups[0].path' <<< "$document") || return 1
-    backup_hash=$(jq -r '.backups[0].sha256' <<< "$document") || return 1
-    [[ "$backup_kind" == prior-lifecycle \
-      && "$backup_path" == "${transaction_dir}/prior-lifecycle.json" ]] || return 1
-    validate_private_control_file "$backup_path" || return 1
-    [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
+    return 0
   fi
+  backup_path=$(jq -r '.backups[0].path' <<< "$document") || return 1
+  backup_hash=$(jq -r '.backups[0].sha256' <<< "$document") || return 1
+  [[ "$backup_kind" == prior-lifecycle \
+    && "$backup_path" == "${transaction_dir}/prior-lifecycle.json" ]] || return 1
+  validate_private_control_file "$backup_path" || return 1
+  [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]]
+}
 
+# Every file backup targets a distinct symlink-free path; a taken copy is a
+# private control file in the transaction directory with the recorded hash,
+# mode, and owner.
+validate_manifest_file_backups() {
+  local document="$1" transaction_dir="$2" backup_entry backup_kind backup_path
+  local backup_hash backup_target backup_mode backup_uid backup_gid
+  local -A backup_targets=()
   while IFS= read -r backup_entry; do
     [[ -n "$backup_entry" ]] || continue
     backup_kind=$(jq -r '.kind' <<< "$backup_entry") || return 1
@@ -704,33 +708,48 @@ validate_transaction_manifest_json() {
     path_has_no_symlink_components "$backup_target" || return 1
     [[ -z "${backup_targets[$backup_target]:-}" ]] || return 1
     backup_targets["$backup_target"]=1
-    if [[ "$backup_kind" == file ]]; then
-      [[ "$(dirname "$backup_path")" == "$transaction_dir" \
-        && "$(basename "$backup_path")" =~ ^file-[1-9][0-9]*\.backup$ ]] \
-        || return 1
-      [[ "$backup_mode" =~ ^[0-7]{3,4}$ \
-        && "$backup_uid" =~ ^[0-9]+$ && "$backup_gid" =~ ^[0-9]+$ ]] || return 1
-      [[ "$backup_uid" == "$(control_owner_uid)" ]] || return 1
-      mode_is_control_safe "$backup_mode" || return 1
-      validate_private_control_file "$backup_path" || return 1
-      [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
-    fi
+    [[ "$backup_kind" == file ]] || continue
+    [[ "$(dirname "$backup_path")" == "$transaction_dir" \
+      && "$(basename "$backup_path")" =~ ^file-[1-9][0-9]*\.backup$ ]] \
+      || return 1
+    [[ "$backup_mode" =~ ^[0-7]{3,4}$ \
+      && "$backup_uid" =~ ^[0-9]+$ && "$backup_gid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$backup_uid" == "$(control_owner_uid)" ]] || return 1
+    mode_is_control_safe "$backup_mode" || return 1
+    validate_private_control_file "$backup_path" || return 1
+    [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
   done < <(jq -c '.backups[] |
     select(.kind == "file" or .kind == "absent-file")' <<< "$document")
+}
 
+# The firmware backup and enrollment plan live under the state directory at
+# the paths their identifiers imply.
+validate_manifest_firmware_paths() {
+  local document="$1" backup_id path
   if json_is '.firmware_backup != null' "$document"; then
-    firmware_backup_id=$(jq -r '.firmware_backup.id' <<< "$document") || return 1
-    firmware_backup_path=$(jq -r '.firmware_backup.path' <<< "$document") || return 1
-    [[ "$firmware_backup_path" == \
-      "$(state_dir_path)/firmware-backup/${firmware_backup_id}" ]] || return 1
+    backup_id=$(jq -r '.firmware_backup.id' <<< "$document") || return 1
+    path=$(jq -r '.firmware_backup.path' <<< "$document") || return 1
+    [[ "$path" == "$(state_dir_path)/firmware-backup/${backup_id}" ]] || return 1
   fi
   if json_is '.enrollment_plan != null' "$document"; then
-    enrollment_backup_id=$(jq -r '.enrollment_plan.backup_id' <<< "$document") \
-      || return 1
-    enrollment_plan_path=$(jq -r '.enrollment_plan.path' <<< "$document") || return 1
-    [[ "$enrollment_plan_path" == \
-      "$(state_dir_path)/firmware-backup/${enrollment_backup_id}/plan" ]] || return 1
+    backup_id=$(jq -r '.enrollment_plan.backup_id' <<< "$document") || return 1
+    path=$(jq -r '.enrollment_plan.path' <<< "$document") || return 1
+    [[ "$path" == "$(state_dir_path)/firmware-backup/${backup_id}/plan" ]] || return 1
   fi
+}
+
+# A manifest is valid when its schema holds and, unless check_files is false,
+# every backup, firmware path, and domain record it references proves on disk.
+validate_transaction_manifest_json() {
+  local transaction_id="$1" document="$2" check_files="${3:-true}" transaction_dir reference
+  [[ "$check_files" == true || "$check_files" == false ]] || return 1
+  transaction_dir=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  validate_manifest_schema "$transaction_id" "$document" "$transaction_dir" \
+    || return 1
+  [[ "$check_files" == true ]] || return 0
+  validate_manifest_lifecycle_backup "$document" "$transaction_dir" || return 1
+  validate_manifest_file_backups "$document" "$transaction_dir" || return 1
+  validate_manifest_firmware_paths "$document" || return 1
   while IFS= read -r reference; do
     [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" "$transaction_dir" \
       || return 1
@@ -738,12 +757,288 @@ validate_transaction_manifest_json() {
   validate_transaction_domain_records "$transaction_id" "$document"
 }
 
+# Managed settings and tracking ownership are recorded together: tracking
+# ownership requires managed settings, and a completed transaction carries both
+# or neither.
+validate_ownership_record_rules() {
+  local transaction_id="$1" status="$2" managed_settings="$3" tracking_ownership="$4"
+  if [[ "$managed_settings" != null ]]; then
+    validate_managed_settings_record_reference "$transaction_id" "$managed_settings" \
+      || return 1
+  fi
+  if [[ "$tracking_ownership" != null ]]; then
+    validate_tracking_ownership_record_reference "$transaction_id" "$tracking_ownership" \
+      || return 1
+    [[ "$managed_settings" != null ]] || return 1
+  fi
+  [[ "$status" == completed ]] || return 0
+  [[ ( "$managed_settings" == null && "$tracking_ownership" == null ) \
+    || ( "$managed_settings" != null && "$tracking_ownership" != null ) ]]
+}
+
+# A producer root binds the immutable producer record to its own identity and
+# carries no firmware, Windows, or unconfigure evidence.
+validate_producer_record_rules() {
+  local transaction_id="$1" document="$2" producer="$3" path producer_document
+  validate_producer_record_reference "$transaction_id" "$producer" || return 1
+  path=$(jq -r '.path' <<< "$producer") || return 1
+  producer_document=$(read_control_document "$path") || return 1
+  jq -en --argjson manifest "$document" --argjson producer "$producer_document" \
+    --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    $manifest.operation == $producer.operation and
+    $manifest.target_state == "active" and $manifest.prior_state == "active" and
+    $manifest.file_rollback_policy == "preserve" and
+    $manifest.boot_id == $producer.owner.boot_id and
+    $manifest.owner.pid == $producer.owner.pid and
+    $manifest.owner.start_time == $producer.owner.start_time and
+    $manifest.owner.uid == $producer.owner.uid and
+    ($manifest | no_firmware_evidence) and
+    $manifest.domain_records.bootnext == null and
+    $manifest.domain_records.firmware == null and
+    $manifest.domain_records.unconfigure == null and
+    $manifest.domain_records.windows == null and
+    (if $manifest.status == "completed" then
+      ($manifest | ownership_records_paired) and
+      $manifest.domain_records.final_proof != null and
+      $manifest.domain_records.final_proof.schema_version == $final_schema
+     else true end)
+  ' >/dev/null
+}
+
+# The proof document a manifest's final proof must be, by kind and operation.
+validate_proof_record_reference() {
+  local transaction_id="$1" document="$2" kind="$3" operation="$4" proof="$5"
+  case "${kind}/${operation}" in
+    recovery-attempt/windows-recovery)
+      validate_windows_recovery_proof_reference "$transaction_id" "$proof" "$document"
+      ;;
+    recovery-attempt/software-recovery)
+      validate_software_recovery_proof_reference "$transaction_id" "$proof" "$document"
+      ;;
+    root/unconfigure|recovery-attempt/unconfigure-recovery)
+      validate_unconfigure_proof_reference "$transaction_id" "$proof" "$document"
+      ;;
+    *)
+      validate_final_proof_reference "$transaction_id" "$proof"
+      ;;
+  esac
+}
+
+# Enrollment evidence of a root enrollment (prior state active) or a firmware
+# recovery attempt (prior state recovery-required): the backup precedes the
+# plan, a root without a backup still restores files, and completion proves
+# db, KEK, and PK in order.
+validate_enrollment_manifest_rules() {
+  local document="$1" prior_state="$2"
+  jq -e --arg prior "$prior_state" --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" \
+    "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    .target_state == "active" and .prior_state == $prior and
+    .domain_records.bootnext == null and
+    (if .status == "completed" then ownership_records_paired else true end) and
+    .domain_records.unconfigure == null and .domain_records.windows == null and
+    (if .firmware_backup == null then
+      .enrollment_plan == null and .firmware_writes == [] and
+      (if $prior == "active" then
+        .domain_records.firmware == null and .file_rollback_policy == "restore"
+       else true end)
+     else
+      .firmware_backup.status == "complete" and .enrollment_plan != null
+     end) and
+    (if .status == "completed" then
+      .firmware_backup != null and .enrollment_plan != null and
+      .file_rollback_policy == "preserve" and
+      .domain_records.final_proof != null and
+      .domain_records.final_proof.schema_version == $final_schema and
+      .domain_records.firmware != null and
+      (.completed_phases | index("prove-enrolled-trust") != null) and
+      (all(.firmware_writes[];
+        .readback_status == "verified" or .readback_status == "unchanged")) and
+      [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
+        ["db","KEK","PK"]
+     else true end)
+  ' <<< "$document" >/dev/null
+}
+
+# A BootNext root records the variable before its single write and carries no
+# other evidence.
+validate_bootnext_manifest_rules() {
+  local document="$1"
+  jq -e "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    .target_state == "active" and .prior_state == "active" and
+    .file_rollback_policy == "restore" and no_firmware_evidence and
+    .domain_records.final_proof == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and
+    .domain_records.tracking_ownership == null and
+    .domain_records.unconfigure == null and .domain_records.windows == null and
+    (if .domain_records.bootnext == null then
+      .completed_phases == [] and
+      (.current_phase == null or .current_phase == "record-bootnext")
+     else
+      ((.completed_phases == [] and .current_phase == "record-bootnext") or
+       (.completed_phases == ["record-bootnext"] and
+         (.current_phase == null or .current_phase == "set-bootnext")) or
+       (.completed_phases == ["record-bootnext","set-bootnext"] and
+         .current_phase == null))
+     end) and
+    (if .status == "completed" then
+      .domain_records.bootnext != null and
+      .completed_phases == ["record-bootnext","set-bootnext"]
+     else true end)
+  ' <<< "$document" >/dev/null
+}
+
+# An unconfigure root restores files until config enrollment is reset and
+# preserves them afterwards; completion requires the intent and the proof.
+validate_unconfigure_manifest_rules() {
+  local document="$1"
+  jq -e --argjson intent_schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+    --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    --argjson phases "$OMASECBOOT_OPERATION_PHASES" "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    $phases["unconfigure"] as $phases |
+    .target_state == "disabled" and .prior_state == "active" and
+    no_firmware_evidence and
+    .domain_records.bootnext == null and
+    .domain_records.firmware == null and .domain_records.managed_settings == null and
+    .domain_records.producer == null and .domain_records.tracking_ownership == null and
+    .domain_records.windows == null and
+    phase_sequence_valid($phases) and
+    (if .domain_records.unconfigure == null then
+      .completed_phases == [] and
+      (.current_phase == null or .current_phase == "record-unconfigure")
+     else .domain_records.unconfigure.schema_version == $intent_schema end) and
+    (if .domain_records.final_proof == null then true
+     else .current_phase == "prove-unconfigured" or
+       (.completed_phases == $phases and .current_phase == null) end) and
+    ((.completed_phases | length) as $done |
+     if $done < 5 or ($done == 5 and .current_phase == null) then
+       .file_rollback_policy == "restore"
+     elif $done == 5 and .current_phase == "reset-config-enrollment" then
+       (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve")
+     else .file_rollback_policy == "preserve" end) and
+    (if .status == "completed" then
+      .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
+      .domain_records.final_proof != null and
+      .domain_records.final_proof.schema_version == $proof_schema and
+      .completed_phases == $phases and .current_phase == null
+     else true end)
+  ' <<< "$document" >/dev/null
+}
+
+# A Windows recovery attempt classifies, restores, and proves BootNext in order
+# and records nothing else.
+validate_windows_recovery_manifest_rules() {
+  local document="$1"
+  jq -e "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    .target_state == "active" and .prior_state == "recovery-required" and
+    .file_rollback_policy == "restore" and no_firmware_evidence and
+    .domain_records.bootnext == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and .domain_records.producer == null and
+    .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+    (if .domain_records.windows == null then
+      .domain_records.final_proof == null and .completed_phases == [] and
+      (.current_phase == null or .current_phase == "classify-bootnext")
+     elif .domain_records.final_proof == null then
+      ((.completed_phases == [] and .current_phase == "classify-bootnext") or
+       (.completed_phases == ["classify-bootnext"] and
+         (.current_phase == null or .current_phase == "restore-bootnext")) or
+       (.completed_phases == ["classify-bootnext","restore-bootnext"] and
+         (.current_phase == null or .current_phase == "prove-bootnext")))
+     else
+      ((.completed_phases == ["classify-bootnext","restore-bootnext"] and
+          .current_phase == "prove-bootnext") or
+       (.completed_phases ==
+          ["classify-bootnext","restore-bootnext","prove-bootnext"] and
+          .current_phase == null))
+     end) and
+    (if .status == "completed" then
+      .domain_records.windows != null and .domain_records.final_proof != null and
+      .completed_phases ==
+        ["classify-bootnext","restore-bootnext","prove-bootnext"]
+     else true end)
+  ' <<< "$document" >/dev/null
+}
+
+# A software recovery attempt either restores files and proves the restore or
+# proves an already completed root; its target may be any stable state.
+validate_software_recovery_manifest_rules() {
+  local document="$1"
+  jq -e --argjson proof_schema "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" \
+    "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    .prior_state == "recovery-required" and
+    (.target_state == "active" or .target_state == "disabled" or
+      .target_state == "unmanaged") and
+    .file_rollback_policy == "preserve" and no_firmware_evidence and
+    .domain_records.bootnext == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and .domain_records.producer == null and
+    .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+    .domain_records.windows == null and
+    (.completed_phases == ["restore-files","prove-restored"] or
+      .completed_phases == ["prove-completed"] or
+      .completed_phases == [] or
+      .completed_phases == ["restore-files"]) and
+    (if .current_phase == null then true
+     elif .completed_phases == [] then
+       (.current_phase == "restore-files" or .current_phase == "prove-completed")
+     elif .completed_phases == ["restore-files"] then
+       .current_phase == "prove-restored"
+     else false end) and
+    (if .status == "completed" then
+      .domain_records.final_proof != null and
+      .domain_records.final_proof.schema_version == $proof_schema and
+      ((.completed_phases == ["restore-files","prove-restored"]) or
+       (.completed_phases == ["prove-completed"])) and .current_phase == null
+     else true end)
+  ' <<< "$document" >/dev/null
+}
+
+# An unconfigure recovery attempt replays the fixed phase sequence and
+# completes only with the proof.
+validate_unconfigure_recovery_manifest_rules() {
+  local document="$1"
+  jq -e --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+    --argjson phases "$OMASECBOOT_OPERATION_PHASES" "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
+    .target_state == "disabled" and .prior_state == "recovery-required" and
+    .file_rollback_policy == "preserve" and no_firmware_evidence and
+    .domain_records.bootnext == null and .domain_records.firmware == null and
+    .domain_records.managed_settings == null and .domain_records.producer == null and
+    .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
+    .domain_records.windows == null and
+    ($phases["unconfigure-recovery"] as $phases |
+      phase_sequence_valid($phases) and
+      (if .domain_records.final_proof == null then true
+       else .current_phase == "prove-unconfigured" or
+         (.completed_phases == $phases and .current_phase == null) end) and
+      (if .status == "completed" then
+        .domain_records.final_proof != null and
+        .domain_records.final_proof.schema_version == $proof_schema and
+        .completed_phases == $phases and .current_phase == null
+       else true end))
+  ' <<< "$document" >/dev/null
+}
+
+# The evidence shape of a recovery attempt, by operation.
+validate_recovery_attempt_manifest_rules() {
+  local document="$1" operation="$2" firmware="$3"
+  case "$operation" in
+    producer-recovery)
+      [[ "$firmware" == null ]] || return 1
+      json_is "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'no_firmware_evidence and
+        .file_rollback_policy == "preserve"' "$document"
+      ;;
+    firmware-recovery) validate_enrollment_manifest_rules "$document" recovery-required ;;
+    windows-recovery) validate_windows_recovery_manifest_rules "$document" ;;
+    software-recovery) validate_software_recovery_manifest_rules "$document" ;;
+    unconfigure-recovery) validate_unconfigure_recovery_manifest_rules "$document" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The domain records of one manifest: each present record proves its
+# reference, and the record set matches the manifest's kind and operation.
 validate_transaction_domain_records() {
-  local transaction_id="$1" document="$2" bootnext producer proof firmware windows
-  local managed_settings tracking_ownership unconfigure
-  local path producer_document
-  local kind status operation
-  local extracted
+  local transaction_id="$1" document="$2" extracted
+  local bootnext producer proof firmware managed_settings tracking_ownership
+  local unconfigure windows kind status operation
   local -a fields
   extracted=$(jq -er '
     (.domain_records.bootnext | tojson),
@@ -770,84 +1065,31 @@ validate_transaction_domain_records() {
   status=${fields[9]}
   operation=${fields[10]}
 
-  if [[ "$managed_settings" != null ]]; then
-    validate_managed_settings_record_reference "$transaction_id" "$managed_settings" \
-      || return 1
-  fi
-  if [[ "$tracking_ownership" != null ]]; then
-    validate_tracking_ownership_record_reference "$transaction_id" "$tracking_ownership" \
-      || return 1
-  fi
-  [[ "$tracking_ownership" == null || "$managed_settings" != null ]] || return 1
-  if [[ "$status" == completed ]]; then
-    [[ ( "$managed_settings" == null && "$tracking_ownership" == null ) \
-      || ( "$managed_settings" != null && "$tracking_ownership" != null ) ]] || return 1
-  fi
+  validate_ownership_record_rules "$transaction_id" "$status" "$managed_settings" \
+    "$tracking_ownership" || return 1
   if [[ "$unconfigure" != null ]]; then
+    [[ "$operation" == unconfigure ]] || return 1
     validate_unconfigure_intent_reference "$transaction_id" "$unconfigure" "$document" \
       || return 1
   fi
-
   if [[ "$bootnext" != null ]]; then
     [[ "$kind" == root && "$operation" == windows-bootnext \
       && "$producer" == null ]] || return 1
     validate_bootnext_record_reference "$transaction_id" "$bootnext" "$document" || return 1
   fi
-
   if [[ "$producer" != null ]]; then
     [[ "$kind" == root ]] || return 1
-    validate_producer_record_reference "$transaction_id" "$producer" || return 1
-    path=$(jq -r '.path' <<< "$producer") || return 1
-    producer_document=$(read_control_document "$path") || return 1
-    jq -en --argjson manifest "$document" --argjson producer "$producer_document" \
-      --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
-      $manifest.operation == $producer.operation and
-      $manifest.target_state == "active" and $manifest.prior_state == "active" and
-      $manifest.file_rollback_policy == "preserve" and
-      $manifest.boot_id == $producer.owner.boot_id and
-      $manifest.owner.pid == $producer.owner.pid and
-      $manifest.owner.start_time == $producer.owner.start_time and
-       $manifest.owner.uid == $producer.owner.uid and
-       $manifest.firmware_backup == null and $manifest.enrollment_plan == null and
-       $manifest.firmware_writes == [] and
-       $manifest.domain_records.bootnext == null and
-       $manifest.domain_records.firmware == null and
-       (if $manifest.status == "completed" then
-          (($manifest.domain_records.managed_settings == null and
-            $manifest.domain_records.tracking_ownership == null) or
-           ($manifest.domain_records.managed_settings != null and
-            $manifest.domain_records.tracking_ownership != null))
-        else true end) and
-      $manifest.domain_records.unconfigure == null and
-      $manifest.domain_records.windows == null and
-      (if $manifest.status == "completed" then
-        $manifest.domain_records.final_proof != null and
-        $manifest.domain_records.final_proof.schema_version == $final_schema
-       else true end)
-    ' >/dev/null || return 1
+    validate_producer_record_rules "$transaction_id" "$document" "$producer" || return 1
   fi
-
   if [[ "$windows" != null ]]; then
     [[ "$kind" == recovery-attempt && "$operation" == windows-recovery \
       && "$bootnext" == null && "$producer" == null && "$firmware" == null ]] || return 1
     validate_windows_recovery_record_reference "$transaction_id" "$windows" "$document" \
       || return 1
   fi
-
   if [[ "$proof" != null ]]; then
-    if [[ "$kind" == recovery-attempt && "$operation" == windows-recovery ]]; then
-      validate_windows_recovery_proof_reference "$transaction_id" "$proof" "$document" \
-        || return 1
-    elif [[ "$kind" == recovery-attempt && "$operation" == software-recovery ]]; then
-      validate_software_recovery_proof_reference "$transaction_id" "$proof" "$document" \
-        || return 1
-    elif [[ ( "$kind" == root && "$operation" == unconfigure ) \
-      || ( "$kind" == recovery-attempt && "$operation" == unconfigure-recovery ) ]]; then
-      validate_unconfigure_proof_reference "$transaction_id" "$proof" "$document" \
-        || return 1
-    else
-      validate_final_proof_reference "$transaction_id" "$proof" || return 1
-    fi
+    validate_proof_record_reference "$transaction_id" "$document" "$kind" "$operation" \
+      "$proof" || return 1
   fi
   if [[ "$firmware" != null ]]; then
     [[ "$producer" == null && "$proof" != null \
@@ -858,243 +1100,28 @@ validate_transaction_domain_records() {
   elif [[ "$operation" == enroll-secure-boot && "$status" == completed ]]; then
     return 1
   fi
-  if [[ "$operation" == enroll-secure-boot ]]; then
-    [[ "$kind" == root && "$producer" == null ]] || return 1
-    jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
-      .target_state == "active" and .prior_state == "active" and
-      .domain_records.bootnext == null and
-      (if .status == "completed" then
-        ((.domain_records.managed_settings == null and
-          .domain_records.tracking_ownership == null) or
-         (.domain_records.managed_settings != null and
-          .domain_records.tracking_ownership != null))
-       else true end) and
-      .domain_records.unconfigure == null and .domain_records.windows == null and
-      (if .firmware_backup == null then
-        .enrollment_plan == null and .firmware_writes == [] and
-        .domain_records.firmware == null and .file_rollback_policy == "restore"
-       else
-        .firmware_backup.status == "complete" and .enrollment_plan != null
-       end) and
-      (if .status == "completed" then
-        .firmware_backup != null and .enrollment_plan != null and
-        .file_rollback_policy == "preserve" and
-        .domain_records.final_proof != null and
-        .domain_records.final_proof.schema_version == $final_schema and
-        .domain_records.firmware != null and
-        (.completed_phases | index("prove-enrolled-trust") != null) and
-        (all(.firmware_writes[];
-          .readback_status == "verified" or .readback_status == "unchanged")) and
-        [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
-          ["db","KEK","PK"]
-       else true end)
-    ' <<< "$document" >/dev/null || return 1
-  fi
-  if [[ "$operation" == windows-bootnext ]]; then
-    [[ "$kind" == root && "$producer" == null && "$proof" == null \
-      && "$firmware" == null ]] || return 1
-    jq -e '
-      .target_state == "active" and .prior_state == "active" and
-      .file_rollback_policy == "restore" and
-      .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-      .domain_records.final_proof == null and .domain_records.firmware == null and
-      .domain_records.managed_settings == null and
-      .domain_records.tracking_ownership == null and
-      .domain_records.unconfigure == null and .domain_records.windows == null and
-      (if .domain_records.bootnext == null then
-        .completed_phases == [] and
-        (.current_phase == null or .current_phase == "record-bootnext")
-       else
-        ((.completed_phases == [] and .current_phase == "record-bootnext") or
-         (.completed_phases == ["record-bootnext"] and
-           (.current_phase == null or .current_phase == "set-bootnext")) or
-         (.completed_phases == ["record-bootnext","set-bootnext"] and
-           .current_phase == null))
-       end) and
-      (if .status == "completed" then
-        .domain_records.bootnext != null and
-        .completed_phases == ["record-bootnext","set-bootnext"]
-       else true end)
-    ' <<< "$document" >/dev/null || return 1
-  fi
-  if [[ "$operation" == unconfigure ]]; then
-    [[ "$kind" == root && "$producer" == null \
-      && "$firmware" == null && "$managed_settings" == null \
-      && "$tracking_ownership" == null && "$windows" == null ]] || return 1
-    jq -e --argjson intent_schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
-      --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
-      --argjson phases "$OMASECBOOT_OPERATION_PHASES" "$OMASECBOOT_JQ_DEFS"'
-      $phases["unconfigure"] as $phases |
-      .target_state == "disabled" and .prior_state == "active" and
-      .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-      .domain_records.bootnext == null and
-      .domain_records.firmware == null and .domain_records.managed_settings == null and
-      .domain_records.producer == null and .domain_records.tracking_ownership == null and
-       .domain_records.windows == null and
-       phase_sequence_valid($phases) and
-       (if .domain_records.unconfigure == null then
-          .completed_phases == [] and
-          (.current_phase == null or .current_phase == "record-unconfigure")
-        else .domain_records.unconfigure.schema_version == $intent_schema end) and
-       (if .domain_records.final_proof == null then true
-        else .current_phase == "prove-unconfigured" or
-          (.completed_phases == $phases and .current_phase == null) end) and
-       ((.completed_phases | length) as $done |
-        if $done < 5 or ($done == 5 and .current_phase == null) then
-          .file_rollback_policy == "restore"
-        elif $done == 5 and .current_phase == "reset-config-enrollment" then
-          (.file_rollback_policy == "restore" or .file_rollback_policy == "preserve")
-        else .file_rollback_policy == "preserve" end) and
-       (if .status == "completed" then
-          .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
-          .domain_records.final_proof != null and
-          .domain_records.final_proof.schema_version == $proof_schema and
-         .completed_phases == $phases and .current_phase == null
-        else true end)
-    ' <<< "$document" >/dev/null || return 1
-  elif [[ "$unconfigure" != null ]]; then
-    return 1
-  fi
-  if [[ "$kind" == recovery-attempt ]]; then
-    [[ "$producer" == null ]] || return 1
-    case "$operation" in
-      producer-recovery)
-        [[ "$firmware" == null \
-          && $(jq -r '.firmware_backup == null and .enrollment_plan == null and
-            .firmware_writes == [] and .file_rollback_policy == "preserve"' \
-            <<< "$document") == true ]] || return 1
-        ;;
-      firmware-recovery)
-        jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" '
-          .target_state == "active" and .prior_state == "recovery-required" and
-          .domain_records.bootnext == null and
-          (if .status == "completed" then
-            ((.domain_records.managed_settings == null and
-              .domain_records.tracking_ownership == null) or
-             (.domain_records.managed_settings != null and
-              .domain_records.tracking_ownership != null))
-           else true end) and
-          .domain_records.unconfigure == null and .domain_records.windows == null and
-          (if .firmware_backup == null then
-            .enrollment_plan == null and .firmware_writes == []
-           else
-            .firmware_backup.status == "complete" and .enrollment_plan != null
-           end) and
-          (if .status == "completed" then
-            .firmware_backup != null and .enrollment_plan != null and
-            .file_rollback_policy == "preserve" and
-            .domain_records.final_proof != null and
-            .domain_records.final_proof.schema_version == $final_schema and
-            .domain_records.firmware != null and
-            (.completed_phases | index("prove-enrolled-trust") != null) and
-            (all(.firmware_writes[];
-              .readback_status == "verified" or .readback_status == "unchanged")) and
-            [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
-              ["db","KEK","PK"]
-           else true end)
-        ' <<< "$document" >/dev/null || return 1
-        ;;
-      windows-recovery)
-        jq -e '
-          .target_state == "active" and .prior_state == "recovery-required" and
-          .file_rollback_policy == "restore" and
-          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-          .domain_records.bootnext == null and .domain_records.firmware == null and
-          .domain_records.managed_settings == null and .domain_records.producer == null and
-          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
-          (if .domain_records.windows == null then
-            .domain_records.final_proof == null and .completed_phases == [] and
-            (.current_phase == null or .current_phase == "classify-bootnext")
-           elif .domain_records.final_proof == null then
-            ((.completed_phases == [] and .current_phase == "classify-bootnext") or
-             (.completed_phases == ["classify-bootnext"] and
-               (.current_phase == null or .current_phase == "restore-bootnext")) or
-             (.completed_phases == ["classify-bootnext","restore-bootnext"] and
-               (.current_phase == null or .current_phase == "prove-bootnext")))
-           else
-            ((.completed_phases == ["classify-bootnext","restore-bootnext"] and
-                .current_phase == "prove-bootnext") or
-             (.completed_phases ==
-                ["classify-bootnext","restore-bootnext","prove-bootnext"] and
-                .current_phase == null))
-           end) and
-          (if .status == "completed" then
-            .domain_records.windows != null and .domain_records.final_proof != null and
-            .completed_phases ==
-              ["classify-bootnext","restore-bootnext","prove-bootnext"]
-           else true end)
-        ' <<< "$document" >/dev/null || return 1
-        ;;
-      software-recovery)
-        jq -e --argjson proof_schema "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" '
-          .prior_state == "recovery-required" and
-          (.target_state == "active" or .target_state == "disabled" or
-            .target_state == "unmanaged") and
-          .file_rollback_policy == "preserve" and
-          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-          .domain_records.bootnext == null and .domain_records.firmware == null and
-          .domain_records.managed_settings == null and .domain_records.producer == null and
-          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
-          .domain_records.windows == null and
-          (.completed_phases == ["restore-files","prove-restored"] or
-            .completed_phases == ["prove-completed"] or
-            .completed_phases == [] or
-            .completed_phases == ["restore-files"]) and
-          (if .current_phase == null then true
-           elif .completed_phases == [] then
-             (.current_phase == "restore-files" or .current_phase == "prove-completed")
-           elif .completed_phases == ["restore-files"] then
-             .current_phase == "prove-restored"
-           else false end) and
-          (if .status == "completed" then
-            .domain_records.final_proof != null and
-            .domain_records.final_proof.schema_version == $proof_schema and
-            ((.completed_phases == ["restore-files","prove-restored"]) or
-             (.completed_phases == ["prove-completed"])) and .current_phase == null
-           else true end)
-        ' <<< "$document" >/dev/null || return 1
-        ;;
-      unconfigure-recovery)
-        jq -e --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
-          --argjson phases "$OMASECBOOT_OPERATION_PHASES" "$OMASECBOOT_JQ_DEFS"'
-          .target_state == "disabled" and .prior_state == "recovery-required" and
-          .file_rollback_policy == "preserve" and
-          .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [] and
-          .domain_records.bootnext == null and .domain_records.firmware == null and
-          .domain_records.managed_settings == null and .domain_records.producer == null and
-          .domain_records.tracking_ownership == null and .domain_records.unconfigure == null and
-          .domain_records.windows == null and
-          ($phases["unconfigure-recovery"] as $phases |
-            phase_sequence_valid($phases) and
-            (if .domain_records.final_proof == null then true
-             else .current_phase == "prove-unconfigured" or
-               (.completed_phases == $phases and .current_phase == null) end) and
-            (if .status == "completed" then
-              .domain_records.final_proof != null and
-              .domain_records.final_proof.schema_version == $proof_schema and
-              .completed_phases == $phases and .current_phase == null
-             else true end))
-        ' <<< "$document" >/dev/null || return 1
-        ;;
-      *) return 1 ;;
-    esac
-    if [[ "$proof" != null ]]; then
-      if [[ "$operation" == windows-recovery ]]; then
-        [[ $(jq -r '.schema_version' <<< "$proof") == \
-          "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" ]] || return 1
-      elif [[ "$operation" == software-recovery ]]; then
-        [[ $(jq -r '.schema_version' <<< "$proof") == \
-          "$SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION" ]] || return 1
-      elif [[ "$operation" == unconfigure-recovery ]]; then
-        [[ $(jq -r '.schema_version' <<< "$proof") == \
-          "$UNCONFIGURE_PROOF_SCHEMA_VERSION" ]] || return 1
-      else
-        [[ $(jq -r '.schema_version' <<< "$proof") == "$FINAL_PROOF_SCHEMA_VERSION" ]] \
-          || return 1
-      fi
-    fi
-    [[ "$status" != completed || "$proof" != null ]] || return 1
-  fi
+
+  case "$operation" in
+    enroll-secure-boot)
+      [[ "$kind" == root && "$producer" == null ]] || return 1
+      validate_enrollment_manifest_rules "$document" active || return 1
+      ;;
+    windows-bootnext)
+      [[ "$kind" == root && "$producer" == null && "$proof" == null \
+        && "$firmware" == null ]] || return 1
+      validate_bootnext_manifest_rules "$document" || return 1
+      ;;
+    unconfigure)
+      [[ "$kind" == root && "$producer" == null \
+        && "$firmware" == null && "$managed_settings" == null \
+        && "$tracking_ownership" == null && "$windows" == null ]] || return 1
+      validate_unconfigure_manifest_rules "$document" || return 1
+      ;;
+  esac
+  [[ "$kind" == recovery-attempt ]] || return 0
+  [[ "$producer" == null ]] || return 1
+  validate_recovery_attempt_manifest_rules "$document" "$operation" "$firmware" || return 1
+  [[ "$status" != completed || "$proof" != null ]]
 }
 
 recovery_operation_for_root_manifest() {
