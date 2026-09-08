@@ -10,125 +10,46 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
 # Fallback for development (running from repo checkout)
 [[ -d "$LIB_DIR" ]] || LIB_DIR="${SCRIPT_DIR}/../lib"
+# The installed command whose hooks activation validates; read by lib/checks.sh.
+# shellcheck disable=SC2034
+OMASECBOOT_COMMAND_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 
 for lib in common lifecycle checks discover sign producers enroll windows status; do
   # shellcheck source=/dev/null
   source "${LIB_DIR}/${lib}.sh"
 done
 
-current_omasecboot_executable_path() {
-  readlink -f "${BASH_SOURCE[0]}"
-}
-
-activation_hook_path() {
-  case "$1" in
-    removal) printf '/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook\n' ;;
-    transaction) printf '/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook\n' ;;
-    package-sign) printf '/usr/share/libalpm/hooks/zzz-omasecboot.hook\n' ;;
-    limine-pre) printf '/etc/boot/hooks/pre.d/000-omasecboot-guard\n' ;;
-    limine-post) printf '/etc/boot/hooks/post.d/zzz-omasecboot-sign\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-validate_activation_hook() {
-  local key="$1" command="$2" path expected template expected_hash
-  local document normalized actual_hash executable=false
-  path=$(activation_hook_path "$key") || return 1
-  case "$key" in
-    removal)
-      expected="Exec = ${command} --quiet guard removal"
-      expected_hash=f70bc5a660776e2a5dd4ea5e8184a61b1adc547db4c3286a69b355383f1eb56d
-      ;;
-    transaction)
-      expected="Exec = ${command} --quiet guard transaction"
-      expected_hash=cedd35b7b7209cb01587649fba225907c3552b837a03f8f609fd063154e99f5f
-      ;;
-    package-sign)
-      expected="Exec = ${command} --quiet hook package-sign"
-      expected_hash=6250350574ba80e09c65a1f49571df2e925e6976254b32868fae3ea132b4a0c9
-      ;;
-    limine-pre)
-      expected="exec ${command} --quiet hook pre"
-      expected_hash=ea5485e3cc7a1470329f54b96bee38cc5edc1a9746878bf241183144432a2807
-      executable=true
-      ;;
-    limine-post)
-      expected="exec ${command} --quiet hook post"
-      expected_hash=0ecf4826228641befc2bff8df14ad28c0b0431e23b8366353b63cebac7eb7d05
-      executable=true
-      ;;
-    *) return 1 ;;
-  esac
-  validate_control_file "$path" || return 1
-  [[ "$executable" == false || -x "$path" ]] || return 1
-  if [[ "$executable" == false ]] && pacman_hook_is_shadowed "$path"; then
-    return 1
-  fi
-  document=$(<"$path") || return 1
-  [[ "$document" == *"$expected"* ]] || return 1
-  template=${expected/"$command"/@BINDIR@\/omasecboot}
-  normalized=${document/"$expected"/"$template"}
-  actual_hash=$(sha256_text "$normalized") || return 1
-  [[ "$actual_hash" == "$expected_hash" ]]
-}
-
-lifecycle_activation_environment_is_ready() {
-  local command key
-  command=$(current_omasecboot_executable_path) || return 1
-  validate_control_file "$command" && [[ -x "$command" ]] || return 1
-  [[ $(producer_package_version limine-mkinitcpio-hook) == \
-      "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
-    && $(producer_package_version limine-snapper-sync) == \
-      "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" \
-    && $(producer_package_version sbctl) == "$SUPPORTED_SBCTL_VERSION" ]] || {
-    fail "Lifecycle activation requires the exact supported producer packages"
-    return 1
-  }
-  version_at_least "$(producer_package_version efibootmgr)" \
-    "$WINDOWS_EFIBOOTMGR_MINIMUM_VERSION" || {
-    fail "Lifecycle activation requires efibootmgr ${WINDOWS_EFIBOOTMGR_MINIMUM_VERSION} or newer"
-    return 1
-  }
-  unconfigure_limine_tools_are_pinned || {
-    fail "Lifecycle activation requires the supported unconfiguration tools"
-    return 1
-  }
-  for key in removal transaction package-sign limine-pre limine-post; do
-    validate_activation_hook "$key" "$command" || {
-      fail "Lifecycle activation requires the current installed, unshadowed ${key} hook"
-      return 1
-    }
-  done
-}
-
-# Shared entry of every recoverable mutation command: root, recovery
-# dependencies, then any pending lifecycle recovery. Callers check
-# _lifecycle_recovery_performed and report instead of starting new work.
-recoverable_command_prelude() {
+# Runs one recoverable mutation command: root and recovery dependencies, any
+# pending lifecycle recovery, and the body only when no recovery ran.
+run_recoverable_command() {
   local name="$1"
+  shift
   check_root "$name"
   check_recovery_deps
   recover_lifecycle_if_required || {
     fail "Lifecycle recovery failed; no new ${name} mutation was attempted"
     return 1
   }
+  if [[ "$_lifecycle_recovery_performed" == true ]]; then
+    pass "Lifecycle recovery completed; run ${name} again to start a new mutation"
+    return 0
+  fi
+  "$@"
 }
 
 # --- Commands ----------------------------------------------------------------
 
 cmd_setup() {
-  local backup_id state repair_required=true backup_rc=0
   [[ $# -eq 0 ]] || {
     fail "Setup does not accept arguments"
     return 2
   }
   header "Secure Boot Setup"
-  recoverable_command_prelude "setup" || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; run setup again to start a new setup mutation"
-    return 0
-  fi
+  run_recoverable_command setup setup_mutation
+}
+
+setup_mutation() {
+  local backup_id state repair_required=true backup_rc=0
   check_deps
   check_efi_mode
   require_gum
@@ -188,17 +109,16 @@ cmd_setup() {
 }
 
 cmd_enroll() {
-  local backup_id state
   [[ $# -eq 0 ]] || {
     fail "Enrollment does not accept arguments"
     return 2
   }
   header "Key Enrollment"
-  recoverable_command_prelude "enroll" || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; run enroll again to start a new enrollment"
-    return 0
-  fi
+  run_recoverable_command enroll enroll_mutation
+}
+
+enroll_mutation() {
+  local backup_id state
   check_deps
   check_efi_mode
   require_gum
@@ -216,7 +136,7 @@ cmd_enroll() {
     return 1
   }
   gum confirm "Enroll the confirmed db, KEK, and PK trust plan now?" || return 1
-  run_dormant_enrollment "$backup_id" || return 1
+  run_enrollment "$backup_id" || return 1
   validate_setup_instruction_boundary "$backup_id" 4 || return 1
   warn "Enrollment is proved; enable Secure Boot in firmware settings."
 }
@@ -246,63 +166,74 @@ verify_adoption_observations() {
 cmd_adopt() {
   local original_verification="" original_enrollment=""
   local original_before_save="" original_after_save=""
-  local observed_verification observed_enrollment
-  local observed_before_save observed_after_save config
 
   header "Adopt Existing Configuration"
   while (( $# > 0 )); do
     case "$1" in
-      --verification-original)
-        [[ $# -ge 2 ]] || die "Missing value for --verification-original"
-        original_verification="$2"
-        shift 2
-        ;;
-      --enrollment-original)
-        [[ $# -ge 2 ]] || die "Missing value for --enrollment-original"
-        original_enrollment="$2"
-        shift 2
-        ;;
-      --before-save-original)
-        [[ $# -ge 2 ]] || die "Missing value for --before-save-original"
-        original_before_save="$2"
-        shift 2
-        ;;
-      --after-save-original)
-        [[ $# -ge 2 ]] || die "Missing value for --after-save-original"
-        original_after_save="$2"
+      --verification-original|--enrollment-original|--before-save-original|--after-save-original)
+        [[ $# -ge 2 ]] || {
+          fail "Missing value for $1"
+          return 2
+        }
+        case "$1" in
+          --verification-original) original_verification="$2" ;;
+          --enrollment-original) original_enrollment="$2" ;;
+          --before-save-original) original_before_save="$2" ;;
+          --after-save-original) original_after_save="$2" ;;
+        esac
         shift 2
         ;;
       *)
-        die "Unknown adoption option: $1"
+        fail "Unknown adoption option: $1"
+        return 2
         ;;
     esac
   done
+  run_recoverable_command adopt adopt_mutation "$original_verification" \
+    "$original_enrollment" "$original_before_save" "$original_after_save"
+}
 
-  recoverable_command_prelude adopt || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; run adopt again to start a new adoption"
-    return 0
-  fi
+adopt_mutation() {
+  local original_verification="$1" original_enrollment="$2"
+  local original_before_save="$3" original_after_save="$4"
+  local observed_verification observed_enrollment
+  local observed_before_save observed_after_save config
+
   if [[ "$original_verification" == unknown || "$original_enrollment" == unknown \
     || "$original_before_save" == unknown || "$original_after_save" == unknown ]]; then
     fail "Adoption requires known original values so unconfiguration remains available"
     return 1
   fi
-  read_lifecycle || die "Lifecycle state is invalid or unsafe"
-  # shellcheck disable=SC2154 # Set by read_lifecycle from the sourced module.
-  [[ "$_lifecycle_state" == unmanaged ]] \
-    || die "Adoption requires unmanaged state; current state is ${_lifecycle_state}"
+  read_lifecycle || {
+    fail "Lifecycle state is invalid or unsafe"
+    return 1
+  }
+  [[ "$_lifecycle_state" == unmanaged ]] || {
+    fail "Adoption requires unmanaged state; current state is ${_lifecycle_state}"
+    return 1
+  }
 
   config=$(limine_default_config_path)
-  [[ -f "$config" ]] || die "${config} not found"
-  observed_verification=$(limine_managed_setting_state ENABLE_VERIFICATION) \
-    || die "Could not read a unique ENABLE_VERIFICATION value from ${config}"
-  observed_enrollment=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG) \
-    || die "Could not read a unique ENABLE_ENROLL_LIMINE_CONFIG value from ${config}"
-  observed_before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll) \
-    || die "Could not read a unique COMMANDS_BEFORE_SAVE value from ${config}"
-  observed_after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config) \
-    || die "Could not read a unique COMMANDS_AFTER_SAVE value from ${config}"
+  [[ -f "$config" ]] || {
+    fail "${config} not found"
+    return 1
+  }
+  observed_verification=$(limine_managed_setting_state ENABLE_VERIFICATION) || {
+    fail "Could not read a unique ENABLE_VERIFICATION value from ${config}"
+    return 1
+  }
+  observed_enrollment=$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG) || {
+    fail "Could not read a unique ENABLE_ENROLL_LIMINE_CONFIG value from ${config}"
+    return 1
+  }
+  observed_before_save=$(limine_managed_token_state COMMANDS_BEFORE_SAVE limine-reset-enroll) || {
+    fail "Could not read a unique COMMANDS_BEFORE_SAVE value from ${config}"
+    return 1
+  }
+  observed_after_save=$(limine_managed_token_state COMMANDS_AFTER_SAVE limine-enroll-config) || {
+    fail "Could not read a unique COMMANDS_AFTER_SAVE value from ${config}"
+    return 1
+  }
 
   echo "  Existing managed settings:"
   echo "    ENABLE_VERIFICATION=${observed_verification}"
@@ -339,8 +270,10 @@ cmd_adopt() {
     "$observed_verification" "$original_verification" \
     "$observed_enrollment" "$original_enrollment" \
     "$observed_before_save" "$original_before_save" \
-    "$observed_after_save" "$original_after_save" \
-    || die "Could not commit the adoption record"
+    "$observed_after_save" "$original_after_save" || {
+    fail "Could not commit the adoption record"
+    return 1
+  }
   pass "Existing configuration adopted; guarded boot-producer repair is active"
 }
 
@@ -363,6 +296,32 @@ cmd_windows_preflight() {
   windows_encryption_gate
 }
 
+# Unprivileged, silent probe for the Quattro menu guard: the recorded handoff
+# exists and still resolves to one valid firmware target.
+cmd_windows_available() {
+  read_windows_target_state >/dev/null 2>&1 || return 1
+  find_windows_boot_entry >/dev/null || return 1
+  windows_state_matches_resolved_target
+}
+
+windows_setup_mutation() {
+  check_deps
+  check_efi_mode
+  add_windows_boot_entry
+}
+
+windows_suppress_mutation() {
+  check_deps
+  check_efi_mode
+  suppress_stale_windows_entry
+}
+
+windows_bootnext_mutation() {
+  check_core_deps
+  check_efi_mode
+  run_windows_bootnext
+}
+
 cmd_windows() {
   if (( $# > 1 )); then
     cmd_windows_help
@@ -371,44 +330,11 @@ cmd_windows() {
   fi
 
   case "${1:-}" in
-    available)
-      read_windows_target_state >/dev/null 2>&1 || return 1
-      find_windows_boot_entry >/dev/null || return 1
-      windows_state_matches_resolved_target
-      ;;
-    preflight)
-      cmd_windows_preflight
-      ;;
-    setup)
-      recoverable_command_prelude "windows setup" || return 1
-      if [[ "$_lifecycle_recovery_performed" == true ]]; then
-        pass "Lifecycle recovery completed; run windows setup again for a new mutation"
-        return 0
-      fi
-      check_deps
-      check_efi_mode
-      add_windows_boot_entry
-      ;;
-    suppress)
-      recoverable_command_prelude "windows suppress" || return 1
-      if [[ "$_lifecycle_recovery_performed" == true ]]; then
-        pass "Lifecycle recovery completed; run windows suppress again for a new mutation"
-        return 0
-      fi
-      check_deps
-      check_efi_mode
-      suppress_stale_windows_entry
-      ;;
-    bootnext)
-      recoverable_command_prelude "windows bootnext" || return 1
-      if [[ "$_lifecycle_recovery_performed" == true ]]; then
-        pass "Lifecycle recovery completed; BootNext was not armed again"
-        return 0
-      fi
-      check_core_deps
-      check_efi_mode
-      run_dormant_windows_bootnext
-      ;;
+    available) cmd_windows_available ;;
+    preflight) cmd_windows_preflight ;;
+    setup) run_recoverable_command "windows setup" windows_setup_mutation ;;
+    suppress) run_recoverable_command "windows suppress" windows_suppress_mutation ;;
+    bootnext) run_recoverable_command "windows bootnext" windows_bootnext_mutation ;;
     help|--help|-h)
       cmd_windows_help
       ;;
@@ -429,11 +355,10 @@ cmd_cleanup() {
     fail "Cleanup does not accept arguments"
     return 2
   }
-  recoverable_command_prelude "cleanup" || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; run cleanup again for a new cleanup mutation"
-    return 0
-  fi
+  run_recoverable_command cleanup cleanup_mutation
+}
+
+cleanup_mutation() {
   check_core_deps
   run_tracking_cleanup cleanup
 }
@@ -443,11 +368,10 @@ cmd_sign() {
     fail "Signing does not accept arguments"
     return 2
   }
-  recoverable_command_prelude "sign" || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; run sign again for a new signing mutation"
-    return 0
-  fi
+  run_recoverable_command sign sign_mutation
+}
+
+sign_mutation() {
   check_deps
   qheader "Signing EFI Files"
   run_artifact_repair sign
@@ -459,15 +383,15 @@ cmd_unconfigure() {
     return 2
   }
   header "Disable OmaSecBoot Management"
-  recoverable_command_prelude "unconfigure" || return 1
-  if [[ "$_lifecycle_recovery_performed" == true ]]; then
-    pass "Lifecycle recovery completed; no new unconfiguration was started"
-    return 0
-  fi
+  run_recoverable_command unconfigure unconfigure_mutation
+}
+
+unconfigure_mutation() {
   check_deps
+  check_efi_mode
   require_gum
   gum confirm "Restore recorded defaults and rebuild stock Limine boot state?" || return 1
-  run_dormant_unconfigure
+  run_unconfigure
 }
 
 cmd_repair() {
@@ -476,7 +400,12 @@ cmd_repair() {
     return 2
   }
   header "Lifecycle Recovery"
-  recoverable_command_prelude "repair" || return 1
+  check_root repair
+  check_recovery_deps
+  recover_lifecycle_if_required || {
+    fail "Lifecycle recovery failed"
+    return 1
+  }
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed"
   else
@@ -486,7 +415,10 @@ cmd_repair() {
 
 cmd_status() {
   local lifecycle_rc=0 status_rc=0
-  [[ $# -eq 0 ]] || return 2
+  [[ $# -eq 0 ]] || {
+    fail "Status does not accept arguments"
+    return 2
+  }
   check_core_deps
   show_lifecycle_status || lifecycle_rc=$?
   show_status || status_rc=$?
@@ -494,7 +426,10 @@ cmd_status() {
 }
 
 cmd_version() {
-  [[ $# -eq 0 ]] || return 2
+  [[ $# -eq 0 ]] || {
+    fail "Version does not accept arguments"
+    return 2
+  }
   printf 'omasecboot %s\n' "$OMASECBOOT_VERSION"
 }
 

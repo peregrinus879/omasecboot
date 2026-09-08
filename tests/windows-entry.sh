@@ -36,6 +36,11 @@ source "${ROOT_DIR}/lib/lifecycle.sh"
 # shellcheck source=../lib/windows.sh
 source "${ROOT_DIR}/lib/windows.sh"
 
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
+
 QUIET=true
 CASE_DIR=""
 CONFIG_FILE=""
@@ -413,7 +418,7 @@ test_successful_setup() {
   [[ "$_windows_state_kind" == legacy-empty ]] \
     || fail_test "empty legacy state marker was not classified for migration"
 
-  run_windows_handoff_setup || fail_test "dormant Windows setup transaction failed"
+  run_windows_handoff_setup || fail_test "Windows setup transaction failed"
   state_file=$(windows_target_state_path)
   read_windows_target_state || fail_test "written Windows target state is invalid"
   [[ "$_windows_state_boot_number" == 0007 \
@@ -983,7 +988,7 @@ test_suppression_final_proof_rollback() {
 test_bootnext_success_and_schema() {
   local lifecycle manifest transaction_id reference record state tampered
   setup_bootnext_fixture bootnext-success
-  run_dormant_windows_bootnext || fail_test "dormant BootNext transaction failed"
+  run_windows_bootnext || fail_test "BootNext transaction failed"
   [[ $BOOTNEXT_COMMAND_CALLS -eq 1 \
     && $(<"$BOOTNEXT_CALL_LOG") == '-n 0007' ]] \
     || fail_test "BootNext transaction did not issue exactly one bounded write"
@@ -1041,7 +1046,7 @@ test_bootnext_prior_value() {
   local manifest record
   setup_bootnext_fixture bootnext-prior
   write_bootnext_variable 0042
-  run_dormant_windows_bootnext || fail_test "BootNext replacement transaction failed"
+  run_windows_bootnext || fail_test "BootNext replacement transaction failed"
   manifest=$(lifecycle_manifest_path \
     "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
   record=$(jq -r '.domain_records.bootnext.path' "$manifest")
@@ -1054,7 +1059,7 @@ test_bootnext_preflight_boundaries() {
   setup_bootnext_fixture bootnext-attributes
   write_bootnext_variable 0009 3
   lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "unsupported BootNext attributes passed preflight"
   fi
   [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
@@ -1064,7 +1069,7 @@ test_bootnext_preflight_boundaries() {
   setup_bootnext_fixture bootnext-tool
   BOOTNEXT_TOOL_VALID=false
   lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "unverified efibootmgr passed BootNext preflight"
   fi
   [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" \
@@ -1075,7 +1080,7 @@ test_bootnext_preflight_boundaries() {
   variable=$(windows_bootnext_variable_path)
   printf '\x07\x00\x00\x00\x09' > "$variable"
   chmod 600 "$variable"
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "truncated BootNext payload passed preflight"
   fi
   read_lifecycle || fail_test "truncated BootNext preflight damaged lifecycle"
@@ -1085,7 +1090,7 @@ test_bootnext_preflight_boundaries() {
   setup_bootnext_fixture bootnext-symlink
   variable=$(windows_bootnext_variable_path)
   ln -s "$(windows_target_state_path)" "$variable"
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "symlink BootNext variable passed preflight"
   fi
   read_lifecycle || fail_test "symlink BootNext preflight damaged lifecycle"
@@ -1094,7 +1099,7 @@ test_bootnext_preflight_boundaries() {
 
   setup_bootnext_fixture bootnext-mount-race
   BOOTNEXT_MOUNT_FAIL_AT=2
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "efivarfs mount race passed BootNext preflight"
   fi
   read_lifecycle || fail_test "efivarfs mount race damaged lifecycle"
@@ -1106,7 +1111,7 @@ test_bootnext_prewrite_races() {
   setup_bootnext_fixture bootnext-prior-race
   BOOTNEXT_FAILPOINT=after-bootnext-record
   BOOTNEXT_FAIL_ACTION=change-prior
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "BootNext prior-value race reported success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "prior-value race reached efibootmgr"
@@ -1115,7 +1120,7 @@ test_bootnext_prewrite_races() {
   setup_bootnext_fixture bootnext-target-race
   BOOTNEXT_FAILPOINT=before-target-revalidation
   BOOTNEXT_FAIL_ACTION=change-target
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "Windows target race reported BootNext success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "target race reached efibootmgr"
@@ -1124,7 +1129,7 @@ test_bootnext_prewrite_races() {
   setup_bootnext_fixture bootnext-tool-race
   BOOTNEXT_FAILPOINT=after-bootnext-record
   BOOTNEXT_FAIL_ACTION=change-tool
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "efibootmgr identity race reported BootNext success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "efibootmgr identity race reached mutation"
@@ -1133,7 +1138,7 @@ test_bootnext_prewrite_races() {
   setup_bootnext_fixture bootnext-boot-race
   BOOTNEXT_FAILPOINT=after-bootnext-record
   BOOTNEXT_FAIL_ACTION=change-boot
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "boot-ID race reported BootNext success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 0 ]] || fail_test "boot-ID race reached efibootmgr"
@@ -1145,7 +1150,7 @@ test_bootnext_command_failures() {
   setup_bootnext_fixture bootnext-command-no-effect
   BOOTNEXT_COMMAND_EFFECT=false
   BOOTNEXT_COMMAND_RC=23
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "failed no-effect efibootmgr command reported success"
   fi
   [[ $BOOTNEXT_COMMAND_CALLS -eq 1 ]] || fail_test "failed efibootmgr command was not bounded"
@@ -1156,7 +1161,7 @@ test_bootnext_command_failures() {
 
   setup_bootnext_fixture bootnext-command-effect
   BOOTNEXT_COMMAND_RC=23
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "failed after-effect efibootmgr command reported success"
   fi
   state=$(read_windows_bootnext_state)
@@ -1169,7 +1174,7 @@ test_bootnext_readback_and_interruption() {
   local state signal_rc
   setup_bootnext_fixture bootnext-mismatch
   BOOTNEXT_EFFECT_NUMBER=0008
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "mismatched BootNext readback reported success"
   fi
   assert_bootnext_recovery set-bootnext
@@ -1177,7 +1182,7 @@ test_bootnext_readback_and_interruption() {
   setup_bootnext_fixture bootnext-unreadable-readback
   BOOTNEXT_FAILPOINT=after-bootnext-command
   BOOTNEXT_FAIL_ACTION=corrupt-attributes
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "malformed post-write BootNext readback reported success"
   fi
   assert_bootnext_recovery set-bootnext
@@ -1186,7 +1191,7 @@ test_bootnext_readback_and_interruption() {
   BOOTNEXT_FAILPOINT=after-bootnext-command
   BOOTNEXT_FAIL_ACTION=signal-term
   signal_rc=0
-  { (run_dormant_windows_bootnext >/dev/null 2>&1) || signal_rc=$?; } 2>/dev/null
+  { (run_windows_bootnext >/dev/null 2>&1) || signal_rc=$?; } 2>/dev/null
   [[ $signal_rc -eq 143 ]] || fail_test "post-write TERM did not propagate"
   state=$(read_windows_bootnext_state)
   jq -e '.present == true and .boot_number == "0007"' <<< "$state" >/dev/null \
@@ -1198,7 +1203,7 @@ test_bootnext_commit_failure() {
   local manifest state
   setup_bootnext_fixture bootnext-commit-failure
   LIFECYCLE_FAILPOINT=before-stable-state-write
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "BootNext stable-state publication failure reported success"
   fi
   state=$(read_windows_bootnext_state)
@@ -1226,7 +1231,7 @@ recover_windows_incident() {
 
 create_bootnext_effect_incident() {
   BOOTNEXT_COMMAND_RC=23
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "BootNext recovery fixture reported root success"
   fi
   BOOTNEXT_COMMAND_RC=0
@@ -1317,7 +1322,7 @@ test_windows_recovery_prior_unchanged() {
   setup_bootnext_fixture recovery-unchanged
   BOOTNEXT_COMMAND_EFFECT=false
   BOOTNEXT_COMMAND_RC=23
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "unchanged recovery fixture reported root success"
   fi
   BOOTNEXT_COMMAND_RC=0
@@ -1356,7 +1361,7 @@ test_windows_recovery_cross_boot_before_write() {
   setup_bootnext_fixture recovery-cross-boot-before-write
   BOOTNEXT_FAILPOINT=after-bootnext-record
   BOOTNEXT_FAIL_ACTION=fail
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "pre-write cross-boot fixture reported success"
   fi
   read_lifecycle || fail_test "pre-write cross-boot root was unreadable"
@@ -1386,7 +1391,7 @@ test_windows_recovery_refuses_changed_before_write() {
   setup_bootnext_fixture recovery-changed-before-write
   BOOTNEXT_FAILPOINT=after-bootnext-record
   BOOTNEXT_FAIL_ACTION=fail
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "changed pre-write fixture reported root success"
   fi
   read_lifecycle || fail_test "changed pre-write root was unreadable"
@@ -1410,7 +1415,7 @@ test_windows_recovery_without_published_record() {
   local root_id manifest
   setup_bootnext_fixture recovery-not-published
   RESOLVE_FAIL_AT=2
-  if run_dormant_windows_bootnext >/dev/null 2>&1; then
+  if run_windows_bootnext >/dev/null 2>&1; then
     fail_test "recordless BootNext fixture reported success"
   fi
   read_lifecycle || fail_test "recordless root was unreadable"

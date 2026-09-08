@@ -32,6 +32,10 @@ sbctl_config_path() {
 # keys, and multiple documents. Strict mode additionally rejects anything that
 # changes what sbctl would enroll or sign: nested content, unknown keys, custom
 # key backends, and nonempty db_additions or files lists.
+_sbctl_keydir=""
+_sbctl_guid_path=""
+_sbctl_files_db=""
+
 parse_sbctl_config() {
   local config="$1" strict="${2:-false}" line trimmed key candidate value last_key=""
   local -A seen=()

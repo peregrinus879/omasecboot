@@ -20,6 +20,11 @@ source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/lifecycle.sh"
 
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
+
 [[ $(windows_bootnext_variable_path) == \
   /sys/firmware/efi/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c ]] \
   || fail_test "lifecycle does not own the canonical BootNext variable path"
@@ -118,7 +123,6 @@ reset_state() {
   _recovery_attempt_count=0
   _recovery_target_state=""
   _recovery_producer_reference="null"
-  _recovery_incident_json=""
   _transaction_active=false
   _transaction_id=""
   _transaction_token=""
@@ -931,10 +935,12 @@ jq -e --arg path "$root_incident_path" --arg hash "$root_seal_hash" '
   .transaction.root_incident.sha256 == $hash
 ' "$(lifecycle_file_path)" >/dev/null \
   || fail_test "lifecycle did not bind the root seal"
-read_recovery_incident || fail_test "sealed root incident did not validate"
-[[ $(jq -r '.kind' <<< "$_recovery_incident_json") == root ]] \
-  || fail_test "recovery reader did not return the root seal"
-if printf '%s\n' "$_recovery_incident_json" \
+with_boot_repair_lock
+load_recovery_context || fail_test "sealed root incident did not validate"
+release_boot_repair_lock
+[[ $(jq -r '.kind' <<< "$_recovery_root_manifest_json") == root ]] \
+  || fail_test "recovery context did not load the root manifest"
+if printf '%s\n' "$(<"$root_incident_path")" \
   | atomic_create_control_file "$root_incident_path" 600; then
   fail_test "create-once writer replaced an incident seal"
 fi
@@ -1007,9 +1013,12 @@ read_lifecycle || fail_test "bounded attempt chain did not validate"
 transaction_dirs=("$(transactions_dir_path)"/*)
 attempt_dir_count=${#transaction_dirs[@]}
 attempt_limit_state_hash=$(sha256_file "$(lifecycle_file_path)")
-if recovery_attempt_capacity_available; then
-  fail_test "attempt 33 was admitted"
-fi
+with_boot_repair_lock
+capacity_rc=0
+load_recovery_context || capacity_rc=$?
+release_boot_repair_lock
+[[ $capacity_rc -eq 2 && "$_incident_read_status" == attempt-limit ]] \
+  || fail_test "attempt 33 was admitted"
 if validate_incident_chain "$root_incident_reference" "$previous_attempt" \
   "$((MAX_RECOVERY_ATTEMPT_SEALS + 1))" false; then
   fail_test "chain validator admitted attempt 33"
@@ -1160,14 +1169,14 @@ root_incident_tampered=$(jq -c '.failure.reason = "tampered"' \
   <<< "$root_incident_original")
 printf '%s\n' "$root_incident_tampered" \
   | atomic_write_control_file "$root_incident_path" 600
-if read_recovery_incident >/dev/null 2>&1; then
-  fail_test "recovery trusted a tampered root seal"
+if read_lifecycle >/dev/null 2>&1; then
+  fail_test "lifecycle trusted a tampered root seal"
 fi
 [[ "$_lifecycle_read_status" == control-state-ambiguous ]] \
   || fail_test "tampered root seal was not classified as ambiguous"
 printf '%s\n' "$root_incident_original" \
   | atomic_write_control_file "$root_incident_path" 600
-read_recovery_incident || fail_test "root seal did not recover after test restore"
+read_lifecycle || fail_test "root seal did not recover after test restore"
 
 reset_state
 adopt_lifecycle : "no" "no" "yes" "no" "absent" "absent" "absent" "absent" \

@@ -1,6 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC2154 # Transaction and artifact globals come from sourced modules.
-# OmaSecBoot: state-aware firmware backup and dormant key enrollment
+# OmaSecBoot: state-aware firmware backup and guarded key enrollment
 
 readonly EFI_GLOBAL_VARIABLE_GUID="8be4df61-93ca-11d2-aa0d-00e098032b8c"
 readonly EFI_IMAGE_SECURITY_DATABASE_GUID="d719b2cb-3d3a-4596-a3bc-dad00e67656f"
@@ -28,8 +28,6 @@ _sbctl_executable=""
 _sbctl_executable_hash=""
 _sbctl_config_state=""
 _sbctl_config_hash=""
-_sbctl_keydir=""
-_sbctl_guid_path=""
 _local_key_state=""
 _setup_mode=""
 _audit_mode=""
@@ -1182,6 +1180,7 @@ classify_setup_state() {
   printf '%s\n' "$_setup_state"
 }
 
+# Test seam: suites replace this to stub the Windows encryption gate.
 secure_boot_windows_gate() {
   windows_encryption_gate
 }
@@ -2020,7 +2019,7 @@ run_firmware_recovery_locked() {
   return "$callback_rc"
 }
 
-run_dormant_enrollment() {
+run_enrollment() {
   local backup_id="$1"
   run_lifecycle_transaction_with_preflight "enroll-secure-boot" "active" "active" \
     enrollment_preflight enroll_planned_trust_set "$backup_id"

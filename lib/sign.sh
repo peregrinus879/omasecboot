@@ -1415,7 +1415,7 @@ unconfigure_software_state() {
   unconfigure_apply_phases
 }
 
-run_dormant_unconfigure() {
+run_unconfigure() {
   run_lifecycle_transaction_with_preflight unconfigure disabled active \
     unconfigure_preflight unconfigure_software_state
 }

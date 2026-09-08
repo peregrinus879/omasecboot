@@ -18,6 +18,12 @@ _windows_partition_number=""
 _windows_hd_start=""
 _windows_hd_size=""
 _windows_device_path=""
+_windows_dp_exact=false
+_windows_dp_valid=false
+_windows_dp_partuuid=""
+_windows_dp_partition=""
+_windows_dp_start=""
+_windows_dp_size=""
 _windows_maj_min=""
 _windows_state_boot_number=""
 _windows_state_label=""
@@ -101,6 +107,7 @@ windows_target_state_path() {
   printf '%s/windows-enabled\n' "$(state_dir_path)"
 }
 
+# Test seam: suites point this at a fixture configuration.
 windows_limine_config_path() {
   limine_config_path
 }
@@ -1089,7 +1096,6 @@ windows_preflight_scan_esps() {
 }
 
 windows_collect_encryption_preflight() {
-  local rc=0
   windows_preflight_reset
   windows_preflight_detect_firmware
   if ! windows_preflight_read_block_inventory; then
@@ -1736,7 +1742,7 @@ remove_windows_bootnext_variable() {
 }
 
 execute_windows_recovery_action() {
-  local action recovery_boot_id observed prior_number current_state rc=0
+  local action recovery_boot_id current_state rc=0
   load_windows_recovery_record || return 1
   action=$(jq -r '.action' <<< "$_windows_recovery_record_json") || return 1
   recovery_boot_id=$(jq -r '.recovery_boot_id' <<< "$_windows_recovery_record_json") \
@@ -2139,7 +2145,7 @@ write_windows_bootnext_bound() {
   }
 }
 
-run_dormant_windows_bootnext() {
+run_windows_bootnext() {
   run_lifecycle_transaction_with_preflight "windows-bootnext" "active" "active" \
     windows_bootnext_preflight record_and_set_windows_bootnext
 }

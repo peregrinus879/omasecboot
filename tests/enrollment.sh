@@ -40,6 +40,11 @@ source "${ROOT_DIR}/lib/sign.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/enroll.sh"
 
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
+
 pacman_database_lock_path() {
   printf '%s/pacman-db.lck\n' "$TEST_DIR"
 }
@@ -515,7 +520,7 @@ setup_fixture() {
 
 prepare_and_activate() {
   local state_file backup_id
-  prepare_state_aware_setup true || fail_test "dormant setup preparation failed"
+  prepare_state_aware_setup true || fail_test "setup preparation failed"
   state_file=$(lifecycle_file_path)
   backup_id=$(jq -r '.last_transaction.id' "$state_file")
   validate_firmware_backup "$backup_id" || fail_test "firmware backup validation failed"
@@ -960,8 +965,8 @@ test_enrollment_guard_and_success() {
   [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
     || fail_test "observed state 2 mismatch"
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
-    || fail_test "dormant enrollment did not start from F0"
-  run_dormant_enrollment "$backup_id" || fail_test "dormant enrollment failed"
+    || fail_test "enrollment did not start from F0"
+  run_enrollment "$backup_id" || fail_test "enrollment failed"
   mapfile -t partial_calls < <(grep -- '--partial' "$SBCTL_LOG")
   [[ "${partial_calls[*]}" == \
     'enroll-keys -m -f --partial db enroll-keys -m -f --partial KEK enroll-keys -m -f --partial PK' ]] \
@@ -1026,7 +1031,7 @@ test_firmware_command_evidence_boundaries() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=after-db-command
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-command failpoint reported success"
   fi
   read_lifecycle || fail_test "post-command lifecycle unreadable"
@@ -1042,7 +1047,7 @@ test_firmware_command_evidence_boundaries() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=after-db-command-result
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-command-result failpoint reported success"
   fi
   read_lifecycle || fail_test "pending-readback lifecycle unreadable"
@@ -1058,7 +1063,7 @@ test_firmware_command_evidence_boundaries() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   SBCTL_FAIL_PHASE=before-db
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "no-effect db command reported success"
   fi
   read_lifecycle || fail_test "unchanged-readback lifecycle unreadable"
@@ -1080,7 +1085,7 @@ test_dbx_drift_blocks_cleanly() {
   read_lifecycle || fail_test "drift fixture lifecycle unreadable"
   generation=$_lifecycle_generation
   : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "changed dbx passed enrollment preflight"
   fi
   read_lifecycle || fail_test "dbx refusal damaged lifecycle"
@@ -1098,7 +1103,7 @@ test_partial_readback_failure() {
   enter_setup_mode
   SBCTL_MISMATCH_PHASE=db
   : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "incorrect db readback reported success"
   fi
   read_lifecycle || fail_test "partial readback lifecycle unreadable"
@@ -1137,7 +1142,7 @@ test_db_command_failure_after_effect() {
   enter_setup_mode
   SBCTL_FAIL_PHASE=after-db
   : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-db command failure reported success"
   fi
   read_lifecycle || fail_test "post-db command failure lifecycle unreadable"
@@ -1167,7 +1172,7 @@ test_pk_command_failure_after_effect() {
   SBCTL_FAIL_PHASE=after-PK
   : > "$SBCTL_LOG"
   : > "$ARTIFACT_LOG"
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-PK command failure reported success"
   fi
   read_lifecycle || fail_test "post-PK command failure lifecycle unreadable"
@@ -1194,7 +1199,7 @@ test_artifact_repair_drift_blocks_write() {
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=after-enrollment-artifact-repair
   : > "$SBCTL_LOG"
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-repair firmware drift allowed enrollment"
   fi
   if grep -Fq -- '--partial' "$SBCTL_LOG"; then
@@ -1344,7 +1349,7 @@ test_firmware_recovery_resolves_pending_effect() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=after-db-command
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "pending-effect fixture reported success"
   fi
   read_lifecycle || fail_test "pending-effect root was unreadable"
@@ -1380,7 +1385,7 @@ test_firmware_recovery_inherits_resolved_retry() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=before-db-write
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "pending retry fixture reported success"
   fi
   ENROLLMENT_MUTATION_POINT=after-recovery-artifact-repair
@@ -1425,7 +1430,7 @@ test_firmware_recovery_retry_limit_is_cumulative() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   SBCTL_FAIL_PHASE=before-db
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "retry-limit root reported success"
   fi
   if recover_firmware_incident; then
@@ -1452,7 +1457,7 @@ test_firmware_recovery_completes_post_pk_effect() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   SBCTL_FAIL_PHASE=after-PK
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "post-PK recovery fixture reported success"
   fi
   SBCTL_FAIL_PHASE=""
@@ -1478,7 +1483,7 @@ test_firmware_recovery_leaves_unreadable_pending() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   ENROLLMENT_MUTATION_POINT=after-db-command
-  if run_dormant_enrollment "$backup_id"; then
+  if run_enrollment "$backup_id"; then
     fail_test "unreadable pending fixture reported success"
   fi
   read_lifecycle || fail_test "unreadable pending root was unreadable"

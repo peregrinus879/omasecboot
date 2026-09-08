@@ -47,7 +47,7 @@ Single dispatcher sources lib modules. Each lib file owns one concern:
 - `common.sh` - constants, colors, output helpers, quiet mode
 - `lifecycle.sh` - versioned state, durable manifests, transaction handling, hook ownership, and guards
 - `producers.sh` - ancestor-bound producer leases and the fixed reconstruction/recovery registry
-- `checks.sh` - root, deps, EFI mount, gum validation
+- `checks.sh` - root, dependency, EFI mount, and gum checks, and the lifecycle activation environment
 - `discover.sh` - EFI file discovery, sbctl tracked-file discovery, sbctl database fallback helpers
 - `sign.sh` - key creation, signing, sbctl compatibility registration, stale entry cleanup, Limine verification/enrollment helpers
 - `enroll.sh` - raw firmware backup, strict trust planning, setup-state classification, and guarded enrollment

@@ -156,7 +156,7 @@ list_omarchy_direct_boot_entries() {
 
 show_status() {
   header "Secure Boot Status"
-  local all_ok=true
+  local all_ok=true line
 
   # Parse sbctl status
   local json secure_boot_state="" setup_mode_state="" installed_state=""

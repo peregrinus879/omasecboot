@@ -31,6 +31,11 @@ source "${ROOT_DIR}/lib/enroll.sh"
 # shellcheck source=../lib/windows.sh
 source "${ROOT_DIR}/lib/windows.sh"
 
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
+
 QUIET=true
 UNCONFIGURE_RECOVERY_FAILPOINT=""
 
@@ -250,7 +255,7 @@ test_successful_unconfigure() {
   windows_hash=$(sha256_file "$(windows_target_state_path)")
   key_hash=$(sha256_file "${CASE_DIR}/key-state/marker")
 
-  run_dormant_unconfigure || fail_test "dormant unconfiguration failed"
+  run_unconfigure || fail_test "unconfiguration failed"
   read_lifecycle || fail_test "disabled lifecycle is unreadable"
   [[ "$_lifecycle_state" == disabled ]] || fail_test "disabled state was not committed"
   jq -e '
@@ -308,7 +313,7 @@ test_successful_unconfigure() {
 
 test_unknown_original_blocks_before_transition() {
   setup_fixture unknown unknown
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "unknown original value allowed unconfiguration"
   fi
   read_lifecycle || fail_test "unknown-original lifecycle became unreadable"
@@ -319,7 +324,7 @@ test_unknown_original_blocks_before_transition() {
 test_three_way_conflict_blocks_before_transition() {
   setup_fixture conflict
   replace_limine_default_entry ENABLE_VERIFICATION || fail_test "could not create conflict"
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "managed-setting conflict allowed unconfiguration"
   fi
   read_lifecycle || fail_test "conflict lifecycle became unreadable"
@@ -333,7 +338,7 @@ test_rebuild_failure_preserves_files() {
   run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
     || fail_test "failure ownership seed failed"
   REBUILD_FAIL=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "failed stock rebuild committed disabled state"
   fi
   read_lifecycle || fail_test "failed rebuild lifecycle became unreadable"
@@ -361,7 +366,7 @@ test_rebuild_failure_recovers_disabled() {
   run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
     || fail_test "recovery ownership seed failed"
   REBUILD_FAIL=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "recovery fixture unexpectedly completed unconfiguration"
   fi
   read_lifecycle || fail_test "unconfigure recovery fixture is unreadable"
@@ -400,7 +405,7 @@ test_pre_reset_failure_rolls_back_files() {
   config_hash=$(sha256_file "$(limine_config_path)")
   database_hash=$(sha256_file "$SBCTL_FILES_DB")
   SBCTL_REMOVE_FAIL=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "pre-reset tracking failure reported success"
   fi
   read_lifecycle || fail_test "pre-reset failure lifecycle became unreadable"
@@ -423,7 +428,7 @@ test_noop_install_rejects_non_stock_targets() {
   local manifest
   setup_fixture noop-install
   INSTALL_NOOP=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "no-op Limine install proved non-stock targets"
   fi
   read_lifecycle || fail_test "no-op install lifecycle became unreadable"
@@ -441,7 +446,7 @@ test_esp_sync_failure_blocks_disabled_commit() {
   local manifest
   setup_fixture esp-sync-failure
   ESP_SYNC_FAIL=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "ESP sync failure committed disabled state"
   fi
   read_lifecycle || fail_test "ESP sync failure lifecycle became unreadable"
@@ -462,7 +467,7 @@ test_legacy_windows_block_is_removed() {
     -e "s/^${WINDOWS_ENTRY_MARKER//\//\\/}$/${WINDOWS_LEGACY_ENTRY_MARKER//\//\\/}/" \
     -e "/^${WINDOWS_ENTRY_END_MARKER//\//\\/}$/d" \
     "$(limine_config_path)"
-  run_dormant_unconfigure || fail_test "legacy Windows ownership blocked unconfiguration"
+  run_unconfigure || fail_test "legacy Windows ownership blocked unconfiguration"
   windows_managed_block_state '' || fail_test "legacy Windows block left invalid markers"
   [[ "$_windows_block_state" == absent && ! -s "$(windows_target_state_path)" ]] \
     || fail_test "legacy Windows block or empty opt-in marker was changed incorrectly"
@@ -470,7 +475,7 @@ test_legacy_windows_block_is_removed() {
 
 test_original_enrollment_setting_is_restored() {
   setup_fixture original-enrollment yes yes
-  run_dormant_unconfigure || fail_test "original config-enrollment setting blocked unconfiguration"
+  run_unconfigure || fail_test "original config-enrollment setting blocked unconfiguration"
   [[ "$(limine_managed_setting_state ENABLE_ENROLL_LIMINE_CONFIG)" == yes ]] \
     || fail_test "original config-enrollment setting was not restored"
   unconfigured_limine_targets_match_source \
@@ -558,7 +563,7 @@ test_recovery_phase_failure_chain() {
   run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
     || fail_test "recovery phase ownership seed failed"
   REBUILD_FAIL=true
-  if run_dormant_unconfigure; then
+  if run_unconfigure; then
     fail_test "recovery phase root unexpectedly completed"
   fi
   read_lifecycle || fail_test "recovery phase root is unreadable"

@@ -21,6 +21,11 @@ source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=../lib/lifecycle.sh
 source "${ROOT_DIR}/lib/lifecycle.sh"
 
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
+
 state_dir_path() { printf '%s/state\n' "$CASE_DIR"; }
 limine_lock_path() { printf '%s/boot-partition.lock\n' "$CASE_DIR"; }
 snapshot_restore_lock_path() { printf '%s/restore.lock\n' "$CASE_DIR"; }

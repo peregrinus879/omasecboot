@@ -87,6 +87,7 @@ resolve_package_producer_context() {
   _producer_caller=pacman
 }
 
+# Test seam: suites replace this to present a fixture parent process.
 resolve_limine_producer_context() {
   resolve_limine_producer_process "$PPID"
 }

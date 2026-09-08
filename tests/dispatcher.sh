@@ -18,6 +18,11 @@ fail_test() {
 
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/bin/omasecboot"
+
+# Test convenience: a lifecycle transaction without a preflight step.
+run_lifecycle_transaction() {
+  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
+}
 REAL_RECOVER_LIFECYCLE_IF_REQUIRED=$(declare -f recover_lifecycle_if_required)
 
 state_dir_path() {
@@ -114,7 +119,7 @@ unconfigure_limine_tools_are_pinned() {
   [[ "$ACTIVATION_UNCONFIGURE_SUPPORTED" == true ]]
 }
 write_activation_hook() {
-  local key="$1" schema="${2:-$OMASECBOOT_HOOK_SCHEMA_VERSION}" target="$activation_command"
+  local key="$1" schema="${2:-1}" target="$activation_command"
   local hook source line placeholder='@BINDIR@/omasecboot'
   hook=$(activation_hook_path "$key") || return 1
   [[ "${3:-current}" == current ]] || target="${TEST_DIR}/wrong-command"
@@ -150,7 +155,7 @@ if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "stale activation hook schema was accepted"
 fi
 write_activation_hook transaction
-write_activation_hook limine-post "$OMASECBOOT_HOOK_SCHEMA_VERSION" wrong
+write_activation_hook limine-post 1 wrong
 if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "incorrectly targeted activation hook was accepted"
 fi
@@ -362,7 +367,7 @@ activate_confirmed_enrollment_plan() {
 observe_setup_state() { printf '%s\n' "$SETUP_STATE"; }
 secure_boot_windows_gate() { printf 'windows-gate\n' >> "$mutation_log"; }
 validate_setup_instruction_boundary() { printf 'windows-gate\n' >> "$mutation_log"; }
-run_dormant_enrollment() { printf 'enroll\n' >> "$mutation_log"; }
+run_enrollment() { printf 'enroll\n' >> "$mutation_log"; }
 run_artifact_repair() {
   [[ "$1" == sign ]] || return 1
   printf 'sign\n' >> "$mutation_log"
@@ -371,10 +376,10 @@ run_tracking_cleanup() {
   [[ "$1" == cleanup ]] || return 1
   printf 'cleanup\n' >> "$mutation_log"
 }
-run_dormant_unconfigure() { printf 'unconfigure\n' >> "$mutation_log"; }
+run_unconfigure() { printf 'unconfigure\n' >> "$mutation_log"; }
 add_windows_boot_entry() { printf 'windows-setup\n' >> "$mutation_log"; }
 suppress_stale_windows_entry() { printf 'windows-suppress\n' >> "$mutation_log"; }
-run_dormant_windows_bootnext() { printf 'windows-bootnext\n' >> "$mutation_log"; }
+run_windows_bootnext() { printf 'windows-bootnext\n' >> "$mutation_log"; }
 
 cmd_setup >/dev/null || fail_test "enabled setup route failed"
 cmd_setup >/dev/null || fail_test "enabled setup repair route failed"

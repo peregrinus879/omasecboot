@@ -55,7 +55,6 @@ _transaction_active=false
 _transaction_id=""
 _transaction_operation=""
 _transaction_target_state=""
-_recovery_incident_json=""
 _lifecycle_recovery_performed=false
 _transaction_previous_exit=""
 _transaction_previous_int=""
@@ -218,18 +217,6 @@ reference_transaction_id() {
   transaction_id=$(basename "$transaction_dir") || return 1
   lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
   printf '%s\n' "$transaction_id"
-}
-
-validate_lifecycle_managed_settings_reference() {
-  local reference="$1" transaction_id
-  transaction_id=$(reference_transaction_id "$reference" managed-settings.json) || return 1
-  validate_managed_settings_record_reference "$transaction_id" "$reference"
-}
-
-validate_lifecycle_tracking_ownership_reference() {
-  local reference="$1" transaction_id
-  transaction_id=$(reference_transaction_id "$reference" tracking-ownership.json) || return 1
-  validate_tracking_ownership_record_reference "$transaction_id" "$reference"
 }
 
 validate_lifecycle_ownership_pair() {
@@ -2508,22 +2495,6 @@ lifecycle_removal_is_allowed() {
   return "$result"
 }
 
-read_recovery_incident() {
-  local root
-  _recovery_incident_json=""
-  read_lifecycle || return 1
-  [[ "$_lifecycle_state" == recovery-required ]] || return 1
-  root=$(jq -c '.transaction.root_incident' <<< "$_lifecycle_json") || return 1
-  validate_incident_reference "$root" || return 1
-  _recovery_incident_json="$_incident_json"
-}
-
-recovery_attempt_capacity_available() {
-  read_recovery_incident || return 1
-  (( $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") <
-    MAX_RECOVERY_ATTEMPT_SEALS ))
-}
-
 reset_recovery_context() {
   _recovery_root_reference=""
   _recovery_root_manifest_json=""
@@ -4290,12 +4261,7 @@ reconcile_stale_transition() {
     return
   fi
   [[ "$manifest_kind" == root ]] || return 1
-  case "$manifest_status" in
-    transition)
-      ;;
-    completed|failed|stale) ;;
-    *) return 1 ;;
-  esac
+  [[ "$manifest_status" =~ ^(transition|completed|failed|stale)$ ]] || return 1
   ensure_lifecycle_recovery 1 "$reason" stale
 }
 
@@ -4456,13 +4422,6 @@ run_lifecycle_transaction_with_preflight() {
   restore_transaction_traps
   release_boot_repair_lock
   return "$callback_rc"
-}
-
-run_lifecycle_transaction() {
-  local operation="$1" target_state="$2" allowed_states="$3" callback="$4"
-  shift 4
-  run_lifecycle_transaction_with_preflight "$operation" "$target_state" \
-    "$allowed_states" : "$callback" "$@"
 }
 
 record_adoption_transaction() {
