@@ -163,7 +163,7 @@ A present boot manager is a signal that Windows is installed. It is not proof th
 
 ### Handoff
 
-`sudo omasecboot windows setup` records the Windows target and writes a managed Limine entry that uses `protocol: efi_boot_entry`. Selecting Windows in the Limine menu then sets the firmware BootNext variable and reboots, so firmware loads `bootmgfw.efi` directly instead of Limine chainloading it. `sudo omasecboot windows bootnext` requests the same one-boot handoff from Linux without the menu.
+`sudo omasecboot windows setup` records the Windows target and writes a managed Limine entry that uses `protocol: efi_boot_entry`. Selecting Windows in the Limine menu then sets the firmware BootNext variable and reboots, so firmware loads `bootmgfw.efi` directly instead of Limine chainloading it. `sudo omasecboot windows bootnext` requests the same one-boot handoff from Linux without the menu. The menu reboots only when that command exits 0; when it first had to complete lifecycle recovery it exits 3 without a request.
 
 The target is validated structurally, not by matching text: the command parses `BootOrder` and each boot option's device path, requires the exact `\EFI\Microsoft\Boot\bootmgfw.efi` file node, maps the partition node to exactly one FAT ESP by PARTUUID and geometry, reads the loader's header without writing, and requires one active Windows target whose label resolves identically under Limine's rules. Duplicate labels, multiple Windows installations, entries outside `BootOrder`, localized labels, and ambiguous mounts fail closed. OmaSecBoot never creates or relabels firmware entries. If a recorded target stops resolving, `sudo omasecboot windows suppress` removes the managed Limine block while keeping the opt-in.
 
@@ -207,7 +207,7 @@ All mutating commands require root, refuse unknown arguments, and complete any p
 | `windows preflight` | The read-only encryption preparation gate |
 | `windows setup` | Record the validated target and write the managed Limine entry |
 | `windows suppress` | Remove the managed Limine entry, keep the opt-in |
-| `windows bootnext` | Request one firmware handoff to Windows |
+| `windows bootnext` | Request one firmware handoff to Windows; exit 3 means lifecycle recovery ran and no request was made, so run it again |
 | `unconfigure` | Restore recorded settings and stock boot state, commit `disabled` |
 | `repair` | Resume the interrupted operation recorded in the lifecycle |
 | `version` | Print `omasecboot 1.0.0` |

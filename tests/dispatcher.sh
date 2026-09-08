@@ -389,7 +389,12 @@ check_core_deps() { fail_test "command-specific dependencies ran before recovery
 check_efi_mode() { fail_test "command-specific EFI checks ran before recovery"; }
 require_gum() { fail_test "interactive dependencies ran before recovery"; }
 cmd_setup >/dev/null || fail_test "setup recovery-only route failed"
-cmd_windows bootnext >/dev/null || fail_test "BootNext recovery-only route failed"
+# The menu reboots on success, so recovery without a request is not success.
+if cmd_windows bootnext >/dev/null; then
+  fail_test "BootNext recovery-only route claimed a handoff request"
+else
+  [[ $? -eq 3 ]] || fail_test "BootNext recovery-only route did not return status 3"
+fi
 [[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover' ]] \
   || fail_test "a recovered command started an unintended second mutation"
 cmd_adopt --verification-original unknown --enrollment-original no \

@@ -20,10 +20,13 @@ for lib in common lifecycle records software checks discover sign producers enro
 done
 
 # Runs one recoverable mutation command: root and recovery dependencies, any
-# pending lifecycle recovery, and the body only when no recovery ran.
+# pending lifecycle recovery, and the body only when no recovery ran. When
+# recovery ran, the body is skipped and the command returns recovery_status, so
+# a caller that chains on success (the Windows menu) never mistakes recovery
+# for the request it asked for.
 run_recoverable_command() {
-  local name="$1"
-  shift
+  local name="$1" recovery_status="$2"
+  shift 2
   check_root "$name"
   check_recovery_deps
   recover_lifecycle_if_required || {
@@ -32,7 +35,7 @@ run_recoverable_command() {
   }
   if [[ "$_lifecycle_recovery_performed" == true ]]; then
     pass "Lifecycle recovery completed; run ${name} again to start a new mutation"
-    return 0
+    return "$recovery_status"
   fi
   "$@"
 }
@@ -45,7 +48,7 @@ cmd_setup() {
     return 2
   }
   header "Secure Boot Setup"
-  run_recoverable_command setup setup_mutation
+  run_recoverable_command setup 0 setup_mutation
 }
 
 setup_mutation() {
@@ -114,7 +117,7 @@ cmd_enroll() {
     return 2
   }
   header "Key Enrollment"
-  run_recoverable_command enroll enroll_mutation
+  run_recoverable_command enroll 0 enroll_mutation
 }
 
 enroll_mutation() {
@@ -189,7 +192,7 @@ cmd_adopt() {
         ;;
     esac
   done
-  run_recoverable_command adopt adopt_mutation "$original_verification" \
+  run_recoverable_command adopt 0 adopt_mutation "$original_verification" \
     "$original_enrollment" "$original_before_save" "$original_after_save"
 }
 
@@ -332,9 +335,9 @@ cmd_windows() {
   case "${1:-}" in
     available) cmd_windows_available ;;
     preflight) cmd_windows_preflight ;;
-    setup) run_recoverable_command "windows setup" windows_setup_mutation ;;
-    suppress) run_recoverable_command "windows suppress" windows_suppress_mutation ;;
-    bootnext) run_recoverable_command "windows bootnext" windows_bootnext_mutation ;;
+    setup) run_recoverable_command "windows setup" 0 windows_setup_mutation ;;
+    suppress) run_recoverable_command "windows suppress" 0 windows_suppress_mutation ;;
+    bootnext) run_recoverable_command "windows bootnext" 3 windows_bootnext_mutation ;;
     help|--help|-h)
       cmd_windows_help
       ;;
@@ -355,7 +358,7 @@ cmd_cleanup() {
     fail "Cleanup does not accept arguments"
     return 2
   }
-  run_recoverable_command cleanup cleanup_mutation
+  run_recoverable_command cleanup 0 cleanup_mutation
 }
 
 cleanup_mutation() {
@@ -368,7 +371,7 @@ cmd_sign() {
     fail "Signing does not accept arguments"
     return 2
   }
-  run_recoverable_command sign sign_mutation
+  run_recoverable_command sign 0 sign_mutation
 }
 
 sign_mutation() {
@@ -383,7 +386,7 @@ cmd_unconfigure() {
     return 2
   }
   header "Disable OmaSecBoot Management"
-  run_recoverable_command unconfigure unconfigure_mutation
+  run_recoverable_command unconfigure 0 unconfigure_mutation
 }
 
 unconfigure_mutation() {
