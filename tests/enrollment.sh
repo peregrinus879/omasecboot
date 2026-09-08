@@ -1002,6 +1002,45 @@ test_enrollment_guard_and_success() {
     || fail_test "observed state 5 mismatch"
 }
 
+test_partial_plan_refusal() {
+  local backup_id
+  setup_fixture partial-plan
+  # A backup that already equals the planned KEK has no F0 frontier.
+  write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
+  if prepare_state_aware_setup true >/dev/null 2>&1; then
+    fail_test "preparation built a plan the firmware already partly holds"
+  fi
+
+  # A plan recorded before the frontier check exists: the firmware already
+  # holds the planned KEK and the instruction boundaries refuse it.
+  setup_fixture partial-plan-boundary
+  write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
+  planned_trust_differs_from_backup() { return 0; }
+  backup_id=$(prepare_and_activate)
+  [[ "$(observe_setup_state "$backup_id")" == 3 ]] \
+    || fail_test "partially enrolled plan was not observed as state 3"
+  if validate_setup_instruction_boundary "$backup_id" 3 \
+    > "${CASE_DIR}/boundary.out" 2>&1; then
+    fail_test "state 3 instruction boundary admitted a partially enrolled plan"
+  fi
+  grep -Fq 'already holds part of the planned trust set' "${CASE_DIR}/boundary.out" \
+    || fail_test "partial plan refusal lacked its guidance"
+  enter_setup_mode
+  [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
+    || fail_test "partially enrolled plan in Setup Mode was not state 2"
+  if run_enrollment "$backup_id" > "${CASE_DIR}/enroll.out" 2>&1; then
+    fail_test "enrollment started from a partially enrolled plan"
+  fi
+  grep -Fq 'already holds part of the planned trust set' "${CASE_DIR}/enroll.out" \
+    || fail_test "enrollment refusal lacked its guidance"
+  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
+    fail_test "partial plan refusal reached a firmware command"
+  fi
+  read_lifecycle || fail_test "partial plan refusal left the lifecycle unreadable"
+  [[ "$_lifecycle_state" == active ]] \
+    || fail_test "partial plan refusal changed the lifecycle state"
+}
+
 test_firmware_command_evidence_boundaries() {
   local backup_id manifest
   setup_fixture unknown-command-result
@@ -1559,6 +1598,7 @@ run_case missing-entry test_missing_current_entry_blocks
 run_case firmware-frontiers test_firmware_frontier_classifier
 run_case live-ledger-writer test_live_firmware_ledger_writer
 run_case enrollment-success test_enrollment_guard_and_success
+run_case partial-plan test_partial_plan_refusal
 run_case firmware-command-evidence test_firmware_command_evidence_boundaries
 run_case dbx-drift test_dbx_drift_blocks_cleanly
 run_case partial-readback test_partial_readback_failure

@@ -815,7 +815,8 @@ validate_planned_trust_preserves_backup() {
   ensure_firmware_runtime_dir || return 1
   runtime=$(firmware_runtime_dir_path) || return 1
   current_dir=$(mktemp -d "${runtime}/current-plan.XXXXXX") || return 1
-  planned_trust_preserves_backup "$backup_id" "$plan_dir" "$current_dir" || rc=1
+  planned_trust_preserves_backup "$backup_id" "$plan_dir" "$current_dir" \
+    && planned_trust_differs_from_backup "$plan_dir" "$current_dir" || rc=1
   rm -rf "$current_dir" || return 1
   return "$rc"
 }
@@ -841,6 +842,28 @@ planned_trust_preserves_backup() {
     "${plan_dir}/db.entries" || return 1
   _validated_current_pk_hash=$(single_x509_pk_hash "${current_dir}/PK.entries") \
     || return 1
+}
+
+# The F0-F3 frontiers need every planned database to differ from its backup;
+# a plan that already matches one of them has no representable enrollment.
+planned_trust_differs_from_backup() {
+  local plan_dir="$1" current_dir="$2" name
+  for name in PK KEK db; do
+    ! canonical_entries_are_equal "${current_dir}/${name}.entries" \
+      "${plan_dir}/${name}.entries" || return 1
+  done
+}
+
+# Enrollment starts at F0 only when every planned database differs from the
+# firmware's; a partial match is refused before any firmware instruction.
+planned_trust_is_representable() {
+  local backup_id="$1" name
+  for name in PK KEK db; do
+    [[ $(current_database_plan_status "$backup_id" "$name") == different ]] || {
+      fail "The firmware already holds part of the planned trust set; restore the factory Secure Boot keys in firmware settings, then run setup again"
+      return 1
+    }
+  done
 }
 
 build_enrollment_plan() {
@@ -1458,6 +1481,7 @@ validate_setup_instruction_boundary() {
     for name in PK KEK db; do
       current_firmware_variable_matches_backup "$backup_id" "$name" || return 1
     done
+    planned_trust_is_representable "$backup_id" || return 1
   else
     for name in PK KEK db; do
       compare_current_database_to_plan "$backup_id" "$name" || return 1
@@ -1765,6 +1789,7 @@ enrollment_preflight() {
   current_firmware_variable_matches_backup "$backup_id" KEK || return 1
   current_firmware_variable_matches_backup "$backup_id" db || return 1
   current_firmware_variable_matches_backup "$backup_id" dbx || return 1
+  planned_trust_is_representable "$backup_id" || return 1
   secure_boot_windows_gate || return 1
   artifact_repair_preflight || return 1
   _enrollment_backup_id="$backup_id"
