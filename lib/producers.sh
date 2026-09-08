@@ -324,6 +324,9 @@ registered_producer_repair() {
 run_registered_producer_recovery_locked() {
   boot_locks_are_held || return 1
   load_producer_recovery_context || return $?
+  # A managed-settings conflict is refused before an attempt is consumed and
+  # before any producer output is rebuilt under the conflicting configuration.
+  artifact_managed_settings_are_repairable || return 1
   run_recovery_attempt_locked producer-recovery registered_producer_repair \
     "registered producer recovery"
 }

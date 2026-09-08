@@ -797,11 +797,12 @@ load_latest_recovery_ownership_records() {
   done
 }
 
-prepare_artifact_ownership() {
-  local managed_reference tracking_reference tracked_raw file settings paths
-  local previous_ownership=false
-  local managed_before=present managed_after=present
-  local -A tracked=()
+# Loads the ownership records a repair continues from: the newest complete
+# pair in the current incident chain, else the stable lifecycle pair, else
+# none. _repair_ownership_found reports which.
+load_repair_ownership_records() {
+  local managed_reference tracking_reference previous_ownership=false
+  _repair_ownership_found=false
   read_lifecycle || return 1
   managed_reference=$(jq -c '.managed_settings' <<< "$_lifecycle_json") || return 1
   tracking_reference=$(jq -c '.tracking_ownership' <<< "$_lifecycle_json") || return 1
@@ -816,14 +817,32 @@ prepare_artifact_ownership() {
       previous_ownership=true
     fi
   fi
-  if [[ "$managed_reference" != null || "$tracking_reference" != null ]]; then
-    [[ "$managed_reference" != null && "$tracking_reference" != null ]] || return 1
-    [[ "$previous_ownership" == true ]] || load_lifecycle_ownership_records || return 1
+  [[ "$managed_reference" != null || "$tracking_reference" != null ]] || return 0
+  [[ "$managed_reference" != null && "$tracking_reference" != null ]] || return 1
+  [[ "$previous_ownership" == true ]] || load_lifecycle_ownership_records || return 1
+  _repair_ownership_found=true
+}
+
+# Recorded managed settings must be at their managed or original values before
+# any repair or reconstruction touches boot state.
+artifact_managed_settings_are_repairable() {
+  local settings
+  load_repair_ownership_records || return 1
+  [[ "$_repair_ownership_found" == true ]] || return 0
+  settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
+  limine_managed_settings_are_repairable "$settings" || {
+    fail "Managed Limine settings conflict with recorded OmaSecBoot ownership"
+    return 1
+  }
+}
+
+prepare_artifact_ownership() {
+  local tracked_raw file settings paths
+  local managed_before=present managed_after=present
+  local -A tracked=()
+  artifact_managed_settings_are_repairable || return 1
+  if [[ "$_repair_ownership_found" == true ]]; then
     settings=$(jq -c '.settings' <<< "$_managed_settings_record_json") || return 1
-    limine_managed_settings_are_repairable "$settings" || {
-      fail "Managed Limine settings conflict with recorded OmaSecBoot ownership"
-      return 1
-    }
     if limine_enrollment_hooks_present; then
       managed_before=absent
       managed_after=absent
@@ -1446,8 +1465,12 @@ artifact_repair_preflight() {
   }
 }
 
+# The relaxed preflight before producer reconstruction: it tolerates missing
+# producer outputs, but not a managed-settings conflict, which would otherwise
+# shape the rebuilt artifacts before the full preflight refuses it.
 producer_reconstruction_preflight() {
   artifact_environment_preflight || return 1
+  artifact_managed_settings_are_repairable || return 1
   validate_control_file "$(limine_config_path)" || return 1
   current_limine_config_checksum >/dev/null
 }

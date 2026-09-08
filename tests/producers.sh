@@ -209,7 +209,7 @@ reset_case() {
   rm -rf "$CASE_DIR"
   mkdir -p "$(dirname "$EFI_FILE")"
   printf 'TIMEOUT=5\n' > "$CONFIG_FILE"
-  printf 'ENABLE_VERIFICATION=no\n' > "$DEFAULTS_FILE"
+  printf 'ENABLE_VERIFICATION=no\nENABLE_ENROLL_LIMINE_CONFIG=yes\n' > "$DEFAULTS_FILE"
   printf 'SIGNED EFI\n' > "$EFI_FILE"
   : > "$REGISTRY_LOG"
   OWNER_ALIVE=true

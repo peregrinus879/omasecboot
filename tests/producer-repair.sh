@@ -362,10 +362,56 @@ run_repair_case() (
   assert_recovered_case "$context" "$root_id"
 )
 
+# A managed setting outside its managed and recorded original values stops
+# recovery before any reconstruction runs, without consuming an attempt.
+run_conflict_case() (
+  local context="$1" root_id primary_hash
+  setup_fixture "conflict-${context}"
+  set_producer_context "$context" || fail_test "conflict: producer context failed"
+  with_boot_repair_lock || fail_test "conflict: producer root could not lock"
+  read_lifecycle || fail_test "conflict: active lifecycle was unreadable"
+  begin_registered_producer_lease || fail_test "conflict: producer lease failed"
+  read_lifecycle || fail_test "conflict: producer lease was unreadable"
+  root_id=$_lifecycle_transaction_id
+  adopt_transaction_context "$root_id" \
+    || fail_test "conflict: producer root context was not adopted"
+  rollback_and_mark_recovery 97 "fixture producer interruption" failed \
+    || fail_test "conflict: failed root incident was not published"
+  release_boot_repair_lock
+
+  sed -i 's/^ENABLE_VERIFICATION=.*/ENABLE_VERIFICATION=maybe/' \
+    "$(limine_default_config_path)"
+  primary_hash=$(sha256_file "$(limine_primary_binary_path)")
+  rm -f "$(snapshot_restore_lock_path)"
+  with_boot_repair_lock || fail_test "conflict: producer recovery could not lock"
+  if reconcile_and_recover_producer_locked >/dev/null 2>&1; then
+    release_boot_repair_lock
+    fail_test "conflict: recovery proceeded despite a managed-settings conflict"
+  fi
+  release_boot_repair_lock
+  [[ ! -s "$REGISTRY_LOG" ]] \
+    || fail_test "conflict: reconstruction ran before the settings conflict was refused"
+  [[ $(sha256_file "$(limine_primary_binary_path)") == "$primary_hash" ]] \
+    || fail_test "conflict: boot artifacts changed under a settings conflict"
+  read_lifecycle || fail_test "conflict: lifecycle unreadable after the refusal"
+  [[ "$_lifecycle_state" == recovery-required \
+    && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 0 ]] \
+    || fail_test "conflict: the refusal consumed a recovery attempt"
+
+  sed -i 's/^ENABLE_VERIFICATION=.*/ENABLE_VERIFICATION=yes/' \
+    "$(limine_default_config_path)"
+  with_boot_repair_lock || fail_test "conflict: producer recovery could not relock"
+  reconcile_and_recover_producer_locked \
+    || fail_test "conflict: recovery failed after the setting was restored"
+  release_boot_repair_lock
+  assert_recovered_case "$context" "$root_id"
+)
+
 run_repair_case package
 run_repair_case uki-build
 run_repair_case entry-tool
 run_repair_case snapshot-sync
 run_repair_case full-restore
+run_conflict_case package
 
 printf 'producer repair integration tests passed\n'
