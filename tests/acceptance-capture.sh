@@ -36,6 +36,7 @@ fi
 [[ $EUID -eq 0 ]] || { printf 'run this with sudo; it reads root-only lifecycle state\n' >&2; exit 2; }
 command -v script >/dev/null 2>&1 || { printf 'util-linux script is required\n' >&2; exit 2; }
 
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out_dir="${OMASECBOOT_ACCEPTANCE_DIR:-$PWD/acceptance-records}"
 mkdir -p "$out_dir" || exit 2
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -55,6 +56,38 @@ block() { # title, then command...
     "$@" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true
     printf '```\n'
   } >> "$out"
+}
+
+# Version strings repeat across candidates, so the record compares the
+# installed payload byte for byte with the checkout the recorder runs from.
+compare_installed_payload() {
+  local installed source mismatches=0
+  for installed in /usr/bin/omasecboot /usr/lib/omasecboot/*.sh; do
+    case "$installed" in
+      /usr/bin/omasecboot) source="${root_dir}/bin/omasecboot" ;;
+      *) source="${root_dir}/lib/${installed##*/}" ;;
+    esac
+    if [[ ! -e "$installed" ]]; then
+      printf 'missing: %s\n' "$installed"
+      mismatches=$((mismatches + 1))
+    elif cmp -s "$installed" "$source"; then
+      printf 'match: %s\n' "$installed"
+    else
+      printf 'MISMATCH: %s differs from %s\n' "$installed" "$source"
+      mismatches=$((mismatches + 1))
+    fi
+  done
+  for source in "${root_dir}"/lib/*.sh; do
+    [[ -e "/usr/lib/omasecboot/${source##*/}" ]] || {
+      printf 'not installed: %s\n' "$source"
+      mismatches=$((mismatches + 1))
+    }
+  done
+  if [[ $mismatches -eq 0 ]]; then
+    printf 'installed payload matches checkout: yes\n'
+  else
+    printf 'installed payload matches checkout: no (%s)\n' "$mismatches"
+  fi
 }
 
 file_block() { # title path
@@ -79,6 +112,9 @@ capture_state() {
   block "Firmware and machine model" bash -c 'for f in sys_vendor product_name product_family bios_vendor bios_version bios_date; do printf "%s=%s\n" "$f" "$(cat /sys/class/dmi/id/$f 2>/dev/null)"; done'
   block "Omarchy version" bash -c 'pacman -Q omarchy omarchy-settings 2>&1; cat /usr/share/omarchy/version 2>/dev/null'
   block "Pinned and related packages" pacman -Q omasecboot limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr coreutils limine util-linux jq gum openssl
+  block "Checkout revision and dirty state" bash -c "git -C '${root_dir}' rev-parse HEAD 2>&1; git -C '${root_dir}' status --porcelain 2>&1 | sed 's/^/dirty: /'"
+  block "Installed payload hashes" bash -c 'sha256sum /usr/bin/omasecboot /usr/lib/omasecboot/*.sh 2>&1'
+  block "Installed payload versus checkout" compare_installed_payload
   block "Secure Boot variables" bash -c 'for v in SecureBoot SetupMode AuditMode DeployedMode; do p=$(ls /sys/firmware/efi/efivars/${v}-* 2>/dev/null | head -1); if [[ -n $p ]]; then printf "%s=%s\n" "$v" "$(od -An -tu1 -j4 -N1 "$p" | tr -d " ")"; else printf "%s=absent\n" "$v"; fi; done'
   block "sbctl status" sbctl status
   block "sbctl list-files" sbctl list-files
