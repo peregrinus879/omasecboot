@@ -3,17 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-producer-ownership.XXXXXX")
-
-cleanup() {
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init producer-ownership
 
 # shellcheck source=../lib/common.sh
 source "${ROOT_DIR}/lib/common.sh"

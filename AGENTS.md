@@ -25,7 +25,8 @@ Naming boundary: `OmaSecBoot` is the product name; `omasecboot` is the sole user
 - `omarchy/omarchy-menu.jsonc` - reference fragment for the Quattro "Reboot to Windows" menu entry
 - `Makefile` - `package` (build from tracked files), `install` (package staging only; refuses a live root and any uninstall), `test` (the aggregate)
 - `.github/workflows/ci.yml` - lint, one job per hermetic suite, the package build, and the privileged container check
-- `tests/*.sh` - eighteen hermetic suites run by `make test`, plus `tests/package-root.sh` (root, disposable container only; CI runs it) and `tests/acceptance-capture.sh` (root, real hardware; records one file per checklist row)
+- `tests/*.sh` - nineteen hermetic suites run by `make test`, plus `tests/package-root.sh` (root, disposable container only; CI runs it) and `tests/acceptance-capture.sh` (root, real hardware; records one file per checklist row)
+- `tests/lib/harness.sh` - the suites' scratch directory, failure reporter, cleanup, and the preflight-free transaction helper
 
 ## Architecture
 
@@ -101,7 +102,7 @@ One name per concept, in code, tests, and documentation:
 ## Post-Change Verification
 
 - Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, git, and make. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
-- Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh` and `shellcheck -x` over the same files.
+- Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh` and `shellcheck -x` over the same files.
 - Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
 
 ## Conventions

@@ -3,11 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
 
 removal_hook="${ROOT_DIR}/pacman-hooks/00-omasecboot-removal-guard.hook"
 guard_hook="${ROOT_DIR}/pacman-hooks/00-omasecboot-transition-guard.hook"

@@ -84,6 +84,7 @@ test:
 	bash tests/guards.sh
 	bash tests/dispatcher.sh
 	bash tests/checks.sh
+	bash tests/status.sh
 	bash tests/install.sh
 	bash tests/package.sh
 	bash tests/windows.sh

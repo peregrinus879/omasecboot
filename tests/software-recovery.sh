@@ -3,18 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-software-recovery.XXXXXX")
-
-cleanup() {
-  release_boot_repair_lock 2>/dev/null || true
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init software-recovery
 
 # shellcheck source=../lib/common.sh
 source "${ROOT_DIR}/lib/common.sh"
@@ -24,11 +15,6 @@ source "${ROOT_DIR}/lib/lifecycle.sh"
 source "${ROOT_DIR}/lib/records.sh"
 # shellcheck source=../lib/software.sh
 source "${ROOT_DIR}/lib/software.sh"
-
-# Test convenience: a lifecycle transaction without a preflight step.
-run_lifecycle_transaction() {
-  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
-}
 
 state_dir_path() { printf '%s/state\n' "$CASE_DIR"; }
 limine_lock_path() { printf '%s/boot-partition.lock\n' "$CASE_DIR"; }

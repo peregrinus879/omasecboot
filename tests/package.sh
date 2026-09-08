@@ -9,17 +9,10 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # The lifecycle validators reject symlink components, so resolve the build root.
-BUILD_DIR=$(readlink -f "$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-package.XXXXXX")")
-
-cleanup() {
-  rm -rf "$BUILD_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init package
+BUILD_DIR=$(readlink -f "$TEST_DIR")
 
 for tool in makepkg fakeroot bsdtar pacman vercmp git tar jq sha256sum make; do
   command -v "$tool" >/dev/null 2>&1 || fail_test "package test requires ${tool}"

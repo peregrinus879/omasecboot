@@ -3,31 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-windows-entry.XXXXXX")
-
-cleanup() {
-  local pid
-  trap - EXIT INT TERM HUP
-  if declare -p run_case_pids >/dev/null 2>&1; then
-    for pid in "${run_case_pids[@]}"; do
-      kill -TERM "$pid" 2>/dev/null || true
-    done
-    for pid in "${run_case_pids[@]}"; do
-      wait "$pid" 2>/dev/null || true
-    done
-  fi
-  release_boot_repair_lock 2>/dev/null || true
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init windows-entry
 
 # shellcheck source=../lib/common.sh
 source "${ROOT_DIR}/lib/common.sh"
@@ -39,11 +17,6 @@ source "${ROOT_DIR}/lib/records.sh"
 source "${ROOT_DIR}/lib/software.sh"
 # shellcheck source=../lib/windows.sh
 source "${ROOT_DIR}/lib/windows.sh"
-
-# Test convenience: a lifecycle transaction without a preflight step.
-run_lifecycle_transaction() {
-  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
-}
 
 QUIET=true
 CASE_DIR=""

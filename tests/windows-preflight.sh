@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-windows-preflight.XXXXXX")
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init windows-preflight
 BIN_DIR="${TEST_DIR}/bin"
 EFI_FIXTURE="${TEST_DIR}/efibootmgr.out"
 EFI_ERROR_FIXTURE="${TEST_DIR}/efibootmgr.err"
@@ -19,24 +21,9 @@ MOUNT_FAIL_DEVICES="${TEST_DIR}/mount-fail-devices"
 MOUNT_SIGNAL_DEVICES="${TEST_DIR}/mount-signal-devices"
 LOADER_SOURCE="${TEST_DIR}/bootmgfw.efi"
 CALL_LOG="${TEST_DIR}/calls.log"
+TEST_FAILURE_LOGS=("$CALL_LOG")
 GUM_LOG="${TEST_DIR}/gum.log"
 ORIGINAL_PATH=$PATH
-
-cleanup() {
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  if [[ -n "${case_output:-}" && -f "$case_output" ]]; then
-    /usr/bin/cat "$case_output" >&2
-  fi
-  if [[ -f "${CALL_LOG:-/nonexistent}" ]]; then
-    /usr/bin/cat "$CALL_LOG" >&2
-  fi
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
 
 mkdir -p "$BIN_DIR" "${TEST_DIR}/tmp"
 export TMPDIR="${TEST_DIR}/tmp"
@@ -429,6 +416,7 @@ assert_no_runtime_artifacts() {
 }
 
 case_output="${TEST_DIR}/case.out"
+TEST_FAILURE_LOGS=("$case_output" "$CALL_LOG")
 
 reset_case
 run_gate "$case_output"

@@ -3,17 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-lifecycle.XXXXXX")
-
-cleanup() {
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init lifecycle
 
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/common.sh"
@@ -25,11 +17,6 @@ source "${ROOT_DIR}/lib/records.sh"
 source "${ROOT_DIR}/lib/software.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/status.sh"
-
-# Test convenience: a lifecycle transaction without a preflight step.
-run_lifecycle_transaction() {
-  run_lifecycle_transaction_with_preflight "$1" "$2" "$3" : "${@:4}"
-}
 
 [[ $(windows_bootnext_variable_path) == \
   /sys/firmware/efi/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c ]] \

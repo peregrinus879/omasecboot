@@ -3,20 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-recovery-publication.XXXXXX")
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init recovery-publication
 SYNC_LOG="${TEST_DIR}/sync.log"
 ATTEMPT_ID=11111111-1111-1111-1111-111111111111
 ROOT_ID=22222222-2222-2222-2222-222222222222
-
-cleanup() {
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
 
 # shellcheck source=../lib/common.sh
 source "${ROOT_DIR}/lib/common.sh"

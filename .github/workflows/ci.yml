@@ -28,9 +28,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Bash syntax
-        run: bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh
+        run: bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh
       - name: ShellCheck
-        run: shellcheck -x bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh
+        run: shellcheck -x bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh
       - name: Menu fragment parses
         run: jq empty omarchy/omarchy-menu.jsonc
 
@@ -56,6 +56,7 @@ jobs:
           - guards
           - dispatcher
           - checks
+          - status
           - install
           - windows
           - windows-preflight

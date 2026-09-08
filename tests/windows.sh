@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-windows.XXXXXX")
+# shellcheck source=tests/lib/harness.sh
+source "${ROOT_DIR}/tests/lib/harness.sh"
+test_harness_init windows
 BIN_DIR="${TEST_DIR}/bin"
 EFI_FIXTURE="${TEST_DIR}/efibootmgr.out"
 EFI_ERROR_FIXTURE="${TEST_DIR}/efibootmgr.err"
@@ -17,16 +19,6 @@ LOADER_SOURCE="${TEST_DIR}/bootmgfw.efi"
 EXISTING_ESP="${TEST_DIR}/existing-esp"
 RUNTIME_PARENT="${TEST_DIR}/run"
 ORIGINAL_PATH=$PATH
-
-cleanup() {
-  rm -rf "$TEST_DIR"
-}
-trap cleanup EXIT
-
-fail_test() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
 
 mkdir -p "$BIN_DIR" "${EXISTING_ESP}/EFI/Microsoft/Boot" "$RUNTIME_PARENT"
 TEST_MOUNT_ID=$(/usr/bin/findmnt -n -T "$TEST_DIR" -o ID)

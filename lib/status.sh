@@ -515,7 +515,7 @@ show_windows_status() {
 # Tracked-file verification, root only. The closing line reflects file state
 # alone, not the other sections.
 show_tracked_files_status() {
-  if [[ $EUID -ne 0 ]]; then
+  if [[ "$EUID" != "$(control_owner_uid)" ]]; then
     echo
     echo -e "  ${DIM}Run as root for file verification: ${BOLD}sudo omasecboot status${NC}"
     return 0
