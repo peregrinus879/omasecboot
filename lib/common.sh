@@ -45,6 +45,7 @@ qheader() { [[ "$QUIET" == true ]] || header "$@"; }
 
 # Prepended to every jq program that validates lifecycle documents.
 # shellcheck disable=SC2034 # Consumed by the sourced lib modules.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
 readonly OMASECBOOT_JQ_DEFS='
   def uuid:
     type == "string" and
@@ -63,6 +64,42 @@ readonly OMASECBOOT_JQ_DEFS='
     type == "string" and length <= 64 and test("^[a-z0-9][a-z0-9-]*$");
   def phase:
     type == "string" and length <= 128 and test("^[a-z0-9][a-z0-9-]*$");
+  def artifact_reference:
+    type == "object" and keys == ["path","schema_version","sha256"] and
+    (.path | absolute_path) and
+    (.schema_version | type == "number" and . >= 1 and floor == .) and
+    (.sha256 | digest);
+  def incident_reference($max_attempts):
+    type == "object" and
+    keys == ["id","kind","operation","ordinal","path","sha256","status"] and
+    (.id | uuid) and (.operation | operation) and (.path | absolute_path) and
+    (.sha256 | digest) and
+    (if .kind == "root" then
+      .ordinal == 0 and
+      (.status == "failed" or .status == "stale" or .status == "publication-uncertain")
+    elif .kind == "attempt" then
+      (.ordinal | type == "number" and . >= 1 and . <= $max_attempts and floor == .) and
+      (.status == "failed" or .status == "stale" or .status == "completed")
+    else false end);
+  def failure:
+    type == "object" and keys == ["exit_code","phase","reason","recorded_at"] and
+    (.exit_code | type == "number" and . >= 0 and . <= 255 and floor == .) and
+    (.phase == null or (.phase | phase)) and
+    (.reason | type == "string" and length > 0 and length <= 1024) and
+    (.recorded_at | timestamp);
+  def phase_sequence_valid($phases):
+    (.completed_phases | length) as $done |
+    .completed_phases == $phases[0:$done] and $done <= ($phases | length) and
+    (if .current_phase == null then true
+     else $done < ($phases | length) and .current_phase == $phases[$done] end) and
+    (if .status == "completed" then
+       .completed_phases == $phases and .current_phase == null
+     else true end);
+  def firmware_write_resolved($old; $new):
+    $new.hierarchy == $old.hierarchy and $new.started_at == $old.started_at and
+    $new.command_exit_code == $old.command_exit_code and
+    ($new.readback_status == "unchanged" or $new.readback_status == "verified" or
+      $new.readback_status == "failed") and $new.completed_at != null;
 '
 
 # --- Locking ----------------------------------------------------------------
@@ -202,18 +239,22 @@ fd_matches_path() {
   [[ "$fd_identity" == "$path_identity" ]]
 }
 
-inherited_limine_fd_is_valid() {
-  local path parent_uid self_identity parent_identity
-  path=$(limine_lock_path)
+# An inherited lock descriptor is valid when it names the current lock file
+# and the parent, running as the control owner, holds the same open file.
+inherited_fd_is_valid() {
+  local fd="$1" path="$2" parent_uid self_identity parent_identity
   validate_control_file "$path" || return 1
-  fd_matches_path 200 "$path" || return 1
-
+  fd_matches_path "$fd" "$path" || return 1
   parent_uid=$(process_effective_uid "$PPID") || return 1
-  [[ "$parent_uid" == "$(control_owner_uid)" ]] || return 1
-  [[ -e "/proc/${PPID}/fd/200" ]] || return 1
-  self_identity=$(control_file_identity /proc/self/fd/200) || return 1
-  parent_identity=$(control_file_identity "/proc/${PPID}/fd/200") || return 1
+  [[ "$parent_uid" == "$(control_owner_uid)" && -e "/proc/${PPID}/fd/${fd}" ]] \
+    || return 1
+  self_identity=$(control_file_identity "/proc/self/fd/${fd}") || return 1
+  parent_identity=$(control_file_identity "/proc/${PPID}/fd/${fd}") || return 1
   [[ "$self_identity" == "$parent_identity" ]]
+}
+
+inherited_limine_fd_is_valid() {
+  inherited_fd_is_valid 200 "$(limine_lock_path)"
 }
 
 lock_inherited_limine_fd() {
@@ -225,16 +266,7 @@ lock_inherited_limine_fd() {
 }
 
 inherited_repair_fd_is_valid() {
-  local path parent_uid self_identity parent_identity
-  path="$(state_dir_path)/repair.lock"
-  validate_control_file "$path" || return 1
-  fd_matches_path 201 "$path" || return 1
-  parent_uid=$(process_effective_uid "$PPID") || return 1
-  [[ "$parent_uid" == "$(control_owner_uid)" && -e "/proc/${PPID}/fd/201" ]] \
-    || return 1
-  self_identity=$(control_file_identity /proc/self/fd/201) || return 1
-  parent_identity=$(control_file_identity "/proc/${PPID}/fd/201") || return 1
-  [[ "$self_identity" == "$parent_identity" ]]
+  inherited_fd_is_valid 201 "$(state_dir_path)/repair.lock"
 }
 
 with_repair_lock() {

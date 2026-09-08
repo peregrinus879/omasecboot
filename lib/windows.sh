@@ -1819,7 +1819,7 @@ windows_recovery_delete() {
 }
 
 persist_windows_recovery_proof() {
-  local transaction_dir path timestamp outcome final_state document reference record_reference
+  local timestamp outcome final_state document record_reference
   load_windows_recovery_record || return 1
   [[ $(jq -r '.recovery_boot_id' <<< "$_windows_recovery_record_json") == \
     "$(boot_id_value)" ]] || return 1
@@ -1848,8 +1848,6 @@ persist_windows_recovery_proof() {
   esac
   read_transaction_manifest "$_transaction_id" || return 1
   record_reference=$(jq -c '.domain_records.windows' <<< "$_manifest_json") || return 1
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/windows-recovery-proof.json"
   timestamp=$(utc_timestamp) || return 1
   document=$(jq -cn \
     --argjson schema "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" \
@@ -1870,12 +1868,9 @@ persist_windows_recovery_proof() {
       command_exit_code: $command_exit_code,
       final_state: $final_state
     }') || return 1
-  validate_windows_recovery_proof_json "$_transaction_id" "$document" "$_manifest_json" \
-    || return 1
-  printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  reference=$(transaction_artifact_reference "$path" \
-    "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION") || return 1
-  transaction_set_domain_record final_proof "$reference"
+  persist_transaction_domain_record final_proof windows-recovery-proof.json \
+    "$WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION" validate_windows_recovery_proof_json \
+    '["proved_at"]' "$document"
 }
 
 windows_recovery_transaction() {
@@ -1894,9 +1889,8 @@ windows_recovery_transaction() {
 }
 
 run_windows_recovery_locked() {
-  local callback_rc=0 commit_rc=0 begin_rc=0 stale_attempt_id="" failure_reason
-  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
-    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  local stale_attempt_id=""
+  boot_locks_are_held || return 1
   _windows_error=""
   read_lifecycle || return 1
   if [[ "$_lifecycle_state" == transition ]]; then
@@ -1916,37 +1910,17 @@ run_windows_recovery_locked() {
     fi
   fi
   load_windows_recovery_context || return $?
-  arm_transaction_traps
-  begin_lifecycle_recovery_attempt windows-recovery || begin_rc=$?
-  if [[ $begin_rc -ne 0 ]]; then
-    if [[ "$_transaction_active" == true ]]; then
-      if read_lifecycle && [[ "$_lifecycle_state" == transition \
-        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-        rollback_and_mark_recovery "$begin_rc" \
-          "Windows recovery attempt initialization failed" failed || true
-      else
-        detach_transaction_context
-      fi
-    fi
-    restore_transaction_traps
-    return "$begin_rc"
-  fi
-  windows_recovery_transaction || callback_rc=$?
+  run_recovery_attempt_locked windows-recovery windows_recovery_attempt "Windows recovery"
+}
+
+# The recovery transaction with the efibootmgr boundary closed afterwards and
+# the Windows diagnostic carried into the rollback reason.
+windows_recovery_attempt() {
+  local rc=0
+  windows_recovery_transaction || rc=$?
   close_windows_efibootmgr_boundary
-  if [[ $callback_rc -eq 0 ]]; then
-    commit_lifecycle_recovery_attempt || commit_rc=$?
-    if [[ $commit_rc -ne 0 ]]; then
-      rollback_and_mark_recovery "$commit_rc" \
-        "stable Windows recovery publication failed" failed || true
-      callback_rc=$commit_rc
-    fi
-  else
-    failure_reason=${_windows_error:-Windows BootNext recovery failed}
-    rollback_and_mark_recovery "$callback_rc" "$failure_reason" failed \
-      || true
-  fi
-  restore_transaction_traps
-  return "$callback_rc"
+  (( rc == 0 )) || _transaction_failure_reason=${_windows_error:-Windows BootNext recovery failed}
+  return "$rc"
 }
 
 windows_bootnext_exact_target_is_current() {

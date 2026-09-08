@@ -1181,40 +1181,6 @@ unconfigure_preflight() {
 # record that equals the candidate apart from ignore_key, and binds its
 # reference into the manifest exactly once. The validator receives the
 # transaction id, the document, and the current manifest.
-persist_transaction_domain_record() {
-  local name="$1" schema="$2" validator="$3" ignore_key="$4" document="$5"
-  local filename transaction_dir path existing reference current_reference
-  case "$name" in
-    unconfigure) filename=unconfigure-intent.json ;;
-    final_proof) filename=final-proof.json ;;
-    *) return 1 ;;
-  esac
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/${filename}"
-  read_transaction_manifest "$_transaction_id" || return 1
-  "$validator" "$_transaction_id" "$document" "$_manifest_json" || return 1
-  if [[ -e "$path" || -L "$path" ]]; then
-    existing=$(read_control_document "$path") || return 1
-    "$validator" "$_transaction_id" "$existing" "$_manifest_json" || return 1
-    jq -en --argjson existing "$existing" --argjson candidate "$document" \
-      --arg key "$ignore_key" \
-      '($existing | del(.[$key])) == ($candidate | del(.[$key]))' >/dev/null || return 1
-  else
-    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  fi
-  reference=$(transaction_artifact_reference "$path" "$schema") || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c --arg name "$name" '.domain_records[$name]' \
-    <<< "$_manifest_json") || return 1
-  if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record "$name" "$reference" || return 1
-  else
-    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]] \
-      || return 1
-  fi
-  _persisted_record_reference="$reference"
-}
-
 persist_unconfigure_intent() {
   local document
   unconfigure_validate_all_conflicts || return 1
@@ -1239,8 +1205,9 @@ persist_unconfigure_intent() {
       limine_source: {path: $source, identity: $source_identity, sha256: $source_hash},
       limine_tools: $tools
     }') || return 1
-  persist_transaction_domain_record unconfigure "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
-    validate_unconfigure_intent_json recorded_at "$document" || return 1
+  persist_transaction_domain_record unconfigure unconfigure-intent.json \
+    "$UNCONFIGURE_INTENT_SCHEMA_VERSION" validate_unconfigure_intent_json \
+    '["recorded_at"]' "$document" || return 1
   _unconfigure_intent_reference_json="$_persisted_record_reference"
 }
 
@@ -1291,8 +1258,9 @@ persist_unconfigure_proof() {
         fallback: {path: $fallback, config_checksum: $zero_checksum, sha256: $fallback_hash}
       }
     }') || return 1
-  persist_transaction_domain_record final_proof "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
-    validate_unconfigure_proof_json proved_at "$document"
+  persist_transaction_domain_record final_proof final-proof.json \
+    "$UNCONFIGURE_PROOF_SCHEMA_VERSION" validate_unconfigure_proof_json \
+    '["proved_at"]' "$document"
 }
 
 unconfigure_recovery_failpoint() {
@@ -1641,8 +1609,8 @@ persist_final_artifact_proof() {
         identity: $config_identity},
       artifacts: $artifacts
     }') || return 1
-  persist_transaction_domain_record final_proof "$FINAL_PROOF_SCHEMA_VERSION" \
-    validate_final_proof_json proved_at "$document"
+  persist_transaction_domain_record final_proof final-proof.json \
+    "$FINAL_PROOF_SCHEMA_VERSION" validate_final_proof_json '["proved_at"]' "$document"
 }
 
 repair_boot_artifacts() {

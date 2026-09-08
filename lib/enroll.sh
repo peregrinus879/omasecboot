@@ -1816,8 +1816,7 @@ run_enrollment_write_phase() {
 }
 
 persist_firmware_enrollment_proof() {
-  local backup_id="$1" frontier transaction_dir path timestamp writes writes_hash
-  local document existing reference current_reference
+  local backup_id="$1" frontier timestamp writes writes_hash document
   [[ "$_transaction_active" == true ]] || return 1
   validate_enrollment_transaction_binding "$backup_id" || return 1
   frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
@@ -1833,16 +1832,10 @@ persist_firmware_enrollment_proof() {
     [.firmware_writes[] | select(.readback_status == "verified") | .hierarchy] ==
       ["db","KEK","PK"]
   ' <<< "$_manifest_json" >/dev/null || return 1
-  transaction_dir=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
-  path="${transaction_dir}/firmware-proof.json"
-  if [[ -e "$path" || -L "$path" ]]; then
-    existing=$(read_control_document "$path") || return 1
-    validate_firmware_proof_json "$_transaction_id" "$existing" "$_manifest_json" || return 1
-  else
-    timestamp=$(utc_timestamp) || return 1
-    writes=$(jq -cS '.firmware_writes' <<< "$_manifest_json") || return 1
-    writes_hash=$(sha256_text "$writes") || return 1
-    document=$(jq -cn \
+  timestamp=$(utc_timestamp) || return 1
+  writes=$(jq -cS '.firmware_writes' <<< "$_manifest_json") || return 1
+  writes_hash=$(sha256_text "$writes") || return 1
+  document=$(jq -cn \
       --argjson schema "$FIRMWARE_PROOF_SCHEMA_VERSION" \
       --arg version "$OMASECBOOT_VERSION" \
       --arg id "$_transaction_id" \
@@ -1882,18 +1875,9 @@ persist_firmware_enrollment_proof() {
         firmware_writes_sha256: $writes_hash,
         artifact_proof: $manifest.domain_records.final_proof
       }') || return 1
-    validate_firmware_proof_json "$_transaction_id" "$document" "$_manifest_json" || return 1
-    printf '%s\n' "$document" | atomic_create_control_file "$path" 600 || return 1
-  fi
-  reference=$(transaction_artifact_reference "$path" "$FIRMWARE_PROOF_SCHEMA_VERSION") \
-    || return 1
-  read_transaction_manifest "$_transaction_id" || return 1
-  current_reference=$(jq -c '.domain_records.firmware' <<< "$_manifest_json") || return 1
-  if [[ "$current_reference" == null ]]; then
-    transaction_set_domain_record firmware "$reference"
-  else
-    [[ "$(jq -Sc . <<< "$current_reference")" == "$(jq -Sc . <<< "$reference")" ]]
-  fi
+  persist_transaction_domain_record firmware firmware-proof.json \
+    "$FIRMWARE_PROOF_SCHEMA_VERSION" validate_firmware_proof_json '["proved_at"]' \
+    "$document"
 }
 
 enroll_planned_trust_set() {
@@ -1983,40 +1967,10 @@ firmware_recovery_transaction() {
 }
 
 run_firmware_recovery_locked() {
-  local backup_id callback_rc=0 commit_rc=0 begin_rc=0
-  [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false \
-    && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 1
+  boot_locks_are_held || return 1
   load_firmware_recovery_context || return $?
-  backup_id="$_firmware_recovery_backup_id"
-  arm_transaction_traps
-  begin_lifecycle_recovery_attempt firmware-recovery || begin_rc=$?
-  if [[ $begin_rc -ne 0 ]]; then
-    if [[ "$_transaction_active" == true ]]; then
-      if read_lifecycle && [[ "$_lifecycle_state" == transition \
-        && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-        rollback_and_mark_recovery "$begin_rc" \
-          "firmware recovery attempt initialization failed" failed || true
-      else
-        detach_transaction_context
-      fi
-    fi
-    restore_transaction_traps
-    return "$begin_rc"
-  fi
-  firmware_recovery_transaction "$backup_id" || callback_rc=$?
-  if [[ $callback_rc -eq 0 ]]; then
-    commit_lifecycle_recovery_attempt || commit_rc=$?
-    if [[ $commit_rc -ne 0 ]]; then
-      rollback_and_mark_recovery "$commit_rc" \
-        "stable firmware recovery publication failed" failed || true
-      callback_rc=$commit_rc
-    fi
-  else
-    rollback_and_mark_recovery "$callback_rc" "firmware trust recovery failed" failed \
-      || true
-  fi
-  restore_transaction_traps
-  return "$callback_rc"
+  run_recovery_attempt_locked firmware-recovery firmware_recovery_transaction \
+    "firmware recovery" "$_firmware_recovery_backup_id"
 }
 
 run_enrollment() {

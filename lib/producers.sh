@@ -203,15 +203,10 @@ begin_registered_producer_lease() {
   prepare_producer_transaction_documents || return 1
   begin_producer_lifecycle_transaction "$_producer_transaction_id" "$_producer_reference" \
     "$_producer_backups_json" || rc=$?
-  if [[ $rc -ne 0 && "$_transaction_active" == true ]]; then
-    if read_lifecycle && [[ "$_lifecycle_state" == transition \
-      && "$_lifecycle_transaction_id" == "$_transaction_id" ]]; then
-      rollback_and_mark_recovery "$rc" "producer lease initialization failed" failed || true
-    else
-      detach_transaction_context
-    fi
+  if (( rc != 0 )); then
+    abandon_failed_begin "$rc" "producer lease"
+    return "$rc"
   fi
-  [[ $rc -eq 0 ]] || return "$rc"
   detach_transaction_context
 }
 
@@ -348,20 +343,14 @@ reconcile_and_recover_producer_locked() {
 }
 
 complete_registered_producer_locked() {
-  local expected_class="$1" callback_rc=0 commit_rc=0
+  local expected_class="$1" callback_rc=0
   producer_transition_is_owned "$expected_class" || return 1
   adopt_transaction_context "$_lifecycle_transaction_id" || return 1
+  _transaction_failure_reason=""
   arm_transaction_traps
   registered_producer_repair || callback_rc=$?
-  if [[ $callback_rc -eq 0 ]]; then
-    commit_lifecycle_transaction || commit_rc=$?
-    if [[ $commit_rc -ne 0 ]]; then
-      rollback_and_mark_recovery "$commit_rc" "stable producer commit failed" failed || true
-      callback_rc=$commit_rc
-    fi
-  else
-    rollback_and_mark_recovery "$callback_rc" "producer post-repair failed" failed || true
-  fi
+  finish_armed_transaction commit_lifecycle_transaction "$callback_rc" \
+    "producer post-repair" || callback_rc=$?
   restore_transaction_traps
   return "$callback_rc"
 }
