@@ -55,6 +55,7 @@ jobs:
           - unconfigure-tools
           - guards
           - dispatcher
+          - checks
           - install
           - windows
           - windows-preflight

@@ -45,7 +45,9 @@ check_esp_mount() {
 }
 
 check_efi_mode() {
-  [[ -d /sys/firmware/efi ]] \
+  local efivars
+  efivars=$(efivars_path)
+  [[ -d "${efivars%/*}" ]] \
     || die "System did not boot in UEFI mode. Secure Boot requires UEFI."
 }
 

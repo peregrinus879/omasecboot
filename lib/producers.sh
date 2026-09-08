@@ -254,19 +254,28 @@ producer_lease_is_nested_here() {
 
 # --- Repair and recovery -----------------------------------------------------
 
+limine_snapper_sync_path() {
+  printf '%s\n' /usr/bin/limine-snapper-sync
+}
+
+# The producer's own build, run without the hook variables that would make it
+# look like a nested hook, with the shared lock handed to it.
 run_package_producer_reconstruction() {
+  local tool
+  tool=$(limine_mkinitcpio_path) || return 1
   validate_control_file /usr/bin/env || return 1
-  validate_control_file /usr/bin/limine-mkinitcpio || return 1
-  with_limine_lock_handoff /usr/bin/env -u HOOK_CALLER -u HOOK_CMDLINE \
-    /usr/bin/limine-mkinitcpio
+  validate_control_file "$tool" || return 1
+  with_limine_lock_handoff /usr/bin/env -u HOOK_CALLER -u HOOK_CMDLINE "$tool"
 }
 
 run_snapshot_producer_reconstruction() {
+  local tool
+  tool=$(limine_snapper_sync_path) || return 1
   validate_control_file /usr/bin/env || return 1
-  validate_control_file /usr/bin/limine-snapper-sync || return 1
+  validate_control_file "$tool" || return 1
   producer_runtime_is_clear || return 1
-  with_limine_lock_handoff /usr/bin/env -u HOOK_CALLER -u HOOK_CMDLINE \
-    /usr/bin/limine-snapper-sync --no-force-save
+  with_limine_lock_handoff /usr/bin/env -u HOOK_CALLER -u HOOK_CMDLINE "$tool" \
+    --no-force-save
 }
 
 # Recovery rebuilds what the interrupted producer would have produced; a

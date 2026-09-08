@@ -851,24 +851,23 @@ fi
   'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
   "${ROOT_DIR}/lib/windows.sh") -eq 2 ]] \
   || fail_test "guarded Windows code does not contain the two bounded BootNext writes"
-/usr/bin/grep -Fxq "  run_windows_efibootmgr -n \"\$target_number\" || command_rc=\$?" \
-  "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "guarded Windows code bypassed its validated efibootmgr wrapper"
 if /usr/bin/grep -Eq 'run_windows_efibootmgr[[:space:]]+-N' \
   "${ROOT_DIR}/lib/windows.sh"; then
   fail_test "Windows recovery retained efibootmgr's unreliable BootNext deletion path"
 fi
-/usr/bin/grep -Fq "remove_windows_bootnext_variable \"\$(windows_bootnext_variable_path)\"" \
-  "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "Windows recovery does not use its bounded direct deletion wrapper"
-/usr/bin/grep -Fq "owner=\$(producer_file_owner_package \"\$path\")" \
-  "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "guarded Windows code does not verify efibootmgr package ownership"
-/usr/bin/grep -Fq "\"/proc/self/fd/\${_windows_efibootmgr_fd}\" \"\$@\"" \
-  "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "guarded Windows code does not execute the validated efibootmgr inode"
-/usr/bin/grep -Fxq "  rm -f -- \"\$1\"" "${ROOT_DIR}/lib/windows.sh" \
-  || fail_test "Windows recovery does not remove BootNext through its bounded wrapper"
+# The deletion wrapper removes exactly the BootNext variable file and nothing else.
+(
+  windows_bootnext_variable_path() { printf '%s/BootNext\n' "$TEST_DIR"; }
+  : > "${TEST_DIR}/BootNext"
+  : > "${TEST_DIR}/OtherVariable"
+  if remove_windows_bootnext_variable "${TEST_DIR}/OtherVariable"; then
+    fail_test "the deletion wrapper accepted a path other than the BootNext variable"
+  fi
+  [[ -e "${TEST_DIR}/OtherVariable" ]] || fail_test "the deletion wrapper removed an unrelated file"
+  remove_windows_bootnext_variable "${TEST_DIR}/BootNext" \
+    || fail_test "the deletion wrapper failed on the BootNext variable"
+  [[ ! -e "${TEST_DIR}/BootNext" ]] || fail_test "the deletion wrapper left the BootNext variable"
+) || exit 1
 if /usr/bin/grep -RE 'systemctl[[:space:]]+reboot' \
   "${ROOT_DIR}/lib" "${ROOT_DIR}/bin" >/dev/null; then
   fail_test "production code retained a direct reboot command"

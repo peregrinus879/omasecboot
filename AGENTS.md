@@ -25,7 +25,7 @@ Naming boundary: `OmaSecBoot` is the product name; `omasecboot` is the sole user
 - `omarchy/omarchy-menu.jsonc` - reference fragment for the Quattro "Reboot to Windows" menu entry
 - `Makefile` - `package` (build from tracked files), `install` (package staging only; refuses a live root and any uninstall), `test` (the aggregate)
 - `.github/workflows/ci.yml` - lint, one job per hermetic suite, the package build, and the privileged container check
-- `tests/*.sh` - seventeen hermetic suites run by `make test`, plus `tests/package-root.sh` (root, disposable container only; CI runs it) and `tests/acceptance-capture.sh` (root, real hardware; records one file per checklist row)
+- `tests/*.sh` - eighteen hermetic suites run by `make test`, plus `tests/package-root.sh` (root, disposable container only; CI runs it) and `tests/acceptance-capture.sh` (root, real hardware; records one file per checklist row)
 
 ## Architecture
 

@@ -12,7 +12,7 @@ This checklist defines what must be true before a release tag is created. It sep
 
 ## 2. Hermetic evidence
 
-- [ ] `make test` passes on the candidate (17 suites). Record the date, host, and elapsed time.
+- [ ] `make test` passes on the candidate (18 suites). Record the date, host, and elapsed time.
 - [ ] `bash -n` and `shellcheck` pass over `bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh`.
 - [ ] `jq empty omarchy/omarchy-menu.jsonc` passes.
 

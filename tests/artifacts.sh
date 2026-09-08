@@ -291,8 +291,20 @@ assert_recovery_rollback() {
 }
 
 test_discovery_and_tracking_sources() {
-  local discovered tracked
+  local discovered tracked suffix
+  for suffix in sha1_a b3_b blake3_c xxh_d xxhash_e; do
+    printf 'SNAPSHOT\n' > "${CASE_DIR}/boot/EFI/Linux/history.efi_${suffix}"
+  done
+  printf 'NOT\n' > "${CASE_DIR}/boot/EFI/Linux/history.efi_md5_f"
   discovered=$(discover_efi_files) || fail_test "EFI discovery failed"
+  for suffix in sha1_a b3_b blake3_c xxh_d xxhash_e; do
+    grep -Fxq "${CASE_DIR}/boot/EFI/Linux/history.efi_${suffix}" <<< "$discovered" \
+      || fail_test "snapshot suffix efi_${suffix} was not discovered"
+  done
+  if grep -Fq "history.efi_md5_f" <<< "$discovered"; then
+    fail_test "an unsupported hash suffix was discovered as an EFI artifact"
+  fi
+  rm -f "${CASE_DIR}"/boot/EFI/Linux/history.efi_*
   grep -Fxq "$PRIMARY" <<< "$discovered" || fail_test "primary Limine binary was not discovered"
   grep -Fxq "$FALLBACK" <<< "$discovered" || fail_test "fallback Limine binary was not discovered"
   grep -Fxq "$SNAPSHOT" <<< "$discovered" || fail_test "snapshot UKI suffix was not discovered"

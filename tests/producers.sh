@@ -27,6 +27,8 @@ source "${ROOT_DIR}/lib/sign.sh"
 # shellcheck source=../lib/producers.sh
 source "${ROOT_DIR}/lib/producers.sh"
 REAL_RESOLVE_PACKAGE_PRODUCER_CONTEXT=$(declare -f resolve_package_producer_context)
+REAL_RECONSTRUCTION_RUNNERS=$(declare -f run_package_producer_reconstruction \
+  run_snapshot_producer_reconstruction)
 
 CASE_DIR="${TEST_DIR}/case"
 CONFIG_FILE="${CASE_DIR}/limine.conf"
@@ -205,11 +207,6 @@ run_package_producer_reconstruction() {
 
 run_snapshot_producer_reconstruction() {
   printf 'snapshot\n' >> "$REGISTRY_LOG"
-}
-
-noop_transaction() {
-  transaction_phase_start "noop"
-  transaction_phase_complete "noop"
 }
 
 reset_case() {
@@ -1202,5 +1199,49 @@ if HOOK_CALLER=limine-snapper-restore HOOK_CMDLINE='--restore --no-mutex' \
   resolve_limine_producer_process "$resolver_owner" >/dev/null 2>&1; then
   fail_test "forged legacy hook environment selected a restore producer"
 fi
+
+# The reconstruction commands run the producer's own tool without the hook
+# variables, with the shared lock handed off, and snapshots only while no
+# full restore is running.
+(
+  reset_case
+  activate_case
+  eval "$REAL_RECONSTRUCTION_RUNNERS"
+  tool_log="${TEST_DIR}/reconstruction.log"
+  : > "$tool_log"
+  for tool in fake-mkinitcpio fake-snapper-sync; do
+    cat > "${TEST_DIR}/${tool}" <<EOF
+#!/bin/bash
+printf '%s caller=%s cmdline=%s args=%s\n' "\$(basename "\$0")" "\${HOOK_CALLER-unset}" \
+  "\${HOOK_CMDLINE-unset}" "\$*" >> "$tool_log"
+EOF
+    chmod 755 "${TEST_DIR}/${tool}"
+  done
+  limine_mkinitcpio_path() { printf '%s/fake-mkinitcpio\n' "$TEST_DIR"; }
+  limine_snapper_sync_path() { printf '%s/fake-snapper-sync\n' "$TEST_DIR"; }
+  eval "original_$(declare -f validate_control_file)"
+  validate_control_file() {
+    [[ "$1" == /usr/bin/env || "$1" == "${TEST_DIR}/fake-"* ]] \
+      || original_validate_control_file "$1"
+  }
+  with_boot_repair_lock || fail_test "reconstruction fixture could not lock"
+  HOOK_CALLER=limine-entry-tool HOOK_CMDLINE=x run_package_producer_reconstruction \
+    || fail_test "package reconstruction failed"
+  grep -Fxq 'fake-mkinitcpio caller=unset cmdline=unset args=' "$tool_log" \
+    || fail_test "package reconstruction did not run the producer tool without hook variables"
+  HOOK_CALLER=limine-snapper-sync run_snapshot_producer_reconstruction \
+    || fail_test "snapshot reconstruction failed"
+  grep -Fxq 'fake-snapper-sync caller=unset cmdline=unset args=--no-force-save' "$tool_log" \
+    || fail_test "snapshot reconstruction did not rerun the sync without force-save"
+  boot_locks_are_held || fail_test "reconstruction handoff did not reacquire the locks"
+  : > "$(snapshot_restore_lock_path)"
+  if run_snapshot_producer_reconstruction; then
+    fail_test "snapshot reconstruction ran while the restore marker existed"
+  fi
+  [[ $(grep -c fake-snapper-sync "$tool_log") -eq 1 ]] \
+    || fail_test "snapshot reconstruction invoked the tool under the restore marker"
+  rm -f "$(snapshot_restore_lock_path)"
+  release_boot_repair_lock
+)
 
 printf 'producer tests passed\n'
