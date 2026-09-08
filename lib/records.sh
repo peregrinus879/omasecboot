@@ -138,6 +138,9 @@ validate_tracking_ownership_record_reference() {
   validate_domain_reference "$1" "$2" "$TRACKING_OWNERSHIP_SCHEMA_VERSION" tracking-ownership.json validate_tracking_ownership_record_json
 }
 
+# The recorded tool version is historical evidence and is checked for shape
+# only; whether the tools may run again is proved against the installed
+# package when they are executed.
 validate_unconfigure_intent_json() {
   local transaction_id="$1" document="$2" manifest="$3" prior_path prior_lifecycle
   local managed tracking
@@ -146,7 +149,6 @@ validate_unconfigure_intent_json() {
     --arg install "$(limine_install_path)" \
     --arg mkinitcpio "$(limine_mkinitcpio_path)" \
     --arg reset "$(limine_reset_enroll_path)" \
-    --arg tool_version "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
     --argjson manifest "$manifest" "$OMASECBOOT_JQ_DEFS"'
     type == "object" and
     keys == ["limine_source","limine_tools","managed_settings","operation","recorded_at",
@@ -162,7 +164,8 @@ validate_unconfigure_intent_json() {
     (.limine_tools | type == "object" and
       keys == ["install","mkinitcpio","package","reset","version"] and
       .package == "limine-mkinitcpio-hook" and
-      .version == $tool_version and
+      (.version | type == "string" and length > 0 and length <= 64 and
+        test("^[0-9A-Za-z][0-9A-Za-z.+:~-]*$")) and
       (.install | type == "object" and keys == ["identity","path","sha256"] and
         .path == $install and (.identity | identity) and (.sha256 | digest)) and
       (.mkinitcpio | type == "object" and keys == ["identity","path","sha256"] and

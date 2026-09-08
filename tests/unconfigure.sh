@@ -68,10 +68,15 @@ limine_install_path() { printf 'limine-install\n'; }
 limine_mkinitcpio_path() { printf 'limine-mkinitcpio\n'; }
 limine_reset_enroll_path() { printf 'limine-reset-enroll\n'; }
 unconfigure_limine_tools_are_pinned() { return 0; }
+# The recorded tool version differs from the current pin on purpose: every
+# read of a completed unconfiguration below is a read under a later release.
+RECORDED_TOOL_VERSION=1.37.1-1
+[[ "$RECORDED_TOOL_VERSION" != "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ]] \
+  || fail_test "the recorded tool version fixture must differ from the pin"
 capture_unconfigure_limine_tools() {
-  jq -cn '{
+  jq -cn --arg version "$RECORDED_TOOL_VERSION" '{
     package: "limine-mkinitcpio-hook",
-    version: "1.38.0-1",
+    version: $version,
     install: {path: "limine-install", identity: "1:1", sha256: ("a" * 64)},
     mkinitcpio: {path: "limine-mkinitcpio", identity: "1:2", sha256: ("b" * 64)},
     reset: {path: "limine-reset-enroll", identity: "1:3", sha256: ("c" * 64)}
@@ -262,7 +267,7 @@ test_successful_unconfigure() {
     ] and .domain_records.unconfigure != null and .domain_records.final_proof != null
   ' "$manifest" >/dev/null || fail_test "completed unconfiguration proof is incomplete"
   intent=$(jq -r '.domain_records.unconfigure.path' "$manifest")
-  jq -e --arg version "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" '
+  jq -e --arg version "$RECORDED_TOOL_VERSION" '
     .operation == "unconfigure" and .managed_settings != null and
     .tracking_ownership != null and .limine_source.sha256 != null and
     .limine_tools.package == "limine-mkinitcpio-hook" and
@@ -271,11 +276,15 @@ test_successful_unconfigure() {
       all(.identity != null and .sha256 != null))
   ' "$intent" >/dev/null \
     || fail_test "unconfiguration intent is incomplete"
-  forged_intent=$(jq '.limine_tools.version = "unsupported"' "$intent")
+  forged_intent=$(jq '.limine_tools.version = "not a version!"' "$intent")
   if validate_unconfigure_intent_json "$(jq -r '.id' "$manifest")" \
     "$forged_intent" "$(<"$manifest")"; then
-    fail_test "unconfiguration intent accepted an unsupported tool version"
+    fail_test "unconfiguration intent accepted a malformed tool version"
   fi
+  forged_intent=$(jq '.limine_tools.version = "1.99.0-1"' "$intent")
+  validate_unconfigure_intent_json "$(jq -r '.id' "$manifest")" \
+    "$forged_intent" "$(<"$manifest")" \
+    || fail_test "unconfiguration intent rejected another release's tool version"
   jq -e '
     .limine.source.sha256 == .limine.primary.sha256 and
     .limine.source.sha256 == .limine.fallback.sha256
