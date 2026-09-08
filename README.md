@@ -5,7 +5,7 @@
 OmaSecBoot provisions signing keys, signs every EFI artifact Omarchy boots, enrolls the current Limine configuration checksum into both Limine executables, backs up and replaces firmware trust under explicit confirmation, and adds a validated Windows firmware handoff for dual-boot systems. Every mutation runs as a durable transaction that can be resumed or rolled back, and every firmware instruction is printed only after a direct read-back proof.
 
 > [!CAUTION]
-> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI covers only the hermetic suites and a container package check, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [implementation contract](docs/implementation-contract.md) and the [release checklist](docs/release-checklist.md).
+> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI covers only the hermetic suites and a container package check, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [release checklist](docs/release-checklist.md).
 
 ## Why This Tool
 
@@ -72,7 +72,7 @@ The package also depends on bash, coreutils, util-linux, diffutils, findutils, g
 
 `OmaSecBoot` is the product name; `omasecboot` is the command, package, and namespace.
 
-The supported deployment is the Arch package built from `PKGBUILD` at a release tag. No package has been published yet, so build it from a git clone of the commit you want to install:
+The supported deployment is the Arch package built from `PKGBUILD`. Build it from a git clone of the commit you want to install:
 
 ```bash
 git clone https://github.com/peregrinus879/omasecboot.git
@@ -84,9 +84,7 @@ omasecboot version                            # omasecboot 1.0.0
 
 `make package` needs `base-devel` and git. It packs the tracked files into the archive layout the recipe expects and runs makepkg without a dependency check, so the package can be built on any Arch machine; pacman checks the dependencies when it installs. `bash tests/package.sh` runs the same build with payload and lifecycle checks and discards it.
 
-`make install` refuses to write to a live root; it exists only for package staging. If an older copy was ever installed under `/usr/local`, remove `/usr/local/bin/omasecboot`, `/usr/local/lib/omasecboot/`, its hooks in `/etc/pacman.d/hooks/`, and `/etc/boot/hooks/post.d/zzz-omasecboot-sign` before installing the package: pacman refuses to overwrite the unowned Limine hook, same-named hooks in `/etc/pacman.d/hooks/` take precedence over the packaged ones, and the lifecycle refuses to activate while any hook is shadowed or targets a command other than `/usr/bin/omasecboot`. `status` reports both conditions.
-
-The planned Omarchy integration installs the package from the Omarchy Package Repository through a setup wizard that performs the read-only prechecks first. It has not shipped.
+`make install` refuses to write to a live root; it exists only for package staging. A same-named hook in `/etc/pacman.d/hooks/` takes precedence over the packaged one, and the lifecycle refuses to activate while any hook is shadowed or targets a command other than `/usr/bin/omasecboot`; `status` reports both conditions.
 
 ## Lifecycle
 
@@ -171,7 +169,7 @@ The target is validated structurally, not by matching text: the command parses `
 
 Quattro's own `limine-scan` writes a `protocol: efi` chainload entry for Windows. `status` reports such entries but never removes them.
 
-The tracked `omarchy/omarchy-menu.jsonc` file is a reference for a Quattro menu entry, "Reboot to Windows". Do not merge it into `~/.config/omarchy/extensions/omarchy-menu.jsonc` yet; the packaged Omarchy integration will ship the final guard and action. If the reboot is cancelled after BootNext is armed, firmware keeps the one-boot request.
+The tracked `omarchy/omarchy-menu.jsonc` file is the reference fragment for a Quattro menu entry, "Reboot to Windows", owned by the Omarchy integration. If the reboot is cancelled after BootNext is armed, firmware keeps the one-boot request.
 
 ## Day-to-Day Operation
 
@@ -188,14 +186,14 @@ Once the lifecycle is `active`, package and Limine hooks keep the boot artifacts
 
 Kernel, Limine, and snapshot updates therefore need no manual action. Two situations do:
 
-- **A supported package update.** While the lifecycle is `active`, a pacman transaction that changes `limine-mkinitcpio-hook`, `limine-snapper-sync`, or `sbctl` is refused with `disable lifecycle before changing pinned producers`. Wait for an OmaSecBoot release that supports the new version, install it, and if the refusal persists, disable Secure Boot in firmware, run `sudo omasecboot unconfigure`, update, and run `setup` again. This is a known cost of the exact-version model and is recorded as an open release decision in `docs/maintenance.md`.
+- **A supported package update.** While the lifecycle is `active`, a pacman transaction that changes `limine-mkinitcpio-hook`, `limine-snapper-sync`, or `sbctl` is refused with `disable lifecycle before changing pinned producers`. Wait for an OmaSecBoot release that supports the new version, install it, and if the refusal persists, disable Secure Boot in firmware, run `sudo omasecboot unconfigure`, update, and run `setup` again. This is a known cost of the exact-version model.
 - **Template resets.** `omarchy refresh limine`, config reinstalls, and factory resets can replace `limine.conf` and drop the Windows entry. Run `sudo omasecboot sign` afterwards; it re-enrolls the checksum, and `status` reports a missing Windows block.
 
-Updating `omasecboot` itself is not a boot mutation and is allowed in any stable state.
+Updating `omasecboot` itself is not a boot mutation and is allowed in any lifecycle state; during `recovery-required` it is the way to receive a recovery fix.
 
 ## Commands
 
-All mutating commands require root, refuse extra arguments, and complete any pending recovery before doing new work.
+All mutating commands require root, refuse unknown arguments, and complete any pending recovery before doing new work.
 
 | Command | Purpose |
 |---|---|
@@ -255,6 +253,7 @@ These are four different operations. None of them is a factory reset.
 | `Lifecycle activation requires the exact supported producer packages` or `Lifecycle activation requires efibootmgr 18 or newer` | One of the three pinned producer packages is not at its supported version, or efibootmgr is older than 18 | Update or downgrade from disabled or pristine state; see Requirements |
 | `sign` or `status` reports that `/EFI/BOOT/BOOTX64.EFI` carries no Limine config checksum | On a shared ESP, Windows repair or a Windows installer rewrote the fallback loader with its own copy | Rerun Omarchy's `limine-update` to restore Limine's fallback copy, then `sudo omasecboot sign` |
 | `Lifecycle activation requires the current installed ... hook` | A hook is missing, altered, or targets a command other than `/usr/bin/omasecboot` | Reinstall the package; remove any `/usr/local` copy |
+| `... blocked while full snapshot restore is running` | The `limine-snapper-restore` marker under `/run/lock` exists: a full restore is running, or one crashed and left it behind | Wait for the restore to finish; a reboot clears a stale marker. After confirming no restore is running you may remove `/run/lock/limine-snapper-restore.lock` yourself |
 | `Boot-mutating package transaction blocked: ... disable lifecycle before changing pinned producers` | A pacman transaction would change a supported package while active | See Day-to-Day Operation |
 | `Boot-mutating package transaction blocked: lifecycle is transition ...` | Another OmaSecBoot transaction is running or was interrupted | Wait, then `sudo omasecboot repair` |
 | `Package removal requires verified disabled or pristine lifecycle state` | The removal guard refused | Run `unconfigure` first |
@@ -295,15 +294,13 @@ Limine, limine-entry-tool, and limine-snapper-sync share `/run/lock/boot-partiti
 
 Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode, AuditMode, DeployedMode, and SecureBoot values, and the DMI identity fields (product UUID plus the vendor, product, board, and BIOS identifiers, including the board serial) are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
 
-### Code structure
+### Contributing
 
-`bin/omasecboot` dispatches to modules in `lib/`: `common.sh` (constants, output, locks), `lifecycle.sh` (state, transactions, incidents, guards), `producers.sh` (producer leases and recovery), `checks.sh`, `discover.sh`, `sign.sh` (enrollment, signing, unconfiguration), `enroll.sh` (firmware backup, planning, enrollment, firmware recovery), `windows.sh` (target proof, preflight, BootNext, Windows recovery), and `status.sh`.
-
-Reference sources, versioned compatibility findings, workaround removal triggers, and deferred decisions are in [docs/maintenance.md](docs/maintenance.md). The implementation and release contract is [docs/implementation-contract.md](docs/implementation-contract.md). Operational invariants for contributors are in `AGENTS.md`. Verification runs `make test`, `bash -n`, and `shellcheck` over all shell files.
+`AGENTS.md` is the contributor contract: module ownership, invariants, terminology, and verification. Sources and compatibility findings are in [docs/maintenance.md](docs/maintenance.md).
 
 ### Design philosophy
 
-Handle the parts of Secure Boot that Omarchy does not automate for this dual-boot flow: one-time key creation and enrollment, config checksum enrollment and verification in both Limine executables, signing of new and snapshot artifacts, and the Windows handoff. Delegate everything else: re-signing of tracked files to `zz-sbctl.hook`, UKI building to `mkinitcpio`, kernel entries to `limine-entry-tool`, snapshot entries to `limine-snapper-sync`. Don't automate what's already automated. Fill the gaps that aren't.
+Handle the parts of Secure Boot that Omarchy does not automate for this dual-boot flow: one-time key creation and enrollment, config checksum enrollment and verification in both Limine executables, signing of new and snapshot artifacts, and the Windows handoff. Delegate everything else: re-signing of tracked files to `zz-sbctl.hook`, UKI building to `mkinitcpio`, kernel entries to `limine-entry-tool`, snapshot entries to `limine-snapper-sync`. Automate only what nothing else automates.
 
 ## License
 
