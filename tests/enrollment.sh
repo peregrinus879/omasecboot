@@ -208,7 +208,7 @@ snapshot_restore_lock_path() {
   printf '%s/limine-snapper-restore.lock\n' "$CASE_DIR"
 }
 
-firmware_variables_path() {
+efivars_path() {
   printf '%s\n' "$EFIVARS_DIR"
 }
 

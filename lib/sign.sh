@@ -386,7 +386,7 @@ verify_limine_config_targets() {
   local expected="$1" current
   current=$(current_limine_config_checksum) || return 1
   [[ "$current" == "$expected" ]] || {
-    fail "${LIMINE_CONF} changed during artifact repair"
+    fail "$(limine_config_path) changed during artifact repair"
     return 1
   }
   verify_limine_embedded_checksum "$(limine_primary_binary_path)" "$expected" \
@@ -451,9 +451,9 @@ clean_stale_entries() {
   qact "Cleaning ${#removable[@]} stale database entries"
   for file in "${removable[@]}"; do
     if sbctl remove-file "$file" >/dev/null 2>&1; then
-      qpass "${file#"${ESP}"/}"
+      qpass "${file#"$(esp_path)"/}"
     else
-      warn "Could not remove: ${file#"${ESP}"/}"
+      warn "Could not remove: ${file#"$(esp_path)"/}"
       failed=$((failed + 1))
     fi
   done
@@ -534,14 +534,6 @@ save_sbctl_file_entry() {
   validate_control_file "$files_db" || return 1
   durable_sync "$files_db" || return 1
   durable_sync "$db_dir"
-}
-
-artifact_esp_is_mounted() {
-  local root fstype
-  root=$(esp_path)
-  mountpoint -q "$root" || return 1
-  fstype=$(findmnt -n -T "$root" -o FSTYPE 2>/dev/null) || return 1
-  [[ "$fstype" == vfat ]]
 }
 
 validate_sbctl_tracking_store() {
@@ -1032,7 +1024,7 @@ unconfigure_windows_state_identity() {
 # captured. Shared by the root transaction and by recovery.
 unconfigure_inputs_are_current() {
   unconfigure_limine_tools_match_intent || return 1
-  artifact_esp_is_mounted || return 1
+  esp_is_mounted_vfat || return 1
   validate_control_file "$(limine_default_config_path)" || return 1
   validate_control_file "$(limine_config_path)" || return 1
   unconfigure_limine_source_is_unchanged || return 1
@@ -1150,7 +1142,7 @@ unconfigure_preflight() {
     return 1
   }
   _unconfigure_limine_tools_json=$(capture_unconfigure_limine_tools) || return 1
-  artifact_esp_is_mounted || return 1
+  esp_is_mounted_vfat || return 1
   validate_control_file "$(limine_default_config_path)" || return 1
   validate_control_file "$(limine_config_path)" || return 1
   validate_control_file "$(limine_primary_binary_path)" || return 1
@@ -1400,7 +1392,7 @@ artifact_environment_preflight() {
       return 1
     }
   done
-  artifact_esp_is_mounted || {
+  esp_is_mounted_vfat || {
     fail "$(esp_path) is not the mounted FAT32 ESP"
     return 1
   }

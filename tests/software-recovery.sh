@@ -34,7 +34,7 @@ esp_path() { printf '%s/boot\n' "$CASE_DIR"; }
 control_owner_uid() { id -u; }
 require_control_root() { :; }
 durable_sync() { :; }
-artifact_esp_is_mounted() { [[ "$ESP_MOUNTED" == true ]]; }
+esp_is_mounted_vfat() { [[ "$ESP_MOUNTED" == true ]]; }
 lifecycle_package_boundary_is_clear() { [[ "$PACKAGE_BOUNDARY_CLEAR" == true ]]; }
 
 FAILPOINT=""

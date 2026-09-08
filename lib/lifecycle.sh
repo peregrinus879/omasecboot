@@ -58,13 +58,10 @@ readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 readonly MAX_FIRMWARE_WRITE_ATTEMPTS=6
 readonly MAX_FIRMWARE_HIERARCHY_ATTEMPTS=2
 
-windows_bootnext_efivars_dir() {
-  printf '/sys/firmware/efi/efivars\n'
-}
 
 windows_bootnext_variable_path() {
   printf '%s/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' \
-    "$(windows_bootnext_efivars_dir)"
+    "$(efivars_path)"
 }
 
 _lifecycle_state=unmanaged
@@ -912,43 +909,54 @@ process_stat_fields() {
   printf '%s\n' "${stat_line##*) }"
 }
 
-process_start_time() {
-  local pid="$1" fields
+# One field of /proc/<pid>/stat after the command name, matched against a
+# pattern before it is trusted.
+process_stat_field() {
+  local pid="$1" index="$2" pattern="$3" fields
   local -a values
   fields=$(process_stat_fields "$pid") || return 1
   read -r -a values <<< "$fields"
-  [[ ${#values[@]} -gt 19 && ${values[19]} =~ ^[0-9]+$ ]] || return 1
-  printf '%s\n' "${values[19]}"
+  [[ ${#values[@]} -gt $index && ${values[$index]} =~ $pattern ]] || return 1
+  printf '%s\n' "${values[$index]}"
+}
+
+process_start_time() {
+  process_stat_field "$1" 19 '^[0-9]+$'
 }
 
 process_state() {
-  local pid="$1" fields
-  local -a values
-  fields=$(process_stat_fields "$pid") || return 1
-  read -r -a values <<< "$fields"
-  [[ ${#values[@]} -gt 0 && ${values[0]} =~ ^[A-Za-z]$ ]] || return 1
-  printf '%s\n' "${values[0]}"
+  process_stat_field "$1" 0 '^[A-Za-z]$'
 }
 
 process_parent_pid() {
-  local pid="$1" fields
-  local -a values
-  fields=$(process_stat_fields "$pid") || return 1
-  read -r -a values <<< "$fields"
-  [[ ${#values[@]} -gt 1 && ${values[1]} =~ ^[0-9]+$ ]] || return 1
-  printf '%s\n' "${values[1]}"
+  process_stat_field "$1" 1 '^[0-9]+$'
 }
 
-process_has_ancestor() {
-  local ancestor="$1" current="$2" parent loops=0
+# Walks from a process up its ancestry and prints the first pid the predicate
+# accepts; the walk is bounded and a self-parented pid ends it.
+find_process_ancestor() {
+  local current="$1" predicate="$2" parent loops=0
+  shift 2
   while [[ "$current" =~ ^[0-9]+$ && "$current" -gt 0 && $loops -lt 256 ]]; do
-    [[ "$current" == "$ancestor" ]] && return 0
+    if "$predicate" "$current" "$@"; then
+      printf '%s\n' "$current"
+      return 0
+    fi
     parent=$(process_parent_pid "$current") || return 1
     [[ "$parent" != "$current" ]] || return 1
     current="$parent"
     loops=$((loops + 1))
   done
   return 1
+}
+
+process_is_pid() {
+  [[ "$1" == "$2" ]]
+}
+
+process_has_ancestor() {
+  local ancestor="$1" current="$2"
+  find_process_ancestor "$current" process_is_pid "$ancestor" >/dev/null
 }
 
 process_runs_script() {
@@ -1031,8 +1039,7 @@ validate_private_control_directory() {
   local path="$1" mode
   validate_control_directory "$path" || return 1
   mode=$(stat -Lc '%a' "$path" 2>/dev/null) || return 1
-  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
-  (( (8#$mode & 0077) == 0 ))
+  mode_is_private "$mode"
 }
 
 ensure_state_layout() {
@@ -2492,8 +2499,7 @@ software_recovery_esp_is_safe() {
     [[ -n "$target" ]] || continue
     case "$target" in
       "${esp}"/*)
-        declare -F artifact_esp_is_mounted >/dev/null || return 1
-        artifact_esp_is_mounted || return 1
+        esp_is_mounted_vfat || return 1
         return 0
         ;;
     esac

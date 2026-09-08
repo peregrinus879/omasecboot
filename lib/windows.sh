@@ -18,6 +18,14 @@ _windows_partition_number=""
 _windows_hd_start=""
 _windows_hd_size=""
 _windows_device_path=""
+declare -ag _windows_scan_lines=()
+_windows_scan_begin=0
+_windows_scan_end=0
+_windows_scan_legacy=0
+_windows_scan_suspicious=0
+_windows_scan_begin_index=-1
+_windows_scan_end_index=-1
+_windows_scan_legacy_index=-1
 _windows_dp_exact=false
 _windows_dp_valid=false
 _windows_dp_partuuid=""
@@ -307,7 +315,7 @@ windows_parse_firmware_inventory() {
   local boot_pattern='^Boot([0-9A-F]{4})([* ]) (.*)$'
   local order_pattern='^([0-9A-F]{4})(,[0-9A-F]{4})*$'
   local data_pattern='^([0-9A-Fa-f]{2})( [0-9A-Fa-f]{2})*$'
-  local diagnostics_file executable old_umask command_rc=0 diagnostics=false
+  local diagnostics_file executable command_rc=0 diagnostics=false
   local -a raw_order=()
   local -A order_numbers=() dp_seen=()
   local LC_ALL=C
@@ -320,15 +328,11 @@ windows_parse_firmware_inventory() {
     windows_reject "efibootmgr is required for Windows target discovery"
     return 1
   }
-  old_umask=$(umask) || return 1
-  umask 077
   diagnostics_file=$(mktemp "${TMPDIR:-/tmp}/omasecboot-efibootmgr.XXXXXX" \
     2>/dev/null) || {
-    umask "$old_umask"
     windows_reject "Could not prepare EFI boot-entry diagnostics"
     return 1
   }
-  umask "$old_umask"
   inventory=$(LC_ALL=C "$executable" -v 2> "$diagnostics_file") || command_rc=$?
   [[ ! -s "$diagnostics_file" ]] || diagnostics=true
   rm -f "$diagnostics_file" 2>/dev/null || {
@@ -639,14 +643,9 @@ windows_map_target_esp() {
   _windows_maj_min="$maj_min"
 }
 
-windows_mount_locks_are_owned() {
-  [[ "${_OMASECBOOT_LIMINE_LOCK_OWNED:-false}" != false \
-    && "${_OMASECBOOT_REPAIR_LOCK_OWNED:-false}" == true ]]
-}
-
 windows_reconcile_runtime_mount() {
   local runtime mount_path mount_json
-  windows_mount_locks_are_owned || return 1
+  boot_locks_are_held || return 1
   runtime=$(windows_runtime_dir_path) || return 1
   mount_path=$(windows_runtime_mount_path) || return 1
   validate_control_directory "$(dirname "$runtime")" || return 1
@@ -784,7 +783,7 @@ windows_with_target_mount() {
     trap 'exit 143' TERM
     trap 'exit 129' HUP
 
-    windows_mount_locks_are_owned || exit 1
+    boot_locks_are_held || exit 1
     windows_reconcile_runtime_mount || exit 1
     windows_find_reusable_mount || exit 1
     if [[ -n "$_windows_reusable_mount" ]]; then
@@ -1392,19 +1391,7 @@ revalidate_windows_target_state() {
 }
 
 windows_validate_efivarfs_mount() {
-  local directory mount_info target fstype extra
-  directory=$(windows_bootnext_efivars_dir) || return 1
-  [[ -d "$directory" && ! -L "$directory" ]] || {
-    windows_reject "EFI variable filesystem is unavailable"
-    return 1
-  }
-  mount_info=$(findmnt --noheadings --raw --target "$directory" \
-    --output TARGET,FSTYPE 2>/dev/null) || {
-    windows_reject "Cannot resolve the EFI variable filesystem"
-    return 1
-  }
-  read -r target fstype extra <<< "$mount_info"
-  [[ -z "$extra" && "$target" == "$directory" && "$fstype" == efivarfs ]] || {
+  efivarfs_mount_is_valid || {
     windows_reject "EFI variables are not backed by the expected efivarfs mount"
     return 1
   }
@@ -1414,7 +1401,7 @@ read_windows_bootnext_state() {
   local directory path uid mode size bytes_text number present=false
   local -a bytes=()
   windows_validate_efivarfs_mount || return 1
-  directory=$(windows_bootnext_efivars_dir) || return 1
+  directory=$(efivars_path) || return 1
   path=$(windows_bootnext_variable_path) || return 1
   [[ "$path" == "${directory}/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c" ]] \
     || return 1
@@ -1923,8 +1910,8 @@ windows_recovery_attempt() {
   return "$rc"
 }
 
-windows_bootnext_exact_target_is_current() {
-  local record="$1"
+# The recorded target still resolves to the same firmware entry and ESP.
+windows_recorded_target_is_current() {
   read_windows_target_state || return 1
   resolve_windows_target || {
     windows_report_error
@@ -1934,6 +1921,11 @@ windows_bootnext_exact_target_is_current() {
     windows_reject "Persisted Windows target identity is stale"
     return 1
   }
+}
+
+windows_bootnext_exact_target_is_current() {
+  local record="$1"
+  windows_recorded_target_is_current || return 1
   jq -e \
     --arg boot_number "$_windows_state_boot_number" \
     --arg label "$_windows_state_label" \
@@ -1952,15 +1944,7 @@ windows_bootnext_exact_target_is_current() {
 }
 
 windows_bootnext_preflight() {
-  read_windows_target_state || return 1
-  resolve_windows_target || {
-    windows_report_error
-    return 1
-  }
-  windows_state_matches_resolved_target || {
-    windows_reject "Persisted Windows target identity is stale"
-    return 1
-  }
+  windows_recorded_target_is_current || return 1
   read_windows_bootnext_state >/dev/null || {
     windows_report_error
     return 1
@@ -2038,15 +2022,7 @@ load_windows_bootnext_record() {
 record_and_set_windows_bootnext() {
   local prior executable_hash rc=0
   transaction_phase_start "record-bootnext" || return 1
-  read_windows_target_state || return 1
-  resolve_windows_target || {
-    windows_report_error
-    return 1
-  }
-  windows_state_matches_resolved_target || {
-    windows_reject "Persisted Windows target identity is stale"
-    return 1
-  }
+  windows_recorded_target_is_current || return 1
   prior=$(read_windows_bootnext_state) || {
     windows_report_error
     return 1
@@ -2124,70 +2100,86 @@ run_windows_bootnext() {
     windows_bootnext_preflight record_and_set_windows_bootnext
 }
 
-windows_managed_block_state() {
-  local label="$1" config index begin_count=0 end_count=0 legacy_count=0
-  local suspicious_count=0
-  local begin_index=-1 end_index=-1 legacy_index=-1 next_index
-  local -a lines=()
+# Reads the configuration once and counts the managed markers.
+windows_scan_managed_markers() {
+  local config index
+  _windows_scan_lines=()
+  _windows_scan_begin=0
+  _windows_scan_end=0
+  _windows_scan_legacy=0
+  _windows_scan_suspicious=0
+  _windows_scan_begin_index=-1
+  _windows_scan_end_index=-1
+  _windows_scan_legacy_index=-1
   config=$(windows_limine_config_path) || return 1
   [[ -f "$config" && ! -L "$config" ]] || return 1
-  mapfile -t lines < "$config" || return 1
-  for ((index=0; index < ${#lines[@]}; index++)); do
-    case "${lines[$index]}" in
+  mapfile -t _windows_scan_lines < "$config" || return 1
+  for ((index=0; index < ${#_windows_scan_lines[@]}; index++)); do
+    case "${_windows_scan_lines[$index]}" in
       "$WINDOWS_ENTRY_MARKER")
-        begin_count=$((begin_count + 1))
-        begin_index=$index
+        _windows_scan_begin=$((_windows_scan_begin + 1))
+        _windows_scan_begin_index=$index
         ;;
       "$WINDOWS_ENTRY_END_MARKER")
-        end_count=$((end_count + 1))
-        end_index=$index
+        _windows_scan_end=$((_windows_scan_end + 1))
+        _windows_scan_end_index=$index
         ;;
       "$WINDOWS_LEGACY_ENTRY_MARKER")
-        legacy_count=$((legacy_count + 1))
-        legacy_index=$index
+        _windows_scan_legacy=$((_windows_scan_legacy + 1))
+        _windows_scan_legacy_index=$index
         ;;
       "$WINDOWS_ENTRY_MARKER"*|"$WINDOWS_ENTRY_END_MARKER"*|\
       "$WINDOWS_LEGACY_ENTRY_MARKER"*)
-        suspicious_count=$((suspicious_count + 1))
+        _windows_scan_suspicious=$((_windows_scan_suspicious + 1))
         ;;
     esac
   done
+}
+
+# The four entry lines after a marker describe one handoff with this label.
+windows_block_body_matches() {
+  local start="$1" label="$2"
+  [[ "${_windows_scan_lines[start + 1]}" == /Windows \
+    && "${_windows_scan_lines[start + 2]}" == "    comment: ${label}" \
+    && "${_windows_scan_lines[start + 3]}" == '    protocol: efi_boot_entry' \
+    && "${_windows_scan_lines[start + 4]}" == "    entry: ${label}" ]]
+}
+
+# A legacy block ends at the file's end, an empty line, or an unindented line.
+windows_block_ends_at() {
+  local next="$1"
+  (( next == ${#_windows_scan_lines[@]} )) \
+    || [[ -z "${_windows_scan_lines[$next]}" \
+      || "${_windows_scan_lines[$next]}" != [[:space:]]* ]]
+}
+
+windows_managed_block_state() {
+  local label="$1"
+  windows_scan_managed_markers || return 1
   _windows_block_state=invalid
   _windows_block_start=-1
   _windows_block_count=0
-  if (( begin_count == 0 && end_count == 0 && legacy_count == 0 \
-    && suspicious_count == 0 )); then
+  (( _windows_scan_suspicious == 0 )) || return 1
+  if (( _windows_scan_begin == 0 && _windows_scan_end == 0 && _windows_scan_legacy == 0 )); then
     _windows_block_state=absent
     return 0
   fi
-  if (( begin_count == 1 && end_count == 1 && legacy_count == 0 \
-    && suspicious_count == 0 \
-    && end_index == begin_index + 5 )) \
-    && [[ "${lines[begin_index + 1]}" == /Windows \
-      && "${lines[begin_index + 2]}" == "    comment: ${label}" \
-      && "${lines[begin_index + 3]}" == '    protocol: efi_boot_entry' \
-      && "${lines[begin_index + 4]}" == "    entry: ${label}" ]]; then
+  if (( _windows_scan_begin == 1 && _windows_scan_end == 1 && _windows_scan_legacy == 0 \
+    && _windows_scan_end_index == _windows_scan_begin_index + 5 )) \
+    && windows_block_body_matches "$_windows_scan_begin_index" "$label"; then
     _windows_block_state=canonical
-    _windows_block_start=$begin_index
+    _windows_block_start=$_windows_scan_begin_index
     _windows_block_count=6
     return 0
   fi
-  if (( begin_count == 0 && end_count == 0 && legacy_count == 1 \
-    && suspicious_count == 0 \
-    && legacy_index + 4 < ${#lines[@]} )) \
-    && [[ "${lines[legacy_index + 1]}" == /Windows \
-      && "${lines[legacy_index + 2]}" == "    comment: ${label}" \
-      && "${lines[legacy_index + 3]}" == '    protocol: efi_boot_entry' \
-      && "${lines[legacy_index + 4]}" == "    entry: ${label}" ]]; then
-    next_index=$((legacy_index + 5))
-    if (( next_index == ${#lines[@]} )) \
-      || [[ -z "${lines[$next_index]}" \
-        || "${lines[$next_index]}" != [[:space:]]* ]]; then
-      _windows_block_state=legacy
-      _windows_block_start=$legacy_index
-      _windows_block_count=5
-      return 0
-    fi
+  if (( _windows_scan_begin == 0 && _windows_scan_end == 0 && _windows_scan_legacy == 1 \
+    && _windows_scan_legacy_index + 4 < ${#_windows_scan_lines[@]} )) \
+    && windows_block_body_matches "$_windows_scan_legacy_index" "$label" \
+    && windows_block_ends_at $((_windows_scan_legacy_index + 5)); then
+    _windows_block_state=legacy
+    _windows_block_start=$_windows_scan_legacy_index
+    _windows_block_count=5
+    return 0
   fi
   return 1
 }
@@ -2216,7 +2208,7 @@ windows_preserve_config_metadata() {
 }
 
 windows_rewrite_managed_block() {
-  local action="$1" label="$2" config config_dir temporary old_umask
+  local action="$1" label="$2" config config_dir temporary
   local uid gid mode index inserted=false
   local -a lines=()
   [[ "$action" == install || "$action" == remove ]] || return 1
@@ -2239,13 +2231,7 @@ windows_rewrite_managed_block() {
   mapfile -t lines < "$config" || return 1
   config_dir=$(dirname "$config")
   [[ -d "$config_dir" && ! -L "$config_dir" ]] || return 1
-  old_umask=$(umask)
-  umask 077
-  temporary=$(mktemp "${config_dir}/.omasecboot-windows.XXXXXX") || {
-    umask "$old_umask"
-    return 1
-  }
-  umask "$old_umask"
+  temporary=$(mktemp "${config_dir}/.omasecboot-windows.XXXXXX") || return 1
 
   if ! {
     for ((index=0; index < ${#lines[@]}; index++)); do
@@ -2279,41 +2265,17 @@ windows_rewrite_managed_block() {
 }
 
 windows_legacy_managed_block_label() {
-  local config index legacy_index=-1 legacy_count=0 suspicious_count=0 next_index
-  local comment label entry
-  local -a lines=()
-  config=$(windows_limine_config_path) || return 1
-  [[ -f "$config" && ! -L "$config" ]] || return 1
-  mapfile -t lines < "$config" || return 1
-  for ((index=0; index < ${#lines[@]}; index++)); do
-    case "${lines[$index]}" in
-      "$WINDOWS_LEGACY_ENTRY_MARKER")
-        legacy_count=$((legacy_count + 1))
-        legacy_index=$index
-        ;;
-      "$WINDOWS_ENTRY_MARKER"|"$WINDOWS_ENTRY_END_MARKER"|\
-      "$WINDOWS_ENTRY_MARKER"*|"$WINDOWS_ENTRY_END_MARKER"*|\
-      "$WINDOWS_LEGACY_ENTRY_MARKER"*)
-        suspicious_count=$((suspicious_count + 1))
-        ;;
-    esac
-  done
-  (( legacy_count == 1 && suspicious_count == 0 \
-    && legacy_index + 4 < ${#lines[@]} )) || return 1
-  [[ "${lines[legacy_index + 1]}" == /Windows \
-    && "${lines[legacy_index + 2]}" == '    comment: '* \
-    && "${lines[legacy_index + 3]}" == '    protocol: efi_boot_entry' \
-    && "${lines[legacy_index + 4]}" == '    entry: '* ]] || return 1
-  comment=${lines[legacy_index + 2]#'    comment: '}
-  entry=${lines[legacy_index + 4]#'    entry: '}
-  [[ "$comment" == "$entry" ]] || return 1
-  label="$comment"
+  local start label
+  windows_scan_managed_markers || return 1
+  (( _windows_scan_begin == 0 && _windows_scan_end == 0 && _windows_scan_legacy == 1 \
+    && _windows_scan_suspicious == 0 \
+    && _windows_scan_legacy_index + 4 < ${#_windows_scan_lines[@]} )) || return 1
+  start=$_windows_scan_legacy_index
+  [[ "${_windows_scan_lines[start + 2]}" == '    comment: '* ]] || return 1
+  label=${_windows_scan_lines[start + 2]#'    comment: '}
+  windows_block_body_matches "$start" "$label" || return 1
   windows_label_is_safe "$label" || return 1
-  next_index=$((legacy_index + 5))
-  if (( next_index < ${#lines[@]} )); then
-    [[ -z "${lines[$next_index]}" || "${lines[$next_index]}" != [[:space:]]* ]] \
-      || return 1
-  fi
+  windows_block_ends_at $((start + 5)) || return 1
   printf '%s\n' "$label"
 }
 
@@ -2358,14 +2320,20 @@ update_windows_boot_entry() {
   windows_rewrite_managed_block install "$label"
 }
 
-windows_setup_preflight() {
+# Resolves the firmware target, the managed block, and the recorded state, and
+# requires them to agree.
+windows_resolve_setup_inputs() {
   resolve_windows_target || return 1
   windows_managed_block_state "$_windows_label" || return 1
   windows_classify_target_state || return 1
   if [[ "$_windows_state_kind" == current ]]; then
     windows_state_matches_resolved_target || return 1
   fi
-  windows_setup_inputs_are_consistent || return 1
+  windows_setup_inputs_are_consistent
+}
+
+windows_setup_preflight() {
+  windows_resolve_setup_inputs || return 1
   artifact_repair_preflight
 }
 
@@ -2389,13 +2357,7 @@ configure_windows_handoff() {
   transaction_phase_complete "backup-windows" || return 1
 
   transaction_phase_start "resolve-windows" || return 1
-  resolve_windows_target || return 1
-  windows_managed_block_state "$_windows_label" || return 1
-  windows_classify_target_state || return 1
-  if [[ "$_windows_state_kind" == current ]]; then
-    windows_state_matches_resolved_target || return 1
-  fi
-  windows_setup_inputs_are_consistent || return 1
+  windows_resolve_setup_inputs || return 1
   transaction_phase_complete "resolve-windows" || return 1
 
   transaction_phase_start "persist-windows-target" || return 1

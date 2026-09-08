@@ -31,7 +31,7 @@ Naming boundary: `OmaSecBoot` is the product name; `omasecboot` is the sole user
 
 The dispatcher sources the modules in this order and each owns one concern:
 
-- `common.sh` - constants, output helpers, quiet mode, control-file validation, both locks, the pacman helpers, `json_is`
+- `common.sh` - constants, output helpers, quiet mode, control-file validation, both locks, the pacman helpers, `json_is`, the ESP and efivarfs predicates
 - `lifecycle.sh` - versioned state, transaction manifests, incident seals, recovery context, stale reconciliation, software recovery, the lifecycle status display
 - `checks.sh` - root, dependency, EFI mode, ESP mount, and gum checks; the lifecycle activation environment
 - `discover.sh` - EFI artifact discovery, sbctl configuration and tracked-file discovery

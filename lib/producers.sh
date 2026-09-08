@@ -50,22 +50,16 @@ drain_package_producer_targets() {
   while IFS= read -r line || [[ -n "$line" ]]; do :; done
 }
 
+# A process runs as the control owner with the given identity.
+process_is_owned_identity() {
+  local pid="$1" kind="$2" identity="$3"
+  [[ "$(process_effective_uid "$pid" 2>/dev/null || true)" == "$(control_owner_uid)" ]] \
+    && process_matches_identity "$pid" "$kind" "$identity"
+}
+
 find_root_process_ancestor() {
-  local start_pid="$1" kind="$2" identity="$3" current parent loops=0
-  current="$start_pid"
-  while [[ "$current" =~ ^[0-9]+$ && "$current" -gt 0 && $loops -lt 256 ]]; do
-    if [[ "$(process_effective_uid "$current" 2>/dev/null || true)" == \
-      "$(control_owner_uid)" ]] \
-      && process_matches_identity "$current" "$kind" "$identity"; then
-      printf '%s\n' "$current"
-      return 0
-    fi
-    parent=$(process_parent_pid "$current") || return 1
-    [[ "$parent" != "$current" ]] || return 1
-    current="$parent"
-    loops=$((loops + 1))
-  done
-  return 1
+  local start_pid="$1" kind="$2" identity="$3"
+  find_process_ancestor "$start_pid" process_is_owned_identity "$kind" "$identity"
 }
 
 set_producer_owner() {

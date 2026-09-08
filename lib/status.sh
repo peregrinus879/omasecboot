@@ -2,7 +2,9 @@
 # OmaSecBoot: status display and file verification
 
 list_limine_unhashed_paths() {
-  [[ -f "$LIMINE_CONF" ]] || return 0
+  local config
+  config=$(limine_config_path)
+  [[ -f "$config" ]] || return 0
 
   awk '
     function normalise_protocol(value) {
@@ -74,11 +76,13 @@ list_limine_unhashed_paths() {
       remember_path(key, value, NR)
     }
     END { flush_entry() }
-  ' "$LIMINE_CONF"
+  ' "$config"
 }
 
 list_limine_v12_color_warnings() {
-  [[ -f "$LIMINE_CONF" ]] || return 0
+  local config
+  config=$(limine_config_path)
+  [[ -f "$config" ]] || return 0
 
   awk '
     function trim(value) {
@@ -107,11 +111,13 @@ list_limine_v12_color_warnings() {
         print NR ": " key ": " value
       }
     }
-  ' "$LIMINE_CONF"
+  ' "$config"
 }
 
 list_unmanaged_windows_chainloads() {
-  [[ -f "$LIMINE_CONF" ]] || return 0
+  local config
+  config=$(limine_config_path)
+  [[ -f "$config" ]] || return 0
 
   awk '
     function normalise_protocol(value) {
@@ -141,7 +147,7 @@ list_unmanaged_windows_chainloads() {
         print NR ": " line
       }
     }
-  ' "$LIMINE_CONF"
+  ' "$config"
 }
 
 list_windows_firmware_entries() {
@@ -266,16 +272,14 @@ show_status() {
   echo
   echo -e "  ${BOLD}ESP Mount${NC}"
   if command -v mountpoint >/dev/null 2>&1 && command -v findmnt >/dev/null 2>&1; then
-    local esp_fstype=""
-    esp_fstype=$(findmnt -n -T "$ESP" -o FSTYPE 2>/dev/null) || esp_fstype=""
-    if mountpoint -q "$ESP" && [[ "$esp_fstype" == "vfat" ]]; then
-      pass "${ESP} mounted as vfat"
+    if esp_is_mounted_vfat; then
+      pass "$(esp_path) mounted as vfat"
     else
-      fail "${ESP} is not mounted as the FAT32 ESP (${esp_fstype:-not mounted})"
+      fail "$(esp_path) is not mounted as the FAT32 ESP"
       all_ok=false
     fi
   else
-    warn "mountpoint/findmnt unavailable; cannot verify ${ESP} mount"
+    warn "mountpoint/findmnt unavailable; cannot verify $(esp_path) mount"
   fi
 
   echo
@@ -339,7 +343,7 @@ show_status() {
     if [[ -n "$color_warnings" ]]; then
       warn "Limine 12 expects interface colors as RRGGBB values"
       while IFS= read -r line; do
-        echo -e "    ${YELLOW}!${NC} ${LIMINE_CONF}:${line}"
+        echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
       done <<< "$color_warnings"
     fi
 
@@ -349,13 +353,13 @@ show_status() {
         if [[ "$limine_v12_or_newer" == true && "$secure_boot_state" == "true" ]]; then
           fail "Limine 12 Secure Boot path-hash enforcement may block boot"
           while IFS= read -r line; do
-            echo -e "    ${RED}✗${NC} ${LIMINE_CONF}:${line}"
+            echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
           done <<< "$unhashed_paths"
           all_ok=false
         else
           warn "Limine 12 readiness: non-EFI loaded paths are missing BLAKE2B hashes"
           while IFS= read -r line; do
-            echo -e "    ${YELLOW}!${NC} ${LIMINE_CONF}:${line}"
+            echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
           done <<< "$unhashed_paths"
         fi
       else
@@ -452,9 +456,9 @@ show_status() {
       fail "Durable Windows target state is invalid or unsafe"
     fi
     all_ok=false
-  elif grep -Fq "$WINDOWS_ENTRY_MARKER" "$LIMINE_CONF" 2>/dev/null \
-    || grep -Fq "$WINDOWS_ENTRY_END_MARKER" "$LIMINE_CONF" 2>/dev/null \
-    || grep -Fq "$WINDOWS_LEGACY_ENTRY_MARKER" "$LIMINE_CONF" 2>/dev/null; then
+  elif grep -Fq "$WINDOWS_ENTRY_MARKER" "$(limine_config_path)" 2>/dev/null \
+    || grep -Fq "$WINDOWS_ENTRY_END_MARKER" "$(limine_config_path)" 2>/dev/null \
+    || grep -Fq "$WINDOWS_LEGACY_ENTRY_MARKER" "$(limine_config_path)" 2>/dev/null; then
     warn "Managed Windows entry has no durable target identity"
     all_ok=false
   else
@@ -466,7 +470,7 @@ show_status() {
   if [[ -n "$unmanaged_windows_chainloads" ]]; then
     warn "Windows EFI chainload entry may trigger BitLocker"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} ${LIMINE_CONF}:${line}"
+      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
     done <<< "$unmanaged_windows_chainloads"
     echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
     echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"

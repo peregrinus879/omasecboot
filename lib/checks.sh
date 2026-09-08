@@ -34,20 +34,14 @@ check_deps() {
 }
 
 check_esp_mount() {
-  command -v mountpoint >/dev/null 2>&1 \
-    || die "mountpoint not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
-  command -v findmnt >/dev/null 2>&1 \
-    || die "findmnt not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
-
-  [[ -d "${ESP}/EFI" ]] \
-    || die "${ESP}/EFI not found. Is the EFI partition mounted?"
-  mountpoint -q "$ESP" \
-    || die "${ESP} is not a mountpoint. Refusing to modify a stale ESP directory."
-
-  local fstype=""
-  fstype=$(findmnt -n -T "$ESP" -o FSTYPE 2>/dev/null) || fstype=""
-  [[ "$fstype" == "vfat" ]] \
-    || die "${ESP} is mounted as ${fstype:-unknown}, expected vfat/FAT32 ESP"
+  local esp
+  esp=$(esp_path)
+  { command -v mountpoint && command -v findmnt; } >/dev/null 2>&1 \
+    || die "util-linux (mountpoint, findmnt) not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
+  [[ -d "${esp}/EFI" ]] \
+    || die "${esp}/EFI not found. Is the EFI partition mounted?"
+  esp_is_mounted_vfat \
+    || die "${esp} is not mounted as the FAT32 ESP. Refusing to modify a stale directory."
 }
 
 check_efi_mode() {

@@ -124,7 +124,7 @@ durable_sync() {
   fi
 }
 
-windows_bootnext_efivars_dir() {
+efivars_path() {
   printf '%s/efivars\n' "$CASE_DIR"
 }
 
@@ -133,7 +133,7 @@ windows_validate_efivarfs_mount() {
   BOOTNEXT_MOUNT_VALIDATIONS=$((BOOTNEXT_MOUNT_VALIDATIONS + 1))
   (( BOOTNEXT_MOUNT_FAIL_AT == 0 \
     || BOOTNEXT_MOUNT_VALIDATIONS != BOOTNEXT_MOUNT_FAIL_AT )) || return 1
-  directory=$(windows_bootnext_efivars_dir) || return 1
+  directory=$(efivars_path) || return 1
   [[ -d "$directory" && ! -L "$directory" ]]
 }
 

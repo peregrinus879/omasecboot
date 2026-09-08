@@ -141,6 +141,36 @@ mode_is_control_safe() {
   (( (8#$mode & 0022) == 0 ))
 }
 
+# Readable and writable by the owner only.
+mode_is_private() {
+  local mode="$1"
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 0077) == 0 ))
+}
+
+# The ESP is mounted at its path as a FAT filesystem.
+esp_is_mounted_vfat() {
+  local esp
+  esp=$(esp_path)
+  mountpoint -q "$esp" || return 1
+  [[ $(findmnt -n -T "$esp" -o FSTYPE 2>/dev/null) == vfat ]]
+}
+
+efivars_path() {
+  printf '/sys/firmware/efi/efivars\n'
+}
+
+# The EFI variable filesystem is the exact efivarfs mount at its canonical path.
+efivarfs_mount_is_valid() {
+  local root target fstype extra
+  root=$(efivars_path) || return 1
+  path_has_no_symlink_components "$root" || return 1
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  read -r target fstype extra < <(findmnt -rn -T "$root" -o TARGET,FSTYPE 2>/dev/null) \
+    || return 1
+  [[ -z "$extra" && "$target" == "$root" && "$fstype" == efivarfs ]]
+}
+
 path_has_no_symlink_components() {
   local path="$1" resolved
   [[ "$path" =~ ^/[^[:cntrl:]]+$ ]] || return 1

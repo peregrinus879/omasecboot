@@ -44,10 +44,6 @@ enrollment_failpoint() {
   return 0
 }
 
-firmware_variables_path() {
-  printf '/sys/firmware/efi/efivars\n'
-}
-
 firmware_runtime_dir_path() {
   printf '/run/omasecboot/firmware\n'
 }
@@ -74,7 +70,7 @@ firmware_variable_filename() {
 firmware_variable_path() {
   local filename
   filename=$(firmware_variable_filename "$1") || return 1
-  printf '%s/%s\n' "$(firmware_variables_path)" "$filename"
+  printf '%s/%s\n' "$(efivars_path)" "$filename"
 }
 
 firmware_backup_path() {
@@ -89,18 +85,12 @@ firmware_plan_path() {
 }
 
 validate_efivarfs_mount() {
-  local root target fstype
-  root=$(firmware_variables_path) || return 1
-  path_has_no_symlink_components "$root" || return 1
-  [[ -d "$root" && ! -L "$root" ]] || return 1
-  read -r target fstype < <(findmnt -rn -T "$root" -o TARGET,FSTYPE 2>/dev/null) \
-    || return 1
-  [[ "$target" == "$root" && "$fstype" == efivarfs ]]
+  efivarfs_mount_is_valid
 }
 
 validate_firmware_variable_file() {
   local path="$1" root uid mode links
-  root=$(firmware_variables_path) || return 1
+  root=$(efivars_path) || return 1
   [[ "$(dirname "$path")" == "$root" ]] || return 1
   path_has_no_symlink_components "$path" || return 1
   [[ -f "$path" && ! -L "$path" ]] || return 1
@@ -140,7 +130,7 @@ ensure_firmware_backup_root() {
 
 firmware_variable_presence() {
   local name="$1" root filename matches
-  root=$(firmware_variables_path) || return 2
+  root=$(efivars_path) || return 2
   filename=$(firmware_variable_filename "$name") || return 2
   validate_efivarfs_mount || return 2
   matches=$(find "$root" -xdev -mindepth 1 -maxdepth 1 -name "$filename" \
@@ -189,8 +179,8 @@ copy_firmware_variable_snapshot() {
   parent=$(dirname "$destination")
   validate_private_control_directory "$parent" || return 1
   [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
-  first=$(umask 077; mktemp "${parent}/.${name}.first.XXXXXX") || return 1
-  second=$(umask 077; mktemp "${parent}/.${name}.second.XXXXXX") || {
+  first=$(mktemp "${parent}/.${name}.first.XXXXXX") || return 1
+  second=$(mktemp "${parent}/.${name}.second.XXXXXX") || {
     rm -f "$first"
     return 1
   }
@@ -561,7 +551,7 @@ canonicalize_esl() {
   validate_private_control_file "$input" || return 1
   parent=$(dirname "$output")
   validate_private_control_directory "$parent" || return 1
-  temporary=$(umask 077; mktemp "${parent}/.$(basename "$output").XXXXXX") || return 1
+  temporary=$(mktemp "${parent}/.$(basename "$output").XXXXXX") || return 1
   if ! canonical_esl_rows "$input" > "$temporary" \
     || ! LC_ALL=C sort -o "$temporary" "$temporary" \
     || ! chmod 600 "$temporary" \
