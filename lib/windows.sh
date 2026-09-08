@@ -11,6 +11,7 @@ readonly WINDOWS_LOADER_POSIX='/EFI/Microsoft/Boot/bootmgfw.efi'
 readonly WINDOWS_ESP_PARTTYPE='c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
 
 _windows_error=""
+_windows_inventory_raw=""
 _windows_boot_number=""
 _windows_label=""
 _windows_partuuid=""
@@ -109,6 +110,13 @@ windows_reject() {
 
 windows_report_error() {
   [[ -z "$_windows_error" ]] || fail "$_windows_error"
+}
+
+# Rejects and reports at once, for callers that do not defer the report.
+windows_fail() {
+  _windows_error="$1"
+  fail "$_windows_error"
+  return 1
 }
 
 windows_target_state_path() {
@@ -282,6 +290,7 @@ windows_parse_device_path() {
 }
 
 windows_reset_inventory() {
+  _windows_inventory_raw=""
   _windows_order=()
   unset _windows_inventory_label _windows_inventory_active
   unset _windows_inventory_exact _windows_inventory_valid
@@ -309,20 +318,11 @@ windows_reset_target() {
   _windows_reusable_mount=""
 }
 
-windows_parse_firmware_inventory() {
-  local inventory line current="" order_seen=false rest label formatted
-  local raw_number boot_number active raw_dp value
-  local boot_pattern='^Boot([0-9A-F]{4})([* ]) (.*)$'
-  local order_pattern='^([0-9A-F]{4})(,[0-9A-F]{4})*$'
-  local data_pattern='^([0-9A-Fa-f]{2})( [0-9A-Fa-f]{2})*$'
-  local diagnostics_file executable command_rc=0 diagnostics=false
-  local -a raw_order=()
-  local -A order_numbers=() dp_seen=()
-  local LC_ALL=C
-
-  _windows_error=""
-  windows_reset_target
-  windows_reset_inventory
+# Reads the raw `efibootmgr -v` inventory into _windows_inventory_raw. Any
+# diagnostics on stderr mean the inventory is incomplete, so the read fails
+# rather than parsing a subset.
+windows_read_firmware_inventory() {
+  local executable diagnostics_file inventory command_rc=0 diagnostics=false
   executable=$(windows_efibootmgr_query_path) || return 1
   [[ -x "$executable" ]] || {
     windows_reject "efibootmgr is required for Windows target discovery"
@@ -351,6 +351,73 @@ windows_parse_firmware_inventory() {
     windows_reject "EFI boot entry inventory is empty"
     return 1
   }
+  _windows_inventory_raw="$inventory"
+}
+
+# BootOrder: at most 128 distinct entries, kept in firmware order.
+windows_parse_boot_order() {
+  local value="$1" raw_number boot_number
+  local order_pattern='^([0-9A-F]{4})(,[0-9A-F]{4})*$'
+  local -a raw_order=()
+  local -A order_numbers=()
+  local LC_ALL=C
+  [[ "$value" =~ $order_pattern ]] || {
+    windows_reject "EFI BootOrder is malformed"
+    return 1
+  }
+  IFS=',' read -r -a raw_order <<< "$value"
+  (( ${#raw_order[@]} <= 128 )) || {
+    windows_reject "EFI BootOrder exceeds Limine's 128-entry limit"
+    return 1
+  }
+  for raw_number in "${raw_order[@]}"; do
+    boot_number=${raw_number^^}
+    [[ -z "${order_numbers[$boot_number]:-}" ]] || {
+      windows_reject "EFI BootOrder contains duplicate Boot${boot_number}"
+      return 1
+    }
+    order_numbers["$boot_number"]=1
+    _windows_order+=("$boot_number")
+  done
+}
+
+# Inventory records that carry no boot entry and need no parsing.
+windows_inventory_record_is_ignorable() {
+  case "$1" in
+    BootCurrent:\ [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\
+    BootNext:\ [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\
+    Timeout:\ *\ seconds|\
+    MirroredPercentageAbove4G:\ *|\
+    MirrorMemoryBelow4GB:\ true|\
+    MirrorMemoryBelow4GB:\ false|\
+    MirrorStatus:\ *|\
+    DesiredMirroredPercentageAbove4G:\ *|\
+    DesiredMirrorMemoryBelow4GB:\ true|\
+    DesiredMirrorMemoryBelow4GB:\ false|\
+    RequestMirroredPercentageAbove4G:\ *|\
+    RequestMirrorMemoryBelow4GB:\ true|\
+    RequestMirrorMemoryBelow4GB:\ false)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Parses the firmware inventory into the _windows_inventory_* tables: every
+# boot entry carries its label, active flag, and the raw device path that
+# immediately follows it, and BootOrder names only readable entries.
+windows_parse_firmware_inventory() {
+  local line current="" order_seen=false rest label formatted
+  local boot_number active raw_dp
+  local boot_pattern='^Boot([0-9A-F]{4})([* ]) (.*)$'
+  local data_pattern='^([0-9A-Fa-f]{2})( [0-9A-Fa-f]{2})*$'
+  local -A dp_seen=()
+  local LC_ALL=C
+
+  _windows_error=""
+  windows_reset_target
+  windows_reset_inventory
+  windows_read_firmware_inventory || return 1
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ -n "$current" && -z "${dp_seen[$current]:-}" \
@@ -363,34 +430,12 @@ windows_parse_firmware_inventory() {
         windows_reject "EFI inventory contains multiple BootOrder records"
         return 1
       }
-      value=${line#BootOrder: }
-      [[ "$value" =~ $order_pattern ]] || {
-        windows_reject "EFI BootOrder is malformed"
-        return 1
-      }
-      IFS=',' read -r -a raw_order <<< "$value"
-      (( ${#raw_order[@]} <= 128 )) || {
-        windows_reject "EFI BootOrder exceeds Limine's 128-entry limit"
-        return 1
-      }
-      for raw_number in "${raw_order[@]}"; do
-        boot_number=${raw_number^^}
-        [[ -z "${order_numbers[$boot_number]:-}" ]] || {
-          windows_reject "EFI BootOrder contains duplicate Boot${boot_number}"
-          return 1
-        }
-        order_numbers["$boot_number"]=1
-        _windows_order+=("$boot_number")
-      done
+      windows_parse_boot_order "${line#BootOrder: }" || return 1
       order_seen=true
       continue
     fi
 
     if [[ "$line" =~ $boot_pattern ]]; then
-      if [[ -n "$current" && -z "${dp_seen[$current]:-}" ]]; then
-        windows_reject "Boot${current} has no raw device path"
-        return 1
-      fi
       boot_number=${BASH_REMATCH[1]^^}
       active=${BASH_REMATCH[2]}
       rest=${BASH_REMATCH[3]}
@@ -447,27 +492,11 @@ windows_parse_firmware_inventory() {
       continue
     fi
 
-    case "$line" in
-      BootCurrent:\ [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\
-      BootNext:\ [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]|\
-      Timeout:\ *\ seconds|\
-      MirroredPercentageAbove4G:\ *|\
-      MirrorMemoryBelow4GB:\ true|\
-      MirrorMemoryBelow4GB:\ false|\
-      MirrorStatus:\ *|\
-      DesiredMirroredPercentageAbove4G:\ *|\
-      DesiredMirrorMemoryBelow4GB:\ true|\
-      DesiredMirrorMemoryBelow4GB:\ false|\
-      RequestMirroredPercentageAbove4G:\ *|\
-      RequestMirrorMemoryBelow4GB:\ true|\
-      RequestMirrorMemoryBelow4GB:\ false)
-        ;;
-      *)
-        windows_reject "EFI inventory contains an unsupported record"
-        return 1
-        ;;
-    esac
-  done <<< "$inventory"
+    windows_inventory_record_is_ignorable "$line" || {
+      windows_reject "EFI inventory contains an unsupported record"
+      return 1
+    }
+  done <<< "$_windows_inventory_raw"
 
   [[ "$order_seen" == true && ${#_windows_order[@]} -gt 0 ]] || {
     windows_reject "EFI BootOrder is missing or empty"
@@ -1167,6 +1196,39 @@ windows_preflight_confirm() {
   "$_windows_preflight_gum" confirm "$prompt"
 }
 
+# A declined preflight: the operator cancelled a prompt or answered no.
+windows_preflight_declined() {
+  if [[ $# -gt 0 ]]; then
+    fail "$1"
+  else
+    warn "Windows preflight declined"
+  fi
+  _windows_preflight_result=declined
+}
+
+# A preflight that reaches no conclusion authorizes no firmware instruction.
+windows_preflight_inconclusive() {
+  fail "$1"
+  _windows_preflight_result=technical-unknown
+}
+
+# Preparation guidance for one edition, or for every edition when unknown.
+windows_preflight_print_guidance() {
+  local edition="${1:-}"
+  windows_preflight_print_common_guidance
+  [[ "$edition" == Pro || "$edition" == Enterprise || "$edition" == Education ]] \
+    || windows_preflight_print_home_guidance
+  [[ "$edition" == Home ]] || windows_preflight_print_pro_guidance
+  windows_preflight_print_unknown_reasons
+}
+
+windows_preflight_choose() {
+  "$_windows_preflight_gum" choose --header "$1" "${@:2}"
+}
+
+# The read-only Windows encryption gate: collects the firmware, BitLocker, and
+# loader signals, then requires the edition, management, and preparation
+# acknowledgments whenever any signal is present or unknown.
 windows_encryption_gate() {
   local collection_rc=0 edition management
   windows_collect_encryption_preflight || collection_rc=$?
@@ -1177,15 +1239,11 @@ windows_encryption_gate() {
       return "$collection_rc"
       ;;
     *)
-      windows_preflight_mark_unknown loader \
-        "Windows preflight collection failed safely"
+      windows_preflight_mark_unknown loader "Windows preflight collection failed safely"
       windows_preflight_print_summary
-      windows_preflight_print_common_guidance
-      windows_preflight_print_home_guidance
-      windows_preflight_print_pro_guidance
-      windows_preflight_print_unknown_reasons
-      fail "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
-      _windows_preflight_result=technical-unknown
+      windows_preflight_print_guidance
+      windows_preflight_inconclusive \
+        "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
       return 2
       ;;
   esac
@@ -1202,86 +1260,69 @@ windows_encryption_gate() {
   fi
 
   if ! _windows_preflight_gum=$(windows_preflight_gum_path); then
-    windows_preflight_print_common_guidance
-    windows_preflight_print_home_guidance
-    windows_preflight_print_pro_guidance
-    windows_preflight_print_unknown_reasons
-    fail "gum is required to collect edition, management, and preparation acknowledgments"
-    _windows_preflight_result=technical-unknown
+    windows_preflight_print_guidance
+    windows_preflight_inconclusive \
+      "gum is required to collect edition, management, and preparation acknowledgments"
     return 2
   fi
-  edition=$("$_windows_preflight_gum" choose --header "Windows edition" \
-    Home Pro Enterprise Education) || {
-    warn "Windows preflight declined"
-    _windows_preflight_result=declined
+  edition=$(windows_preflight_choose "Windows edition" Home Pro Enterprise Education) || {
+    windows_preflight_declined
     return 1
   }
   case "$edition" in
     Home|Pro|Enterprise|Education) ;;
     *)
-      fail "Windows edition selection was not recognized"
-      _windows_preflight_result=technical-unknown
+      windows_preflight_inconclusive "Windows edition selection was not recognized"
       return 2
       ;;
   esac
-  management=$("$_windows_preflight_gum" choose --header "Windows management" \
+  management=$(windows_preflight_choose "Windows management" \
     "Personal device" "Managed by an organization") || {
-    warn "Windows preflight declined"
-    _windows_preflight_result=declined
+    windows_preflight_declined
     return 1
   }
   case "$management" in
     "Personal device"|"Managed by an organization") ;;
     *)
-      fail "Windows management selection was not recognized"
-      _windows_preflight_result=technical-unknown
+      windows_preflight_inconclusive "Windows management selection was not recognized"
       return 2
       ;;
   esac
 
-  windows_preflight_print_common_guidance
-  if [[ "$edition" == Home ]]; then
-    windows_preflight_print_home_guidance
-  else
-    windows_preflight_print_pro_guidance
-  fi
-  windows_preflight_print_unknown_reasons
+  windows_preflight_print_guidance "$edition"
   if [[ "$management" == "Managed by an organization" ]]; then
     warn "Organization-managed devices require administrator approval before firmware keys are replaced"
-    if ! windows_preflight_confirm \
-      "Has the organization's administrator approved replacing the firmware Secure Boot keys?"; then
-      fail "Administrator approval is required for a managed Windows device"
-      _windows_preflight_result=declined
+    windows_preflight_confirm \
+      "Has the organization's administrator approved replacing the firmware Secure Boot keys?" || {
+      windows_preflight_declined "Administrator approval is required for a managed Windows device"
       return 1
-    fi
+    }
   fi
-  if ! windows_preflight_confirm \
-    "Have you checked Windows encryption state and backed up every available recovery key?"; then
-    fail "Windows encryption-state review and recovery-key preparation are required"
-    _windows_preflight_result=declined
+  windows_preflight_confirm \
+    "Have you checked Windows encryption state and backed up every available recovery key?" || {
+    windows_preflight_declined "Windows encryption-state review and recovery-key preparation are required"
     return 1
-  fi
+  }
   if [[ "$_windows_preflight_bitlocker_state" != absent ]]; then
     if [[ "$edition" == Home ]]; then
-      if ! windows_preflight_confirm \
-        "Is Device Encryption off with decryption fully complete?"; then
-        fail "Windows Home must finish Device Encryption decryption"
-        _windows_preflight_result=declined
+      windows_preflight_confirm "Is Device Encryption off with decryption fully complete?" || {
+        windows_preflight_declined "Windows Home must finish Device Encryption decryption"
         return 1
-      fi
-    elif ! windows_preflight_confirm \
-      "Is BitLocker protection suspended on every protected Windows volume?"; then
-      fail "BitLocker protection must be suspended before Secure Boot changes"
-      _windows_preflight_result=declined
-      return 1
+      }
+    else
+      windows_preflight_confirm \
+        "Is BitLocker protection suspended on every protected Windows volume?" || {
+        windows_preflight_declined "BitLocker protection must be suspended before Secure Boot changes"
+        return 1
+      }
     fi
   fi
 
   if [[ "$_windows_preflight_firmware_state" == unknown \
     || "$_windows_preflight_bitlocker_state" == unknown \
     || "$_windows_preflight_loader_state" == unknown ]]; then
-    fail "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
-    _windows_preflight_result=technical-unknown
+    windows_preflight_inconclusive \
+      "Windows preflight remains technically inconclusive; no firmware instruction is authorized"
     return 2
   fi
   pass "Windows encryption preparation acknowledged"
@@ -1530,6 +1571,28 @@ capture_windows_bootnext_variable_evidence() {
   }'
 }
 
+# The plan for a root that never published its BootNext record: nothing was
+# written, so nothing is restored.
+windows_recovery_unpublished_plan_json() {
+  local recovery_boot_id="$1"
+  jq -cn --arg recovery_boot_id "$recovery_boot_id" \
+    --argjson root_incident "$_recovery_root_reference" '{
+      action: "none",
+      bootnext_record: null,
+      observed: null,
+      planned_outcome: "not-published",
+      prior: null,
+      recovery_boot_id: $recovery_boot_id,
+      relation: null,
+      root_boot_id: null,
+      root_incident: $root_incident,
+      target: null,
+      tool: null,
+      variable: null,
+      write_frontier: "not-published"
+    }'
+}
+
 load_windows_recovery_context() {
   local root_id reference path record root_boot_id recovery_boot_id relation prior observed
   local target action outcome write_frontier tool=null variable=null current_hash
@@ -1552,23 +1615,8 @@ load_windows_recovery_context() {
     || return 1
   recovery_boot_id=$(boot_id_value) || return 1
   if [[ "$reference" == null ]]; then
-    _windows_recovery_plan_json=$(jq -cn \
-      --arg recovery_boot_id "$recovery_boot_id" \
-      --argjson root_incident "$_recovery_root_reference" '{
-        action: "none",
-        bootnext_record: null,
-        observed: null,
-        planned_outcome: "not-published",
-        prior: null,
-        recovery_boot_id: $recovery_boot_id,
-        relation: null,
-        root_boot_id: null,
-        root_incident: $root_incident,
-        target: null,
-        tool: null,
-        variable: null,
-        write_frontier: "not-published"
-      }') || return 1
+    _windows_recovery_plan_json=$(windows_recovery_unpublished_plan_json "$recovery_boot_id") \
+      || return 1
     return 0
   fi
 
@@ -1591,20 +1639,17 @@ load_windows_recovery_context() {
     write_frontier=not-reached
   fi
   observed=$(read_windows_bootnext_state) || {
-    windows_reject "BootNext is unreadable during Windows recovery classification"
-    windows_report_error
+    windows_fail "BootNext is unreadable during Windows recovery classification"
     return 1
   }
   if [[ "$write_frontier" == not-reached ]]; then
     jq -e --argjson prior "$prior" '. == $prior' <<< "$observed" >/dev/null || {
-      windows_reject "BootNext changed after a root transaction that never reached its write phase"
-      windows_report_error
+      windows_fail "BootNext changed after a root transaction that never reached its write phase"
       return 1
     }
     action=none
     outcome="prior-unchanged"
-  elif [[ "$relation" == later-boot \
-    ]] && json_is '.present == false' "$observed"; then
+  elif [[ "$relation" == later-boot ]] && json_is '.present == false' "$observed"; then
     action=none
     outcome=consumed-unknown
   elif jq -e --argjson prior "$prior" '. == $prior' <<< "$observed" >/dev/null; then
@@ -1626,8 +1671,7 @@ load_windows_recovery_context() {
       jq -e --arg hash "$current_hash" '.efibootmgr.executable_sha256 == $hash' \
         <<< "$record" >/dev/null || {
           close_windows_efibootmgr_boundary
-          windows_reject "The recorded efibootmgr executable is no longer available"
-          windows_report_error
+          windows_fail "The recorded efibootmgr executable is no longer available"
           return 1
         }
       tool=$(jq -c '.efibootmgr' <<< "$record") || {
@@ -1644,8 +1688,7 @@ load_windows_recovery_context() {
         <<< "$second_state" >/dev/null || return 1
     fi
   else
-    windows_reject "BootNext no longer matches the recorded prior state or Windows target"
-    windows_report_error
+    windows_fail "BootNext no longer matches the recorded prior state or Windows target"
     return 1
   fi
   _windows_recovery_plan_json=$(jq -cn \
@@ -1753,14 +1796,12 @@ execute_windows_recovery_action() {
   esac
   [[ $rc -eq 0 ]] || return "$rc"
   current_state=$(read_windows_bootnext_state) || {
-    windows_reject "BootNext recovery readback is unreadable"
-    windows_report_error
+    windows_fail "BootNext recovery readback is unreadable"
     return 1
   }
   jq -e --argjson expected "$(jq -c '.prior' <<< "$_windows_recovery_record_json")" \
     '. == $expected' <<< "$current_state" >/dev/null || {
-      windows_reject "BootNext recovery readback does not match the recorded prior state"
-      windows_report_error
+      windows_fail "BootNext recovery readback does not match the recorded prior state"
       return 1
     }
 }
@@ -1769,14 +1810,12 @@ execute_windows_recovery_action() {
 windows_recovery_state_is_observed() {
   local current_state
   current_state=$(read_windows_bootnext_state) || {
-    windows_reject "BootNext became unreadable before Windows recovery mutation"
-    windows_report_error
+    windows_fail "BootNext became unreadable before Windows recovery mutation"
     return 1
   }
   jq -e --argjson expected "$(jq -c '.observed' <<< "$_windows_recovery_record_json")" \
     '. == $expected' <<< "$current_state" >/dev/null || {
-    windows_reject "BootNext changed after Windows recovery evidence was recorded"
-    windows_report_error
+    windows_fail "BootNext changed after Windows recovery evidence was recorded"
     return 1
   }
 }
@@ -1815,8 +1854,7 @@ persist_windows_recovery_proof() {
     final_state=null
   else
     final_state=$(read_windows_bootnext_state) || {
-      windows_reject "BootNext proof readback is unreadable"
-      windows_report_error
+      windows_fail "BootNext proof readback is unreadable"
       return 1
     }
   fi
@@ -2366,7 +2404,7 @@ configure_windows_handoff() {
 
   transaction_phase_start "configure-windows-entry" || return 1
   update_windows_boot_entry "$_windows_label" || return 1
-  _repair_config_checksum=$(current_limine_config_checksum) || return 1
+  artifact_repair_refresh_config_checksum || return 1
   transaction_phase_complete "configure-windows-entry" || return 1
 
   repair_boot_artifacts || return 1
@@ -2447,7 +2485,7 @@ suppress_stale_windows_entry_body() {
   [[ "$(sha256_file "$state_file")" == "$state_hash" ]] || return 1
   windows_require_unsafe_target || return 1
   windows_rewrite_managed_block remove "$label" || return 1
-  _repair_config_checksum=$(current_limine_config_checksum) || return 1
+  artifact_repair_refresh_config_checksum || return 1
   transaction_phase_complete "suppress-windows-entry" || return 1
 
   repair_boot_artifacts || return 1

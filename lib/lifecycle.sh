@@ -276,6 +276,8 @@ transaction_locks_are_held() {
   [[ "$_transaction_active" == true ]] && boot_locks_are_held
 }
 
+# Ends the active transaction window and drops the environment handoff; the
+# identity fields stay readable until detach_transaction_context clears them.
 end_transaction_context() {
   _transaction_active=false
   unset OMASECBOOT_TRANSACTION_ID OMASECBOOT_TRANSACTION_TOKEN
@@ -3501,6 +3503,7 @@ set_transaction_context() {
   _transaction_target_state=$(jq -r '.target_state' <<< "$_manifest_json") || return 1
 }
 
+# Clears the transaction identity after its active window has ended.
 detach_transaction_context() {
   _transaction_active=false
   _transaction_id=""

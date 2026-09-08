@@ -1413,10 +1413,16 @@ artifact_environment_preflight() {
   }
 }
 
+# The config checksum the repair phases enroll and prove. A mutation that
+# rewrites limine.conf between preflight and repair refreshes it.
+artifact_repair_refresh_config_checksum() {
+  _repair_config_checksum=$(current_limine_config_checksum)
+}
+
 artifact_repair_preflight() {
   local file primary_found=false fallback_found=false
   artifact_environment_preflight || return 1
-  _repair_config_checksum=$(current_limine_config_checksum) || return 1
+  artifact_repair_refresh_config_checksum || return 1
   for file in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
     read_limine_embedded_checksum "$file" >/dev/null || {
       fail "Could not find one valid Limine config checksum slot in ${file}"

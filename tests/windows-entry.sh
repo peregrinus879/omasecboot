@@ -242,9 +242,13 @@ current_limine_config_checksum() {
   sha256_file "$CONFIG_FILE"
 }
 
+artifact_repair_refresh_config_checksum() {
+  _repair_config_checksum=$(current_limine_config_checksum)
+}
+
 artifact_repair_preflight() {
   [[ "$PREFLIGHT_FAIL" == false ]] || return 1
-  _repair_config_checksum=$(current_limine_config_checksum) || return 1
+  artifact_repair_refresh_config_checksum || return 1
   PREFLIGHT_CONFIG_CHECKSUM="$_repair_config_checksum"
 }
 
