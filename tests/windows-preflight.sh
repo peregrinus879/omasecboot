@@ -17,6 +17,8 @@ VFAT_DEVICES="${TEST_DIR}/vfat-devices"
 BLKID_UNKNOWN_DEVICES="${TEST_DIR}/blkid-unknown-devices"
 LOADER_DEVICES="${TEST_DIR}/loader-devices"
 BAD_LOADER_DEVICES="${TEST_DIR}/bad-loader-devices"
+UNREADABLE_DEVICES="${TEST_DIR}/unreadable-devices"
+LOOKUP_UNKNOWN_SUFFIX=""
 MOUNT_FAIL_DEVICES="${TEST_DIR}/mount-fail-devices"
 MOUNT_SIGNAL_DEVICES="${TEST_DIR}/mount-signal-devices"
 LOADER_SOURCE="${TEST_DIR}/bootmgfw.efi"
@@ -224,6 +226,19 @@ windows_block_device_matches() {
   /usr/bin/grep -Fxq "${path}"$'\t'"${maj}" "$DEVICE_MAP"
 }
 
+windows_preflight_device_reads() {
+  ! /usr/bin/grep -Fxq "$1" "$UNREADABLE_DEVICES"
+}
+
+eval "original_$(declare -f windows_path_lookup_state)"
+windows_path_lookup_state() {
+  if [[ -n "$LOOKUP_UNKNOWN_SUFFIX" && "$1" == *"$LOOKUP_UNKNOWN_SUFFIX" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  original_windows_path_lookup_state "$1"
+}
+
 windows_preflight_gum_path() {
   [[ "$GUM_AVAILABLE" == true ]] || return 1
   printf '%s/gum\n' "$BIN_DIR"
@@ -364,6 +379,8 @@ reset_case() {
   : > "$BLKID_UNKNOWN_DEVICES"
   : > "$LOADER_DEVICES"
   : > "$BAD_LOADER_DEVICES"
+  : > "$UNREADABLE_DEVICES"
+  LOOKUP_UNKNOWN_SUFFIX=""
   : > "$MOUNT_FAIL_DEVICES"
   : > "$MOUNT_SIGNAL_DEVICES"
   : > "$CALL_LOG"
@@ -492,6 +509,37 @@ run_gate "$case_output"
   || fail_test "unsafe loader did not leave a technical blocker"
 /usr/bin/grep -Fq 'failed safely on ESP /dev/linux-esp' "$case_output" \
   || fail_test "unsafe loader omitted its device-specific blocker"
+assert_no_runtime_artifacts
+
+# A probe that cannot open its device is not a negative observation.
+reset_case
+printf '/dev/windows-os\n' > "$UNREADABLE_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+  || fail_test "unreadable Windows volume passed as a BitLocker negative"
+/usr/bin/grep -Fq 'BitLocker signature probing is inconclusive for /dev/windows-os' \
+  "$case_output" || fail_test "unreadable volume omitted its device-specific blocker"
+
+reset_case
+printf '/dev/linux-esp\n' > "$UNREADABLE_DEVICES"
+: > "$VFAT_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+  || fail_test "unreadable ESP passed as a negative"
+/usr/bin/grep -Fq 'BitLocker signature probing is inconclusive for /dev/linux-esp' \
+  "$case_output" || fail_test "unreadable ESP omitted its BitLocker blocker"
+/usr/bin/grep -Fq 'FAT signature probing is inconclusive for ESP /dev/linux-esp' \
+  "$case_output" || fail_test "unreadable ESP omitted its FAT blocker"
+
+# A loader path whose lookup fails for any reason other than absence stays
+# unknown.
+reset_case
+LOOKUP_UNKNOWN_SUFFIX=$WINDOWS_LOADER_POSIX
+run_gate "$case_output"
+[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+  || fail_test "unobservable loader path passed as a loader negative"
+/usr/bin/grep -Fq 'failed safely on ESP /dev/linux-esp' "$case_output" \
+  || fail_test "unobservable loader omitted its device-specific blocker"
 assert_no_runtime_artifacts
 
 reset_case

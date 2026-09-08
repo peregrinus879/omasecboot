@@ -905,17 +905,47 @@ windows_preflight_detect_firmware() {
   done
 }
 
+# blkid reports a missing signature and an unopenable device alike as status
+# 2, so a negative counts only when the device itself reads.
+windows_preflight_device_reads() {
+  local path="$1"
+  [[ ! -L "$path" && -b "$path" ]] || return 1
+  dd if="$path" bs=4096 count=1 of=/dev/null status=none \
+    iflag=fullblock,noatime 2>/dev/null
+}
+
+# 0: the device carries the expected signature; 2: it reads and carries none;
+# 1: the observation failed, so the device stays unknown.
 windows_preflight_probe_type() {
-  local path="$1" expected="$2" output rc=0
+  local path="$1" expected="$2" output errors_file errors rc=0
+  errors_file=$(mktemp "${TMPDIR:-/tmp}/omasecboot-blkid.XXXXXX" 2>/dev/null) \
+    || return 1
   output=$(LC_ALL=C blkid --probe --match-types "$expected" \
-    --output value --match-tag TYPE -- "$path" 2>/dev/null) || rc=$?
+    --output value --match-tag TYPE -- "$path" 2>"$errors_file") || rc=$?
+  errors=$(<"$errors_file")
+  rm -f "$errors_file"
   if [[ $rc -eq 0 && "$output" == "$expected" ]]; then
     return 0
   fi
-  if [[ $rc -eq 2 && -z "$output" ]]; then
+  if [[ $rc -eq 2 && -z "$output" && -z "$errors" ]] \
+    && windows_preflight_device_reads "$path"; then
     return 2
   fi
   return 1
+}
+
+# present, absent, or unknown for one pathname: only a missing path component
+# means absent; any other lookup failure stays unknown.
+windows_path_lookup_state() {
+  local path="$1" errors
+  if errors=$(LC_ALL=C stat -c %F -- "$path" 2>&1 >/dev/null); then
+    printf 'present\n'
+    return 0
+  fi
+  case "$errors" in
+    *'No such file or directory'*|*'Not a directory'*) printf 'absent\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
 }
 
 windows_preflight_device_is_external() {
@@ -1039,12 +1069,17 @@ windows_preflight_mount_path() {
     "$(windows_runtime_dir_path)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
 }
 
-# 0: a Microsoft loader is present on the mounted ESP; 2: none; 1: unsafe.
+# 0: a Microsoft loader is present on the mounted ESP; 2: none; 1: unsafe or
+# unobservable.
 windows_preflight_inspect_loader() {
-  local mount_path="$1" loader
+  local mount_path="$1" loader state
   loader="${mount_path}${WINDOWS_LOADER_POSIX}"
-  [[ -e "$loader" || -L "$loader" ]] || return 2
-  windows_verify_loader_file "$mount_path"
+  state=$(windows_path_lookup_state "$loader") || return 1
+  case "$state" in
+    absent) return 2 ;;
+    present) windows_verify_loader_file "$mount_path" ;;
+    *) return 1 ;;
+  esac
 }
 
 windows_preflight_scan_esps() {
