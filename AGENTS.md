@@ -102,8 +102,7 @@ One name per concept, in code, tests, and documentation:
 ## Post-Change Verification
 
 - Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, git, and make. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
-- Run `bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh` and `shellcheck -x` over the same files.
-- Parse `omarchy/omarchy-menu.jsonc` with `jq` after menu changes.
+- Run `make lint` after any change: one `bash -n` per script, `shellcheck -x` over all of them, and the menu fragment parsed with `jq`.
 
 ## Conventions
 

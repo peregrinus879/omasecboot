@@ -22,17 +22,13 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Install tools
-        run: pacman -Syu --noconfirm --needed git jq shellcheck
+        run: pacman -Syu --noconfirm --needed git jq make shellcheck
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Bash syntax
-        run: bash -n bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh
-      - name: ShellCheck
-        run: shellcheck -x bin/omasecboot lib/*.sh limine-hooks/* tests/*.sh tests/lib/*.sh
-      - name: Menu fragment parses
-        run: jq empty omarchy/omarchy-menu.jsonc
+      - name: Syntax, ShellCheck, and menu JSONC
+        run: make lint
 
   hermetic:
     name: Hermetic suite (${{ matrix.suite }})

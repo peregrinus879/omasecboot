@@ -14,8 +14,10 @@ LIMINEPOSTHOOKDIR = /etc/boot/hooks/post.d
 PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
                00-omasecboot-transition-guard.hook \
                zzz-omasecboot.hook
+SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) $(wildcard limine-hooks/*) \
+          $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
 
-.PHONY: install uninstall package test
+.PHONY: install uninstall package lint test
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -70,6 +72,12 @@ package:
 	  LOGDEST="$$build" BUILDDIR="$$build/build" \
 	  makepkg --config "$$build/makepkg.conf" --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
 	echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
+
+# bash -n parses only its first operand, so every script gets its own call.
+lint:
+	@for script in $(SCRIPTS); do bash -n "$$script" || exit 1; done
+	shellcheck -x $(SCRIPTS)
+	jq empty omarchy/omarchy-menu.jsonc
 
 test:
 	bash tests/lifecycle.sh
