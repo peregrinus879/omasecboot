@@ -2414,12 +2414,13 @@ transaction_backup_file() {
     return 1
   }
   if ! write_transaction_manifest_json "$document"; then
+    # The copy goes only when a successful re-read proves the manifest never
+    # took the reference; an unreadable manifest keeps the evidence.
     if read_transaction_manifest "$_transaction_id" \
-      && jq -e --arg path "$backup_path" \
+      && ! jq -e --arg path "$backup_path" \
         '.backups[] | select(.path == $path)' <<< "$_manifest_json" >/dev/null; then
-      return 1
+      rm -f "$backup_path"
     fi
-    rm -f "$backup_path"
     return 1
   fi
 }

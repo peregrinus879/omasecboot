@@ -164,6 +164,16 @@ manifest_sync_failure_transaction() {
   transaction_backup_file "$ABSENT_FILE" true
 }
 
+# The second backup's manifest write fails after the rename, so the manifest on
+# disk references a copy whose publication was uncertain.
+manifest_read_failure_transaction() {
+  transaction_phase_start "backup-files"
+  transaction_backup_file "$PRESENT_FILE"
+  printf 'changed before manifest publication\n' > "$PRESENT_FILE"
+  arm_sync_failure "$(dirname "$(lifecycle_manifest_path "$_transaction_id")")"
+  transaction_backup_file "$SECOND_FILE"
+}
+
 recovery_sync_failure_transaction() {
   transaction_phase_start "recovery-sync" || return 1
   arm_sync_failure "$(state_dir_path)"
@@ -465,7 +475,8 @@ file_fixture_dir="${TEST_DIR}/files"
 mkdir -m 755 "$file_fixture_dir"
 PRESENT_FILE="${file_fixture_dir}/present"
 ABSENT_FILE="${file_fixture_dir}/absent"
-export PRESENT_FILE ABSENT_FILE
+SECOND_FILE="${file_fixture_dir}/second"
+export PRESENT_FILE ABSENT_FILE SECOND_FILE
 printf 'original\n' > "$PRESENT_FILE"
 if run_lifecycle_transaction "file-rollback" "active" "active" \
   failed_file_transaction; then
@@ -652,6 +663,48 @@ jq -e '.status == "failed" and .rollback.status == "completed" and
   ([.backups[] | select(.target != null)] | length) == 2' \
   "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
   || fail_test "published backup was deleted after ambiguous manifest write"
+
+# When the confirming read after an uncertain manifest write also fails, the
+# copy stays: only a successful re-read proving it unreferenced may delete it.
+reset_state
+printf 'original\n' > "$PRESENT_FILE"
+printf 'second original\n' > "$SECOND_FILE"
+adopt_lifecycle : "no" "no" "yes" "yes" \
+  "absent" "absent" "absent" "absent" \
+  || fail_test "manifest-read fixture adoption failed"
+read_manifest_definition=$(declare -f read_transaction_manifest)
+eval "original_${read_manifest_definition}"
+READ_FAIL_ARMED=true
+read_transaction_manifest() {
+  if [[ "$READ_FAIL_ARMED" == true && -e "$SYNC_FAIL_MARKER" ]]; then
+    READ_FAIL_ARMED=false
+    return 1
+  fi
+  original_read_transaction_manifest "$@"
+}
+if run_lifecycle_transaction "manifest-read-failure" "active" "active" \
+  manifest_read_failure_transaction; then
+  fail_test "manifest write with a failed confirming read reported success"
+fi
+eval "$read_manifest_definition"
+unset -f original_read_transaction_manifest
+SYNC_FAIL_PATH=""
+rm -f "$SYNC_FAIL_MARKER"
+[[ "$READ_FAIL_ARMED" == false ]] || fail_test "the confirming read was never exercised"
+read_lifecycle || fail_test "manifest-read failure left the lifecycle unreadable"
+[[ "$_lifecycle_state" == recovery-required ]] \
+  || fail_test "manifest-read failure did not require recovery"
+read_failure_manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+[[ -e "$(dirname "$read_failure_manifest")/file-2.backup" ]] \
+  || fail_test "uncertain manifest write deleted a backup the manifest references"
+jq -e '.status == "failed" and .rollback.status == "completed" and
+  ([.backups[] | select(.kind == "file")] | length) == 2' \
+  "$read_failure_manifest" >/dev/null \
+  || fail_test "manifest with a kept backup did not validate and roll back"
+grep -Fxq original "$PRESENT_FILE" \
+  || fail_test "rollback with a kept backup did not restore the first file"
+grep -Fxq 'second original' "$SECOND_FILE" \
+  || fail_test "rollback with a kept backup changed the second file"
 
 reset_state
 arm_sync_failure "$(transactions_dir_path)"
