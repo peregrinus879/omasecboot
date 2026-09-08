@@ -32,14 +32,16 @@ Naming boundary: `OmaSecBoot` is the product name; `omasecboot` is the sole user
 The dispatcher sources the modules in this order and each owns one concern:
 
 - `common.sh` - constants, output helpers, quiet mode, control-file validation, both locks, the pacman helpers, `json_is`, the ESP and efivarfs predicates
-- `lifecycle.sh` - versioned state, transaction manifests, incident seals, recovery context, stale reconciliation, software recovery, the lifecycle status display
+- `lifecycle.sh` - versioned state, transaction manifests, incident seals, recovery context, stale reconciliation
+- `records.sh` - domain record schemas, references, validators, and the once-only record persister
+- `software.sh` - software recovery for restore-policy roots
 - `checks.sh` - root, dependency, EFI mode, ESP mount, and gum checks; the lifecycle activation environment
 - `discover.sh` - EFI artifact discovery, sbctl configuration and tracked-file discovery
 - `sign.sh` - Limine settings, config-checksum enrollment, signing and tracking, artifact proof, unconfiguration and its recovery
 - `producers.sh` - producer admission, leases, the fixed reconstruction and recovery registry, the pacman and Limine hook entry points
 - `enroll.sh` - firmware backup, trust plan, setup-state classification, guarded enrollment, firmware recovery
 - `windows.sh` - Windows target proof, encryption preflight, the managed `limine.conf` block, BootNext mutation, Windows recovery
-- `status.sh` - the `status` display
+- `status.sh` - the `status` display, including the lifecycle line
 
 ## Dependencies
 

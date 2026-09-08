@@ -34,6 +34,10 @@ source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/lifecycle.sh"
 # shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/records.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/software.sh"
+# shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/discover.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/sign.sh"

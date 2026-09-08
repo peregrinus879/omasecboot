@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154 # Lifecycle globals come from the sourced lifecycle module.
 # OmaSecBoot: status display and file verification
 
 list_limine_unhashed_paths() {
@@ -158,6 +159,43 @@ list_windows_firmware_entries() {
 list_omarchy_direct_boot_entries() {
   command -v efibootmgr >/dev/null 2>&1 || return 0
   efibootmgr -v 2>/dev/null | grep -Ei '^Boot[0-9A-Fa-f]+\*?[[:space:]]+Omarchy.*\\EFI\\Linux\\omarchy.*\.efi' || true
+}
+
+show_lifecycle_status() {
+  if ! read_lifecycle; then
+    fail "Lifecycle state is invalid or unsafe"
+    return 1
+  fi
+  case "$_lifecycle_state" in
+    unmanaged)
+      warn "Lifecycle: unmanaged (explicit setup or adoption required)"
+      return 1
+      ;;
+    disabled) pass "Lifecycle: disabled" ;;
+    active) pass "Lifecycle: active" ;;
+    transition)
+      if [[ "$EUID" == "$(control_owner_uid)" ]]; then
+        if ! read_transaction_manifest "$_lifecycle_transaction_id"; then
+          fail "Lifecycle: recovery-required (invalid transaction ${_lifecycle_transaction_id})"
+          return 1
+        fi
+        if ! manifest_owner_is_alive; then
+          fail "Lifecycle: recovery-required (stale transaction ${_lifecycle_transaction_id})"
+          return 1
+        fi
+      fi
+      warn "Lifecycle: transition (${_lifecycle_transaction_id})"
+      return 1
+      ;;
+    recovery-required)
+      fail "Lifecycle: recovery-required (${_lifecycle_transaction_id})"
+      return 1
+      ;;
+    *)
+      fail "Lifecycle: unsupported state"
+      return 1
+      ;;
+  esac
 }
 
 show_status() {

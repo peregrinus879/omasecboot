@@ -119,7 +119,7 @@ for hook in "$limine_pre_hook" "$limine_post_hook"; do
 done
 
 [[ -d "$canonical_lib" ]] || fail "canonical library path is missing"
-for lib in common lifecycle checks discover sign producers enroll windows status; do
+for lib in common lifecycle records software checks discover sign producers enroll windows status; do
   [[ -f "${canonical_lib}/${lib}.sh" \
     && $(stat -Lc '%a' "${canonical_lib}/${lib}.sh") == 644 ]] \
     || fail "library module missing or wrong mode: ${lib}.sh"

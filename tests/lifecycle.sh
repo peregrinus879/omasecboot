@@ -19,6 +19,12 @@ fail_test() {
 source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/lifecycle.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/records.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/software.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/status.sh"
 
 # Test convenience: a lifecycle transaction without a preflight step.
 run_lifecycle_transaction() {

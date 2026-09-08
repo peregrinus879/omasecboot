@@ -15,6 +15,12 @@ readonly STATE_DIR="/var/lib/omasecboot"
 # Must match BOOT_PARTITION_LOCK in limine-entry-tool and limine-snapper-sync,
 # which own this mutex.
 readonly LIMINE_LOCK_FILE="/run/lock/boot-partition.lock"
+# shellcheck disable=SC2034 # Used by sourced lib files.
+readonly WINDOWS_EFIBOOTMGR_MINIMUM_VERSION=18
+# shellcheck disable=SC2034 # Used by sourced lib files.
+readonly WINDOWS_EFIBOOTMGR_EXECUTABLE="/usr/bin/efibootmgr"
+# shellcheck disable=SC2034 # Used by sourced lib files.
+readonly WINDOWS_BOOTNEXT_LOADER_PATH='\EFI\Microsoft\Boot\bootmgfw.efi'
 
 # --- Colors ------------------------------------------------------------------
 
@@ -158,6 +164,11 @@ esp_is_mounted_vfat() {
 
 efivars_path() {
   printf '/sys/firmware/efi/efivars\n'
+}
+
+windows_bootnext_variable_path() {
+  printf '%s/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' \
+    "$(efivars_path)"
 }
 
 # The EFI variable filesystem is the exact efivarfs mount at its canonical path.

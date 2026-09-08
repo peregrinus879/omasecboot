@@ -20,6 +20,10 @@ fail_test() {
 source "${ROOT_DIR}/lib/common.sh"
 # shellcheck source=../lib/lifecycle.sh
 source "${ROOT_DIR}/lib/lifecycle.sh"
+# shellcheck source=../lib/records.sh
+source "${ROOT_DIR}/lib/records.sh"
+# shellcheck source=../lib/software.sh
+source "${ROOT_DIR}/lib/software.sh"
 # shellcheck source=../lib/discover.sh
 source "${ROOT_DIR}/lib/discover.sh"
 # shellcheck source=../lib/sign.sh

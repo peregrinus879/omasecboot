@@ -842,6 +842,7 @@ done
 
 if /usr/bin/grep -RE 'efibootmgr[[:space:]].*(-n|--bootnext|-o|--bootorder|-B|--delete-bootnum|-c|--create)' \
   "${ROOT_DIR}/bin" "${ROOT_DIR}/lib/common.sh" "${ROOT_DIR}/lib/lifecycle.sh" \
+  "${ROOT_DIR}/lib/records.sh" "${ROOT_DIR}/lib/software.sh" \
   "${ROOT_DIR}/lib/checks.sh" "${ROOT_DIR}/lib/discover.sh" "${ROOT_DIR}/lib/sign.sh" \
   "${ROOT_DIR}/lib/enroll.sh" "${ROOT_DIR}/lib/producers.sh" \
   "${ROOT_DIR}/lib/status.sh" >/dev/null; then

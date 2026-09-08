@@ -157,7 +157,9 @@ usr/lib/omasecboot/discover.sh
 usr/lib/omasecboot/enroll.sh
 usr/lib/omasecboot/lifecycle.sh
 usr/lib/omasecboot/producers.sh
+usr/lib/omasecboot/records.sh
 usr/lib/omasecboot/sign.sh
+usr/lib/omasecboot/software.sh
 usr/lib/omasecboot/status.sh
 usr/lib/omasecboot/windows.sh
 usr/lib/tmpfiles.d/
@@ -220,7 +222,7 @@ grep -rFq "$BUILD_DIR" "${extract}/usr" "${extract}/etc" \
   && fail_test "the build directory leaked into an installed file"
 cmp -s "${extract}/usr/bin/omasecboot" "${ROOT_DIR}/bin/omasecboot" \
   || fail_test "packaged command differs from the source command"
-for lib in common lifecycle checks discover sign producers enroll windows status; do
+for lib in common lifecycle records software checks discover sign producers enroll windows status; do
   cmp -s "${extract}/usr/lib/omasecboot/${lib}.sh" "${ROOT_DIR}/lib/${lib}.sh" \
     || fail_test "packaged library differs from the source: ${lib}.sh"
 done

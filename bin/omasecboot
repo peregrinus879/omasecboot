@@ -14,7 +14,7 @@ LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
 # shellcheck disable=SC2034
 OMASECBOOT_COMMAND_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 
-for lib in common lifecycle checks discover sign producers enroll windows status; do
+for lib in common lifecycle records software checks discover sign producers enroll windows status; do
   # shellcheck source=/dev/null
   source "${LIB_DIR}/${lib}.sh"
 done
