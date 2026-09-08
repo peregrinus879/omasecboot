@@ -24,6 +24,21 @@ limine_config_path() { printf '%s\n' "$CONFIG_FILE"; }
 esp_path() { printf '%s\n' "$ESP_DIR"; }
 windows_target_state_path() { printf '%s\n' "$STATE_FILE"; }
 control_owner_uid() { id -u; }
+HOOK_DIR="${TEST_DIR}/hooks"
+STALE_DIR="${TEST_DIR}/stale"
+HOOK_INVALID=""
+mkdir -p "$HOOK_DIR"
+activation_hook_path() { printf '%s/%s\n' "$HOOK_DIR" "$1"; }
+sbctl_resign_hook_path() { printf '%s/zz-sbctl.hook\n' "$HOOK_DIR"; }
+stale_source_install_paths() { printf '%s\n' "${STALE_DIR}/bin" "${STALE_DIR}/lib"; }
+validate_activation_hook() { [[ "$1" != "$HOOK_INVALID" ]]; }
+pacman_hook_is_shadowed() { return 1; }
+install_hooks() {
+  local key
+  for key in removal transaction package-sign limine-pre limine-post zz-sbctl.hook; do
+    : > "${HOOK_DIR}/${key}"
+  done
+}
 write_defaults() { printf '%s\n' "$@" > "$DEFAULTS_FILE"; }
 write_config() { printf '%s\n' "$@" > "$CONFIG_FILE"; }
 
@@ -66,6 +81,44 @@ sbctl() { printf 'raw sbctl status\n'; }
 run_section show_firmware_status ""
 expect_status 0 "raw firmware fallback"
 expect_output "raw sbctl status" "raw firmware fallback"
+
+# --- Hooks ------------------------------------------------------------------
+
+install_hooks
+run_section show_hook_status
+expect_status 0 "installed hooks"
+expect_output "removal present (dependency removal guard)" "installed hooks"
+expect_output "limine-post present (Limine post-mutation checkpoint)" "installed hooks"
+expect_output "zz-sbctl.hook present (re-signing)" "installed hooks"
+
+HOOK_INVALID=limine-pre
+run_section show_hook_status
+expect_status 1 "altered hook"
+expect_output "limine-pre is not the packaged hook or targets another command" "altered hook"
+HOOK_INVALID=""
+
+rm -f "${HOOK_DIR}/transaction"
+_lifecycle_state=unmanaged
+run_section show_hook_status
+expect_status 0 "missing hook while unmanaged"
+expect_output "transaction missing; install the packaged OmaSecBoot release" \
+  "missing hook while unmanaged"
+_lifecycle_state=active
+run_section show_hook_status
+expect_status 1 "missing hook while active"
+install_hooks
+rm -f "${HOOK_DIR}/zz-sbctl.hook"
+run_section show_hook_status
+expect_status 1 "missing sbctl hook while active"
+expect_output "zz-sbctl.hook missing" "missing sbctl hook while active"
+_lifecycle_state=unmanaged
+install_hooks
+
+mkdir -p "${STALE_DIR}/lib"
+run_section show_hook_status
+expect_status 1 "stale source install"
+expect_output "Stale source install at ${STALE_DIR}/lib" "stale source install"
+rm -rf "$STALE_DIR"
 
 # --- Service ----------------------------------------------------------------
 
@@ -214,7 +267,7 @@ run_section show_windows_status
 expect_status 1 "ambiguous Windows target"
 expect_output "do not resolve to one safe handoff target" "ambiguous Windows target"
 
-find_windows_boot_entry() { printf '0001\n'; }
+find_windows_boot_entry() { printf '0001\tWindows\n'; }
 list_unmanaged_windows_chainloads() { printf '12: path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n'; }
 run_section show_windows_status
 expect_status 0 "unmanaged chainload"
@@ -223,12 +276,25 @@ expect_output "may trigger BitLocker" "unmanaged chainload"
 expect_output "remove the chainload entry from limine.conf yourself" "unmanaged chainload"
 list_unmanaged_windows_chainloads() { :; }
 
-read_windows_target_state() { _windows_state_label="Windows"; return 0; }
+read_windows_target_state() {
+  _windows_state_label="Windows"
+  _windows_state_boot_number=0001
+  return 0
+}
 windows_managed_block_state() { _windows_block_state=canonical; }
 run_section show_windows_status
 expect_status 0 "managed handoff"
 expect_output "Durable Windows firmware target identity recorded" "managed handoff"
 expect_output "Windows boot entry in limine.conf (firmware BootNext)" "managed handoff"
+
+# A recorded target that firmware no longer resolves to is a failure, not a
+# green line next to a stale record.
+find_windows_boot_entry() { printf '0002\tWindows\n'; }
+run_section show_windows_status
+expect_status 1 "stale recorded target"
+expect_output "Recorded Windows target Boot0001 is not the firmware target Boot0002" \
+  "stale recorded target"
+find_windows_boot_entry() { printf '0001\tWindows\n'; }
 
 windows_managed_block_state() { _windows_block_state=absent; }
 run_section show_windows_status
@@ -317,10 +383,18 @@ list_enrolled_paths() { printf '%s\n' "$ENROLLED"; }
 discover_efi_files() { printf '%s\n' "$DISCOVERED"; }
 DISCOVERED="$ENROLLED"
 
+# A failed discovery is reported, never read as an empty artifact set.
+discover_efi_files() { return 1; }
+run_section show_tracked_files_status
+expect_status 1 "failed discovery"
+expect_output "Could not discover the EFI artifacts" "failed discovery"
+expect_no_output "all discovered EFI files enrolled" "failed discovery"
+discover_efi_files() { printf '%s\n' "$DISCOVERED"; }
+
 # --- Display ----------------------------------------------------------------
 
 sbctl() { [[ "$*" == "status --json" ]] && printf '%s\n' "$good_json"; }
-show_hook_status() { return 0; }
+install_hooks
 esp_is_mounted_vfat() { return 0; }
 write_defaults 'ENABLE_VERIFICATION=no' 'ENABLE_ENROLL_LIMINE_CONFIG=yes'
 VERIFY_OK=true

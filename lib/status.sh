@@ -238,30 +238,46 @@ show_firmware_status() {
   [[ "$ok" == true ]]
 }
 
-# Installed hooks, HookDir shadowing, and stale source installs. A missing hook
-# fails only while the lifecycle is active.
+# The pacman hook sbctl ships for re-signing after upgrades.
+sbctl_resign_hook_path() {
+  printf '/usr/share/libalpm/hooks/zz-sbctl.hook\n'
+}
+
+# Locations a pre-package source install left behind.
+stale_source_install_paths() {
+  printf '%s\n' /usr/local/bin/omasecboot /usr/local/lib/omasecboot
+}
+
+# Installed hooks by canonical content and executing command target, HookDir
+# shadowing, and stale source installs. A missing hook fails only while the
+# lifecycle is active; a present hook that does not validate fails in every
+# state, because activation would refuse it.
 show_hook_status() {
-  local ok=true hook_entry hook_path hook_label hook_name shadow_dir
-  for hook_entry in \
-    "/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook|dependency removal guard" \
-    "/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook|transaction guard" \
-    "/usr/share/libalpm/hooks/zz-sbctl.hook|re-signing" \
-    "/usr/share/libalpm/hooks/zzz-omasecboot.hook|post-sbctl lifecycle checkpoint" \
-    "/etc/boot/hooks/pre.d/000-omasecboot-guard|Limine pre-mutation guard" \
-    "/etc/boot/hooks/post.d/zzz-omasecboot-sign|Limine post-mutation checkpoint"; do
-    hook_path=${hook_entry%%|*}
-    hook_label=${hook_entry#*|}
-    if [[ -f "$hook_path" && ( "$hook_path" != /etc/boot/* || -x "$hook_path" ) ]]; then
-      pass "${hook_path##*/} present (${hook_label})"
-      continue
-    fi
-    if [[ "$hook_path" == */zz-sbctl.hook ]]; then
-      warn "zz-sbctl.hook missing. Run: ${BOLD}sudo pacman -S sbctl${NC}"
-    else
+  local ok=true entry key hook_label hook_path command hook_name shadow_dir path
+  command=$(current_omasecboot_executable_path) || command=""
+  for entry in "removal|dependency removal guard" "transaction|transaction guard" \
+    "package-sign|post-sbctl lifecycle checkpoint" \
+    "limine-pre|Limine pre-mutation guard" "limine-post|Limine post-mutation checkpoint"; do
+    key=${entry%%|*}
+    hook_label=${entry#*|}
+    hook_path=$(activation_hook_path "$key") || { ok=false; continue; }
+    if [[ ! -f "$hook_path" ]]; then
       warn "${hook_path##*/} missing; install the packaged OmaSecBoot release before activation"
+      [[ ${_lifecycle_state:-unmanaged} != active ]] || ok=false
+    elif [[ -n "$command" ]] && validate_activation_hook "$key" "$command"; then
+      pass "${hook_path##*/} present (${hook_label})"
+    else
+      fail "${hook_path##*/} is not the packaged hook or targets another command; reinstall the package"
+      ok=false
     fi
-    [[ ${_lifecycle_state:-unmanaged} != active ]] || ok=false
   done
+  hook_path=$(sbctl_resign_hook_path)
+  if [[ -f "$hook_path" ]]; then
+    pass "${hook_path##*/} present (re-signing)"
+  else
+    warn "${hook_path##*/} missing. Run: ${BOLD}sudo pacman -S sbctl${NC}"
+    [[ ${_lifecycle_state:-unmanaged} != active ]] || ok=false
+  fi
   for hook_name in 00-omasecboot-removal-guard.hook 00-omasecboot-transition-guard.hook \
     zzz-omasecboot.hook; do
     if pacman_hook_is_shadowed "$(pacman_system_hook_dir)/${hook_name}"; then
@@ -270,10 +286,12 @@ show_hook_status() {
       ok=false
     fi
   done
-  if [[ -e /usr/local/bin/omasecboot || -e /usr/local/lib/omasecboot ]]; then
-    fail "Stale source install under /usr/local; remove it and its hooks before activation"
+  while IFS= read -r path; do
+    [[ -e "$path" ]] || continue
+    fail "Stale source install at ${path}; remove it and its hooks before activation"
     ok=false
-  fi
+    break
+  done < <(stale_source_install_paths)
   [[ "$ok" == true ]]
 }
 
@@ -437,6 +455,7 @@ show_windows_status() {
   fi
 
   local windows_boot_entries windows_boot_count windows_target windows_target_rc=0
+  local target_number target_label
   windows_target=$(find_windows_boot_entry 2>/dev/null) || windows_target_rc=$?
   windows_boot_entries=$(list_windows_firmware_entries)
   windows_boot_count=$(grep -c . <<< "$windows_boot_entries") || windows_boot_count=0
@@ -460,6 +479,13 @@ show_windows_status() {
   windows_state_file=$(windows_target_state_path)
   if read_windows_target_state; then
     pass "Durable Windows firmware target identity recorded"
+    IFS=$'\t' read -r target_number target_label <<< "$windows_target"
+    if [[ $windows_target_rc -eq 0 ]] \
+      && [[ "$_windows_state_boot_number" != "$target_number" \
+        || "$_windows_state_label" != "$target_label" ]]; then
+      fail "Recorded Windows target Boot${_windows_state_boot_number} is not the firmware target Boot${target_number}; run sudo omasecboot windows setup again"
+      ok=false
+    fi
     if windows_managed_block_state "$_windows_state_label"; then
       case "$_windows_block_state" in
         canonical)
@@ -523,13 +549,19 @@ show_tracked_files_status() {
   echo
   echo -e "  ${BOLD}Tracked Files${NC}"
   local ok=true file enrolled_raw enrolled_rc=0 stale_entries stale_rc=0
-  local stale_file stale_output
-  local -a enrolled=() discovered untracked=() missing_tracked=()
+  local stale_file stale_output discovered_raw discovery_rc=0
+  local -a enrolled=() discovered=() untracked=() missing_tracked=()
   local -A enrolled_map=()
 
   enrolled_raw=$(list_enrolled_paths) || enrolled_rc=$?
   stale_entries=$(list_stale_sbctl_entries) || stale_rc=$?
-  mapfile -t discovered < <(discover_efi_files)
+  discovered_raw=$(discover_efi_files) || discovery_rc=$?
+  if [[ $discovery_rc -ne 0 ]]; then
+    fail "Could not discover the EFI artifacts under $(esp_path)"
+    ok=false
+  elif [[ -n "$discovered_raw" ]]; then
+    mapfile -t discovered <<< "$discovered_raw"
+  fi
 
   if [[ $stale_rc -eq 0 && -n "$stale_entries" ]]; then
     while IFS=$'\t' read -r stale_file stale_output; do

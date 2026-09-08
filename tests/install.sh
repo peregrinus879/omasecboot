@@ -85,9 +85,10 @@ while IFS= read -r status_hook; do
   status_hooks=$((status_hooks + 1))
   [[ "$status_hook" == */zz-sbctl.hook || -f "${STAGE_DIR}${status_hook}" ]] \
     || fail_test "status expects a hook the package does not install: ${status_hook}"
-done < <(grep -o '"/\(usr/share/libalpm/hooks\|etc/boot/hooks\)/[^|"]*|' \
-  "${ROOT_DIR}/lib/status.sh" | tr -d '"|')
-[[ $status_hooks -eq 6 ]] || fail_test "status hook list could not be read from lib/status.sh (${status_hooks})"
+done < <(grep -oh "printf '/\(usr/share/libalpm/hooks\|etc/boot/hooks\)/[^'\\\\]*" \
+  "${ROOT_DIR}/lib/checks.sh" "${ROOT_DIR}/lib/status.sh" | sed "s/^printf '//")
+[[ $status_hooks -eq 6 ]] \
+  || fail_test "hook paths could not be read from lib/checks.sh and lib/status.sh (${status_hooks})"
 shadow_hooks=0
 while IFS= read -r status_hook; do
   shadow_hooks=$((shadow_hooks + 1))
