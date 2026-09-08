@@ -839,6 +839,7 @@ artifact_managed_settings_are_repairable() {
 prepare_artifact_ownership() {
   local tracked_raw file settings paths
   local managed_before=present managed_after=present
+  local -a retained=()
   local -A tracked=()
   artifact_managed_settings_are_repairable || return 1
   if [[ "$_repair_ownership_found" == true ]]; then
@@ -871,6 +872,15 @@ prepare_artifact_ownership() {
   while IFS= read -r file; do
     [[ -n "$file" ]] && tracked["$file"]=1
   done <<< "$tracked_raw"
+  # Ownership follows the artifacts that exist: a path gone from disk is
+  # retired here, and the clean-tracking phase of this same repair drops its
+  # tracking entry, so the record bounds current obligations, not every
+  # snapshot filename that ever existed.
+  while IFS= read -r file; do
+    [[ -n "$file" && -e "$file" ]] && retained+=("$file")
+  done < <(jq -r '.[]' <<< "$paths")
+  paths=$(printf '%s\n' "${retained[@]}" | jq -R . | jq -sc 'map(select(. != "")) | unique | sort') \
+    || return 1
   for file in "${_discovered_efi_files[@]}"; do
     [[ -n "${tracked[$file]:-}" ]] && continue
     paths=$(jq -c --arg path "$file" '. + [$path] | unique | sort' <<< "$paths") || return 1

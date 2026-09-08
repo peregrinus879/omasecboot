@@ -702,6 +702,40 @@ test_sign_sync_failure_rollback() {
   assert_recovery_rollback "sign-efi"
 }
 
+# Snapshot churn creates and deletes hash-suffixed UKIs for as long as the
+# machine lives; ownership follows the files that exist instead of growing
+# toward the record limit.
+test_ownership_retirement() {
+  local index churn_dir record live
+  churn_dir="${CASE_DIR}/boot/EFI/Linux"
+  for ((index=0; index < 40; index++)); do
+    printf 'CHURN %s\n' "$index" \
+      > "${churn_dir}/churn-${index}.efi_sha256_$(printf '%08x' "$index")"
+  done
+  run_artifact_repair "artifact-churn-seed" || fail_test "churn seed repair failed"
+  read_lifecycle || fail_test "churn seed lifecycle unreadable"
+  record=$(read_control_document \
+    "$(jq -r '.tracking_ownership.path' <<< "$_lifecycle_json")") \
+    || fail_test "churn seed ownership record unreadable"
+  [[ $(jq '[.paths[] | select(contains("/churn-"))] | length' <<< "$record") -eq 40 ]] \
+    || fail_test "churn seed did not record ownership of the snapshot UKIs"
+
+  rm -f "${churn_dir}"/churn-*
+  live="${churn_dir}/churn-live.efi_sha256_ffffffff"
+  printf 'LIVE\n' > "$live"
+  run_artifact_repair "artifact-churn-retire" || fail_test "repair after snapshot churn failed"
+  read_lifecycle || fail_test "churn retire lifecycle unreadable"
+  record=$(read_control_document \
+    "$(jq -r '.tracking_ownership.path' <<< "$_lifecycle_json")") \
+    || fail_test "churn retire ownership record unreadable"
+  [[ $(jq '[.paths[] | select(contains("/churn-"))] | length' <<< "$record") -eq 1 ]] \
+    || fail_test "retired snapshot UKIs stayed in the ownership record"
+  jq -e --arg path "$live" '.paths | index($path) != null' <<< "$record" >/dev/null \
+    || fail_test "the live snapshot UKI was not owned"
+  [[ $(jq '[to_entries[] | select(.key | contains("/churn-"))] | length' "$SBCTL_FILES_DB") -eq 1 ]] \
+    || fail_test "retired snapshot UKIs stayed tracked"
+}
+
 test_final_mapping_failure_rollback() {
   local db_hash
   db_hash=$(sha256_file "$SBCTL_FILES_DB")
@@ -734,6 +768,7 @@ run_case readback-failure test_readback_failure_rollback
 run_case signing-failure test_signing_failure_rollback
 run_case sign-sync-failure test_sign_sync_failure_rollback
 run_case final-mapping-failure test_final_mapping_failure_rollback
+run_case ownership-retirement test_ownership_retirement
 run_case proof-failure test_final_proof_failure_rollback
 run_case proof-drift test_final_proof_drift_rollback
 FIXTURE_ORIGINAL_VERIFICATION=yes run_case setting-drift test_managed_setting_drift_repair
