@@ -150,12 +150,18 @@ sbctl() {
         fail) return 45 ;;
         empty) return 0 ;;
         json)
-          if [[ ! -f "$SBCTL_FILES_DB" ]]; then
-            printf '{}\n'
+          # The CLI prints an array of entries; the database is the keyed
+          # object it reads (sbctl 0.18 cmd/sbctl/list-files.go).
+          if [[ -n "$SBCTL_LIST_RAW" ]]; then
+            printf '%s\n' "$SBCTL_LIST_RAW"
+          elif [[ ! -f "$SBCTL_FILES_DB" ]]; then
+            printf '[]\n'
           elif [[ -n "$SBCTL_OMIT_LIST_PATH" ]]; then
-            jq --arg path "$SBCTL_OMIT_LIST_PATH" 'del(.[$path])' "$SBCTL_FILES_DB"
+            jq --arg path "$SBCTL_OMIT_LIST_PATH" \
+              '[del(.[$path]) | to_entries[] | .value + {is_signed: true}]' \
+              "$SBCTL_FILES_DB"
           else
-            jq . "$SBCTL_FILES_DB"
+            jq '[to_entries[] | .value + {is_signed: true}]' "$SBCTL_FILES_DB"
           fi
           ;;
         *) return 2 ;;
@@ -220,6 +226,7 @@ setup_fixture() {
   MOUNTPOINT_OK=true
   SBCTL_LIST_MODE=json
   SBCTL_OMIT_LIST_PATH=""
+  SBCTL_LIST_RAW=""
   SBCTL_FAIL_TARGET=""
   SBCTL_INJECT_MAPPING_TARGET=""
   IDENTITY_ALIAS_PATH=""
@@ -317,8 +324,9 @@ test_discovery_and_tracking_sources() {
   tracked=$(list_enrolled_paths) || fail_test "sbctl database fallback failed"
   grep -Fq 'missing.efi' <<< "$tracked" || fail_test "failed sbctl list did not use the database fallback"
 
-  # The fallback reads the same entry schema as the CLI and fails closed on
-  # anything else instead of inventing a source.
+  # Each reader accepts exactly its source's shape and fails closed on
+  # anything else instead of inventing a source. The database is an object
+  # keyed by source path whose file equals the key.
   jq -cn --arg source "$PRIMARY" '{($source): {output_file: $source}}' > "$SBCTL_FILES_DB"
   if list_enrolled_paths >/dev/null 2>&1; then
     fail_test "database fallback synthesized a source for an entry without a file"
@@ -329,10 +337,23 @@ test_discovery_and_tracking_sources() {
   if list_enrolled_paths >/dev/null 2>&1; then
     fail_test "database fallback accepted an entry whose file differs from its key"
   fi
+  # The CLI prints an array of entries. An unsupported CLI answer fails closed
+  # even while the database is readable: an entry without a file, or the
+  # database object itself in place of the array.
   SBCTL_LIST_MODE=json
+  jq -cn --arg source "$PRIMARY" '{($source): {file: $source, output_file: $source}}' \
+    > "$SBCTL_FILES_DB"
+  SBCTL_LIST_RAW=$(jq -cn --arg source "$PRIMARY" '[{output_file: $source, is_signed: true}]')
   if list_enrolled_paths >/dev/null 2>&1; then
-    fail_test "sbctl list output with a mismatched entry was accepted"
+    fail_test "sbctl list output with an entry without a file fell back to the database"
   fi
+  SBCTL_LIST_RAW=$(jq -c . "$SBCTL_FILES_DB")
+  if list_enrolled_paths >/dev/null 2>&1; then
+    fail_test "sbctl list output shaped as the database object fell back to the database"
+  fi
+  SBCTL_LIST_RAW=""
+  tracked=$(list_enrolled_paths) || fail_test "sbctl list array output failed"
+  grep -Fxq "$PRIMARY" <<< "$tracked" || fail_test "sbctl list array output lost the tracked path"
 }
 
 test_sbctl_config_resolution() {
@@ -468,8 +489,9 @@ test_mapping_validation() {
     fail_test "preflight accepted a VFAT alias mapped onto a discovered EFI artifact"
   fi
 
-  # The tracking entry schema is one: a source-keyed object whose file equals
-  # the key. Nothing is synthesized for a malformed entry on a proof path.
+  # Nothing is synthesized for a malformed entry on a proof path: the CLI
+  # array refuses an entry without a file, and the database fallback refuses
+  # an entry whose file differs from its key.
   jq -cn --arg source "$PRIMARY" '{($source): {output_file: $source}}' > "$SBCTL_FILES_DB"
   if artifact_repair_preflight >/dev/null 2>&1; then
     fail_test "preflight synthesized a source for an entry without a file"
@@ -477,9 +499,11 @@ test_mapping_validation() {
   jq -cn --arg source "$PRIMARY" --arg other "${CASE_DIR}/other.efi" '{
     ($other): {file: $source, output_file: $source}
   }' > "$SBCTL_FILES_DB"
+  SBCTL_LIST_MODE=fail
   if artifact_repair_preflight >/dev/null 2>&1; then
     fail_test "preflight accepted a tracking entry whose file differs from its key"
   fi
+  SBCTL_LIST_MODE=json
 }
 
 test_managed_setting_drift_repair() {

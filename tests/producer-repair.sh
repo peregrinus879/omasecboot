@@ -141,9 +141,9 @@ sbctl() {
     list-files)
       [[ "${2:-}" == --json && $# -eq 2 ]] || return 2
       if [[ -f "$database" ]]; then
-        jq . "$database"
+        jq '[to_entries[] | .value + {is_signed: true}]' "$database"
       else
-        printf '{}\n'
+        printf '[]\n'
       fi
       ;;
     verify)

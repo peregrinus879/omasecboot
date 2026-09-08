@@ -151,7 +151,7 @@ sbctl() {
   case "$1" in
     list-files)
       [[ "${2:-}" == --json ]] || return 2
-      jq . "$SBCTL_FILES_DB"
+      jq '[to_entries[] | .value + {is_signed: true}]' "$SBCTL_FILES_DB"
       ;;
     remove-file)
       [[ $# -eq 2 ]] || return 2

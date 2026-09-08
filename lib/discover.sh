@@ -127,21 +127,32 @@ sbctl_database_candidate_paths() {
 }
 
 # Query tracked files through sbctl's public CLI.
-# Returns 0 on success (including empty), 1 on lookup failure.
-# sbctl 0.18's tracking database, which `sbctl list-files --json` prints as
-# is: an object keyed by source path whose values carry `file`, equal to the
-# key, and `output_file`. The CLI reader, the database fallback, and the
-# mapping validator accept exactly this shape and synthesize nothing.
-# shellcheck disable=SC2016 # jq program, not shell expansions.
-readonly SBCTL_ENTRY_ROWS_JQ='
-  if type != "object" then error("unsupported sbctl tracking shape") else . end
-  | to_entries[]
-  | if (.value | type) != "object" or (.value.file | type) != "string"
-      or .value.file == "" or .value.file != .key
+# Returns 0 on success (including empty), 1 when the lookup fails, 2 when
+# sbctl answered with a shape this reader does not accept.
+# Tracked entries come from two sources with two shapes. sbctl 0.18's
+# `list-files --json` (cmd/sbctl/list-files.go) prints an array of entries,
+# each carrying `file`, `output_file`, and `is_signed`; the database it reads
+# (`files.json`) is an object keyed by source path whose values carry `file`,
+# equal to the key, and `output_file`. Each reader accepts exactly its
+# source's shape, synthesizes nothing, and emits the same rows.
+# shellcheck disable=SC2016 # jq programs, not shell expansions.
+readonly SBCTL_ENTRY_ROW_JQ='
+  if type != "object" or (.file | type) != "string" or .file == ""
     then error("unsupported sbctl tracking entry") else . end
-  | [.value.file, (.value.output_file // .value.file)]
+  | [.file, (.output_file // .file)]
   | @tsv
 '
+readonly SBCTL_CLI_ROWS_JQ='
+  if type != "array" then error("unsupported sbctl list-files shape") else . end
+  | .[]
+  | '"$SBCTL_ENTRY_ROW_JQ"
+readonly SBCTL_DB_ROWS_JQ='
+  if type != "object" then error("unsupported sbctl tracking shape") else . end
+  | to_entries[]
+  | if (.value | type) != "object" or .value.file != .key
+    then error("unsupported sbctl tracking entry") else . end
+  | .value
+  | '"$SBCTL_ENTRY_ROW_JQ"
 
 list_enrolled_entries_from_cli() {
   command -v sbctl >/dev/null 2>&1 || return 1
@@ -152,7 +163,7 @@ list_enrolled_entries_from_cli() {
   validate_control_file "$files_db" || return 1
   json=$(sbctl list-files --json 2>/dev/null) || return 1
   [[ -n "$json" && "$json" != "null" ]] || return 0
-  printf '%s\n' "$json" | jq -r "$SBCTL_ENTRY_ROWS_JQ" 2>/dev/null
+  printf '%s\n' "$json" | jq -r "$SBCTL_CLI_ROWS_JQ" 2>/dev/null || return 2
 }
 
 # Query tracked files from sbctl's on-disk database: a fallback path for
@@ -167,25 +178,26 @@ list_enrolled_entries_from_db() {
     return 0
   fi
 
-  printf '%s\n' "$json" | jq -r "$SBCTL_ENTRY_ROWS_JQ" 2>/dev/null
+  printf '%s\n' "$json" | jq -r "$SBCTL_DB_ROWS_JQ" 2>/dev/null
 }
 
 # List file paths currently registered in sbctl's database.
 # Returns 0 on success (including empty), 1 on lookup failure.
-# CLI success with empty output is authoritative.
-# DB fallback only triggers when CLI fails.
+# CLI success with empty output is authoritative. The database fallback
+# covers a failed lookup only; an unsupported CLI shape fails closed.
 list_enrolled_entries() {
   local cli_entries cli_rc=0
   cli_entries=$(list_enrolled_entries_from_cli) || cli_rc=$?
 
-  if [[ $cli_rc -eq 0 ]]; then
-    # CLI succeeded; result is authoritative even if empty
-    [[ -n "$cli_entries" ]] && printf '%s\n' "$cli_entries"
-    return 0
-  fi
-
-  # CLI failed; fall back to on-disk database
-  list_enrolled_entries_from_db
+  case $cli_rc in
+    0)
+      # CLI succeeded; result is authoritative even if empty
+      [[ -n "$cli_entries" ]] && printf '%s\n' "$cli_entries"
+      return 0
+      ;;
+    1) list_enrolled_entries_from_db ;;
+    *) return 1 ;;
+  esac
 }
 
 # Cleanup must catch stale entries even if sbctl's CLI view is incomplete.
@@ -197,7 +209,7 @@ list_enrolled_entries_for_cleanup() {
   cli_entries=$(list_enrolled_entries_from_cli) || cli_rc=$?
   db_entries=$(list_enrolled_entries_from_db) || db_rc=$?
 
-  if [[ $cli_rc -ne 0 && $db_rc -ne 0 ]]; then
+  if [[ $cli_rc -gt 1 || ( $cli_rc -ne 0 && $db_rc -ne 0 ) ]]; then
     return 1
   fi
 
