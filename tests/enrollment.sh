@@ -1003,19 +1003,38 @@ test_enrollment_guard_and_success() {
 }
 
 test_partial_plan_refusal() {
-  local backup_id
+  local backup_id rc
   setup_fixture partial-plan
-  # A backup that already equals the planned KEK has no F0 frontier.
+  # A backup that already equals the planned KEK has no F0 frontier; the plan
+  # is refused with its guidance before it is recorded.
   write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
-  if prepare_state_aware_setup true >/dev/null 2>&1; then
+  if prepare_state_aware_setup true > "${CASE_DIR}/build.out" 2>&1; then
     fail_test "preparation built a plan the firmware already partly holds"
+  fi
+  grep -Fq 'already holds part of the planned trust set' "${CASE_DIR}/build.out" \
+    || fail_test "partial plan refusal at plan build lacked its guidance"
+
+  # A backup that already holds the whole plan is an enrolled firmware: the
+  # plan is built, the machine is observed as state 4, and nothing is written.
+  setup_fixture whole-plan
+  write_raw_database PK "$PLAN_SOURCE/PK.esl"
+  write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
+  write_raw_database db "$PLAN_SOURCE/db.esl"
+  backup_id=$(prepare_and_activate) \
+    || fail_test "preparation refused a plan the firmware already holds in full"
+  [[ "$(observe_setup_state "$backup_id")" == 4 ]] \
+    || fail_test "a fully enrolled firmware was not observed as state 4"
+  validate_setup_instruction_boundary "$backup_id" 4 >/dev/null 2>&1 \
+    || fail_test "state 4 instruction boundary refused a fully enrolled firmware"
+  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
+    fail_test "a fully enrolled firmware reached a firmware command"
   fi
 
   # A plan recorded before the frontier check exists: the firmware already
   # holds the planned KEK and the instruction boundaries refuse it.
   setup_fixture partial-plan-boundary
   write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
-  planned_trust_differs_from_backup() { return 0; }
+  planned_trust_backup_match_is_whole() { return 0; }
   backup_id=$(prepare_and_activate)
   [[ "$(observe_setup_state "$backup_id")" == 3 ]] \
     || fail_test "partially enrolled plan was not observed as state 3"
@@ -1025,6 +1044,18 @@ test_partial_plan_refusal() {
   fi
   grep -Fq 'already holds part of the planned trust set' "${CASE_DIR}/boundary.out" \
     || fail_test "partial plan refusal lacked its guidance"
+  # A database that cannot be read is reported as unreadable, not as a match.
+  rc=0
+  (
+    current_database_plan_status() { return 1; }
+    validate_setup_instruction_boundary "$backup_id" 3 > "${CASE_DIR}/unreadable.out" 2>&1
+  ) || rc=$?
+  [[ $rc -ne 0 ]] || fail_test "state 3 instruction boundary admitted an unreadable database"
+  grep -Fq "Could not read the firmware's PK database" "${CASE_DIR}/unreadable.out" \
+    || fail_test "unreadable database was not reported as such"
+  if grep -Fq 'already holds part of the planned trust set' "${CASE_DIR}/unreadable.out"; then
+    fail_test "unreadable database was reported as a partial match"
+  fi
   enter_setup_mode
   [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
     || fail_test "partially enrolled plan in Setup Mode was not state 2"

@@ -815,7 +815,7 @@ validate_planned_trust_preserves_backup() {
   runtime=$(firmware_runtime_dir_path) || return 1
   current_dir=$(mktemp -d "${runtime}/current-plan.XXXXXX") || return 1
   planned_trust_preserves_backup "$backup_id" "$plan_dir" "$current_dir" \
-    && planned_trust_differs_from_backup "$plan_dir" "$current_dir" || rc=1
+    && planned_trust_backup_match_is_whole "$plan_dir" "$current_dir" || rc=1
   rm -rf "$current_dir" || return 1
   return "$rc"
 }
@@ -843,23 +843,38 @@ planned_trust_preserves_backup() {
     || return 1
 }
 
-# The F0-F3 frontiers need every planned database to differ from its backup;
-# a plan that already matches one of them has no representable enrollment.
-planned_trust_differs_from_backup() {
-  local plan_dir="$1" current_dir="$2" name
+readonly PARTIAL_TRUST_PLAN_MESSAGE='The firmware already holds part of the planned trust set; restore the factory Secure Boot keys in firmware settings, then run setup again'
+
+# The F0-F3 frontiers need every planned database to differ from its backup.
+# A backup that already holds the whole plan is an enrolled firmware, which
+# setup observes as enrolled and never writes; a backup that holds part of it
+# has no representable enrollment sequence and is refused before the plan is
+# recorded.
+planned_trust_backup_match_is_whole() {
+  local plan_dir="$1" current_dir="$2" name matches=0
   for name in PK KEK db; do
-    ! canonical_entries_are_equal "${current_dir}/${name}.entries" \
-      "${plan_dir}/${name}.entries" || return 1
+    if canonical_entries_are_equal "${current_dir}/${name}.entries" \
+      "${plan_dir}/${name}.entries"; then
+      matches=$((matches + 1))
+    fi
   done
+  [[ $matches -eq 0 || $matches -eq 3 ]] && return 0
+  fail "$PARTIAL_TRUST_PLAN_MESSAGE"
+  return 1
 }
 
 # Enrollment starts at F0 only when every planned database differs from the
-# firmware's; a partial match is refused before any firmware instruction.
+# firmware's; a partial match is refused before any firmware instruction, and
+# a database that cannot be read is reported as unreadable, never as a match.
 planned_trust_is_representable() {
-  local backup_id="$1" name
+  local backup_id="$1" name status
   for name in PK KEK db; do
-    [[ $(current_database_plan_status "$backup_id" "$name") == different ]] || {
-      fail "The firmware already holds part of the planned trust set; restore the factory Secure Boot keys in firmware settings, then run setup again"
+    status=$(current_database_plan_status "$backup_id" "$name") || {
+      fail "Could not read the firmware's ${name} database to compare it with the plan"
+      return 1
+    }
+    [[ "$status" == different ]] || {
+      fail "$PARTIAL_TRUST_PLAN_MESSAGE"
       return 1
     }
   done

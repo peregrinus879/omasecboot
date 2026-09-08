@@ -118,11 +118,11 @@ Run these steps in order. Each command prints the next instruction only after it
 |---|---|---|
 | 1 | No local keys | Backup, key creation, plan comparison, artifact proof, PK-delete instruction |
 | 2 | Keys exist, firmware in Setup Mode, plan not enrolled | Tells you to run `enroll` |
-| 3 | Keys exist, firmware in user mode, plan not enrolled | Backup, plan comparison, artifact proof, PK-delete instruction; refused when the firmware already holds part of the plan |
+| 3 | Keys exist, firmware in user mode, plan not enrolled | Backup, plan comparison, artifact proof, PK-delete instruction |
 | 4 | Plan enrolled, Secure Boot off | Artifact proof, enablement instruction |
 | 5 | Plan enrolled, Secure Boot on | Artifact repair and verification |
 
-Contradictory or indeterminate observations fail closed with a message instead of being assigned to a state.
+Contradictory or indeterminate observations fail closed with a message instead of being assigned to a state. Plan comparison accepts a firmware that holds none of the planned trust set, and one that already holds all of it, which is observed as state 4 or 5 and receives no firmware write; a firmware that holds only part of it is refused with `The firmware already holds part of the planned trust set` before any plan is recorded.
 
 What blocks setup before any firmware instruction:
 
@@ -259,7 +259,7 @@ These are four different operations. None of them is a factory reset.
 | `Package removal requires verified disabled or pristine lifecycle state` | The removal guard refused | Run `unconfigure` first |
 | `Lifecycle: recovery-required (...)` | A mutation or rollback failed | `sudo omasecboot repair`; do not intervene manually |
 | `Enrollment requires validated Setup Mode; current setup state is N` | `enroll` was run outside state 2 | Follow the instruction `setup` prints for that state |
-| `The firmware already holds part of the planned trust set` | An earlier enrollment left KEK or db entries the plan would enroll again, so no supported enrollment sequence exists | Restore the factory Secure Boot keys in firmware settings, then run `setup` again |
+| `The firmware already holds part of the planned trust set` | Some but not all of PK, KEK, and db already equal the planned set, so no supported enrollment sequence exists | If the message came from plan comparison during `setup` and no plan is recorded yet, restore the factory Secure Boot keys in firmware settings and run `setup` again. If a plan is already recorded, treat it as the invalid-plan row below |
 | `The current Secure Boot enrollment plan is invalid` or `... failed validation; setup will not replace it` | The recorded backup or plan no longer validates; setup never replaces recorded evidence and no supported reset exists yet | Keep Secure Boot off, leave `/var/lib/omasecboot` untouched, and report the message with `sudo omasecboot status` output |
 | `windows preflight` exits 2 | Technical uncertainty | Read the printed guidance, fix the cause, rerun; there is no override |
 | System will not boot with Secure Boot on | Artifact or trust mismatch | Disable Secure Boot in firmware, boot Linux, run `sudo omasecboot status`, and keep Secure Boot off until the proof passes |
