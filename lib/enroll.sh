@@ -10,7 +10,6 @@ readonly EFI_ACTIVE_AUTH_ATTRIBUTES=39
 readonly EFI_STATE_ATTRIBUTES=6
 readonly FIRMWARE_BACKUP_SCHEMA_VERSION=1
 readonly ENROLLMENT_PLAN_SCHEMA_VERSION=1
-readonly MAX_SETUP_LINEAGE_MANIFESTS=4096
 
 _firmware_backup_id=""
 _firmware_backup_dir=""

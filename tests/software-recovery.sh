@@ -195,4 +195,37 @@ read_lifecycle || fail_test "package-boundary rejection damaged lifecycle state"
 PACKAGE_BOUNDARY_CLEAR=true
 run_software_recovery || fail_test "ESP software recovery did not resume safely"
 
+# A failed preparation from disabled recovers back to disabled, and the
+# lineage through that recovery keeps the package removable.
+reset_case disabled-lineage
+MUTATED_FILE="${CASE_DIR}/managed-file"
+printf 'original\n' > "$MUTATED_FILE"
+noop_preparation() { :; }
+failed_preparation() {
+  transaction_phase_start backup-firmware || return 1
+  transaction_backup_file "$MUTATED_FILE" || return 1
+  printf 'changed\n' > "$MUTATED_FILE"
+  return 25
+}
+run_lifecycle_transaction prepare-secure-boot disabled unmanaged noop_preparation \
+  || fail_test "preparation from pristine state failed"
+lifecycle_removal_is_allowed || fail_test "prepared pristine state blocked removal"
+if run_lifecycle_transaction prepare-secure-boot disabled disabled failed_preparation; then
+  fail_test "failed preparation reported success"
+fi
+read_lifecycle || fail_test "failed preparation left the lifecycle unreadable"
+[[ "$_lifecycle_state" == recovery-required ]] \
+  || fail_test "failed preparation did not require recovery"
+if lifecycle_removal_is_allowed; then
+  fail_test "a preparation incident allowed removal"
+fi
+run_software_recovery || fail_test "preparation recovery failed"
+read_lifecycle || fail_test "recovered preparation left the lifecycle unreadable"
+[[ "$_lifecycle_state" == disabled ]] \
+  || fail_test "preparation recovery did not restore disabled state"
+grep -Fxq original "$MUTATED_FILE" \
+  || fail_test "preparation recovery did not restore the file"
+lifecycle_removal_is_allowed \
+  || fail_test "the recovered disabled lineage blocked removal"
+
 printf 'software recovery tests passed\n'

@@ -1413,6 +1413,30 @@ printf '%s\n' "$schema2_disabled_state" \
 if lifecycle_removal_is_allowed; then
   fail_test "restored schema-2 disabled state bypassed unconfiguration proof"
 fi
+
+# Setup preparation leaves boot artifacts alone, so a preparation lineage from
+# a pristine start keeps the package removable; a generic transaction in that
+# lineage does not.
+reset_state
+run_lifecycle_transaction "prepare-secure-boot" "disabled" "unmanaged" noop_transaction \
+  || fail_test "preparation from pristine state failed"
+lifecycle_removal_is_allowed \
+  || fail_test "preparation from pristine state blocked removal"
+run_lifecycle_transaction "prepare-secure-boot" "disabled" "disabled" noop_transaction \
+  || fail_test "repeated preparation failed"
+lifecycle_removal_is_allowed \
+  || fail_test "a preparation lineage from pristine state blocked removal"
+run_lifecycle_transaction "disable-test" "disabled" "disabled" noop_transaction \
+  || fail_test "generic disabled transaction failed"
+if lifecycle_removal_is_allowed; then
+  fail_test "a generic transaction in the disabled lineage allowed removal"
+fi
+run_lifecycle_transaction "prepare-secure-boot" "disabled" "disabled" noop_transaction \
+  || fail_test "preparation after a generic transaction failed"
+if lifecycle_removal_is_allowed; then
+  fail_test "preparation laundered a generic transaction in the disabled lineage"
+fi
+
 reset_state
 lifecycle_removal_is_allowed || fail_test "pristine state blocked removal"
 package_lock=$(pacman_database_lock_path)

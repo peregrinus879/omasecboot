@@ -41,6 +41,7 @@ readonly MAX_TRANSACTION_BACKUPS=4096
 readonly MAX_CONTROL_DOCUMENT_BYTES=1048576
 readonly MAX_FIRMWARE_WRITE_ATTEMPTS=6
 readonly MAX_FIRMWARE_HIERARCHY_ATTEMPTS=2
+readonly MAX_SETUP_LINEAGE_MANIFESTS=4096
 # jq definitions of the manifest's compound members and of the evidence
 # predicates the rule functions share; appended to OMASECBOOT_JQ_DEFS.
 # shellcheck disable=SC2016 # jq variables, not shell expansions.
@@ -1686,10 +1687,64 @@ read_lifecycle() {
   _lifecycle_read_status=supported
 }
 
+# A disabled state is proved when its last transaction is a completed
+# unconfiguration, or when a lineage of transactions that leave boot artifacts
+# alone (setup preparation, and software recovery back to disabled) leads
+# through hash-bound prior lifecycle records to one, or to a pristine start.
+disabled_lifecycle_is_proved() {
+  local document="$1" depth=0 transaction_id operation manifest prior_path prior_hash
+  local -A visited=()
+  while (( depth < MAX_SETUP_LINEAGE_MANIFESTS )); do
+    [[ $(jq -r '.state' <<< "$document") == disabled ]] || return 1
+    transaction_id=$(jq -r '.last_transaction.id // empty' <<< "$document") || return 1
+    [[ -n "$transaction_id" && -z "${visited[$transaction_id]:-}" ]] || return 1
+    visited["$transaction_id"]=1
+    read_transaction_manifest "$transaction_id" || return 1
+    manifest="$_manifest_json"
+    json_is '.status == "completed" and .target_state == "disabled"' "$manifest" \
+      || return 1
+    operation=$(jq -r '.operation' <<< "$manifest") || return 1
+    case "$operation" in
+      unconfigure|unconfigure-recovery)
+        json_is '.file_rollback_policy == "preserve" and
+          ((.kind == "root" and .operation == "unconfigure" and
+            .domain_records.unconfigure != null and .domain_records.final_proof != null) or
+           (.kind == "recovery-attempt" and .operation == "unconfigure-recovery" and
+            .domain_records.final_proof != null))' "$manifest"
+        return
+        ;;
+      prepare-secure-boot)
+        json_is '.kind == "root"' "$manifest" || return 1
+        ;;
+      software-recovery)
+        json_is '.kind == "recovery-attempt"' "$manifest" || return 1
+        manifest=$(recovery_root_manifest_from_reference \
+          "$(jq -c '.recovery.root_incident' <<< "$manifest")") || return 1
+        json_is '.prior_state == "disabled"' "$manifest" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+    case "$(jq -r '.backups[0].kind' <<< "$manifest")" in
+      absent-lifecycle) return 0 ;;
+      prior-lifecycle) ;;
+      *) return 1 ;;
+    esac
+    prior_path=$(jq -r '.backups[0].path' <<< "$manifest") || return 1
+    prior_hash=$(jq -r '.backups[0].sha256' <<< "$manifest") || return 1
+    validate_private_control_file "$prior_path" || return 1
+    [[ $(sha256_file "$prior_path") == "$prior_hash" ]] || return 1
+    document=$(read_control_document "$prior_path") || return 1
+    validate_lifecycle_json "$document" || return 1
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
 lifecycle_removal_is_allowed() {
   local state_dir state_file document schema result=1
-  local saved_manifest="$_manifest_json"
+  local saved_manifest="$_manifest_json" saved_incident="$_incident_json"
   local saved_id="$_manifest_id" saved_hash="$_manifest_sha256"
+  local saved_incident_status="$_incident_read_status"
   state_dir=$(state_dir_path)
   state_file=$(lifecycle_file_path)
   if [[ ! -e "$state_dir" && ! -L "$state_dir" ]]; then
@@ -1705,24 +1760,15 @@ lifecycle_removal_is_allowed() {
     if validate_lifecycle_json "$document" \
       && [[ $(jq -r '.state' <<< "$document") == disabled ]] \
       && validate_lifecycle_document_references "$document" \
-      && [[ $(jq -r '.last_transaction.operation' <<< "$document") == unconfigure \
-        || $(jq -r '.last_transaction.operation' <<< "$document") == \
-          unconfigure-recovery ]] \
-      && read_transaction_manifest "$(jq -r '.last_transaction.id' <<< "$document")" \
-      && jq -e '
-        .status == "completed" and .target_state == "disabled" and
-        .file_rollback_policy == "preserve" and
-        ((.kind == "root" and .operation == "unconfigure" and
-          .domain_records.unconfigure != null and .domain_records.final_proof != null) or
-         (.kind == "recovery-attempt" and .operation == "unconfigure-recovery" and
-          .domain_records.final_proof != null))
-      ' <<< "$_manifest_json" >/dev/null; then
+      && disabled_lifecycle_is_proved "$document"; then
       result=0
     fi
   fi
   _manifest_json="$saved_manifest"
   _manifest_id="$saved_id"
   _manifest_sha256="$saved_hash"
+  _incident_json="$saved_incident"
+  _incident_read_status="$saved_incident_status"
   return "$result"
 }
 
