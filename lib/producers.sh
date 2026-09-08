@@ -542,6 +542,12 @@ producer_limine_hook_pre() {
   resolve_limine_producer_context || {
     [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] \
       && return 0
+    # An unrecognized child of the owning transaction (unconfiguration runs
+    # limine-install, which runs these hooks) is admitted on its token,
+    # manifest, and ancestry proofs; the parent holds the locks and waits.
+    if [[ "$_lifecycle_state" == transition ]] && current_transition_is_owned; then
+      return 0
+    fi
     fail "Boot mutation blocked: the calling producer is not recognized"
     return 100
   }
@@ -564,6 +570,9 @@ producer_limine_hook_post() {
       ;;
   esac
   resolve_limine_producer_context || {
+    if [[ "$_lifecycle_state" == transition ]] && current_transition_is_owned; then
+      return 0
+    fi
     fail "Post-hook producer repair blocked: the calling producer is not recognized"
     return 100
   }

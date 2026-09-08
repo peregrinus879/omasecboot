@@ -581,6 +581,14 @@ eval "$producer_limine_lock_definition"
     || fail_test "owned transition did not suppress nested Limine completion"
   [[ $(sha256_file "$(lifecycle_file_path)") == "$owned_hash" ]] \
     || fail_test "owned producer suppression changed the lifecycle transition"
+  LIMINE_CONTEXT=unrecognized
+  producer_limine_hook_pre \
+    || fail_test "owned transition rejected its own unrecognized child in the pre-hook"
+  producer_limine_hook_post \
+    || fail_test "owned transition rejected its own unrecognized child in the post-hook"
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$owned_hash" ]] \
+    || fail_test "owned child admission changed the lifecycle transition"
+  LIMINE_CONTEXT="entry-tool"
 
   printf -v OMASECBOOT_TRANSACTION_TOKEN '%s' forged
   if producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
@@ -594,6 +602,13 @@ eval "$producer_limine_lock_definition"
   else
     [[ $? -eq 100 ]] || fail_test "forged Limine transition was not fatal"
   fi
+  LIMINE_CONTEXT=unrecognized
+  if producer_limine_hook_pre >/dev/null 2>&1; then
+    fail_test "forged transition token admitted an unrecognized Limine caller"
+  else
+    [[ $? -eq 100 ]] || fail_test "forged unrecognized Limine caller was not fatal"
+  fi
+  LIMINE_CONTEXT="entry-tool"
   printf -v OMASECBOOT_TRANSACTION_TOKEN '%s' "$owned_token"
   LIMINE_CONTEXT=restore
   if producer_limine_hook_pre >/dev/null 2>&1; then
