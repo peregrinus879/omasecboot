@@ -1319,21 +1319,37 @@ test_firmware_recovery_from_unbound_root() {
 test_setup_lineage_stops_at_unconfigure() {
   local unconfigure_id="11111111-1111-1111-1111-111111111111"
   local activation_id="22222222-2222-2222-2222-222222222222"
-  local backup_id="33333333-3333-3333-3333-333333333333"
-  local prior_path prior_hash lifecycle boundary_operation
+  local lineage_backup_id="33333333-3333-3333-3333-333333333333"
+  # Names avoid the traversal's own locals, which shadow the stub's variables.
+  local lineage_prior_path lineage_prior_hash lifecycle boundary_operation digest timestamp
   setup_fixture setup-lineage-boundary
-  prior_path="${CASE_DIR}/prior-active-lifecycle.json"
-  jq -cn --arg id "$activation_id" \
-    '{state:"active",last_transaction:{id:$id}}' > "$prior_path"
-  prior_hash=$(sha256_file "$prior_path") || fail_test "could not hash lineage fixture"
-  lifecycle=$(jq -cn --arg id "$unconfigure_id" \
-    '{state:"disabled",last_transaction:{id:$id}}') || return 1
+  digest=$(printf 'a%.0s' {1..64})
+  timestamp=2026-01-01T00:00:00Z
+  # Schema-valid lifecycle documents, so the traversal reaches the boundary
+  # instead of rejecting the fixture first.
+  lifecycle_document() {
+    local state="$1" operation="$2" id="$3"
+    jq -cn --arg state "$state" --arg operation "$operation" --arg id "$id" \
+      --arg manifest "$(lifecycle_manifest_path "$id")" --arg digest "$digest" \
+      --arg timestamp "$timestamp" --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+      --arg version "$OMASECBOOT_VERSION" '{
+        schema_version: $schema, writer_version: $version, generation: 2,
+        state: $state, updated_at: $timestamp, transaction: null,
+        last_transaction: {id: $id, operation: $operation, manifest: $manifest,
+          manifest_sha256: $digest, completed_at: $timestamp},
+        last_recovery: null, managed_settings: null, tracking_ownership: null
+      }'
+  }
+  lineage_prior_path="${CASE_DIR}/prior-active-lifecycle.json"
+  lifecycle_document active activate-secure-boot-plan "$activation_id" > "$lineage_prior_path"
+  chmod 600 "$lineage_prior_path"
+  lineage_prior_hash=$(sha256_file "$lineage_prior_path") || fail_test "could not hash lineage fixture"
   validate_lifecycle_document_references() { return 0; }
-  validate_firmware_backup() { [[ "$1" == "$backup_id" ]]; }
-  validate_enrollment_plan() { [[ "$1" == "$backup_id" ]]; }
+  validate_firmware_backup() { [[ "$1" == "$lineage_backup_id" ]]; }
+  validate_enrollment_plan() { [[ "$1" == "$lineage_backup_id" ]]; }
   read_transaction_manifest() {
     if [[ "$1" == "$unconfigure_id" ]]; then
-      _manifest_json=$(jq -cn --arg path "$prior_path" --arg hash "$prior_hash" \
+      _manifest_json=$(jq -cn --arg path "$lineage_prior_path" --arg hash "$lineage_prior_hash" \
         --arg operation "$boundary_operation" '{
         status:"completed",
         operation:$operation,
@@ -1341,7 +1357,7 @@ test_setup_lineage_stops_at_unconfigure() {
         backups:[{kind:"prior-lifecycle",path:$path,sha256:$hash}]
       }')
     elif [[ "$1" == "$activation_id" ]]; then
-      _manifest_json=$(jq -cn --arg id "$backup_id" '{
+      _manifest_json=$(jq -cn --arg id "$lineage_backup_id" '{
         status:"completed",
         operation:"activate-secure-boot-plan",
         firmware_backup:{id:$id,status:"complete"},
@@ -1353,10 +1369,21 @@ test_setup_lineage_stops_at_unconfigure() {
     _manifest_id="$1"
   }
   for boundary_operation in unconfigure unconfigure-recovery; do
+    lifecycle=$(lifecycle_document disabled "$boundary_operation" "$unconfigure_id")
+    validate_lifecycle_json "$lifecycle" \
+      || fail_test "${boundary_operation} lineage fixture is not a valid lifecycle document"
     if setup_backup_id_from_lifecycle_json "$lifecycle"; then
       fail_test "completed ${boundary_operation} retained an obsolete setup plan"
     fi
   done
+  # Positive control: the same history without the boundary traverses to the
+  # activation plan, so the negative assertions above are not vacuous.
+  boundary_operation=cleanup
+  lifecycle=$(lifecycle_document active cleanup "$unconfigure_id")
+  validate_lifecycle_json "$lifecycle" \
+    || fail_test "control lineage fixture is not a valid lifecycle document"
+  [[ $(setup_backup_id_from_lifecycle_json "$lifecycle") == "$lineage_backup_id" ]] \
+    || fail_test "non-boundary history did not traverse to the activation plan"
 }
 
 test_firmware_recovery_resolves_pending_effect() {
