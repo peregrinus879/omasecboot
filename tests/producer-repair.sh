@@ -397,9 +397,16 @@ run_conflict_case() (
   [[ "$_lifecycle_state" == recovery-required \
     && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") -eq 0 ]] \
     || fail_test "conflict: the refusal consumed a recovery attempt"
+  # The reconstruction preflight refuses the same conflict on its own, so a
+  # recovery that reached reconstruction could not rebuild under it.
+  if producer_reconstruction_preflight >/dev/null 2>&1; then
+    fail_test "conflict: reconstruction preflight accepted a managed-settings conflict"
+  fi
 
   sed -i 's/^ENABLE_VERIFICATION=.*/ENABLE_VERIFICATION=yes/' \
     "$(limine_default_config_path)"
+  producer_reconstruction_preflight >/dev/null 2>&1 \
+    || fail_test "conflict: reconstruction preflight refused the restored setting"
   with_boot_repair_lock || fail_test "conflict: producer recovery could not relock"
   reconcile_and_recover_producer_locked \
     || fail_test "conflict: recovery failed after the setting was restored"
