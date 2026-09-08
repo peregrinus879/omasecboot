@@ -1467,6 +1467,47 @@ test_firmware_recovery_retry_limit_is_cumulative() {
   [[ $command_count -eq 2 ]] || fail_test "retry limit issued ${command_count} db commands"
 }
 
+test_firmware_recovery_requires_windows_gate() {
+  local backup_id root_id attempt_count phase rc
+  for phase in before-db before-KEK before-PK; do
+    setup_fixture "recovery-gate-${phase}"
+    backup_id=$(prepare_and_activate)
+    enter_setup_mode
+    SBCTL_FAIL_PHASE="$phase"
+    if run_enrollment "$backup_id" >/dev/null 2>&1; then
+      fail_test "${phase}: gate fixture reported success"
+    fi
+    SBCTL_FAIL_PHASE=""
+    read_lifecycle || fail_test "${phase}: gate fixture lifecycle unreadable"
+    [[ "$_lifecycle_state" == recovery-required ]] \
+      || fail_test "${phase}: gate fixture did not require recovery"
+    root_id="$_lifecycle_transaction_id"
+    attempt_count=$(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json")
+    for rc in 1 2; do
+      WINDOWS_RC=$rc
+      : > "$SBCTL_LOG"
+      : > "$ARTIFACT_LOG"
+      if recover_firmware_incident >/dev/null 2>&1; then
+        fail_test "${phase}: recovery continued past a Windows gate result ${rc}"
+      fi
+      if grep -Fq -- '--partial' "$SBCTL_LOG" || [[ -s "$ARTIFACT_LOG" ]]; then
+        fail_test "${phase}: a refused gate still wrote firmware or artifacts"
+      fi
+      read_lifecycle || fail_test "${phase}: refused recovery lifecycle unreadable"
+      [[ "$_lifecycle_state" == recovery-required \
+        && "$_lifecycle_transaction_id" == "$root_id" \
+        && $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") == \
+          "$attempt_count" ]] \
+        || fail_test "${phase}: a refused gate consumed a recovery attempt"
+    done
+    WINDOWS_RC=0
+    recover_firmware_incident || fail_test "${phase}: recovery failed after the gate passed"
+    read_lifecycle || fail_test "${phase}: recovered lifecycle unreadable"
+    [[ "$_lifecycle_state" == active ]] \
+      || fail_test "${phase}: gated recovery did not restore active state"
+  done
+}
+
 test_firmware_recovery_completes_post_pk_effect() {
   local backup_id manifest
   setup_fixture recovery-post-pk-effect
@@ -1478,7 +1519,10 @@ test_firmware_recovery_completes_post_pk_effect() {
   fi
   SBCTL_FAIL_PHASE=""
   : > "$SBCTL_LOG"
+  # An incident already at F3 reconciles without a new Windows gate.
+  WINDOWS_RC=2
   recover_firmware_incident || fail_test "post-PK effect did not recover"
+  WINDOWS_RC=0
   read_lifecycle || fail_test "post-PK recovery result was unreadable"
   manifest=$(lifecycle_manifest_path \
     "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
@@ -1613,6 +1657,7 @@ run_case recovery-pending-effect test_firmware_recovery_resolves_pending_effect
 run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry
 run_case recovery-retry-limit test_firmware_recovery_retry_limit_is_cumulative
 run_case recovery-post-pk-effect test_firmware_recovery_completes_post_pk_effect
+run_case recovery-windows-gate test_firmware_recovery_requires_windows_gate
 run_case recovery-unreadable-pending test_firmware_recovery_leaves_unreadable_pending
 [[ "$enrollment_test_case_matched" == true ]] \
   || fail_test "unknown ENROLLMENT_TEST_CASE: ${enrollment_test_case}"

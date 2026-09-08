@@ -1980,9 +1980,20 @@ firmware_recovery_transaction() {
   transaction_phase_complete "prove-enrolled-trust"
 }
 
+# Firmware recovery may still write trust entries, so it needs the Windows
+# preparation gate as a fresh observation before an attempt is consumed; an
+# incident already at F3 only reconciles and proves, and needs no gate.
+firmware_recovery_windows_gate() {
+  local backup_id="$1" frontier
+  frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
+  [[ "$frontier" != F3 ]] || return 0
+  secure_boot_windows_gate
+}
+
 run_firmware_recovery_locked() {
   boot_locks_are_held || return 1
   load_firmware_recovery_context || return $?
+  firmware_recovery_windows_gate "$_firmware_recovery_backup_id" || return 1
   run_recovery_attempt_locked firmware-recovery firmware_recovery_transaction \
     "firmware recovery" "$_firmware_recovery_backup_id"
 }
