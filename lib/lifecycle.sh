@@ -1696,6 +1696,9 @@ disabled_lifecycle_is_proved() {
   local -A visited=()
   while (( depth < MAX_SETUP_LINEAGE_MANIFESTS )); do
     [[ $(jq -r '.state' <<< "$document") == disabled ]] || return 1
+    # Every hop binds its manifest by the hash the document recorded, so a
+    # manifest rewritten in place under the same id is not accepted.
+    validate_lifecycle_document_references "$document" || return 1
     transaction_id=$(jq -r '.last_transaction.id // empty' <<< "$document") || return 1
     [[ -n "$transaction_id" && -z "${visited[$transaction_id]:-}" ]] || return 1
     visited["$transaction_id"]=1

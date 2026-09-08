@@ -1437,6 +1437,25 @@ if lifecycle_removal_is_allowed; then
   fail_test "preparation laundered a generic transaction in the disabled lineage"
 fi
 
+# A prior hop's manifest rewritten in place under its own id no longer matches
+# the hash the prior lifecycle document recorded, so the lineage is refused
+# even when the rewritten content would qualify.
+reset_state
+run_lifecycle_transaction "disable-test" "disabled" "unmanaged" noop_transaction \
+  || fail_test "generic transaction from pristine state failed"
+generic_manifest=$(lifecycle_manifest_path \
+  "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+run_lifecycle_transaction "prepare-secure-boot" "disabled" "disabled" noop_transaction \
+  || fail_test "preparation after a pristine generic transaction failed"
+if lifecycle_removal_is_allowed; then
+  fail_test "a generic transaction at the start of the disabled lineage allowed removal"
+fi
+jq -c '.operation = "prepare-secure-boot"' "$generic_manifest" \
+  | atomic_write_control_file "$generic_manifest" 600
+if lifecycle_removal_is_allowed; then
+  fail_test "a prior manifest rewritten under its own id was accepted without its recorded hash"
+fi
+
 reset_state
 lifecycle_removal_is_allowed || fail_test "pristine state blocked removal"
 package_lock=$(pacman_database_lock_path)
