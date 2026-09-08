@@ -160,7 +160,12 @@ usr/lib/tmpfiles.d/omasecboot.conf
 usr/share/
 usr/share/doc/
 usr/share/doc/omasecboot/
+usr/share/doc/omasecboot/AGENTS.md
 usr/share/doc/omasecboot/README.md
+usr/share/doc/omasecboot/docs/
+usr/share/doc/omasecboot/docs/maintenance.md
+usr/share/doc/omasecboot/docs/omarchy-integration.md
+usr/share/doc/omasecboot/docs/release-checklist.md
 usr/share/libalpm/
 usr/share/libalpm/hooks/
 usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook
@@ -196,7 +201,7 @@ while read -r mode owner group path; do
       [[ "$mode" == drwxr-xr-x ]] || fail_test "wrong directory mode: ${path} ${mode}" ;;
     usr/bin/omasecboot|etc/boot/hooks/pre.d/000-omasecboot-guard|etc/boot/hooks/post.d/zzz-omasecboot-sign)
       [[ "$mode" == -rwxr-xr-x ]] || fail_test "wrong executable mode: ${path} ${mode}" ;;
-    usr/lib/omasecboot/*.sh|usr/share/libalpm/hooks/*.hook|usr/lib/tmpfiles.d/omasecboot.conf|usr/share/licenses/omasecboot/LICENSE|usr/share/doc/omasecboot/README.md)
+    usr/lib/omasecboot/*.sh|usr/share/libalpm/hooks/*.hook|usr/lib/tmpfiles.d/omasecboot.conf|usr/share/licenses/omasecboot/LICENSE|usr/share/doc/omasecboot/*.md)
       [[ "$mode" == -rw-r--r-- ]] || fail_test "wrong file mode: ${path} ${mode}" ;;
     .PKGINFO|.MTREE|.BUILDINFO) ;;
     *) fail_test "unexpected package entry: ${path}" ;;

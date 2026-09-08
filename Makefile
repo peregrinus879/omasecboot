@@ -41,6 +41,8 @@ install:
 	install -Dm644 omasecboot.tmpfiles "$(DESTDIR)$(TMPFILESDIR)/omasecboot.conf"
 	install -Dm644 LICENSE "$(DESTDIR)$(LICENSEDIR)/LICENSE"
 	install -Dm644 README.md "$(DESTDIR)$(DOCDIR)/README.md"
+	install -Dm644 AGENTS.md "$(DESTDIR)$(DOCDIR)/AGENTS.md"
+	install -Dm644 -t "$(DESTDIR)$(DOCDIR)/docs/" docs/*.md
 
 # Package removal through pacman is the supported removal path. Its
 # PreTransaction guard allows removal only from verified disabled or pristine

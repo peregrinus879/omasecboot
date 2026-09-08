@@ -131,6 +131,11 @@ grep -Fxq 'f /var/lib/omasecboot/repair.lock 0644 root root -' "$tmpfiles_conf" 
 [[ -f "$license_file" ]] || fail_test "license file was not installed"
 cmp -s "$license_file" "${ROOT_DIR}/LICENSE" || fail_test "installed license drifted"
 [[ -f "$readme_file" ]] || fail_test "documentation was not installed"
+# The README's relative links resolve from the installed documentation root.
+for doc in AGENTS.md docs/maintenance.md docs/omarchy-integration.md docs/release-checklist.md; do
+  [[ -f "${STAGE_DIR}${PREFIX}/share/doc/omasecboot/${doc}" ]] \
+    || fail_test "linked documentation was not installed: ${doc}"
+done
 [[ "$sbctl_hook_name" < "$repair_hook_name" ]] \
   || fail_test "repair hook no longer sorts after sbctl"
 printf '%s\n' "${removal_guard##*/}" "${guard_hook##*/}" | LC_ALL=C sort -C \
