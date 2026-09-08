@@ -64,8 +64,8 @@ sed -i '/^NoExtract/d' /etc/pacman.conf
 pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep \
   util-linux systemd pacman jq openssl gum efibootmgr sbctl limine \
   > "${BUILD_DIR}/deps.log" 2>&1 || { cat "${BUILD_DIR}/deps.log" >&2; fail_test "dependency install failed"; }
-assume=(--assume-installed limine-mkinitcpio-hook=1.38.0-1
-        --assume-installed limine-snapper-sync=1.31.0-1)
+assume=(--assume-installed limine-mkinitcpio-hook=1.38.0-1.1
+        --assume-installed limine-snapper-sync=1.31.0-1.1)
 install -d -m 755 /run/lock
 
 state=/var/lib/omasecboot

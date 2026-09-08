@@ -3,7 +3,7 @@
 # OmaSecBoot: boot-artifact producer leases and registry-selected recovery
 
 # shellcheck disable=SC2034 # Consumed by the dispatcher activation check.
-readonly SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION=1.31.0-1
+readonly SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION=1.31.0-1.1
 
 _producer_class=""
 _producer_subtype=""

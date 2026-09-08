@@ -61,8 +61,8 @@ OmaSecBoot drives three boot-artifact producers whose hook protocol it audits pe
 
 | Package | Supported version | Source |
 |---|---|---|
-| `limine-mkinitcpio-hook` | 1.38.0-1 | Omarchy Package Repository |
-| `limine-snapper-sync` | 1.31.0-1 | Omarchy Package Repository |
+| `limine-mkinitcpio-hook` | 1.38.0-1.1 | Omarchy Package Repository |
+| `limine-snapper-sync` | 1.31.0-1.1 | Omarchy Package Repository |
 | `sbctl` | 0.18-2 | Arch `extra` |
 | `efibootmgr` | 18 or newer | Arch `core` |
 

@@ -29,7 +29,7 @@ Target machine preparation, in this order:
 
 1. Install Windows first, then Omarchy from the ISO alongside it with Secure Boot off. Confirm in the firmware Secure Boot menu that the PK can be deleted on its own; firmware that offers only "clear all keys" is recorded as a refusal for that firmware.
 2. Back up every Windows recovery key (BitLocker or Device Encryption) somewhere off the machine.
-3. Check the producer set and the stale-copy condition before building anything: `pacman -Q limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr` must show exactly 1.38.0-1, 1.31.0-1, and 0.18-2 with efibootmgr at 18 or newer, and `ls /usr/local/bin/omasecboot /usr/local/lib/omasecboot` must report both missing. Any other producer version fails activation by design and needs a re-audit commit before acceptance continues.
+3. Check the producer set and the stale-copy condition before building anything: `pacman -Q limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr` must show exactly 1.38.0-1.1, 1.31.0-1.1, and 0.18-2 with efibootmgr at 18 or newer, and `ls /usr/local/bin/omasecboot /usr/local/lib/omasecboot` must report both missing. Any other producer version fails activation by design and needs a re-audit commit before acceptance continues.
 4. Clone the repository at the candidate commit (a git clone, not an archive: the build reads its file list from git), then `make package`, `sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst`, and `omasecboot version`.
 5. Keep a `notes.md` in `acceptance-records/` for what the recorder cannot see: the firmware menu wording, whether Windows asked for a recovery key after the handoff, and anything the firmware refused.
 

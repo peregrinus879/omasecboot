@@ -243,12 +243,12 @@ activate_case() {
 
 reset_case
 [[ $(parse_pacman_query_version limine-mkinitcpio-hook \
-  'limine-mkinitcpio-hook 1.38.0-1') == 1.38.0-1 ]] \
+  'limine-mkinitcpio-hook 1.38.0-1.1') == 1.38.0-1.1 ]] \
   || fail_test "pacman package version was not parsed"
 for invalid_query in \
-  'other-package 1.38.0-1' \
-  'limine-mkinitcpio-hook 1.38.0-1 trailing' \
-  $'limine-mkinitcpio-hook 1.38.0-1\nother-package 1.0-1'; do
+  'other-package 1.38.0-1.1' \
+  'limine-mkinitcpio-hook 1.38.0-1.1 trailing' \
+  $'limine-mkinitcpio-hook 1.38.0-1.1\nother-package 1.0-1'; do
   if parse_pacman_query_version limine-mkinitcpio-hook "$invalid_query" >/dev/null; then
     fail_test "malformed pacman package query was accepted"
   fi
