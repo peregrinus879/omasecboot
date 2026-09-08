@@ -561,19 +561,14 @@ validate_discovered_sbctl_mappings() {
       (.key | startswith("/")) and
       (.key | explode | all(. >= 32 and . != 127)) and
       ((.value | type) == "object") and
-      (((.value.file // .key) | type) == "string") and
-      ((.value.file // .key) | startswith("/")) and
-      ((.value.file // .key) | explode | all(. >= 32 and . != 127)) and
-      (((.value.output_file // .value.output // .value.file // .key) | type) == "string") and
-      ((.value.output_file // .value.output // .value.file // .key) | startswith("/")) and
-      ((.value.output_file // .value.output // .value.file // .key) |
-        explode | all(. >= 32 and . != 127))
+      .value.file == .key and
+      (((.value.output_file // .value.file) | type) == "string") and
+      ((.value.output_file // .value.file) | startswith("/")) and
+      ((.value.output_file // .value.file) | explode | all(. >= 32 and . != 127))
     )
   ' "$files_db" >/dev/null || return 1
   rows=$(jq -r '
-    to_entries[] |
-    [.key, (.value.file // .key),
-      (.value.output_file // .value.output // .value.file // .key)] | @tsv
+    to_entries[] | [.key, .value.file, (.value.output_file // .value.file)] | @tsv
   ' "$files_db") || return 1
   [[ -n "$rows" ]] || return 0
 

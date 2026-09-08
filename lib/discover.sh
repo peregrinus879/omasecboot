@@ -128,6 +128,21 @@ sbctl_database_candidate_paths() {
 
 # Query tracked files through sbctl's public CLI.
 # Returns 0 on success (including empty), 1 on lookup failure.
+# sbctl 0.18's tracking database, which `sbctl list-files --json` prints as
+# is: an object keyed by source path whose values carry `file`, equal to the
+# key, and `output_file`. The CLI reader, the database fallback, and the
+# mapping validator accept exactly this shape and synthesize nothing.
+# shellcheck disable=SC2016 # jq program, not shell expansions.
+readonly SBCTL_ENTRY_ROWS_JQ='
+  if type != "object" then error("unsupported sbctl tracking shape") else . end
+  | to_entries[]
+  | if (.value | type) != "object" or (.value.file | type) != "string"
+      or .value.file == "" or .value.file != .key
+    then error("unsupported sbctl tracking entry") else . end
+  | [.value.file, (.value.output_file // .value.file)]
+  | @tsv
+'
+
 list_enrolled_entries_from_cli() {
   command -v sbctl >/dev/null 2>&1 || return 1
 
@@ -137,17 +152,7 @@ list_enrolled_entries_from_cli() {
   validate_control_file "$files_db" || return 1
   json=$(sbctl list-files --json 2>/dev/null) || return 1
   [[ -n "$json" && "$json" != "null" ]] || return 0
-
-  # sbctl 0.18 prints its file database: an object keyed by path whose values
-  # carry `file` and `output_file`. Any other shape fails closed.
-  printf '%s\n' "$json" | jq -r '
-    if type != "object" then error("unsupported sbctl list-files shape") else . end
-    | to_entries[]
-    | if (.value | type) != "object" or (.value.file | type) != "string" or .value.file == ""
-      then error("unsupported sbctl list-files entry") else . end
-    | [.value.file, (.value.output_file // .value.file)]
-    | @tsv
-  ' 2>/dev/null
+  printf '%s\n' "$json" | jq -r "$SBCTL_ENTRY_ROWS_JQ" 2>/dev/null
 }
 
 # Query tracked files from sbctl's on-disk database: a fallback path for
@@ -162,14 +167,7 @@ list_enrolled_entries_from_db() {
     return 0
   fi
 
-  # sbctl stores signing entries as a JSON object keyed by source file path.
-  # Normalize it to tab-separated "file<TAB>output_file" rows.
-  echo "$json" | jq -r '
-    if type == "object" then .[] else [] end
-    | select((.file // .output_file // "") != "")
-    | [(.file // .output_file), (.output_file // .file)]
-    | @tsv
-  ' 2>/dev/null
+  printf '%s\n' "$json" | jq -r "$SBCTL_ENTRY_ROWS_JQ" 2>/dev/null
 }
 
 # List file paths currently registered in sbctl's database.

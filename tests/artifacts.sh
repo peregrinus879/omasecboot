@@ -316,6 +316,23 @@ test_discovery_and_tracking_sources() {
   SBCTL_LIST_MODE=fail
   tracked=$(list_enrolled_paths) || fail_test "sbctl database fallback failed"
   grep -Fq 'missing.efi' <<< "$tracked" || fail_test "failed sbctl list did not use the database fallback"
+
+  # The fallback reads the same entry schema as the CLI and fails closed on
+  # anything else instead of inventing a source.
+  jq -cn --arg source "$PRIMARY" '{($source): {output_file: $source}}' > "$SBCTL_FILES_DB"
+  if list_enrolled_paths >/dev/null 2>&1; then
+    fail_test "database fallback synthesized a source for an entry without a file"
+  fi
+  jq -cn --arg source "$PRIMARY" --arg other "${CASE_DIR}/other.efi" '{
+    ($other): {file: $source, output_file: $source}
+  }' > "$SBCTL_FILES_DB"
+  if list_enrolled_paths >/dev/null 2>&1; then
+    fail_test "database fallback accepted an entry whose file differs from its key"
+  fi
+  SBCTL_LIST_MODE=json
+  if list_enrolled_paths >/dev/null 2>&1; then
+    fail_test "sbctl list output with a mismatched entry was accepted"
+  fi
 }
 
 test_sbctl_config_resolution() {
@@ -449,6 +466,19 @@ test_mapping_validation() {
   }' > "$SBCTL_FILES_DB"
   if artifact_repair_preflight >/dev/null 2>&1; then
     fail_test "preflight accepted a VFAT alias mapped onto a discovered EFI artifact"
+  fi
+
+  # The tracking entry schema is one: a source-keyed object whose file equals
+  # the key. Nothing is synthesized for a malformed entry on a proof path.
+  jq -cn --arg source "$PRIMARY" '{($source): {output_file: $source}}' > "$SBCTL_FILES_DB"
+  if artifact_repair_preflight >/dev/null 2>&1; then
+    fail_test "preflight synthesized a source for an entry without a file"
+  fi
+  jq -cn --arg source "$PRIMARY" --arg other "${CASE_DIR}/other.efi" '{
+    ($other): {file: $source, output_file: $source}
+  }' > "$SBCTL_FILES_DB"
+  if artifact_repair_preflight >/dev/null 2>&1; then
+    fail_test "preflight accepted a tracking entry whose file differs from its key"
   fi
 }
 
