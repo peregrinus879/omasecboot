@@ -3443,6 +3443,7 @@ run_lifecycle_transaction_with_preflight() {
     return 1
   fi
   "$preflight" "$@" || {
+    fail "Operation ${operation} preflight failed; no transaction was started"
     release_boot_repair_lock
     return 1
   }

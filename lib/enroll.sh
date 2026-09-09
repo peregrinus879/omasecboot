@@ -1215,12 +1215,30 @@ secure_boot_windows_gate() {
 prepare_secure_boot_preflight() {
   local preparation_consent="${1:-}"
   [[ "$preparation_consent" == true ]] || return 1
-  validate_efivarfs_mount || return 1
-  classify_local_sbctl_keys || return 1
-  [[ "$_local_key_state" == none || "$_local_key_state" == complete ]] || return 1
-  read_current_firmware_modes || return 1
-  [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
-    && "$_deployed_mode" == 0 ]] || return 1
+  validate_efivarfs_mount || {
+    fail "The EFI variable filesystem failed validation"
+    return 1
+  }
+  classify_local_sbctl_keys || {
+    fail "Local sbctl keys could not be classified"
+    return 1
+  }
+  [[ "$_local_key_state" == none || "$_local_key_state" == complete ]] || {
+    fail "The local sbctl key set is incomplete; setup needs no keys or a complete set"
+    return 1
+  }
+  read_current_firmware_modes || {
+    fail "Firmware mode variables could not be read"
+    return 1
+  }
+  [[ "$_setup_mode" == 0 ]] || {
+    fail "Firmware is already in Setup Mode without a validated backup from this tool"
+    return 1
+  }
+  [[ "$_audit_mode" == 0 && "$_deployed_mode" == 0 ]] || {
+    fail "AuditMode or DeployedMode is not zero; only user-mode firmware is supported"
+    return 1
+  }
   secure_boot_windows_gate
 }
 

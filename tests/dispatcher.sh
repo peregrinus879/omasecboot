@@ -383,6 +383,39 @@ expected_mutations=$'recover\nprepare\nactivate\nwindows-gate\nrecover\nsign\nwi
 [[ $(<"$mutation_log") == "$expected_mutations" ]] \
   || fail_test "enabled commands selected the wrong recoverable mutations"
 
+# A declined confirmation names what was cancelled and starts no mutation.
+gum() { [[ "$1" == confirm ]] && return 1; }
+rm -f "$setup_marker"
+PLAN_CONFIRMED=false
+if cmd_setup > "${TEST_DIR}/setup-declined.out" 2>&1; then
+  fail_test "declined setup consent succeeded"
+fi
+grep -Fq 'Setup cancelled; no backup, keys, or plan were written' \
+  "${TEST_DIR}/setup-declined.out" || fail_test "declined setup consent gave no reason"
+[[ ! -e "$setup_marker" ]] || fail_test "declined setup consent prepared a backup"
+: > "$setup_marker"
+if cmd_setup > "${TEST_DIR}/plan-declined.out" 2>&1; then
+  fail_test "declined plan confirmation succeeded"
+fi
+grep -Fq 'Setup cancelled before plan confirmation' "${TEST_DIR}/plan-declined.out" \
+  || fail_test "declined plan confirmation gave no reason"
+[[ "$PLAN_CONFIRMED" == false ]] || fail_test "declined plan confirmation activated the plan"
+if cmd_enroll > "${TEST_DIR}/enroll-declined.out" 2>&1; then
+  fail_test "declined enrollment succeeded"
+fi
+grep -Fq 'Enrollment cancelled; no firmware write was made' \
+  "${TEST_DIR}/enroll-declined.out" || fail_test "declined enrollment gave no reason"
+if cmd_unconfigure > "${TEST_DIR}/unconfigure-declined.out" 2>&1; then
+  fail_test "declined unconfigure succeeded"
+fi
+grep -Fq 'Unconfigure cancelled; nothing was changed' \
+  "${TEST_DIR}/unconfigure-declined.out" || fail_test "declined unconfigure gave no reason"
+[[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover\nrecover\nrecover' ]] \
+  || fail_test "a declined confirmation started a mutation"
+printf '%s\n' "$expected_mutations" > "$mutation_log"
+PLAN_CONFIRMED=true
+gum() { [[ "$1" == confirm ]]; }
+
 RECOVERY_OCCURRED=true
 check_deps() { fail_test "command-specific dependencies ran before recovery"; }
 check_core_deps() { fail_test "command-specific dependencies ran before recovery"; }

@@ -51,6 +51,13 @@ cmd_setup() {
   run_recoverable_command setup 0 setup_mutation
 }
 
+# A declined plan confirmation leaves the prepared backup and plan recorded
+# but unconfirmed; the next setup run shows them again.
+setup_plan_declined() {
+  warn "Setup cancelled before plan confirmation; the recorded backup and plan stay unconfirmed and no firmware instruction applies until setup confirms them"
+  return 1
+}
+
 setup_mutation() {
   local backup_id state repair_required=true backup_rc=0
   check_deps
@@ -63,8 +70,10 @@ setup_mutation() {
     return 1
   fi
   if [[ -z "$backup_id" ]]; then
-    gum confirm "Back up firmware trust and prepare a Secure Boot enrollment plan?" \
-      || return 1
+    gum confirm "Back up firmware trust and prepare a Secure Boot enrollment plan?" || {
+      warn "Setup cancelled; no backup, keys, or plan were written"
+      return 1
+    }
     prepare_state_aware_setup true || return 1
     backup_id=$(current_setup_backup_id) || return 1
   fi
@@ -76,11 +85,12 @@ setup_mutation() {
     echo "  Enrollment plan: $(firmware_plan_path "$backup_id")"
     echo "  Current PK SHA-256: ${_enrollment_current_pk_hash}"
     echo "  Planned PK SHA-256: ${_enrollment_planned_pk_hash}"
-    gum confirm "Replace the current PK with the planned OmaSecBoot PK?" || return 1
+    gum confirm "Replace the current PK with the planned OmaSecBoot PK?" \
+      || setup_plan_declined || return 1
     gum confirm "Confirm this firmware can delete only PK without clearing KEK, db, or dbx?" \
-      || return 1
+      || setup_plan_declined || return 1
     gum confirm "Confirm retained trust entries and recovery preparation were reviewed?" \
-      || return 1
+      || setup_plan_declined || return 1
     activate_confirmed_enrollment_plan "$backup_id" true true true || return 1
     repair_required=false
   fi
@@ -138,7 +148,10 @@ enroll_mutation() {
     fail "Enrollment requires validated Setup Mode; current setup state is ${state}"
     return 1
   }
-  gum confirm "Enroll the confirmed db, KEK, and PK trust plan now?" || return 1
+  gum confirm "Enroll the confirmed db, KEK, and PK trust plan now?" || {
+    warn "Enrollment cancelled; no firmware write was made"
+    return 1
+  }
   run_enrollment "$backup_id" || return 1
   validate_setup_instruction_boundary "$backup_id" 4 || return 1
   warn "Enrollment is proved; enable Secure Boot in firmware settings."
@@ -393,7 +406,10 @@ unconfigure_mutation() {
   check_deps
   check_efi_mode
   require_gum
-  gum confirm "Restore recorded defaults and rebuild stock Limine boot state?" || return 1
+  gum confirm "Restore recorded defaults and rebuild stock Limine boot state?" || {
+    warn "Unconfigure cancelled; nothing was changed"
+    return 1
+  }
   run_unconfigure
 }
 

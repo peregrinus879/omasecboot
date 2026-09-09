@@ -405,9 +405,13 @@ fi
 read_lifecycle || fail_test "invalid adoption damaged lifecycle readability"
 [[ $_lifecycle_state == unmanaged ]] || fail_test "invalid adoption created lifecycle state"
 if adopt_lifecycle reject_adoption_preflight \
-  "no" "unknown" "yes" "unset" "absent" "unknown" "absent" "unknown"; then
+  "no" "unknown" "yes" "unset" "absent" "unknown" "absent" "unknown" \
+  > "${TEST_DIR}/rejected-preflight.out" 2>&1; then
   fail_test "rejected adoption preflight succeeded"
 fi
+grep -Fq 'Operation adopt preflight failed; no transaction was started' \
+  "${TEST_DIR}/rejected-preflight.out" \
+  || fail_test "rejected adoption preflight gave no reason"
 read_lifecycle || fail_test "rejected adoption damaged lifecycle readability"
 [[ $_lifecycle_state == unmanaged ]] || fail_test "rejected adoption created lifecycle state"
 
