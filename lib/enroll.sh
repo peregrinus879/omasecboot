@@ -28,6 +28,7 @@ _sbctl_executable_hash=""
 _sbctl_config_state=""
 _sbctl_config_hash=""
 _local_key_state=""
+_local_key_leftovers=()
 _setup_mode=""
 _audit_mode=""
 _deployed_mode=""
@@ -297,6 +298,9 @@ explain_setup_observation() {
   fi
   if classify_local_sbctl_keys; then
     warn "Local sbctl keys: ${_local_key_state}"
+    if [[ "$_local_key_state" == none ]] && ! local_sbctl_key_directories_are_clear; then
+      warn "Local sbctl key directories without keys: ${_local_key_leftovers[*]}"
+    fi
   else
     warn "Local sbctl keys: not classifiable (missing, mismatched, or an unsupported sbctl configuration)"
   fi
@@ -822,66 +826,89 @@ classify_local_sbctl_keys() {
   fi
 }
 
-# sbctl 0.18 lays out its own state: list-files and verify create the state
-# directory at mode 755 with a zero-length files database on a keyless machine,
-# create-keys makes directories with the same mode, writes the GUID 0644, and
-# writes every key and certificate 0400. An existing directory is therefore
-# held to the control-directory rule (owner and no group or other write), and
-# only the directories this function creates itself are private.
+# sbctl 0.18 owns the layout under /var/lib/sbctl (docs/maintenance.md):
+# create-keys makes the state and key directories with MkdirAll (755 under
+# the root umask), writes the GUID 0644 when it is absent, and generates keys
+# only while one of keys/PK, keys/KEK, and keys/db is missing; when all three
+# exist it reports the keys as already created and writes nothing. Setup
+# therefore creates nothing there itself: it records the directories and the
+# GUID that are absent, so rollback removes exactly what sbctl created, and
+# refuses a hierarchy directory that exists without keys, because sbctl would
+# accept it as a created key set.
+local_sbctl_key_directories_are_clear() {
+  local directory
+  _local_key_leftovers=()
+  for directory in "$_sbctl_keydir/PK" "$_sbctl_keydir/KEK" "$_sbctl_keydir/db"; do
+    [[ ! -e "$directory" && ! -L "$directory" ]] || _local_key_leftovers+=("$directory")
+  done
+  [[ ${#_local_key_leftovers[@]} -eq 0 ]]
+}
+
 create_local_sbctl_keys() {
-  local directory path parent rc=0
-  local -a paths
+  local boundary directory topmost="" rc=0
+  local -a absent_directories=()
   classify_local_sbctl_keys || return 1
   [[ "$_local_key_state" == none ]] || {
     fail "Local sbctl keys already exist (${_local_key_state}); setup creates keys only from none"
     return 1
   }
-  parent=$(dirname "$_sbctl_keydir")
-  if [[ ! -e "$parent" && ! -L "$parent" ]]; then
-    validate_control_directory "$(dirname "$parent")" || {
-      fail "$(dirname "$parent") must be owned by the control user and not writable by group or others"
-      return 1
-    }
-    install -d -m 700 "$parent" || return 1
-    durable_sync "$(dirname "$parent")" || return 1
-  fi
-  validate_control_directory "$parent" || {
-    fail "${parent} must be owned by the control user and not writable by group or others"
+  local_sbctl_key_directories_are_clear || {
+    fail "Local sbctl key directories exist without keys: ${_local_key_leftovers[*]}"
     return 1
   }
-  for directory in "$_sbctl_keydir" "$_sbctl_keydir/PK" \
-    "$_sbctl_keydir/KEK" "$_sbctl_keydir/db"; do
-    if [[ -e "$directory" || -L "$directory" ]]; then
-      validate_control_directory "$directory" || {
-        fail "${directory} must be owned by the control user and not writable by group or others"
-        return 1
-      }
-    else
-      install -d -m 700 "$directory" || return 1
-      durable_sync "$(dirname "$directory")" || return 1
-    fi
+  # The deepest existing ancestor of the key directory must be safe; the
+  # directory below it is the one sbctl creates, and covers everything under it.
+  boundary=$(dirname "$(dirname "$_sbctl_keydir")")
+  directory="$_sbctl_keydir"
+  while [[ "$directory" != "$boundary" && ! -e "$directory" && ! -L "$directory" ]]; do
+    topmost="$directory"
+    directory=$(dirname "$directory")
   done
-  paths=("$_sbctl_guid_path"
-    "$_sbctl_keydir/PK/PK.key" "$_sbctl_keydir/PK/PK.pem"
-    "$_sbctl_keydir/KEK/KEK.key" "$_sbctl_keydir/KEK/KEK.pem"
-    "$_sbctl_keydir/db/db.key" "$_sbctl_keydir/db/db.pem")
-  for path in "${paths[@]}"; do
-    transaction_backup_file "$path" true || {
-      fail "Could not record the pre-creation state of ${path}"
+  validate_control_directory "$directory" || {
+    fail "${directory} must be owned by the control user and not writable by group or others"
+    return 1
+  }
+  if [[ -n "$topmost" ]]; then
+    absent_directories=("$topmost")
+  else
+    absent_directories=("$_sbctl_keydir/PK" "$_sbctl_keydir/KEK" "$_sbctl_keydir/db")
+  fi
+  for directory in "${absent_directories[@]}"; do
+    transaction_backup_absent_directory "$directory" || {
+      fail "Could not record the pre-creation state of ${directory}"
       return 1
     }
   done
-  run_sbctl_enrollment create-keys || {
+  if [[ -z "$topmost" || "$_sbctl_guid_path" != "$topmost"/* ]]; then
+    transaction_backup_file "$_sbctl_guid_path" true || {
+      fail "Could not record the pre-creation state of ${_sbctl_guid_path}"
+      return 1
+    }
+  fi
+  # sbctl derives its directory and GUID modes from the umask, so the layout
+  # is fixed here rather than inherited from the caller's shell.
+  (umask 022 && run_sbctl_enrollment create-keys) || {
     rc=$?
     fail "sbctl create-keys exited with status ${rc}"
     return 1
   }
+  for directory in "$_sbctl_keydir" "$_sbctl_keydir/PK" \
+    "$_sbctl_keydir/KEK" "$_sbctl_keydir/db"; do
+    validate_control_directory "$directory" || {
+      fail "sbctl create-keys left ${directory} missing, foreign-owned, or writable by group or others"
+      return 1
+    }
+  done
   classify_local_sbctl_keys || {
     fail "The keys sbctl created could not be classified"
     return 1
   }
   [[ "$_local_key_state" == complete ]] || {
-    fail "sbctl create-keys left an incomplete key set (${_local_key_state})"
+    fail "sbctl create-keys did not leave a complete key set (${_local_key_state})"
+    return 1
+  }
+  durable_sync "$_sbctl_keydir" || {
+    fail "The keys sbctl created could not be synced to disk"
     return 1
   }
 }
@@ -1360,6 +1387,11 @@ prepare_secure_boot_preflight() {
     fail "The local sbctl key set is incomplete; setup needs no keys or a complete set"
     return 1
   }
+  if [[ "$_local_key_state" == none ]] && ! local_sbctl_key_directories_are_clear; then
+    fail "Local sbctl key directories exist without keys: ${_local_key_leftovers[*]}"
+    fail "sbctl create-keys would treat them as created keys; move them away, or remove them if they hold nothing you need, then run setup again"
+    return 1
+  fi
   read_current_firmware_modes || {
     fail "A firmware mode variable could not be read or has an unexpected shape"
     return 1

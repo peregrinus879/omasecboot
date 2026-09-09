@@ -99,7 +99,8 @@ validate_software_recovery_proof_json() {
   else
     resolution=rolled-back
     expected_backups=$(jq -c '[.backups[] |
-      select(.kind == "file" or .kind == "absent-file") |
+      select(.kind == "file" or .kind == "absent-file" or
+        .kind == "absent-directory") |
       {kind, target, sha256}]' <<< "$root") || return 1
   fi
   jq -e --arg id "$transaction_id" \
@@ -109,7 +110,8 @@ validate_software_recovery_proof_json() {
     --argjson expected_backups "$expected_backups" --argjson manifest "$manifest" "$OMASECBOOT_JQ_DEFS"'
     def restored_backup:
       type == "object" and keys == ["kind","sha256","target"] and
-      (.kind == "file" or .kind == "absent-file") and (.target | absolute_path) and
+      (.kind == "file" or .kind == "absent-file" or .kind == "absent-directory") and
+      (.target | absolute_path) and
       (if .kind == "file" then (.sha256 | digest) else .sha256 == null end);
     type == "object" and
     keys == ["operation","proved_at","resolution","restored_backups","root_incident",
@@ -160,7 +162,8 @@ software_recovery_esp_is_safe() {
         ;;
     esac
   done < <(jq -r '.backups[] |
-    select(.kind == "file" or .kind == "absent-file") | .target' \
+    select(.kind == "file" or .kind == "absent-file" or
+        .kind == "absent-directory") | .target' \
     <<< "$_recovery_root_manifest_json")
 }
 
@@ -170,7 +173,7 @@ software_recovery_backups_are_restored() {
     [[ -n "$entry" ]] || continue
     kind=$(jq -r '.kind' <<< "$entry") || return 1
     target=$(jq -r '.target' <<< "$entry") || return 1
-    if [[ "$kind" == absent-file ]]; then
+    if [[ "$kind" == absent-file || "$kind" == absent-directory ]]; then
       [[ ! -e "$target" && ! -L "$target" ]] || return 1
       continue
     fi
@@ -186,14 +189,16 @@ software_recovery_backups_are_restored() {
       && "$current_mode" == "$mode" && "$(sha256_file "$target")" == "$expected" ]] \
       || return 1
   done < <(jq -c '.backups[] |
-    select(.kind == "file" or .kind == "absent-file")' <<< "$root_manifest")
+    select(.kind == "file" or .kind == "absent-file" or
+        .kind == "absent-directory")' <<< "$root_manifest")
 }
 
 restore_software_recovery_backups() {
   local entry
   local -a entries=()
   entries_json=$(jq -c '.backups | reverse[] |
-    select(.kind == "file" or .kind == "absent-file")' \
+    select(.kind == "file" or .kind == "absent-file" or
+        .kind == "absent-directory")' \
     <<< "$_recovery_root_manifest_json") || return 1
   [[ -z "$entries_json" ]] || mapfile -t entries <<< "$entries_json"
   for entry in "${entries[@]}"; do
@@ -212,7 +217,8 @@ persist_software_recovery_proof() {
     software_recovery_backups_are_restored "$_recovery_root_manifest_json" || return 1
     resolution=rolled-back
     backups=$(jq -c '[.backups[] |
-      select(.kind == "file" or .kind == "absent-file") |
+      select(.kind == "file" or .kind == "absent-file" or
+        .kind == "absent-directory") |
       {kind, target, sha256}]' <<< "$_recovery_root_manifest_json") || return 1
   fi
   document=$(jq -cn \

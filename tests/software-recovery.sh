@@ -41,6 +41,7 @@ reset_case() {
   release_boot_repair_lock 2>/dev/null || true
   CASE_DIR="${TEST_DIR}/${name}"
   mkdir -p "$CASE_DIR"
+  CREATED_DIRECTORY="${CASE_DIR}/created-directory"
   FAILPOINT=""
   FAILPOINT_USED=false
   ESP_MOUNTED=true
@@ -57,7 +58,10 @@ seed_active() {
 failed_cleanup() {
   transaction_phase_start clean-tracking || return 1
   transaction_backup_file "$MUTATED_FILE" || return 1
+  transaction_backup_absent_directory "$CREATED_DIRECTORY" || return 1
   printf 'changed\n' > "$MUTATED_FILE"
+  mkdir -p "$CREATED_DIRECTORY/nested"
+  printf 'created\n' > "$CREATED_DIRECTORY/nested/file"
   return 23
 }
 
@@ -90,12 +94,16 @@ if run_lifecycle_transaction cleanup active active failed_cleanup; then
 fi
 [[ "$(<"$MUTATED_FILE")" == original ]] \
   || fail_test "handled failure did not restore its file"
+[[ ! -e "$CREATED_DIRECTORY" ]] \
+  || fail_test "handled failure did not remove its created directory"
 run_software_recovery || fail_test "handled cleanup recovery failed"
 read_lifecycle || fail_test "handled cleanup recovery lifecycle is unreadable"
 [[ "$_lifecycle_state" == active \
   && $(jq -r '.last_transaction.operation' <<< "$_lifecycle_json") == software-recovery ]] \
   || fail_test "handled cleanup recovery did not publish active"
-jq -e '.resolution == "rolled-back" and .terminal_state == "active"' \
+jq -e --arg directory "$CREATED_DIRECTORY" '
+  .resolution == "rolled-back" and .terminal_state == "active" and
+  ([.restored_backups[] | select(.kind == "absent-directory")] | map(.target)) == [$directory]' \
   "$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")" >/dev/null \
   || fail_test "handled cleanup recovery proof is incomplete"
 
@@ -107,7 +115,11 @@ with_boot_repair_lock || fail_test "could not lock stale cleanup fixture"
 begin_lifecycle_transaction cleanup active || fail_test "could not begin stale cleanup"
 transaction_phase_start clean-tracking || fail_test "could not start stale cleanup"
 transaction_backup_file "$MUTATED_FILE" || fail_test "could not back up stale cleanup file"
+transaction_backup_absent_directory "$CREATED_DIRECTORY" \
+  || fail_test "could not record the stale cleanup directory"
 printf 'changed\n' > "$MUTATED_FILE"
+mkdir -p "$CREATED_DIRECTORY/nested"
+printf 'created\n' > "$CREATED_DIRECTORY/nested/file"
 stale_manifest=$(lifecycle_manifest_path "$_transaction_id")
 stale_document=$(jq -c '.owner.start_time = "0"' "$stale_manifest")
 printf '%s\n' "$stale_document" | atomic_write_control_file "$stale_manifest" 600
@@ -122,6 +134,8 @@ release_boot_repair_lock
 run_software_recovery || fail_test "stale cleanup recovery failed"
 [[ "$(<"$MUTATED_FILE")" == original ]] \
   || fail_test "stale cleanup recovery did not restore the file"
+[[ ! -e "$CREATED_DIRECTORY" ]] \
+  || fail_test "stale cleanup recovery did not remove the created directory"
 
 reset_case completed-publication
 MUTATED_FILE="${CASE_DIR}/unused"

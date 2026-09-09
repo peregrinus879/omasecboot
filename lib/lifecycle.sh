@@ -78,7 +78,7 @@ readonly MANIFEST_JQ_DEFS='
       (.mode | type == "string" and test("^[0-7]{3,4}$")) and
       (.uid | type == "number" and . >= 0 and floor == .) and
       (.gid | type == "number" and . >= 0 and floor == .)
-    elif .kind == "absent-file" then
+    elif .kind == "absent-file" or .kind == "absent-directory" then
       keys == ["gid","kind","mode","path","sha256","target","uid"] and
       .path == null and .sha256 == null and (.target | absolute_path) and
       .mode == null and .uid == null and .gid == null
@@ -87,8 +87,10 @@ readonly MANIFEST_JQ_DEFS='
     type == "array" and length >= 1 and length <= $max_backups and
     all(.[]; backup_entry) and
     (.[0].kind == "absent-lifecycle" or .[0].kind == "prior-lifecycle") and
-    all(.[1:][]; .kind == "file" or .kind == "absent-file") and
+    all(.[1:][]; .kind == "file" or .kind == "absent-file" or
+      .kind == "absent-directory") and
     all(to_entries[1:][]; .value.kind == "absent-file" or
+      .value.kind == "absent-directory" or
       .value.path == ($transaction_dir + "/file-" + (.key | tostring) + ".backup")) and
     ([.[] | select(.target != null) | .target] as $targets |
       ($targets | length) == ($targets | unique | length)) and
@@ -722,7 +724,8 @@ validate_manifest_file_backups() {
     validate_private_control_file "$backup_path" || return 1
     [[ "$(sha256_file "$backup_path")" == "$backup_hash" ]] || return 1
   done < <(jq -c '.backups[] |
-    select(.kind == "file" or .kind == "absent-file")' <<< "$document")
+    select(.kind == "file" or .kind == "absent-file" or
+      .kind == "absent-directory")' <<< "$document")
 }
 
 # The firmware backup and enrollment plan live under the state directory at
@@ -2209,7 +2212,8 @@ validate_transaction_manifest_candidate_files() {
     entry=$(jq -c '.backups[-1]' <<< "$candidate") || return 1
     kind=$(jq -r '.kind' <<< "$entry") || return 1
     target=$(jq -r '.target' <<< "$entry") || return 1
-    [[ "$kind" == file || "$kind" == absent-file ]] || return 1
+    [[ "$kind" == file || "$kind" == absent-file || "$kind" == absent-directory ]] \
+      || return 1
     [[ "$target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
     path_has_no_symlink_components "$target" || return 1
     if [[ "$kind" == file ]]; then
@@ -2474,6 +2478,42 @@ transaction_backup_file() {
   fi
 }
 
+# Records that a directory is absent so rollback removes it with everything a
+# later step creates below it. Only an absent target is recorded: a present
+# directory holds contents this transaction does not own, so it is never
+# removed wholesale. Files below the recorded directory need no entries of
+# their own.
+transaction_backup_absent_directory() {
+  local target="$1" document policy
+  [[ "$_transaction_active" == true && "$target" =~ ^/[^[:cntrl:]]+$ ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  [[ $(jq -r '.status' <<< "$_manifest_json") == transition ]] || return 1
+  policy=$(jq -r '.file_rollback_policy' <<< "$_manifest_json") || return 1
+  [[ "$policy" == preserve || "$policy" == restore ]] || return 1
+  validate_control_directory "$(dirname "$target")" || return 1
+  [[ ! -e "$target" && ! -L "$target" ]] || return 1
+  [[ "$policy" == restore ]] || return 0
+  if jq -e --arg target "$target" \
+    '.backups[] | select(.target == $target)' <<< "$_manifest_json" >/dev/null; then
+    jq -e --arg target "$target" '.backups[] |
+      select(.target == $target and .kind == "absent-directory")' \
+      <<< "$_manifest_json" >/dev/null
+    return
+  fi
+  document=$(jq -c --arg target "$target" '
+    .backups += [{
+      kind: "absent-directory",
+      target: $target,
+      path: null,
+      sha256: null,
+      mode: null,
+      uid: null,
+      gid: null
+    }]
+  ' <<< "$_manifest_json") || return 1
+  write_transaction_manifest_json "$document"
+}
+
 restore_transaction_backup_entry() {
   local entry="$1" kind target backup_path backup_hash mode uid gid
   local parent temporary old_umask
@@ -2483,6 +2523,18 @@ restore_transaction_backup_entry() {
   parent=$(dirname "$target")
   validate_control_directory "$parent" || return 1
 
+  if [[ "$kind" == absent-directory ]]; then
+    if [[ -e "$target" || -L "$target" ]]; then
+      validate_control_directory "$target" || return 1
+      # A mount point at the recorded path is not the transaction's creation.
+      [[ "$(stat -c %d "$target" 2>/dev/null)" == "$(stat -c %d "$parent" 2>/dev/null)" ]] \
+        || return 1
+      rm -rf --one-file-system -- "$target" || return 1
+    fi
+    durable_sync "$parent" || return 1
+    [[ ! -e "$target" && ! -L "$target" ]]
+    return
+  fi
   if [[ "$kind" == absent-file ]]; then
     if [[ -e "$target" || -L "$target" ]]; then
       validate_control_file "$target" || return 1
@@ -2544,7 +2596,8 @@ rollback_transaction_files() {
   fi
   [[ "$policy" == restore ]] || return 1
   entries_json=$(jq -c '.backups | reverse[] |
-    select(.kind == "file" or .kind == "absent-file")' <<< "$_manifest_json") || return 1
+    select(.kind == "file" or .kind == "absent-file" or
+      .kind == "absent-directory")' <<< "$_manifest_json") || return 1
   [[ -z "$entries_json" ]] || mapfile -t entries <<< "$entries_json"
   for entry in "${entries[@]}"; do
     if ! restore_transaction_backup_entry "$entry"; then

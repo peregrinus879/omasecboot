@@ -141,10 +141,23 @@ failed_file_transaction() {
   transaction_backup_file "$PRESENT_FILE"
   transaction_backup_file "$PRESENT_FILE"
   transaction_backup_file "$ABSENT_FILE" true
+  # A present directory is never recorded as absent, and a target already
+  # recorded as a file is not re-recorded as a directory.
+  if transaction_backup_absent_directory "$(dirname "$ABSENT_DIRECTORY")"; then
+    return 91
+  fi
+  if transaction_backup_absent_directory "$ABSENT_FILE"; then
+    return 92
+  fi
+  transaction_backup_absent_directory "$ABSENT_DIRECTORY" || return 93
+  transaction_backup_absent_directory "$ABSENT_DIRECTORY" || return 94
   transaction_phase_complete "backup-files"
   transaction_phase_start "mutate-files"
   printf 'changed\n' > "$PRESENT_FILE"
   printf 'created\n' > "$ABSENT_FILE"
+  mkdir -p "$ABSENT_DIRECTORY/nested"
+  printf 'created\n' > "$ABSENT_DIRECTORY/nested/file"
+  chmod 400 "$ABSENT_DIRECTORY/nested/file"
   return 29
 }
 
@@ -479,8 +492,9 @@ file_fixture_dir="${TEST_DIR}/files"
 mkdir -m 755 "$file_fixture_dir"
 PRESENT_FILE="${file_fixture_dir}/present"
 ABSENT_FILE="${file_fixture_dir}/absent"
+ABSENT_DIRECTORY="${file_fixture_dir}/absent-directory"
 SECOND_FILE="${file_fixture_dir}/second"
-export PRESENT_FILE ABSENT_FILE SECOND_FILE
+export PRESENT_FILE ABSENT_FILE ABSENT_DIRECTORY SECOND_FILE
 printf 'original\n' > "$PRESENT_FILE"
 if run_lifecycle_transaction "file-rollback" "active" "active" \
   failed_file_transaction; then
@@ -491,15 +505,18 @@ fi
 [[ $file_failure_rc -eq 29 ]] || fail_test "file transaction lost its failure status"
 grep -Fxq original "$PRESENT_FILE" || fail_test "file rollback did not restore content"
 [[ ! -e "$ABSENT_FILE" ]] || fail_test "file rollback retained a created target"
+[[ ! -e "$ABSENT_DIRECTORY" ]] || fail_test "file rollback retained a created directory tree"
 read_lifecycle || fail_test "file rollback lifecycle became unreadable"
 [[ $_lifecycle_state == recovery-required ]] \
   || fail_test "failed file transaction did not require recovery"
 file_failure_manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
-jq -e --arg present "$PRESENT_FILE" --arg absent "$ABSENT_FILE" '
+jq -e --arg present "$PRESENT_FILE" --arg absent "$ABSENT_FILE" \
+  --arg directory "$ABSENT_DIRECTORY" '
   .rollback.status == "completed" and
   .rollback.failures == [] and
   ([.backups[] | select(.target == $present and .kind == "file")] | length) == 1 and
-  ([.backups[] | select(.target == $absent and .kind == "absent-file")] | length) == 1
+  ([.backups[] | select(.target == $absent and .kind == "absent-file")] | length) == 1 and
+  ([.backups[] | select(.target == $directory and .kind == "absent-directory")] | length) == 1
 ' "$file_failure_manifest" >/dev/null || fail_test "file rollback record is incomplete"
 unsafe_manifest="${TEST_DIR}/unsafe-file-manifest.json"
 jq '(.backups[] | select(.kind == "file") | .mode) = "666"' \
@@ -507,6 +524,12 @@ jq '(.backups[] | select(.kind == "file") | .mode) = "666"' \
 atomic_write_control_file "$file_failure_manifest" 600 < "$unsafe_manifest"
 if read_transaction_manifest "$_lifecycle_transaction_id" >/dev/null 2>&1; then
   fail_test "transaction manifest trusted unsafe restore metadata"
+fi
+jq '(.backups[] | select(.kind == "absent-directory") | .path) = "/elsewhere"' \
+  "$unsafe_manifest" > "${unsafe_manifest}.directory"
+atomic_write_control_file "$file_failure_manifest" 600 < "${unsafe_manifest}.directory"
+if read_transaction_manifest "$_lifecycle_transaction_id" >/dev/null 2>&1; then
+  fail_test "transaction manifest accepted an absent-directory record with a copy"
 fi
 
 reset_state

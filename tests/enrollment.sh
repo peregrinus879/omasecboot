@@ -357,7 +357,10 @@ write_state_variable() {
 # backend/backend.go at tag 0.18).
 create_key_fixture() {
   local path
-  mkdir -p "$SBCTL_ROOT/keys/PK" "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"
+  for path in "$SBCTL_ROOT" "$SBCTL_ROOT/keys" "$SBCTL_ROOT/keys/PK" \
+    "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"; do
+    [[ -d "$path" ]] || { mkdir "$path" && chmod 755 "$path"; }
+  done
   printf '12345678-1234-4234-8234-123456789abc\n' > "$SBCTL_ROOT/GUID"
   chmod 644 "$SBCTL_ROOT/GUID"
   for path in PK KEK db; do
@@ -374,10 +377,30 @@ create_key_fixture() {
 }
 
 sbctl() {
+  local path
   printf '%s\n' "$*" >> "$SBCTL_LOG"
   case "$*" in
     create-keys)
+      # cmd/sbctl/create-keys.go at tag 0.18: CreateDirectory for the key
+      # directory and the GUID's directory (MkdirAll, 755 under the root
+      # umask), CreateGUID (0644, only when absent), then keys only while
+      # CheckIfKeysInitialized finds one of keys/PK, keys/KEK, and keys/db
+      # missing; with all three present it writes nothing and exits 0.
+      for path in "$SBCTL_ROOT" "$SBCTL_ROOT/keys"; do
+        [[ -d "$path" ]] || { mkdir "$path" && chmod 755 "$path"; }
+      done
+      if [[ ! -e "$SBCTL_ROOT/GUID" ]]; then
+        printf '12345678-1234-4234-8234-123456789abc\n' > "$SBCTL_ROOT/GUID"
+        chmod 644 "$SBCTL_ROOT/GUID"
+      fi
+      printf 'Created Owner UUID 12345678-1234-4234-8234-123456789abc\n'
+      if [[ -e "$SBCTL_ROOT/keys/PK" && -e "$SBCTL_ROOT/keys/KEK" \
+        && -e "$SBCTL_ROOT/keys/db" ]]; then
+        printf 'Secure boot keys have already been created!\n'
+        return 0
+      fi
       create_key_fixture
+      printf 'Secure boot keys created!\n'
       ;;
     'enroll-keys -m -f --export esl')
       cp "$PLAN_SOURCE/PK.esl" "$PLAN_SOURCE/KEK.esl" "$PLAN_SOURCE/db.esl" .
@@ -505,9 +528,11 @@ setup_fixture() {
   _transaction_target_state=""
 }
 
+# Callers capture the printed backup id, so the preparation's own output,
+# which carries sbctl's create-keys lines, goes to stderr.
 prepare_and_activate() {
   local state_file backup_id
-  prepare_state_aware_setup true || fail_test "setup preparation failed"
+  prepare_state_aware_setup true >&2 || fail_test "setup preparation failed"
   state_file=$(lifecycle_file_path)
   backup_id=$(jq -r '.last_transaction.id' "$state_file")
   validate_firmware_backup "$backup_id" || fail_test "firmware backup validation failed"
@@ -687,9 +712,24 @@ test_bad_key_rolls_back() {
   classify_local_sbctl_keys || fail_test "rolled-back key state is unreadable"
   [[ "$_local_key_state" == none ]] || fail_test "failed key creation retained key files"
   manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
-  jq -e '.rollback.status == "completed" and
-    ([.backups[] | select(.kind == "absent-file")] | length) == 7' \
+  jq -e --arg keys "$SBCTL_ROOT/keys" --arg guid "$SBCTL_ROOT/GUID" '
+    .rollback.status == "completed" and
+    ([.backups[] | select(.kind == "absent-directory")] | map(.target)) == [$keys] and
+    ([.backups[] | select(.kind == "absent-file")] | map(.target)) == [$guid]' \
     "$manifest" >/dev/null || fail_test "key rollback coverage is incomplete"
+  # Rollback removed the directories sbctl created, not only the files, so
+  # sbctl does not report the keys as already created on the next attempt
+  # (the third Vivobook run of 2026-09-09); its own database files remain.
+  [[ ! -e "$SBCTL_ROOT/keys" && ! -e "$SBCTL_ROOT/GUID" ]] \
+    || fail_test "key rollback left sbctl's directories or GUID behind"
+  [[ -e "$SBCTL_ROOT/files.json" && $(stat -c %a "$SBCTL_ROOT") == 755 ]] \
+    || fail_test "key rollback removed state that predates the transaction"
+  SBCTL_BAD_KEY=false
+  sbctl create-keys > "${CASE_DIR}/second-create.out" || fail_test "second create-keys failed"
+  grep -Fq 'Secure boot keys created!' "${CASE_DIR}/second-create.out" \
+    || fail_test "sbctl still treated the rolled-back layout as created keys"
+  classify_local_sbctl_keys || fail_test "keys after the second create-keys are unreadable"
+  [[ "$_local_key_state" == complete ]] || fail_test "second create-keys did not create keys"
 }
 
 test_confirmation_requires_acknowledgments() {
@@ -754,7 +794,8 @@ test_preparation_and_backup() {
     .firmware_backup.id == $id and
     .firmware_backup.status == "complete" and
     (.firmware_backup.manifest_sha256 | test("^[0-9a-f]{64}$")) and
-    ([.backups[] | select(.kind == "absent-file")] | length) == 7
+    ([.backups[] | select(.kind == "absent-directory")] | length) == 1 and
+    ([.backups[] | select(.kind == "absent-file")] | length) == 1
   ' "$(lifecycle_manifest_path "$backup_id")" >/dev/null \
     || fail_test "firmware backup and key rollback metadata are incomplete"
   jq -e '
@@ -1033,16 +1074,125 @@ test_sbctl_state_directory_accepted() {
   [[ "$_local_key_state" == complete ]] || fail_test "sbctl's file modes were not complete"
 }
 
-# Without any state directory the tool creates a private one and proceeds.
+# Without any state directory sbctl creates its own (755) and the tool
+# records that one directory, which covers the GUID and the keys below it.
 test_sbctl_state_directory_absent() {
+  local manifest
   setup_fixture sbctl-state-absent
   rm -rf "$SBCTL_ROOT"
   prepare_state_aware_setup true \
     || fail_test "preparation refused an absent state directory"
-  [[ $(stat -c %a "$SBCTL_ROOT") == 700 ]] \
-    || fail_test "the tool-created state directory is not private"
-  classify_local_sbctl_keys || fail_test "keys under a tool-created directory were not classifiable"
-  [[ "$_local_key_state" == complete ]] || fail_test "keys under a tool-created directory were not complete"
+  [[ $(stat -c %a "$SBCTL_ROOT") == 755 ]] \
+    || fail_test "the state directory does not carry sbctl's mode"
+  classify_local_sbctl_keys || fail_test "keys under sbctl's directory were not classifiable"
+  [[ "$_local_key_state" == complete ]] || fail_test "keys under sbctl's directory were not complete"
+  manifest=$(lifecycle_manifest_path "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+  jq -e --arg root "$SBCTL_ROOT" '
+    ([.backups[] | select(.kind == "absent-directory")] | map(.target)) == [$root] and
+    ([.backups[] | select(.kind == "absent-file")] | length) == 0' \
+    "$manifest" >/dev/null || fail_test "the absent state directory was not the only record"
+}
+
+# A failure after key creation removes the whole state directory sbctl made.
+test_sbctl_state_directory_absent_rollback() {
+  setup_fixture sbctl-state-absent-rollback
+  rm -rf "$SBCTL_ROOT"
+  SBCTL_BAD_KEY=true
+  if prepare_state_aware_setup true; then
+    fail_test "mismatched keys under a new state directory were accepted"
+  fi
+  read_lifecycle || fail_test "rollback lifecycle is unreadable"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "the failed creation did not require recovery"
+  jq -e '.rollback.status == "completed"' \
+    "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+    || fail_test "rollback of the new state directory did not complete"
+  [[ ! -e "$SBCTL_ROOT" ]] || fail_test "rollback left sbctl's new state directory behind"
+}
+
+# Hierarchy directories without keys, as an interrupted run leaves them, are
+# refused before any transaction, by name, because sbctl create-keys would
+# report them as created keys and write nothing.
+test_sbctl_leftover_key_directories_refused() {
+  local generation
+  setup_fixture sbctl-leftover-directories
+  mkdir -p "$SBCTL_ROOT/keys/PK" "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"
+  chmod 755 "$SBCTL_ROOT/keys" "$SBCTL_ROOT/keys/PK" "$SBCTL_ROOT/keys/KEK" \
+    "$SBCTL_ROOT/keys/db"
+  read_lifecycle || fail_test "leftover fixture lifecycle is unreadable"
+  generation=$_lifecycle_generation
+  classify_local_sbctl_keys || fail_test "leftover directories were not classifiable"
+  [[ "$_local_key_state" == none ]] || fail_test "empty directories counted as keys"
+  if prepare_state_aware_setup true > "${CASE_DIR}/leftover.out" 2>&1; then
+    fail_test "leftover key directories were accepted"
+  fi
+  grep -Fq "Local sbctl key directories exist without keys: ${SBCTL_ROOT}/keys/PK ${SBCTL_ROOT}/keys/KEK ${SBCTL_ROOT}/keys/db" \
+    "${CASE_DIR}/leftover.out" || fail_test "the leftover refusal did not name the directories"
+  grep -Fq 'remove them if they hold nothing you need' "${CASE_DIR}/leftover.out" \
+    || fail_test "the leftover refusal gave no remedy"
+  read_lifecycle || fail_test "leftover refusal damaged the lifecycle"
+  [[ $_lifecycle_generation -eq generation ]] \
+    || fail_test "leftover directories were refused inside a transaction"
+  [[ ! -e "$SBCTL_ROOT/GUID" ]] || fail_test "the refusal ran create-keys"
+  rm -rf "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"
+  if prepare_state_aware_setup true > "${CASE_DIR}/leftover-one.out" 2>&1; then
+    fail_test "a single leftover key directory was accepted"
+  fi
+  grep -Fq "Local sbctl key directories exist without keys: ${SBCTL_ROOT}/keys/PK" \
+    "${CASE_DIR}/leftover-one.out" || fail_test "a single leftover directory was not named"
+  explain_setup_observation > "${CASE_DIR}/leftover-explain.out" 2>&1
+  grep -Fq "Local sbctl key directories without keys: ${SBCTL_ROOT}/keys/PK" \
+    "${CASE_DIR}/leftover-explain.out" \
+    || fail_test "the observation did not name the leftover directory"
+}
+
+# The README remedy leaves the key directory itself (700 from an earlier
+# tool version) with the hierarchy directories removed: each of the three is
+# recorded and the GUID is recorded as an absent file.
+test_sbctl_key_directory_present() {
+  local manifest
+  setup_fixture sbctl-key-directory-present
+  mkdir "$SBCTL_ROOT/keys"
+  chmod 700 "$SBCTL_ROOT/keys"
+  prepare_state_aware_setup true \
+    || fail_test "preparation refused an empty key directory"
+  classify_local_sbctl_keys || fail_test "keys under the existing directory were not classifiable"
+  [[ "$_local_key_state" == complete ]] || fail_test "keys under the existing directory were not complete"
+  [[ $(stat -c %a "$SBCTL_ROOT/keys") == 700 && $(stat -c %a "$SBCTL_ROOT/keys/PK") == 755 ]] \
+    || fail_test "sbctl's creation changed the existing directory or its own modes"
+  manifest=$(lifecycle_manifest_path "$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")")
+  jq -e --arg keys "$SBCTL_ROOT/keys" --arg guid "$SBCTL_ROOT/GUID" '
+    ([.backups[] | select(.kind == "absent-directory")] | map(.target)) ==
+      [$keys + "/PK", $keys + "/KEK", $keys + "/db"] and
+    ([.backups[] | select(.kind == "absent-file")] | map(.target)) == [$guid]' \
+    "$manifest" >/dev/null || fail_test "the hierarchy directories were not the recorded set"
+}
+
+# A failure after that creation removes the three directories and the GUID
+# and leaves the key directory and sbctl's databases as they were.
+test_sbctl_key_directory_present_rollback() {
+  setup_fixture sbctl-key-directory-present-rollback
+  mkdir "$SBCTL_ROOT/keys"
+  chmod 700 "$SBCTL_ROOT/keys"
+  SBCTL_BAD_KEY=true
+  if prepare_state_aware_setup true; then
+    fail_test "mismatched keys under an existing key directory were accepted"
+  fi
+  read_lifecycle || fail_test "rollback lifecycle is unreadable"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "the failed creation did not require recovery"
+  jq -e '.rollback.status == "completed"' \
+    "$(lifecycle_manifest_path "$_lifecycle_transaction_id")" >/dev/null \
+    || fail_test "rollback under an existing key directory did not complete"
+  [[ ! -e "$SBCTL_ROOT/keys/PK" && ! -e "$SBCTL_ROOT/keys/KEK" && ! -e "$SBCTL_ROOT/keys/db" \
+    && ! -e "$SBCTL_ROOT/GUID" ]] || fail_test "rollback left sbctl's creations behind"
+  [[ -d "$SBCTL_ROOT/keys" && $(stat -c %a "$SBCTL_ROOT/keys") == 700 \
+    && -e "$SBCTL_ROOT/files.json" ]] \
+    || fail_test "rollback removed state that predates the transaction"
+  classify_local_sbctl_keys || fail_test "rolled-back key state is unreadable"
+  [[ "$_local_key_state" == none ]] || fail_test "rollback left key files behind"
+  local_sbctl_key_directories_are_clear \
+    || fail_test "rollback left hierarchy directories that the next setup would refuse"
 }
 
 # A state directory that group or others can write is refused with its reason.
@@ -1971,6 +2121,10 @@ run_case absent-modes test_absent_mode_variables
 run_case observation-explanation test_observation_explanation
 run_case sbctl-state-accepted test_sbctl_state_directory_accepted
 run_case sbctl-state-absent test_sbctl_state_directory_absent
+run_case sbctl-state-absent-rollback test_sbctl_state_directory_absent_rollback
+run_case sbctl-leftover-directories test_sbctl_leftover_key_directories_refused
+run_case sbctl-key-directory-present test_sbctl_key_directory_present
+run_case sbctl-key-directory-present-rollback test_sbctl_key_directory_present_rollback
 run_case sbctl-state-writable test_sbctl_state_directory_writable
 run_case preflight-reasons test_preflight_reasons
 run_case live-ledger-writer test_live_firmware_ledger_writer
