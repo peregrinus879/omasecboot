@@ -127,9 +127,9 @@ test_run_sbctl_enrollment_uses_validated_executable() (
     return 97
   }
 
-  run_sbctl_enrollment enroll-keys -m -f --partial db \
+  run_sbctl_enrollment enroll-keys -m -f --ignore-immutable --partial db \
     || fail_test "validated sbctl executable was not invoked"
-  [[ "$(<"$log")" == "enroll-keys -m -f --partial db" ]] \
+  [[ "$(<"$log")" == "enroll-keys -m -f --ignore-immutable --partial db" ]] \
     || fail_test "validated sbctl executable received the wrong arguments"
 
   SBCTL_EXEC_RC=23
@@ -406,7 +406,19 @@ sbctl() {
       cp "$PLAN_SOURCE/PK.esl" "$PLAN_SOURCE/KEK.esl" "$PLAN_SOURCE/db.esl" .
       chmod 600 PK.esl KEK.esl db.esl
       ;;
-    'enroll-keys -m -f --partial db')
+    'enroll-keys -m -f --partial '*)
+      # cmd/sbctl/enroll-keys.go at tag 0.18 without --ignore-immutable:
+      # CheckImmutable refuses before any write while PK, KEK, or db exists,
+      # because efivarfs marks them immutable (fs/efivarfs/vars.c removable
+      # list; probed on 2026-09-10, ledger).
+      for path in PK KEK db; do
+        [[ ! -e "$(firmware_variable_path "$path")" ]] \
+          || printf 'File is immutable: %s\n' "$(firmware_variable_path "$path")"
+      done
+      printf 'You need to chattr -i files in efivarfs\n'
+      return 1
+      ;;
+    'enroll-keys -m -f --ignore-immutable --partial db')
       [[ "$SBCTL_FAIL_PHASE" != before-db ]] || return 31
       if [[ "$SBCTL_MISMATCH_PHASE" == db ]]; then
         write_raw_database db "$PLAN_SOURCE/mismatch.esl"
@@ -415,12 +427,12 @@ sbctl() {
       fi
       [[ "$SBCTL_FAIL_PHASE" != after-db ]] || return 32
       ;;
-    'enroll-keys -m -f --partial KEK')
+    'enroll-keys -m -f --ignore-immutable --partial KEK')
       [[ "$SBCTL_FAIL_PHASE" != before-KEK ]] || return 33
       write_raw_database KEK "$PLAN_SOURCE/KEK.esl"
       [[ "$SBCTL_FAIL_PHASE" != after-KEK ]] || return 34
       ;;
-    'enroll-keys -m -f --partial PK')
+    'enroll-keys -m -f --ignore-immutable --partial PK')
       [[ "$SBCTL_FAIL_PHASE" != before-PK ]] || return 35
       write_raw_database PK "$PLAN_SOURCE/PK.esl"
       write_state_variable SetupMode 0
@@ -871,15 +883,22 @@ test_firmware_frontier_classifier() {
   enter_setup_mode
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
     || fail_test "initial enrollment state was not F0"
-  sbctl 'enroll-keys -m -f --partial db' \
+  if sbctl 'enroll-keys -m -f --partial db' > "${CASE_DIR}/immutable.out"; then
+    fail_test "a partial write without --ignore-immutable was accepted"
+  fi
+  grep -Fq "File is immutable: $(firmware_variable_path db)" "${CASE_DIR}/immutable.out" \
+    || fail_test "the immutable refusal did not name the variable"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
+    || fail_test "the immutable refusal changed the firmware"
+  sbctl 'enroll-keys -m -f --ignore-immutable --partial db' \
     || fail_test "frontier fixture db write failed"
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F1 ]] \
     || fail_test "db enrollment state was not F1"
-  sbctl 'enroll-keys -m -f --partial KEK' \
+  sbctl 'enroll-keys -m -f --ignore-immutable --partial KEK' \
     || fail_test "frontier fixture KEK write failed"
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F2 ]] \
     || fail_test "KEK enrollment state was not F2"
-  sbctl 'enroll-keys -m -f --partial PK' \
+  sbctl 'enroll-keys -m -f --ignore-immutable --partial PK' \
     || fail_test "frontier fixture PK write failed"
   [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F3 ]] \
     || fail_test "PK enrollment state was not F3"
@@ -1347,7 +1366,7 @@ test_enrollment_guard_and_success() {
   run_enrollment "$backup_id" || fail_test "enrollment failed"
   mapfile -t partial_calls < <(grep -- '--partial' "$SBCTL_LOG")
   [[ "${partial_calls[*]}" == \
-    'enroll-keys -m -f --partial db enroll-keys -m -f --partial KEK enroll-keys -m -f --partial PK' ]] \
+    'enroll-keys -m -f --ignore-immutable --partial db enroll-keys -m -f --ignore-immutable --partial KEK enroll-keys -m -f --ignore-immutable --partial PK' ]] \
     || fail_test "firmware enrollment order changed"
   read_current_firmware_modes || fail_test "post-enrollment modes are invalid"
   [[ "$_setup_mode" == 0 && "$_secure_boot_mode" == 0 ]] \
@@ -1745,7 +1764,7 @@ test_firmware_recovery_from_unbound_root() {
     || fail_test "firmware recovery rewrote root evidence"
   mapfile -t partial_calls < <(grep -- '--partial' "$SBCTL_LOG")
   [[ "${partial_calls[*]}" == \
-    'enroll-keys -m -f --partial db enroll-keys -m -f --partial KEK enroll-keys -m -f --partial PK' ]] \
+    'enroll-keys -m -f --ignore-immutable --partial db enroll-keys -m -f --ignore-immutable --partial KEK enroll-keys -m -f --ignore-immutable --partial PK' ]] \
     || fail_test "unbound recovery used the wrong enrollment order"
   [[ $(grep -Fxc artifact-proof "$ARTIFACT_LOG") -eq 1 ]] \
     || fail_test "firmware recovery omitted its second EFI verification"
@@ -1913,7 +1932,7 @@ test_firmware_recovery_inherits_resolved_retry() {
     || fail_test "resolved retry did not inherit the cumulative ledger"
   [[ $(sha256_file "$first_manifest") == "$first_manifest_hash" ]] \
     || fail_test "later firmware recovery rewrote prior attempt evidence"
-  grep -Fxq 'enroll-keys -m -f --partial db' "$SBCTL_LOG" \
+  grep -Fxq 'enroll-keys -m -f --ignore-immutable --partial db' "$SBCTL_LOG" \
     || fail_test "resolved retry did not issue the bounded db retry"
 }
 
@@ -1940,7 +1959,7 @@ test_firmware_recovery_retry_limit_is_cumulative() {
     all(.firmware_writes[];
       .hierarchy == "db" and .readback_status == "unchanged")' "$manifest" >/dev/null \
     || fail_test "recovery reset the cumulative firmware retry ledger"
-  command_count=$(grep -Fxc 'enroll-keys -m -f --partial db' "$SBCTL_LOG")
+  command_count=$(grep -Fxc 'enroll-keys -m -f --ignore-immutable --partial db' "$SBCTL_LOG")
   [[ $command_count -eq 2 ]] || fail_test "retry limit issued ${command_count} db commands"
 }
 

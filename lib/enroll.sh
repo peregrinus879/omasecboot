@@ -1999,10 +1999,14 @@ enrollment_preflight() {
   _enrollment_backup_id="$backup_id"
 }
 
+# efivarfs marks PK, KEK, db, and dbx immutable (they are outside the kernel's
+# removable list), and sbctl 0.18 refuses enroll-keys before any write while
+# one of the first three carries the attribute; its write layer clears the
+# attribute itself, so the pre-write check is bypassed (docs/maintenance.md).
 apply_enrollment_hierarchy() {
   local hierarchy="$1"
   [[ "$hierarchy" == db || "$hierarchy" == KEK || "$hierarchy" == PK ]] || return 1
-  run_sbctl_enrollment enroll-keys -m -f --partial "$hierarchy"
+  run_sbctl_enrollment enroll-keys -m -f --ignore-immutable --partial "$hierarchy"
 }
 
 # A first enrollment requires sbctl to succeed; a recovery retry accepts a
