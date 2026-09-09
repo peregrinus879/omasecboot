@@ -15,6 +15,8 @@ DEVICE_MAP="${TEST_DIR}/devices"
 BITLOCKER_DEVICES="${TEST_DIR}/bitlocker-devices"
 VFAT_DEVICES="${TEST_DIR}/vfat-devices"
 BLKID_UNKNOWN_DEVICES="${TEST_DIR}/blkid-unknown-devices"
+PARTITION_DEVICES="${TEST_DIR}/partition-devices"
+BLKID_ODD_DEVICES="${TEST_DIR}/blkid-odd-devices"
 LOADER_DEVICES="${TEST_DIR}/loader-devices"
 BAD_LOADER_DEVICES="${TEST_DIR}/bad-loader-devices"
 UNREADABLE_DEVICES="${TEST_DIR}/unreadable-devices"
@@ -74,13 +76,25 @@ printf 'blkid:%s:%s\n' "$expected" "$path" >> "$CALL_LOG"
 if /usr/bin/grep -Fxq "$path" "$BLKID_UNKNOWN_DEVICES"; then
   exit 8
 fi
+if /usr/bin/grep -Fxq "$path" "$BLKID_ODD_DEVICES"; then
+  printf 'ntfs\n'
+  exit 0
+fi
+# A GPT partition without the filtered type still yields its partition entry,
+# so real blkid exits 0 with nothing to print; an image file exits 2.
+absent() {
+  if /usr/bin/grep -Fxq "$path" "$PARTITION_DEVICES"; then
+    exit 0
+  fi
+  exit 2
+}
 case "$expected" in
   BitLocker)
-    /usr/bin/grep -Fxq "$path" "$BITLOCKER_DEVICES" || exit 2
+    /usr/bin/grep -Fxq "$path" "$BITLOCKER_DEVICES" || absent
     printf 'BitLocker\n'
     ;;
   vfat)
-    /usr/bin/grep -Fxq "$path" "$VFAT_DEVICES" || exit 2
+    /usr/bin/grep -Fxq "$path" "$VFAT_DEVICES" || absent
     printf 'vfat\n'
     ;;
   *) exit 4 ;;
@@ -193,6 +207,7 @@ chmod +x "${BIN_DIR}/efibootmgr" "${BIN_DIR}/lsblk" "${BIN_DIR}/blkid" \
 
 export EFI_FIXTURE EFI_ERROR_FIXTURE LSBLK_FIXTURE FINDMNT_INVENTORY DEVICE_MAP
 export BITLOCKER_DEVICES VFAT_DEVICES BLKID_UNKNOWN_DEVICES LOADER_DEVICES
+export PARTITION_DEVICES BLKID_ODD_DEVICES
 export BAD_LOADER_DEVICES MOUNT_FAIL_DEVICES MOUNT_SIGNAL_DEVICES
 export LOADER_SOURCE CALL_LOG GUM_LOG TEST_MOUNT_ID
 export EFI_RC=0 LSBLK_RC=0
@@ -377,6 +392,8 @@ reset_case() {
   : > "$EFI_ERROR_FIXTURE"
   : > "$BITLOCKER_DEVICES"
   : > "$BLKID_UNKNOWN_DEVICES"
+  : > "$PARTITION_DEVICES"
+  : > "$BLKID_ODD_DEVICES"
   : > "$LOADER_DEVICES"
   : > "$BAD_LOADER_DEVICES"
   : > "$UNREADABLE_DEVICES"
@@ -530,6 +547,46 @@ run_gate "$case_output"
   "$case_output" || fail_test "unreadable ESP omitted its BitLocker blocker"
 /usr/bin/grep -Fq 'FAT signature probing is inconclusive for ESP /dev/linux-esp' \
   "$case_output" || fail_test "unreadable ESP omitted its FAT blocker"
+
+# On a GPT partition blkid's low-level probe answers 0 with empty output when
+# the filtered type is absent, because it still reports the partition entry;
+# that is a negative once the device reads, not an unreadable device.
+reset_case
+printf '/dev/windows-os\n/dev/linux-esp\n' > "$PARTITION_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == negative ]] \
+  || fail_test "partition-style blkid answers were not a complete negative"
+if /usr/bin/grep -Fq 'inconclusive' "$case_output"; then
+  fail_test "partition-style blkid answers were reported as inconclusive"
+fi
+
+reset_case
+printf '/dev/windows-os\n/dev/linux-esp\n' > "$PARTITION_DEVICES"
+printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
+  || fail_test "partition-style ESP with a loader did not pass the gate"
+/usr/bin/grep -Fq 'Boot manager: /dev/linux-esp' "$case_output" \
+  || fail_test "partition-style ESP loader was not reported"
+assert_no_runtime_artifacts
+
+reset_case
+printf '/dev/windows-os\n' > "$PARTITION_DEVICES"
+printf '/dev/windows-os\n' > "$UNREADABLE_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+  || fail_test "partition-style answer on an unreadable device passed as a negative"
+/usr/bin/grep -Fq 'BitLocker signature probing is inconclusive for /dev/windows-os' \
+  "$case_output" || fail_test "unreadable partition-style device omitted its blocker"
+
+# A type value other than the filtered one is not a negative either.
+reset_case
+printf '/dev/windows-os\n' > "$BLKID_ODD_DEVICES"
+run_gate "$case_output"
+[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+  || fail_test "an unexpected blkid type value passed as a negative"
+/usr/bin/grep -Fq 'BitLocker signature probing is inconclusive for /dev/windows-os' \
+  "$case_output" || fail_test "unexpected blkid type value omitted its blocker"
 
 # A loader path whose lookup fails for any reason other than absence stays
 # unknown.

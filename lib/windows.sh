@@ -923,7 +923,11 @@ windows_preflight_device_reads() {
 }
 
 # 0: the device carries the expected signature; 2: it reads and carries none;
-# 1: the observation failed, so the device stays unknown.
+# 1: the observation failed, so the device stays unknown. blkid's low-level
+# probe exits 0 whenever it found any value, partition-entry details included,
+# and 2 only when it found none at all (util-linux 2.42.3 lowprobe_device), so
+# a GPT partition without the expected type answers 0 with empty output while
+# an image file answers 2; both are negatives once the device itself reads.
 windows_preflight_probe_type() {
   local path="$1" expected="$2" output errors_file errors rc=0
   errors_file=$(mktemp "${TMPDIR:-/tmp}/omasecboot-blkid.XXXXXX" 2>/dev/null) \
@@ -932,14 +936,21 @@ windows_preflight_probe_type() {
     --output value --match-tag TYPE -- "$path" 2>"$errors_file") || rc=$?
   errors=$(<"$errors_file")
   rm -f "$errors_file"
-  if [[ $rc -eq 0 && "$output" == "$expected" ]]; then
-    return 0
-  fi
-  if [[ $rc -eq 2 && -z "$output" && -z "$errors" ]] \
-    && windows_preflight_device_reads "$path"; then
-    return 2
-  fi
-  return 1
+  [[ -z "$errors" ]] || return 1
+  case "$rc" in
+    0)
+      [[ "$output" != "$expected" ]] || return 0
+      [[ -z "$output" ]] || return 1
+      ;;
+    2)
+      [[ -z "$output" ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  windows_preflight_device_reads "$path" || return 1
+  return 2
 }
 
 # present, absent, or unknown for one pathname: only a missing path component
