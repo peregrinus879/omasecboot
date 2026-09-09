@@ -256,6 +256,30 @@ firmware_variable_is_state() {
   esac
 }
 
+# AuditMode and DeployedMode exist only on UEFI 2.5 firmware, which defines
+# them together: both absent is the earlier user-mode model, both present must
+# read zero, and one without the other is non-conforming. The backup fixes
+# whether the firmware exposes them.
+firmware_mode_is_optional() {
+  case "$1" in
+    AuditMode|DeployedMode) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+firmware_optional_modes_are_clear() {
+  [[ ( "$_audit_mode" == 0 && "$_deployed_mode" == 0 ) \
+    || ( "$_audit_mode" == absent && "$_deployed_mode" == absent ) ]]
+}
+
+# An optional mode variable that appears, disappears, or changes after the
+# backup is drift, exactly like a changed value.
+current_optional_modes_match_backup() {
+  local backup_id="$1"
+  current_firmware_variable_matches_backup "$backup_id" AuditMode \
+    && current_firmware_variable_matches_backup "$backup_id" DeployedMode
+}
+
 # The last inspected raw efivar carries the attributes variable $1 must have;
 # a state variable must also hold a one-byte 0 or 1.
 firmware_inspection_is_expected() {
@@ -372,7 +396,8 @@ stage_firmware_backup() {
           value: (if $state_value == "" then null else ($state_value | tonumber) end)
         }') || return 1
     else
-      ! firmware_variable_is_state "$name" || return 1
+      ! firmware_variable_is_state "$name" || firmware_mode_is_optional "$name" \
+        || return 1
       entry='{"present":false,"raw_file":null,"attributes":null,"raw_sha256":null,"payload_sha256":null,"payload_size":null,"value":null}'
     fi
     variables=$(jq -c --arg name "$name" --argjson entry "$entry" \
@@ -475,7 +500,8 @@ validate_firmware_backup() {
       ! firmware_variable_is_state "$name" \
         || [[ "$_firmware_state_value" == "$value" ]] || return 1
     else
-      ! firmware_variable_is_state "$name" || return 1
+      ! firmware_variable_is_state "$name" || firmware_mode_is_optional "$name" \
+        || return 1
       [[ ! -e "${directory}/${name}.efivar" \
         && ! -L "${directory}/${name}.efivar" ]] || return 1
     fi
@@ -1172,8 +1198,18 @@ revalidate_enrollment_plan_export() {
 }
 
 read_current_firmware_modes() {
-  local name
+  local name presence
   for name in SetupMode AuditMode DeployedMode SecureBoot; do
+    if firmware_mode_is_optional "$name"; then
+      presence=$(firmware_variable_presence "$name") || return 1
+      if [[ "$presence" == absent ]]; then
+        case "$name" in
+          AuditMode) _audit_mode=absent ;;
+          DeployedMode) _deployed_mode=absent ;;
+        esac
+        continue
+      fi
+    fi
     inspect_current_firmware_variable "$name" || return 1
     rm -f "$_firmware_current_file"
     firmware_inspection_is_expected "$name" || return 1
@@ -1228,15 +1264,15 @@ prepare_secure_boot_preflight() {
     return 1
   }
   read_current_firmware_modes || {
-    fail "Firmware mode variables could not be read"
+    fail "A firmware mode variable could not be read or has an unexpected shape"
     return 1
   }
   [[ "$_setup_mode" == 0 ]] || {
     fail "Firmware is already in Setup Mode without a validated backup from this tool"
     return 1
   }
-  [[ "$_audit_mode" == 0 && "$_deployed_mode" == 0 ]] || {
-    fail "AuditMode or DeployedMode is not zero; only user-mode firmware is supported"
+  firmware_optional_modes_are_clear || {
+    fail "AuditMode and DeployedMode must both be absent or both read zero"
     return 1
   }
   secure_boot_windows_gate
@@ -1279,8 +1315,9 @@ activate_enrollment_plan_preflight() {
   validate_enrollment_plan "$backup_id" false || return 1
   revalidate_enrollment_plan_export "$backup_id" false || return 1
   read_current_firmware_modes || return 1
-  [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
-    && "$_deployed_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  [[ "$_setup_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  firmware_optional_modes_are_clear || return 1
+  current_optional_modes_match_backup "$backup_id" || return 1
   current_firmware_variable_matches_backup "$backup_id" PK || return 1
   current_firmware_variable_matches_backup "$backup_id" KEK || return 1
   current_firmware_variable_matches_backup "$backup_id" db || return 1
@@ -1344,10 +1381,12 @@ compare_current_database_to_plan() {
 
 classify_firmware_enrollment_frontier() {
   local backup_id="$1" pk_presence pk_backup pk_plan kek_backup kek_plan
-  local db_backup db_plan dbx_backup
+  local db_backup db_plan dbx_backup audit_backup deployed_backup
   validate_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" true || return 1
   read_current_firmware_modes || return 1
+  audit_backup=$(current_firmware_backup_status "$backup_id" AuditMode) || return 1
+  deployed_backup=$(current_firmware_backup_status "$backup_id" DeployedMode) || return 1
   pk_presence=$(firmware_variable_presence PK) || return 1
   pk_backup=$(current_firmware_backup_status "$backup_id" PK) || return 1
   pk_plan=$(current_database_plan_status "$backup_id" PK) || return 1
@@ -1357,8 +1396,9 @@ classify_firmware_enrollment_frontier() {
   db_plan=$(current_database_plan_status "$backup_id" db) || return 1
   dbx_backup=$(current_firmware_backup_status "$backup_id" dbx) || return 1
 
-  if [[ "$_audit_mode" != 0 || "$_deployed_mode" != 0 \
-    || "$_secure_boot_mode" != 0 || "$dbx_backup" != exact ]]; then
+  if ! firmware_optional_modes_are_clear \
+    || [[ "$audit_backup" != exact || "$deployed_backup" != exact \
+      || "$_secure_boot_mode" != 0 || "$dbx_backup" != exact ]]; then
     printf 'invalid\n'
     return 0
   fi
@@ -1482,8 +1522,9 @@ observe_setup_state() {
   [[ "$_local_key_state" == complete && -n "$backup_id" ]] || return 1
   lifecycle_references_firmware_backup "$backup_id" || return 1
   validate_enrollment_plan "$backup_id" false || return 1
-  [[ "$_audit_mode" == 0 && "$_deployed_mode" == 0 \
-    && $(current_firmware_backup_status "$backup_id" dbx) == exact ]] || return 1
+  firmware_optional_modes_are_clear || return 1
+  current_optional_modes_match_backup "$backup_id" || return 1
+  [[ $(current_firmware_backup_status "$backup_id" dbx) == exact ]] || return 1
   for name in PK KEK db; do
     status=$(current_database_plan_status "$backup_id" "$name") || return 1
     [[ "$status" == exact || "$status" == different ]] || return 1
@@ -1506,8 +1547,9 @@ validate_setup_instruction_boundary() {
   validate_enrollment_plan "$backup_id" true || return 1
   revalidate_enrollment_plan_export "$backup_id" || return 1
   read_current_firmware_modes || return 1
-  [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
-    && "$_deployed_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  [[ "$_setup_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  firmware_optional_modes_are_clear || return 1
+  current_optional_modes_match_backup "$backup_id" || return 1
   current_firmware_variable_matches_backup "$backup_id" dbx || return 1
   if [[ "$state" == 3 ]]; then
     for name in PK KEK db; do
@@ -1815,8 +1857,9 @@ enrollment_preflight() {
   validate_enrollment_plan "$backup_id" true || return 1
   revalidate_enrollment_plan_export "$backup_id" || return 1
   read_current_firmware_modes || return 1
-  [[ "$_setup_mode" == 1 && "$_audit_mode" == 0 \
-    && "$_deployed_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  [[ "$_setup_mode" == 1 && "$_secure_boot_mode" == 0 ]] || return 1
+  firmware_optional_modes_are_clear || return 1
+  current_optional_modes_match_backup "$backup_id" || return 1
   current_pk_is_absent || return 1
   current_firmware_variable_matches_backup "$backup_id" KEK || return 1
   current_firmware_variable_matches_backup "$backup_id" db || return 1
@@ -1864,13 +1907,19 @@ run_enrollment_write_phase() {
 
 persist_firmware_enrollment_proof() {
   local backup_id="$1" frontier timestamp writes writes_hash document
+  local audit_mode_json deployed_mode_json
   [[ "$_transaction_active" == true ]] || return 1
   validate_enrollment_transaction_binding "$backup_id" || return 1
   frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
   [[ "$frontier" == F3 ]] || return 1
   read_current_firmware_modes || return 1
-  [[ "$_setup_mode" == 0 && "$_audit_mode" == 0 \
-    && "$_deployed_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  [[ "$_setup_mode" == 0 && "$_secure_boot_mode" == 0 ]] || return 1
+  firmware_optional_modes_are_clear || return 1
+  current_optional_modes_match_backup "$backup_id" || return 1
+  audit_mode_json=$_audit_mode
+  deployed_mode_json=$_deployed_mode
+  [[ "$audit_mode_json" != absent ]] || audit_mode_json=null
+  [[ "$deployed_mode_json" != absent ]] || deployed_mode_json=null
   read_transaction_manifest "$_transaction_id" || return 1
   jq -e '
     .domain_records.final_proof != null and
@@ -1889,8 +1938,8 @@ persist_firmware_enrollment_proof() {
       --arg timestamp "$timestamp" \
       --arg writes_hash "$writes_hash" \
       --argjson setup_mode "$_setup_mode" \
-      --argjson audit_mode "$_audit_mode" \
-      --argjson deployed_mode "$_deployed_mode" \
+      --argjson audit_mode "$audit_mode_json" \
+      --argjson deployed_mode "$deployed_mode_json" \
       --argjson secure_boot_mode "$_secure_boot_mode" \
       --argjson manifest "$_manifest_json" '{
         schema_version: $schema,

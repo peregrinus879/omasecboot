@@ -141,6 +141,10 @@ Rechecked 2026-09-09: Arch ships sbctl 0.18-2, efibootmgr 18-4, coreutils 9.11-2
 - The tagged `enroll-keys` source permits `--partial` only for `db`, `KEK`, and `PK`; export writes those same three hierarchies; no dbx writer exists. Bare `-f` includes firmware-builtin db and KEK, never PK; `-m` adds Microsoft db and KEK; `--export esl` performs no firmware write. Recheck the package source, config schema, executable ownership, default paths, ESL behavior, and partial-write semantics before supporting another sbctl release or a custom key backend.
 - efitools 1.9.2 authenticated replacement uses a future-year timestamp marked FIXME, so it is not an approved recovery primitive. `sbctl reset` is a PK-removal operation, not factory restoration.
 
+### Firmware modes
+
+- AuditMode and DeployedMode are UEFI 2.5 variables that the specification defines together. Observed 2026-09-09: the ASUS Vivobook TP3402VA (AMI BIOS TP3402VA.307 of 2024-10-17) exposes neither, while the ASUS ROG Zephyrus GU605CR exposes both; `AGENTS.md` owns the acceptance rule. Recheck if an acceptance machine is refused for exposing only one of the two, or reports either with a payload other than one byte.
+
 ### efibootmgr and efivarfs
 
 - efibootmgr 18's `show_var_path()` emits one raw device-path line with the literal prefix `      dp: `, one space between bytes, ` / ` only between nodes, and no trailing separator; optional data uses one `    data: ` line with the same spacing. `-n` accepts a hexadecimal option up to `0xffff` and writes BootNext as a two-byte value. `-N` sets a boolean but the deletion branch passes that value to `is_current_entry()`, so deletion incorrectly requires `Boot0001`; recorded absence is restored with `rm` instead. Recheck raw output, option parsing, write width, and the `-N` implementation before raising or removing the version floor.

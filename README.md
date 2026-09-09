@@ -127,7 +127,7 @@ Contradictory or indeterminate observations fail closed with a message instead o
 What blocks setup before any firmware instruction:
 
 - A current KEK or db entry that the plan would drop, an unknown organizational certificate, or an unsupported signature-list type. OmaSecBoot never preserves trust by subject name and never repairs with `--append`.
-- Missing or non-zero AuditMode or DeployedMode values.
+- A non-zero AuditMode or DeployedMode value, one of those variables without the other, or either appearing or disappearing after the backup was taken. Firmware that predates UEFI 2.5 and exposes neither variable is accepted, and their absence is recorded in the backup.
 - Firmware already in Setup Mode without a validated backup from this tool.
 - A Windows preflight that did not pass.
 
@@ -295,7 +295,7 @@ Limine, limine-entry-tool, and limine-snapper-sync share `/run/lock/boot-partiti
 
 ### Firmware
 
-Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode, AuditMode, DeployedMode, and SecureBoot values, and the DMI identity fields (product UUID plus the vendor, product, board, and BIOS identifiers, including the board serial) are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
+Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their attributes and hashes, absence records, the SetupMode and SecureBoot values, the AuditMode and DeployedMode values or their absence, and the DMI identity fields (product UUID plus the vendor, product, board, and BIOS identifiers, including the board serial) are saved root-only. The planned set is compared entry by entry; every current KEK and db entry must appear byte-for-byte in the plan. Only a single X.509 OEM PK may be replaced, after fingerprint confirmation. Enrollment writes db, KEK, and PK in that order, records each attempt before invoking sbctl, and treats command success as insufficient: the read-back governs.
 
 ### Contributing
 

@@ -838,11 +838,134 @@ test_firmware_frontier_classifier() {
     || fail_test "mode drift was not classified invalid"
   write_state_variable AuditMode 0
   rm -f "$(firmware_variable_path DeployedMode)"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == invalid ]] \
+    || fail_test "a mode variable disappearing after the backup was not classified invalid"
+  write_state_variable DeployedMode 0
+  rm -f "$(firmware_variable_path SetupMode)"
   output=""
   if output=$(classify_firmware_enrollment_frontier "$backup_id"); then
     fail_test "unreadable firmware state was classified"
   fi
   [[ -z "$output" ]] || fail_test "unreadable firmware state returned a frontier"
+}
+
+# Firmware that predates UEFI 2.5 has neither AuditMode nor DeployedMode; the
+# whole path accepts that, records it, and treats a later appearance as drift.
+test_absent_mode_variables() {
+  local backup_id transaction_id manifest firmware_proof proof_document
+  local before_id tampered manifest_path
+  setup_fixture absent-modes
+  rm -f "$(firmware_variable_path AuditMode)" "$(firmware_variable_path DeployedMode)"
+  read_current_firmware_modes \
+    || fail_test "firmware without AuditMode and DeployedMode was unreadable"
+  [[ "$_audit_mode" == absent && "$_deployed_mode" == absent ]] \
+    || fail_test "absent mode variables were not observed as absent"
+  [[ "$(observe_setup_state)" == 1 ]] || fail_test "absent-mode state 1 mismatch"
+  backup_id=$(prepare_and_activate)
+  jq -e '.variables.AuditMode.present == false and
+    .variables.DeployedMode.present == false and
+    .variables.SetupMode.value == 0' \
+    "$(firmware_backup_path "$backup_id")/manifest.json" >/dev/null \
+    || fail_test "mode variable absence was not recorded in the backup"
+  [[ "$(observe_setup_state "$backup_id")" == 3 ]] \
+    || fail_test "absent-mode state 3 mismatch"
+  validate_setup_instruction_boundary "$backup_id" 3 \
+    || fail_test "absent-mode state 3 boundary was rejected"
+  write_state_variable DeployedMode 0
+  if validate_setup_instruction_boundary "$backup_id" 3; then
+    fail_test "a mode variable appearing after the backup was accepted"
+  fi
+  if observe_setup_state "$backup_id" >/dev/null; then
+    fail_test "a mode variable appearing after the backup was classified"
+  fi
+  rm -f "$(firmware_variable_path DeployedMode)"
+  enter_setup_mode
+  [[ "$(observe_setup_state "$backup_id")" == 2 ]] \
+    || fail_test "absent-mode state 2 mismatch"
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == F0 ]] \
+    || fail_test "absent-mode enrollment did not start from F0"
+  write_state_variable AuditMode 0
+  [[ "$(classify_firmware_enrollment_frontier "$backup_id")" == invalid ]] \
+    || fail_test "a mode variable appearing in Setup Mode was not classified invalid"
+  before_id=$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")
+  if run_enrollment "$backup_id" > "${CASE_DIR}/drift-enroll.out" 2>&1; then
+    fail_test "enrollment accepted a mode variable that appeared in Setup Mode"
+  fi
+  grep -Fq 'Operation enroll-secure-boot preflight failed; no transaction was started' \
+    "${CASE_DIR}/drift-enroll.out" || fail_test "drift refusal gave no reason"
+  [[ $(jq -r '.last_transaction.id' "$(lifecycle_file_path)") == "$before_id" ]] \
+    || fail_test "refused enrollment published a transaction"
+  rm -f "$(firmware_variable_path AuditMode)"
+  run_enrollment "$backup_id" || fail_test "absent-mode enrollment failed"
+  read_lifecycle || fail_test "absent-mode enrollment lifecycle is unreadable"
+  [[ "$_lifecycle_state" == active ]] \
+    || fail_test "absent-mode enrollment did not commit active"
+  [[ "$(observe_setup_state "$backup_id")" == 4 ]] \
+    || fail_test "absent-mode state 4 mismatch"
+  transaction_id=$(jq -r '.last_transaction.id' "$(lifecycle_file_path)")
+  manifest=$(lifecycle_manifest_path "$transaction_id")
+  firmware_proof=$(jq -r '.domain_records.firmware.path' "$manifest")
+  proof_document=$(read_control_document "$firmware_proof") \
+    || fail_test "absent-mode firmware proof is unreadable"
+  jq -e '.modes == {SetupMode: 0, AuditMode: null, DeployedMode: null, SecureBoot: 0}' \
+    <<< "$proof_document" >/dev/null \
+    || fail_test "absent modes were not recorded as null in the firmware proof"
+  read_transaction_manifest "$transaction_id" \
+    || fail_test "absent-mode enrollment manifest failed validation"
+  validate_firmware_proof_json "$transaction_id" "$proof_document" "$_manifest_json" \
+    || fail_test "absent-mode firmware proof did not validate"
+  tampered=$(jq -c '.modes.AuditMode = 1' <<< "$proof_document")
+  if validate_firmware_proof_json "$transaction_id" "$tampered" "$_manifest_json"; then
+    fail_test "firmware proof accepted a non-zero optional mode"
+  fi
+  # Only the two optional variables may be recorded absent. The raw file is
+  # removed too, so only the optional-name guard can reject the record.
+  manifest_path="$(firmware_backup_path "$backup_id")/manifest.json"
+  validate_firmware_backup "$backup_id" || fail_test "absent-mode backup stopped validating"
+  tampered=$(jq -c '.variables.SetupMode = .variables.AuditMode' "$manifest_path")
+  printf '%s\n' "$tampered" > "$manifest_path"
+  rm -f "$(firmware_backup_path "$backup_id")/SetupMode.efivar"
+  if validate_firmware_backup "$backup_id"; then
+    fail_test "backup validation accepted an absent SetupMode record"
+  fi
+}
+
+# A refused setup preflight names its reason and starts no transaction.
+test_preflight_reasons() {
+  setup_fixture preflight-reasons
+  enter_setup_mode
+  if prepare_state_aware_setup true > "${CASE_DIR}/setup-mode.out" 2>&1; then
+    fail_test "Setup Mode without a backup was accepted"
+  fi
+  grep -Fq 'already in Setup Mode without a validated backup' \
+    "${CASE_DIR}/setup-mode.out" || fail_test "Setup Mode refusal gave no reason"
+  write_raw_database PK "$PLAN_SOURCE/current-PK.esl"
+  write_state_variable SetupMode 0
+  write_state_variable AuditMode 1
+  if prepare_state_aware_setup true > "${CASE_DIR}/audit-mode.out" 2>&1; then
+    fail_test "non-zero AuditMode was accepted"
+  fi
+  grep -Fq 'AuditMode and DeployedMode must both be absent or both read zero' \
+    "${CASE_DIR}/audit-mode.out" || fail_test "non-zero AuditMode refusal gave no reason"
+  grep -Fq 'Operation prepare-secure-boot preflight failed; no transaction was started' \
+    "${CASE_DIR}/audit-mode.out" \
+    || fail_test "preflight refusal did not say that no transaction started"
+  write_state_variable AuditMode 0
+  write_state_variable DeployedMode 1
+  if prepare_state_aware_setup true > "${CASE_DIR}/deployed-mode.out" 2>&1; then
+    fail_test "non-zero DeployedMode was accepted"
+  fi
+  grep -Fq 'must both be absent or both read zero' "${CASE_DIR}/deployed-mode.out" \
+    || fail_test "non-zero DeployedMode refusal gave no reason"
+  write_state_variable DeployedMode 0
+  rm -f "$(firmware_variable_path AuditMode)"
+  if prepare_state_aware_setup true > "${CASE_DIR}/mixed-modes.out" 2>&1; then
+    fail_test "one optional mode variable without the other was accepted"
+  fi
+  grep -Fq 'must both be absent or both read zero' "${CASE_DIR}/mixed-modes.out" \
+    || fail_test "mixed mode presence refusal gave no reason"
+  [[ ! -e "$(lifecycle_file_path)" ]] \
+    || fail_test "preflight refusal published lifecycle state"
 }
 
 firmware_ledger_writer_callback() {
@@ -1295,8 +1418,11 @@ test_windows_gate_blocks_preparation() {
 
 test_firmware_recovery_from_unbound_root() {
   local backup_id root_id root_manifest root_incident root_manifest_hash root_incident_hash
-  local recovery_id recovery_manifest
-  setup_fixture recovery-unbound-root
+  local recovery_id recovery_manifest recovery_proof
+  setup_fixture "recovery-unbound-root${ABSENT_MODE_FIXTURE_SUFFIX:-}"
+  if [[ "${ABSENT_MODE_VARIABLES:-false}" == true ]]; then
+    rm -f "$(firmware_variable_path AuditMode)" "$(firmware_variable_path DeployedMode)"
+  fi
   backup_id=$(prepare_and_activate)
   run_lifecycle_transaction cleanup active active record_intervening_cleanup \
     || fail_test "intervening cleanup fixture failed"
@@ -1345,6 +1471,21 @@ test_firmware_recovery_from_unbound_root() {
     || fail_test "unbound recovery used the wrong enrollment order"
   [[ $(grep -Fxc artifact-proof "$ARTIFACT_LOG") -eq 1 ]] \
     || fail_test "firmware recovery omitted its second EFI verification"
+  if [[ "${ABSENT_MODE_VARIABLES:-false}" == true ]]; then
+    recovery_proof=$(read_control_document \
+      "$(jq -r '.domain_records.firmware.path' "$recovery_manifest")") \
+      || fail_test "absent-mode recovery proof is unreadable"
+    jq -e '.modes == {SetupMode: 0, AuditMode: null, DeployedMode: null, SecureBoot: 0}' \
+      <<< "$recovery_proof" >/dev/null \
+      || fail_test "absent-mode recovery proof did not record null modes"
+  fi
+}
+
+# The same interrupted enrollment and recovery on firmware without the
+# optional mode variables.
+test_firmware_recovery_from_unbound_root_absent_modes() {
+  local ABSENT_MODE_VARIABLES=true ABSENT_MODE_FIXTURE_SUFFIX=-absent-modes
+  test_firmware_recovery_from_unbound_root
 }
 
 test_setup_lineage_stops_at_unconfigure() {
@@ -1607,7 +1748,7 @@ test_firmware_recovery_leaves_unreadable_pending() {
   read_lifecycle || fail_test "unreadable pending root was unreadable"
   root_id="$_lifecycle_transaction_id"
   root_manifest=$(lifecycle_manifest_path "$root_id")
-  rm -f "$(firmware_variable_path DeployedMode)"
+  rm -f "$(firmware_variable_path SetupMode)"
   if recover_firmware_incident; then
     fail_test "technical firmware uncertainty reported recovery success"
   fi
@@ -1698,6 +1839,8 @@ run_case preparation test_preparation_and_backup
 run_case absent-dbx test_absent_dbx_record
 run_case missing-entry test_missing_current_entry_blocks
 run_case firmware-frontiers test_firmware_frontier_classifier
+run_case absent-modes test_absent_mode_variables
+run_case preflight-reasons test_preflight_reasons
 run_case live-ledger-writer test_live_firmware_ledger_writer
 run_case enrollment-success test_enrollment_guard_and_success
 run_case partial-plan test_partial_plan_refusal
@@ -1710,6 +1853,8 @@ run_case artifact-drift test_artifact_repair_drift_blocks_write
 run_case plan-tamper test_plan_manifest_tamper_blocks
 run_case windows-gate test_windows_gate_blocks_preparation
 run_case recovery-unbound-root test_firmware_recovery_from_unbound_root
+run_case recovery-unbound-root-absent-modes \
+  test_firmware_recovery_from_unbound_root_absent_modes
 run_case setup-lineage-boundary test_setup_lineage_stops_at_unconfigure
 run_case recovery-pending-effect test_firmware_recovery_resolves_pending_effect
 run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry

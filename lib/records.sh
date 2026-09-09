@@ -361,7 +361,9 @@ validate_firmware_proof_json() {
         (if .present then (.raw_sha256 | digest) else .raw_sha256 == null end))) and
     (.modes | type == "object" and
       keys == ["AuditMode","DeployedMode","SecureBoot","SetupMode"] and
-      .AuditMode == 0 and .DeployedMode == 0 and .SecureBoot == 0 and .SetupMode == 0) and
+      (.AuditMode == 0 or .AuditMode == null) and
+      (.DeployedMode == 0 or .DeployedMode == null) and
+      .SecureBoot == 0 and .SetupMode == 0) and
     .firmware_writes_sha256 == $writes_hash and
     (.artifact_proof | proof_reference) and
     .firmware_backup == {
