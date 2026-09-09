@@ -67,7 +67,7 @@ Commands per Tier A row, run in this order with the firmware steps between them:
 | --- | --- |
 | A1 | `sudo bash tests/acceptance-capture.sh A1 -- omasecboot status` |
 | A2 | `sudo bash tests/acceptance-capture.sh A2 -- omasecboot setup`. Answer every confirmation with Enter or `y`; `n`, Esc, or Ctrl-C cancels, the command says so, and a transcript that ends at a prompt or without the PK fingerprints and the delete instruction satisfies no row |
-| firmware | Reboot into firmware settings, delete only the PK (enable Secure Boot first and disable it afterwards if the key menu needs it), boot Linux, then `sudo bash tests/acceptance-capture.sh A3-setupmode` |
+| firmware | Reboot into firmware settings, delete only the PK (enable Secure Boot first and disable it afterwards if the key menu needs it), boot Linux, then `sudo bash tests/acceptance-capture.sh A3-setupmode`. That record must show `SetupMode=1` with sbctl's `Vendor Keys` still listing the builtin KEK and db and Microsoft; a firmware that cleared them with the PK, or that reinstalled its default keys on the next boot, is recorded as a refusal for that firmware and A3 is not run |
 | A3 | `sudo bash tests/acceptance-capture.sh A3 -- omasecboot enroll` |
 | firmware | Reboot into firmware settings, enable Secure Boot, boot Linux |
 | A4 | `sudo bash tests/acceptance-capture.sh A4 -- omasecboot status` |
