@@ -138,9 +138,9 @@ remove_windows_bootnext_variable() {
 }
 
 write_bootnext_variable() {
-  local number="$1" attributes="${2:-7}" path value encoded
+  local number="$1" attributes="${2:-7}" path="${3:-}" value encoded
   [[ "$number" =~ ^[0-9A-F]{4}$ && "$attributes" =~ ^[0-9]+$ ]] || return 1
-  path=$(windows_bootnext_variable_path) || return 1
+  [[ -n "$path" ]] || path=$(windows_bootnext_variable_path) || return 1
   value=$((16#$number))
   printf -v encoded '\\x%02x\\x%02x\\x%02x\\x%02x\\x%02x\\x%02x' \
     "$((attributes & 255))" "$(((attributes >> 8) & 255))" \
@@ -188,9 +188,12 @@ windows_recovery_failpoint() {
       ;;
     corrupt-attributes) write_bootnext_variable 0007 3 ;;
     replace-variable)
+      # The replacement is created while the original still exists, so it
+      # cannot receive the original's inode number on a filesystem that
+      # recycles freed inodes (ext4 and overlay do; tmpfs and btrfs do not).
       path=$(windows_bootnext_variable_path) || return 1
-      rm -f "$path"
-      write_bootnext_variable 0007
+      write_bootnext_variable 0007 7 "${path}.replacement" || return 1
+      mv -f "${path}.replacement" "$path"
       ;;
     fail) return 75 ;;
     *) return 1 ;;
