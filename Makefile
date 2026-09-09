@@ -56,6 +56,8 @@ uninstall:
 # same layout (<name>-<version>/ prefix) is produced here and makepkg uses it in
 # place of a download. Dependencies are checked by pacman at install time, not
 # by makepkg, so the build works on any Arch machine with base-devel and git.
+# Candidate builds share one version string, so an earlier package in PKGDEST
+# is overwritten rather than refused.
 package:
 	@set -eu; \
 	pkgname=$$(sed -n 's/^pkgname=//p' PKGBUILD); \
@@ -72,7 +74,7 @@ package:
 	printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
 	  LOGDEST="$$build" BUILDDIR="$$build/build" \
-	  makepkg --config "$$build/makepkg.conf" --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
+	  makepkg --config "$$build/makepkg.conf" --force --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
 	echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
 
 # bash -n parses only its first operand, so every script gets its own call.
