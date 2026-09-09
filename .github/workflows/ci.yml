@@ -33,7 +33,9 @@ jobs:
   hermetic:
     name: Hermetic suite (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The enrollment suite is the long pole: 52 minutes on 2026-09-08, over 60
+    # after the absent-mode cases. The ledger names the split trigger.
+    timeout-minutes: 90
     container:
       image: archlinux:base-devel
     strategy:
