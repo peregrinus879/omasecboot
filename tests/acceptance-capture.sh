@@ -119,7 +119,7 @@ capture_state() {
   block "sbctl status" sbctl status
   block "sbctl list-files" sbctl list-files
   block "sbctl verify" sbctl verify
-  block "omasecboot status" bash -c 'command -v omasecboot >/dev/null && omasecboot status || echo "omasecboot is not installed"'
+  block "omasecboot status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot status; printf "exit status: %s\n" "$?"; else echo "omasecboot is not installed"; fi'
   block "omasecboot version" bash -c 'command -v omasecboot >/dev/null && omasecboot version || echo "omasecboot is not installed"'
   block "Boot entries (MAC and NVMe nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
   block "ESP mount" findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS /boot
