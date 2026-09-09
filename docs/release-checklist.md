@@ -27,7 +27,7 @@ Hermetic tests do not prove firmware behavior. The matrix below is the minimum. 
 
 Target machine preparation, in this order:
 
-1. Install Windows first, then Omarchy from the ISO alongside it with Secure Boot off. Confirm in the firmware Secure Boot menu that the PK can be deleted on its own; firmware that offers only "clear all keys" is recorded as a refusal for that firmware.
+1. Install Windows first, then Omarchy from the ISO alongside it with Secure Boot off. Confirm in the firmware Secure Boot menu that the PK can be deleted on its own; firmware that offers only "clear all keys" is recorded as a refusal for that firmware. Some firmware shows its key-management menu only while Secure Boot is enabled (the ASUS Vivobook TP3402VA does): there, a PK-only delete is enable Secure Boot, delete the PK, disable Secure Boot again, then boot Linux. Firmware that exposes no AuditMode or DeployedMode variable is accepted; the records show both as absent.
 2. Back up every Windows recovery key (BitLocker or Device Encryption) somewhere off the machine.
 3. Check the producer set and the stale-copy condition before building anything: `pacman -Q limine-mkinitcpio-hook limine-snapper-sync sbctl efibootmgr` must show exactly 1.38.0-1.1, 1.31.0-1.1, and 0.18-2 with efibootmgr at 18 or newer, and `ls /usr/local/bin/omasecboot /usr/local/lib/omasecboot` must report both missing. Any other producer version fails activation by design and needs a re-audit commit before acceptance continues.
 4. Clone the repository at the candidate commit (a git clone, not an archive: the build reads its file list from git), then `make package`, `sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst`, and `omasecboot version`.
@@ -45,7 +45,7 @@ Tier A runs on a dedicated bare-metal laptop that can be wiped, with an Omarchy 
 | A6 | Interrupt a `sign` transaction (SIGTERM during signing), then `sudo omasecboot repair` | Lifecycle `recovery-required`, then recovery completes and returns `active` | Yes |
 | A7 | Disable Secure Boot in firmware, `sudo omasecboot unconfigure` | Recorded settings restored, stock Limine state rebuilt and proved, lifecycle `disabled` | Yes |
 | A8 | `sudo pacman -R omasecboot` from `disabled` | Removal allowed, `/var/lib/omasecboot` and `/var/lib/sbctl` preserved | Yes |
-| A9 | Snapshot restore through `limine-snapper-restore` with the lifecycle active | Restore producer admitted, post-repair proof passes | Recommended |
+| A9 | Restore a snapshot taken after A4 through `limine-snapper-restore` with the lifecycle active | Restore producer admitted, post-repair proof passes, lifecycle `active` and artifacts proved after the reboot | Recommended |
 | A10 | Windows 11 on the same laptop: `windows preflight`, `windows setup`, `windows bootnext`, reboot | Preflight guidance matches the edition, BootNext armed and consumed, Windows starts; record whether BitLocker prompted | Yes when Windows is present |
 
 Tier B runs on a second, in-use dual-boot machine with the exact pinned producer set installed, no stale `/usr/local` copy of the tool, and Windows present. It exercises the non-destructive path and the Windows handoff on a different firmware; it does not require entering Setup Mode on that machine unless the owner accepts that risk. When the Tier A laptop already covered A10, Tier B is recommended rather than mandatory.
@@ -66,14 +66,14 @@ Commands per Tier A row, run in this order with the firmware steps between them:
 | Row | Run |
 | --- | --- |
 | A1 | `sudo bash tests/acceptance-capture.sh A1 -- omasecboot status` |
-| A2 | `sudo bash tests/acceptance-capture.sh A2 -- omasecboot setup` |
-| firmware | Reboot into firmware settings, delete only the PK, boot Linux, then `sudo bash tests/acceptance-capture.sh A3-setupmode` |
+| A2 | `sudo bash tests/acceptance-capture.sh A2 -- omasecboot setup`. Answer every confirmation with Enter or `y`; `n`, Esc, or Ctrl-C cancels, the command says so, and a transcript that ends at a prompt or without the PK fingerprints and the delete instruction satisfies no row |
+| firmware | Reboot into firmware settings, delete only the PK (enable Secure Boot first and disable it afterwards if the key menu needs it), boot Linux, then `sudo bash tests/acceptance-capture.sh A3-setupmode` |
 | A3 | `sudo bash tests/acceptance-capture.sh A3 -- omasecboot enroll` |
 | firmware | Reboot into firmware settings, enable Secure Boot, boot Linux |
 | A4 | `sudo bash tests/acceptance-capture.sh A4 -- omasecboot status` |
 | A5 | `sudo bash tests/acceptance-capture.sh A5 -- pacman -S --noconfirm linux` (if Omarchy's update guard refuses, use `omarchy update` instead), then reboot and `sudo bash tests/acceptance-capture.sh A5-boot -- omasecboot status` |
 | A6 | `sudo bash tests/acceptance-capture.sh A6-interrupt -- timeout -s TERM 3 omasecboot sign`, then `sudo bash tests/acceptance-capture.sh A6 -- omasecboot repair` (if the first record shows `sign` completed before the signal, rerun with `timeout -s TERM 1`) |
-| A9 | `sudo bash tests/acceptance-capture.sh A9 -- limine-snapper-restore` (recommended) |
+| A9 | After A5-boot, create a snapshot to restore: `sudo snapper -c root create -d "omasecboot A9"` (`omarchy-snapshot create` is equivalent but labels it with the Omarchy version). Then `sudo bash tests/acceptance-capture.sh A9 -- limine-snapper-restore`, choose that snapshot by its ID and description, and answer `n` to the reboot prompt so the recorder can write the after-state; reboot, then `sudo bash tests/acceptance-capture.sh A9-boot -- omasecboot status`. Never restore a snapshot older than A2: a full restore replaces the root subvolume, including the package, its hooks, the sbctl keys, and `/var/lib/omasecboot`, while the ESP and firmware keep the signed state, and the machine then needs the recovery route in the README before any further row (recommended) |
 | A10 | `sudo bash tests/acceptance-capture.sh A10-preflight -- omasecboot windows preflight`, `... A10-setup -- omasecboot windows setup`, `... A10-bootnext -- omasecboot windows bootnext`, reboot, use Windows, boot Linux, `... A10-return -- omasecboot status` |
 | firmware | Reboot into firmware settings, disable Secure Boot, boot Linux |
 | A7 | `sudo bash tests/acceptance-capture.sh A7 -- omasecboot unconfigure` |

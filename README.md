@@ -265,6 +265,7 @@ These are four different operations. None of them is a factory reset.
 | `Setup cancelled ...`, `Enrollment cancelled ...`, or `Unconfigure cancelled ...` | You answered no, or pressed Esc or Ctrl-C, at a confirmation; the message says what remains recorded | Run the command again and confirm with Enter or `y` |
 | `Operation ... preflight failed; no transaction was started` | A read-only check refused the command before any change; the lines above it name the cause when the check has one | Fix the named cause and rerun |
 | System will not boot with Secure Boot on | Artifact or trust mismatch | Disable Secure Boot in firmware, boot Linux, run `sudo omasecboot status`, and keep Secure Boot off until the proof passes |
+| A snapshot older than `setup` was restored with `limine-snapper-restore` | The root subvolume, including OmaSecBoot, its hooks, the sbctl keys, and `/var/lib/omasecboot`, went back to before setup while the ESP and firmware keep the signed state; the system boots, but the next kernel or Limine update produces unsigned artifacts | Keep Secure Boot off until the proof passes: disable Secure Boot in firmware, restore the factory keys there, reinstall the package, and run `setup` again. A snapshot taken after setup carries the records it held at that time |
 
 Read-only helpers: `sbctl status`, `sbctl list-files`, `sbctl verify`, `efibootmgr -v`, and `findmnt`. They report state; they do not authorize a firmware change.
 
@@ -273,6 +274,7 @@ Read-only helpers: `sbctl status`, `sbctl list-files`, `sbctl verify`, `efibootm
 - Lifecycle `active` means OmaSecBoot manages this system. It does not mean keys are enrolled or Secure Boot is on.
 - BootNext is a one-boot request. It does not prove Windows booted, keep BitLocker quiet, or preserve PCR7 measurements. Secure Boot changes can trigger BitLocker recovery; they do not always do so.
 - A negative Windows preflight is a bounded observation, not firmware clearance.
+- A full snapshot restore replaces the root subvolume. A snapshot older than `setup` takes OmaSecBoot, its keys, and its records with it while the ESP and firmware keep the signed state; see Troubleshooting.
 - The raw pre-change firmware backup is not a factory key set. OmaSecBoot has no dbx writer and does not promise OEM PK, dbx, or factory-state restoration.
 - After the OEM PK is replaced, Microsoft's Secure Boot certificate servicing is the user's responsibility.
 - Hermetic tests prove the software contract, not firmware behavior. See the [release checklist](docs/release-checklist.md) for the hardware evidence a release requires.
