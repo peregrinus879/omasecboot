@@ -822,22 +822,40 @@ classify_local_sbctl_keys() {
   fi
 }
 
+# sbctl 0.18 lays out its own state: list-files and verify create the state
+# directory at mode 755 with a zero-length files database on a keyless machine,
+# create-keys makes directories with the same mode, writes the GUID 0644, and
+# writes every key and certificate 0400. An existing directory is therefore
+# held to the control-directory rule (owner and no group or other write), and
+# only the directories this function creates itself are private.
 create_local_sbctl_keys() {
-  local directory path parent
+  local directory path parent rc=0
   local -a paths
   classify_local_sbctl_keys || return 1
-  [[ "$_local_key_state" == none ]] || return 1
+  [[ "$_local_key_state" == none ]] || {
+    fail "Local sbctl keys already exist (${_local_key_state}); setup creates keys only from none"
+    return 1
+  }
   parent=$(dirname "$_sbctl_keydir")
   if [[ ! -e "$parent" && ! -L "$parent" ]]; then
-    validate_control_directory "$(dirname "$parent")" || return 1
+    validate_control_directory "$(dirname "$parent")" || {
+      fail "$(dirname "$parent") must be owned by the control user and not writable by group or others"
+      return 1
+    }
     install -d -m 700 "$parent" || return 1
     durable_sync "$(dirname "$parent")" || return 1
   fi
-  validate_private_control_directory "$parent" || return 1
+  validate_control_directory "$parent" || {
+    fail "${parent} must be owned by the control user and not writable by group or others"
+    return 1
+  }
   for directory in "$_sbctl_keydir" "$_sbctl_keydir/PK" \
     "$_sbctl_keydir/KEK" "$_sbctl_keydir/db"; do
     if [[ -e "$directory" || -L "$directory" ]]; then
-      validate_control_directory "$directory" || return 1
+      validate_control_directory "$directory" || {
+        fail "${directory} must be owned by the control user and not writable by group or others"
+        return 1
+      }
     else
       install -d -m 700 "$directory" || return 1
       durable_sync "$(dirname "$directory")" || return 1
@@ -848,11 +866,24 @@ create_local_sbctl_keys() {
     "$_sbctl_keydir/KEK/KEK.key" "$_sbctl_keydir/KEK/KEK.pem"
     "$_sbctl_keydir/db/db.key" "$_sbctl_keydir/db/db.pem")
   for path in "${paths[@]}"; do
-    transaction_backup_file "$path" true || return 1
+    transaction_backup_file "$path" true || {
+      fail "Could not record the pre-creation state of ${path}"
+      return 1
+    }
   done
-  run_sbctl_enrollment create-keys || return 1
-  classify_local_sbctl_keys || return 1
-  [[ "$_local_key_state" == complete ]]
+  run_sbctl_enrollment create-keys || {
+    rc=$?
+    fail "sbctl create-keys exited with status ${rc}"
+    return 1
+  }
+  classify_local_sbctl_keys || {
+    fail "The keys sbctl created could not be classified"
+    return 1
+  }
+  [[ "$_local_key_state" == complete ]] || {
+    fail "sbctl create-keys left an incomplete key set (${_local_key_state})"
+    return 1
+  }
 }
 
 write_backup_payload() {

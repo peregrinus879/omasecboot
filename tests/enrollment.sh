@@ -351,23 +351,26 @@ write_state_variable() {
   chmod 600 "$path"
 }
 
+# The files sbctl 0.18 create-keys writes: directories through MkdirAll with
+# os.ModePerm (755 under the root umask, existing directories untouched), the
+# GUID 0644, every key and certificate 0400 (util.go, guid.go,
+# backend/backend.go at tag 0.18).
 create_key_fixture() {
   local path
   mkdir -p "$SBCTL_ROOT/keys/PK" "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"
-  chmod 700 "$SBCTL_ROOT" "$SBCTL_ROOT/keys" "$SBCTL_ROOT/keys/PK" \
-    "$SBCTL_ROOT/keys/KEK" "$SBCTL_ROOT/keys/db"
   printf '12345678-1234-4234-8234-123456789abc\n' > "$SBCTL_ROOT/GUID"
+  chmod 644 "$SBCTL_ROOT/GUID"
   for path in PK KEK db; do
     cp "$CERT_KEY" "$SBCTL_ROOT/keys/$path/$path.key"
     cp "$CERT_PEM" "$SBCTL_ROOT/keys/$path/$path.pem"
-    chmod 600 "$SBCTL_ROOT/keys/$path/$path.key" \
+    chmod 400 "$SBCTL_ROOT/keys/$path/$path.key" \
       "$SBCTL_ROOT/keys/$path/$path.pem"
   done
   if [[ "$SBCTL_BAD_KEY" == true ]]; then
-    printf 'not-a-private-key\n' > "$SBCTL_ROOT/keys/KEK/KEK.key"
     chmod 600 "$SBCTL_ROOT/keys/KEK/KEK.key"
+    printf 'not-a-private-key\n' > "$SBCTL_ROOT/keys/KEK/KEK.key"
+    chmod 400 "$SBCTL_ROOT/keys/KEK/KEK.key"
   fi
-  chmod 600 "$SBCTL_ROOT/GUID"
 }
 
 sbctl() {
@@ -440,7 +443,14 @@ setup_fixture() {
   mkdir -p "$CASE_DIR" "$EFIVARS_DIR" "$DMI_DIR" "$PLAN_SOURCE" \
     "${CASE_DIR}/bin" "$SBCTL_ROOT"
   chmod 700 "$CASE_DIR" "$EFIVARS_DIR" "$DMI_DIR" "$PLAN_SOURCE" \
-    "${CASE_DIR}/bin" "$SBCTL_ROOT"
+    "${CASE_DIR}/bin"
+  # sbctl's state directory as list-files or verify leave it on a keyless
+  # machine: mode 755 with zero-length databases (util.go ReadOrCreateFile at
+  # tag 0.18); the acceptance recorder runs both before setup.
+  chmod 755 "$SBCTL_ROOT"
+  : > "$SBCTL_ROOT/files.json"
+  : > "$SBCTL_ROOT/bundles.json"
+  chmod 644 "$SBCTL_ROOT/files.json" "$SBCTL_ROOT/bundles.json"
   : > "$SBCTL_LOG"
   : > "$ARTIFACT_LOG"
   printf '#!/bin/sh\nexit 97\n' > "${CASE_DIR}/bin/sbctl"
@@ -1003,6 +1013,49 @@ test_observation_explanation() {
     || fail_test "explanation did not show the enrolled PK"
   grep -Fq 'Lifecycle: active' <<< "$output" \
     || fail_test "explanation omitted the lifecycle state"
+}
+
+# sbctl's own state directory (755 with zero-length databases) is accepted,
+# and the keys it writes at 0400 classify as complete.
+test_sbctl_state_directory_accepted() {
+  setup_fixture sbctl-state-accepted
+  [[ $(stat -c %a "$SBCTL_ROOT") == 755 && -e "$SBCTL_ROOT/files.json" \
+    && ! -s "$SBCTL_ROOT/files.json" ]] \
+    || fail_test "fixture did not reproduce sbctl's state directory"
+  prepare_state_aware_setup true \
+    || fail_test "preparation refused sbctl's own state directory"
+  read_lifecycle || fail_test "prepared lifecycle is unreadable"
+  [[ "$_lifecycle_state" == disabled ]] || fail_test "preparation did not publish disabled"
+  [[ $(stat -c %a "$SBCTL_ROOT/keys/PK/PK.key") == 400 \
+    && $(stat -c %a "$SBCTL_ROOT/GUID") == 644 ]] \
+    || fail_test "fixture did not create sbctl's file modes"
+  classify_local_sbctl_keys || fail_test "sbctl's file modes were not classifiable"
+  [[ "$_local_key_state" == complete ]] || fail_test "sbctl's file modes were not complete"
+}
+
+# Without any state directory the tool creates a private one and proceeds.
+test_sbctl_state_directory_absent() {
+  setup_fixture sbctl-state-absent
+  rm -rf "$SBCTL_ROOT"
+  prepare_state_aware_setup true \
+    || fail_test "preparation refused an absent state directory"
+  [[ $(stat -c %a "$SBCTL_ROOT") == 700 ]] \
+    || fail_test "the tool-created state directory is not private"
+  classify_local_sbctl_keys || fail_test "keys under a tool-created directory were not classifiable"
+  [[ "$_local_key_state" == complete ]] || fail_test "keys under a tool-created directory were not complete"
+}
+
+# A state directory that group or others can write is refused with its reason.
+test_sbctl_state_directory_writable() {
+  setup_fixture sbctl-state-writable
+  chmod 775 "$SBCTL_ROOT"
+  if prepare_state_aware_setup true > "${CASE_DIR}/writable.out" 2>&1; then
+    fail_test "a group-writable state directory was accepted"
+  fi
+  grep -Fq "${SBCTL_ROOT} must be owned by the control user and not writable by group or others" \
+    "${CASE_DIR}/writable.out" \
+    || fail_test "the writable state directory refusal gave no reason"
+  [[ ! -e "$SBCTL_ROOT/keys" ]] || fail_test "a refused state directory received keys"
 }
 
 # A refused setup preflight names its reason and starts no transaction.
@@ -1916,6 +1969,9 @@ run_case missing-entry test_missing_current_entry_blocks
 run_case firmware-frontiers test_firmware_frontier_classifier
 run_case absent-modes test_absent_mode_variables
 run_case observation-explanation test_observation_explanation
+run_case sbctl-state-accepted test_sbctl_state_directory_accepted
+run_case sbctl-state-absent test_sbctl_state_directory_absent
+run_case sbctl-state-writable test_sbctl_state_directory_writable
 run_case preflight-reasons test_preflight_reasons
 run_case live-ledger-writer test_live_firmware_ledger_writer
 run_case enrollment-success test_enrollment_guard_and_success
