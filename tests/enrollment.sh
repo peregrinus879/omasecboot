@@ -930,6 +930,81 @@ test_absent_mode_variables() {
   fi
 }
 
+# When a predicate refuses, the operator sees each trust variable against the
+# backup and the plan: a KEK cleared with the PK, and a db serviced after
+# enrollment, are named rather than hidden behind a bare status.
+test_observation_explanation() {
+  local backup_id output
+  setup_fixture observation-explanation
+  output=$(explain_setup_observation)
+  grep -Fq 'Observed: SetupMode=0 SecureBoot=0 AuditMode=0 DeployedMode=0' <<< "$output" \
+    || fail_test "explanation without a backup omitted the mode variables"
+  if grep -Fq 'versus' <<< "$output"; then
+    fail_test "explanation without a backup compared against one"
+  fi
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  rm -f "$(firmware_variable_path KEK)"
+  output=$(explain_setup_observation "$backup_id")
+  grep -Fq 'Observed: SetupMode=1 SecureBoot=0 AuditMode=0 DeployedMode=0' <<< "$output" \
+    || fail_test "explanation omitted the mode variables"
+  grep -Fq 'KEK: absent, versus backup: different, versus plan: different' <<< "$output" \
+    || fail_test "explanation did not name the cleared KEK"
+  grep -Fq 'db: present, versus backup: exact, versus plan: different' <<< "$output" \
+    || fail_test "explanation did not show the untouched db"
+  grep -Fq 'Local sbctl keys: complete' <<< "$output" \
+    || fail_test "explanation omitted the local key state"
+  if run_enrollment "$backup_id" > "${CASE_DIR}/cleared-kek.out" 2>&1; then
+    fail_test "enrollment accepted a KEK cleared with the PK"
+  fi
+  grep -Fq 'Operation enroll-secure-boot preflight failed; no transaction was started' \
+    "${CASE_DIR}/cleared-kek.out" || fail_test "cleared KEK refusal gave no reason"
+  [[ -z "$(ls -A "$(firmware_runtime_dir_path)" 2>/dev/null)" ]] \
+    || fail_test "the explanation left runtime files behind"
+  write_raw_database KEK "$PLAN_SOURCE/current-KEK.esl"
+  # A transaction that fails after its first firmware write leaves recovery
+  # pending; the explanation says so instead of claiming nothing changed.
+  SBCTL_FAIL_PHASE=after-db
+  if run_enrollment "$backup_id" >/dev/null 2>&1; then
+    fail_test "post-db failure fixture reported success"
+  fi
+  SBCTL_FAIL_PHASE=""
+  output=$(explain_setup_observation "$backup_id")
+  grep -Fq 'Lifecycle: recovery-required; run sudo omasecboot repair and do not intervene manually' \
+    <<< "$output" || fail_test "explanation omitted the pending recovery"
+  if grep -Fqi 'nothing was changed' <<< "$output"; then
+    fail_test "explanation claimed nothing changed after a firmware write"
+  fi
+  grep -Fq 'db: present, versus backup: different, versus plan: exact' <<< "$output" \
+    || fail_test "explanation did not show the written db"
+  recover_firmware_incident || fail_test "recovery after the post-db failure did not complete"
+  read_lifecycle || fail_test "recovered lifecycle is unreadable"
+  [[ "$_lifecycle_state" == active ]] || fail_test "recovery did not return to active"
+  [[ "$(observe_setup_state "$backup_id")" == 4 ]] \
+    || fail_test "recovered enrollment was not observed as state 4"
+  # A damaged plan reads as unknown, never as a firmware difference.
+  mv "$(firmware_plan_path "$backup_id")/db.entries" "${CASE_DIR}/db.entries.aside"
+  output=$(explain_setup_observation "$backup_id")
+  grep -Fq "Enrollment plan ${backup_id}: failed validation" <<< "$output" \
+    || fail_test "explanation did not report the damaged plan"
+  grep -Fq 'db: present, versus backup: different, versus plan: unknown' <<< "$output" \
+    || fail_test "a damaged plan was reported as a firmware difference"
+  mv "${CASE_DIR}/db.entries.aside" "$(firmware_plan_path "$backup_id")/db.entries"
+  write_raw_database db "$PLAN_SOURCE/mismatch.esl"
+  [[ "$(observe_setup_state "$backup_id")" == 3 ]] \
+    || fail_test "a db serviced after enrollment was not observed as state 3"
+  if validate_setup_instruction_boundary "$backup_id" 3; then
+    fail_test "a db serviced after enrollment passed the state 3 boundary"
+  fi
+  output=$(explain_setup_observation "$backup_id")
+  grep -Fq 'db: present, versus backup: different, versus plan: different' <<< "$output" \
+    || fail_test "explanation did not name the serviced db"
+  grep -Fq 'PK: present, versus backup: different, versus plan: exact' <<< "$output" \
+    || fail_test "explanation did not show the enrolled PK"
+  grep -Fq 'Lifecycle: active' <<< "$output" \
+    || fail_test "explanation omitted the lifecycle state"
+}
+
 # A refused setup preflight names its reason and starts no transaction.
 test_preflight_reasons() {
   setup_fixture preflight-reasons
@@ -1840,6 +1915,7 @@ run_case absent-dbx test_absent_dbx_record
 run_case missing-entry test_missing_current_entry_blocks
 run_case firmware-frontiers test_firmware_frontier_classifier
 run_case absent-modes test_absent_mode_variables
+run_case observation-explanation test_observation_explanation
 run_case preflight-reasons test_preflight_reasons
 run_case live-ledger-writer test_live_firmware_ledger_writer
 run_case enrollment-success test_enrollment_guard_and_success

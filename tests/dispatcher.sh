@@ -416,6 +416,96 @@ printf '%s\n' "$expected_mutations" > "$mutation_log"
 PLAN_CONFIRMED=true
 gum() { [[ "$1" == confirm ]]; }
 
+# A refused observation, boundary, or enrollment names itself and explains
+# what the firmware holds against the current backup.
+explanation_log="${TEST_DIR}/explanations"
+explain_setup_observation() { printf 'explain:%s\n' "${1:-}" >> "$explanation_log"; }
+observe_setup_state() { return 1; }
+if cmd_setup > "${TEST_DIR}/observe-refused.out" 2>&1; then
+  fail_test "setup succeeded on a refused observation"
+fi
+grep -Fq 'does not match a supported setup state' "${TEST_DIR}/observe-refused.out" \
+  || fail_test "refused setup observation gave no reason"
+if cmd_enroll > "${TEST_DIR}/observe-refused-enroll.out" 2>&1; then
+  fail_test "enroll succeeded on a refused observation"
+fi
+grep -Fq 'does not match a supported setup state' \
+  "${TEST_DIR}/observe-refused-enroll.out" \
+  || fail_test "refused enroll observation gave no reason"
+observe_setup_state() { printf '%s\n' "$SETUP_STATE"; }
+SETUP_STATE=3
+validate_setup_instruction_boundary() { return 1; }
+if cmd_setup > "${TEST_DIR}/boundary-refused.out" 2>&1; then
+  fail_test "setup succeeded on a refused instruction boundary"
+fi
+grep -Fq 'The state 3 instruction boundary could not be proved' \
+  "${TEST_DIR}/boundary-refused.out" || fail_test "refused instruction boundary gave no reason"
+SETUP_STATE=4
+if cmd_setup > "${TEST_DIR}/boundary4-refused.out" 2>&1; then
+  fail_test "setup succeeded on a refused state 4 boundary"
+fi
+grep -Fq 'The state 4 instruction boundary could not be proved' \
+  "${TEST_DIR}/boundary4-refused.out" || fail_test "refused state 4 boundary gave no reason"
+SETUP_STATE=2
+if cmd_enroll > "${TEST_DIR}/enroll-boundary-refused.out" 2>&1; then
+  fail_test "enroll succeeded on a refused state 4 boundary"
+fi
+grep -Fq 'The state 4 instruction boundary could not be proved; the firmware writes were proved, and nothing else was changed' \
+  "${TEST_DIR}/enroll-boundary-refused.out" \
+  || fail_test "refused post-enrollment boundary gave no reason"
+validate_setup_instruction_boundary() { printf 'windows-gate\n' >> "$mutation_log"; }
+run_enrollment() { return 1; }
+if cmd_enroll > "${TEST_DIR}/enroll-refused.out" 2>&1; then
+  fail_test "enroll succeeded on a refused enrollment"
+fi
+grep -Fq 'Enrollment did not complete; the lifecycle line below says whether recovery is required' \
+  "${TEST_DIR}/enroll-refused.out" || fail_test "failed enrollment gave no reason"
+run_enrollment() { printf 'enroll\n' >> "$mutation_log"; }
+PLAN_CONFIRMED=false
+activate_confirmed_enrollment_plan() { return 1; }
+if cmd_setup > "${TEST_DIR}/activation-refused.out" 2>&1; then
+  fail_test "setup succeeded on a failed plan activation"
+fi
+grep -Fq 'Plan activation did not complete; the lifecycle line below says whether recovery is required' \
+  "${TEST_DIR}/activation-refused.out" || fail_test "failed plan activation gave no reason"
+activate_confirmed_enrollment_plan() {
+  [[ "$*" == '11111111-1111-1111-1111-111111111111 true true true' ]] || return 1
+  PLAN_CONFIRMED=true
+  printf 'activate\n' >> "$mutation_log"
+}
+PLAN_CONFIRMED=true
+run_artifact_repair() { return 1; }
+if cmd_setup > "${TEST_DIR}/repair-refused.out" 2>&1; then
+  fail_test "setup succeeded on a failed artifact repair"
+fi
+grep -Fq 'Boot artifact repair did not complete; the lifecycle line below says whether recovery is required' \
+  "${TEST_DIR}/repair-refused.out" || fail_test "failed artifact repair gave no reason"
+run_artifact_repair() {
+  [[ "$1" == sign ]] || return 1
+  printf 'sign\n' >> "$mutation_log"
+}
+rm -f "$setup_marker"
+prepare_state_aware_setup() { return 1; }
+if cmd_setup > "${TEST_DIR}/prepare-refused.out" 2>&1; then
+  fail_test "setup succeeded on a failed preparation"
+fi
+grep -Fq 'Setup preparation did not complete; the lifecycle line below says whether recovery is required' \
+  "${TEST_DIR}/prepare-refused.out" || fail_test "failed preparation gave no reason"
+prepare_state_aware_setup() {
+  [[ "$1" == true ]] || return 1
+  : > "$setup_marker"
+  printf 'prepare\n' >> "$mutation_log"
+}
+: > "$setup_marker"
+expected_explanations=""
+for _ in 1 2 3 4 5 6 7 8; do
+  expected_explanations+=$'explain:11111111-1111-1111-1111-111111111111\n'
+done
+expected_explanations+='explain:'
+[[ $(<"$explanation_log") == "$expected_explanations" ]] \
+  || fail_test "refusals did not explain the observation against the current backup"
+printf '%s\n' "$expected_mutations" > "$mutation_log"
+
 RECOVERY_OCCURRED=true
 check_deps() { fail_test "command-specific dependencies ran before recovery"; }
 check_core_deps() { fail_test "command-specific dependencies ran before recovery"; }

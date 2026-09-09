@@ -280,6 +280,72 @@ current_optional_modes_match_backup() {
     && current_firmware_variable_matches_backup "$backup_id" DeployedMode
 }
 
+# Read-only account of what the setup and enrollment predicates observed, for
+# the operator after one of them refused or a transaction failed: the mode
+# variables, the local keys, the lifecycle with its recovery instruction when
+# one is pending, the backup and plan validity, and each trust variable
+# against the backup and the plan. It changes nothing and never fails. It does
+# not say whether the refusing command changed anything; the dispatcher says
+# that where it is true.
+explain_setup_observation() {
+  local backup_id="${1:-}" name presence status plan_status line
+  local backup_valid=false plan_valid=false
+  if read_current_firmware_modes; then
+    warn "Observed: SetupMode=${_setup_mode} SecureBoot=${_secure_boot_mode} AuditMode=${_audit_mode} DeployedMode=${_deployed_mode}"
+  else
+    warn "Observed: a mode variable is unreadable or malformed, or SetupMode and SecureBoot both read 1"
+  fi
+  if classify_local_sbctl_keys; then
+    warn "Local sbctl keys: ${_local_key_state}"
+  else
+    warn "Local sbctl keys: not classifiable (missing, mismatched, or an unsupported sbctl configuration)"
+  fi
+  if read_lifecycle; then
+    case "$_lifecycle_state" in
+      recovery-required|transition)
+        warn "Lifecycle: ${_lifecycle_state}; run sudo omasecboot repair and do not intervene manually"
+        ;;
+      *)
+        warn "Lifecycle: ${_lifecycle_state}"
+        ;;
+    esac
+  else
+    warn "Lifecycle: unreadable (${_lifecycle_read_status})"
+  fi
+  if [[ -n "$backup_id" ]]; then
+    if validate_firmware_backup "$backup_id"; then
+      backup_valid=true
+    else
+      warn "Firmware backup ${backup_id}: failed validation"
+    fi
+    if validate_enrollment_plan "$backup_id" false; then
+      plan_valid=true
+    else
+      warn "Enrollment plan ${backup_id}: failed validation"
+    fi
+  fi
+  for name in PK KEK db dbx; do
+    presence=$(firmware_variable_presence "$name") || presence=unreadable
+    line="${name}: ${presence}"
+    if [[ -n "$backup_id" ]]; then
+      status=unknown
+      [[ "$backup_valid" != true ]] \
+        || status=$(current_firmware_backup_status "$backup_id" "$name") || status=unknown
+      line+=", versus backup: ${status}"
+      if [[ "$name" != dbx ]]; then
+        plan_status=unknown
+        [[ "$plan_valid" != true ]] \
+          || plan_status=$(current_database_plan_status "$backup_id" "$name") \
+          || plan_status=unknown
+        line+=", versus plan: ${plan_status}"
+      fi
+    fi
+    warn "$line"
+  done
+  warn "When PK, KEK, and db all read exact against the backup before the PK delete, or against the plan after enrollment, the refusal came from another check (plan export, boot artifacts, or the Windows gate) whose message appears above"
+  return 0
+}
+
 # The last inspected raw efivar carries the attributes variable $1 must have;
 # a state variable must also hold a one-byte 0 or 1.
 firmware_inspection_is_expected() {

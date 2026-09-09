@@ -74,8 +74,15 @@ setup_mutation() {
       warn "Setup cancelled; no backup, keys, or plan were written"
       return 1
     }
-    prepare_state_aware_setup true || return 1
-    backup_id=$(current_setup_backup_id) || return 1
+    prepare_state_aware_setup true || {
+      fail "Setup preparation did not complete; the lifecycle line below says whether recovery is required"
+      explain_setup_observation
+      return 1
+    }
+    backup_id=$(current_setup_backup_id) || {
+      fail "The prepared backup could not be located after preparation"
+      return 1
+    }
   fi
   if ! validate_enrollment_plan "$backup_id" true >/dev/null 2>&1; then
     load_enrollment_pk_fingerprints "$backup_id" || {
@@ -91,24 +98,44 @@ setup_mutation() {
       || setup_plan_declined || return 1
     gum confirm "Confirm retained trust entries and recovery preparation were reviewed?" \
       || setup_plan_declined || return 1
-    activate_confirmed_enrollment_plan "$backup_id" true true true || return 1
+    activate_confirmed_enrollment_plan "$backup_id" true true true || {
+      fail "Plan activation did not complete; the lifecycle line below says whether recovery is required"
+      explain_setup_observation "$backup_id"
+      return 1
+    }
     repair_required=false
   fi
   if [[ "$repair_required" == true ]]; then
-    run_artifact_repair sign || return 1
+    run_artifact_repair sign || {
+      fail "Boot artifact repair did not complete; the lifecycle line below says whether recovery is required"
+      explain_setup_observation "$backup_id"
+      return 1
+    }
   fi
-  state=$(observe_setup_state "$backup_id") || return 1
+  state=$(observe_setup_state "$backup_id") || {
+    fail "Firmware and plan observation does not match a supported setup state; this check changed nothing"
+    explain_setup_observation "$backup_id"
+    return 1
+  }
   case "$state" in
     2)
       warn "Setup Mode is active; run sudo omasecboot enroll"
       ;;
     3)
-      validate_setup_instruction_boundary "$backup_id" 3 || return 1
+      validate_setup_instruction_boundary "$backup_id" 3 || {
+        fail "The state 3 instruction boundary could not be proved; this check changed nothing"
+        explain_setup_observation "$backup_id"
+        return 1
+      }
       warn "Boot artifacts are proved. In firmware settings, delete only PK to enter Setup Mode."
       warn "Do not clear KEK, db, or dbx; then run sudo omasecboot enroll."
       ;;
     4)
-      validate_setup_instruction_boundary "$backup_id" 4 || return 1
+      validate_setup_instruction_boundary "$backup_id" 4 || {
+        fail "The state 4 instruction boundary could not be proved; this check changed nothing"
+        explain_setup_observation "$backup_id"
+        return 1
+      }
       warn "Enrollment is proved with Secure Boot off; enable Secure Boot in firmware settings."
       ;;
     5)
@@ -139,7 +166,11 @@ enroll_mutation() {
     fail "No current confirmed Secure Boot enrollment plan is available"
     return 1
   }
-  state=$(observe_setup_state "$backup_id") || return 1
+  state=$(observe_setup_state "$backup_id") || {
+    fail "Firmware and plan observation does not match a supported setup state; nothing was changed"
+    explain_setup_observation "$backup_id"
+    return 1
+  }
   if [[ "$state" == 4 || "$state" == 5 ]]; then
     pass "The confirmed Secure Boot trust plan is already enrolled"
     return 0
@@ -152,8 +183,16 @@ enroll_mutation() {
     warn "Enrollment cancelled; no firmware write was made"
     return 1
   }
-  run_enrollment "$backup_id" || return 1
-  validate_setup_instruction_boundary "$backup_id" 4 || return 1
+  run_enrollment "$backup_id" || {
+    fail "Enrollment did not complete; the lifecycle line below says whether recovery is required"
+    explain_setup_observation "$backup_id"
+    return 1
+  }
+  validate_setup_instruction_boundary "$backup_id" 4 || {
+    fail "The state 4 instruction boundary could not be proved; the firmware writes were proved, and nothing else was changed"
+    explain_setup_observation "$backup_id"
+    return 1
+  }
   warn "Enrollment is proved; enable Secure Boot in firmware settings."
 }
 
