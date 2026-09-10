@@ -1630,8 +1630,8 @@ load_unconfigure_recovery_context() {
     <<< "$intent_document") || return 1
   _unconfigure_limine_tools_json=$(jq -c '.limine_tools' \
     <<< "$intent_document") || return 1
-  _unconfigure_fallback_state=$(jq -r '.limine_fallback' \
-    <<< "$intent_document") || return 1
+  _unconfigure_fallback_state=$(unconfigure_intent_fallback_state "$intent_document") \
+    || return 1
 
   managed_path=$(jq -r '.path' <<< "$_unconfigure_managed_reference_json") || return 1
   tracking_path=$(jq -r '.path' <<< "$_unconfigure_tracking_reference_json") || return 1

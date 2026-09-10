@@ -709,6 +709,102 @@ test_recovery_phase_failure_chain() {
     || fail_test "final recovery retry rewrote the immutable root"
 }
 
+# Emit the exact schema-1 record shape before hashing/publication, as the
+# pre-ada6c3f writer did. Every lifecycle reader, reference validator, recovery
+# selector and proof below is the real implementation. No sealed fixture is
+# rewritten to make an old record look current.
+test_schema_one_unconfigure_compatibility() (
+  local writer write_schema_one=true kind document schema root_id root_manifest
+  local root_hash intent_path intent_hash proof_path invalid reference
+  writer=$(declare -f persist_transaction_domain_record)
+  eval "${writer/persist_transaction_domain_record/persist_current_domain_record}"
+  persist_transaction_domain_record() {
+    local record="$1" filename="$2" record_schema="$3" validator="$4" ignored="$5"
+    local record_document="$6"
+    if [[ "$write_schema_one" == true && "$_transaction_operation" == unconfigure ]]; then
+      case "$record" in
+        unconfigure)
+          record_document=$(jq -c '.schema_version = 1 | del(.limine_fallback)' \
+            <<< "$record_document") || return 1
+          record_schema=1
+          ;;
+        final_proof)
+          record_document=$(jq -c '.schema_version = 1' <<< "$record_document") || return 1
+          record_schema=1
+          ;;
+      esac
+    fi
+    persist_current_domain_record "$record" "$filename" "$record_schema" \
+      "$validator" "$ignored" "$record_document"
+  }
+  for kind in completed interrupted; do
+    setup_fixture "schema-one-${kind}"
+    write_schema_one=true
+    if [[ "$kind" == interrupted ]]; then
+      REBUILD_FAIL=true
+      if run_unconfigure; then
+        fail_test "historical interrupted unconfiguration reported success"
+      fi
+    else
+      run_unconfigure || fail_test "historical completed unconfiguration was rejected"
+    fi
+    read_lifecycle || fail_test "schema-1 lifecycle references are unreadable"
+    if [[ "$kind" == completed ]]; then
+      root_id=$(jq -r '.last_transaction.id' <<< "$_lifecycle_json")
+    else
+      root_id="$_lifecycle_transaction_id"
+    fi
+    root_manifest=$(lifecycle_manifest_path "$root_id")
+    document=$(read_control_document "$root_manifest")
+    root_hash=$(sha256_file "$root_manifest")
+    intent_path=$(jq -r '.domain_records.unconfigure.path' <<< "$document")
+    intent_hash=$(sha256_file "$intent_path")
+    jq -e '.schema_version == 1 and (has("limine_fallback") | not)' "$intent_path" \
+      >/dev/null || fail_test "historical intent fixture has the wrong shape"
+    [[ $(unconfigure_intent_fallback_state "$(read_control_document "$intent_path")") == managed ]] \
+      || fail_test "historical intent lost its original fallback requirement"
+    for schema in 0 3; do
+      invalid=$(jq --argjson schema "$schema" '.schema_version = $schema' "$intent_path")
+      if validate_unconfigure_intent_json "$root_id" "$invalid" "$document"; then
+        fail_test "unsupported unconfigure schema ${schema} was accepted"
+      fi
+    done
+    invalid=$(jq '.limine_fallback = "absent"' "$intent_path")
+    if validate_unconfigure_intent_json "$root_id" "$invalid" "$document"; then
+      fail_test "schema-1 intent accepted a new fallback authority field"
+    fi
+    reference=$(jq -c '.domain_records.unconfigure | .schema_version = 2' <<< "$document")
+    if validate_unconfigure_intent_reference "$root_id" "$reference" "$document"; then
+      fail_test "record-reference schema did not match the historical document"
+    fi
+    if [[ "$kind" == completed ]]; then
+      proof_path=$(jq -r '.domain_records.final_proof.path' <<< "$document")
+      jq -e '.schema_version == 1 and .intent.schema_version == 1 and
+        .limine.fallback != null' "$proof_path" >/dev/null \
+        || fail_test "historical proof fixture has the wrong shape"
+      lifecycle_removal_is_allowed || fail_test "schema-1 disabled state refused removal"
+    else
+      REBUILD_FAIL=false
+      write_schema_one=false
+      with_boot_repair_lock || fail_test "historical recovery lock failed"
+      run_unconfigure_recovery_locked || fail_test "schema-1 incident did not recover"
+      release_boot_repair_lock
+      read_lifecycle || fail_test "recovery of schema-1 intent was unreadable"
+      [[ "$_lifecycle_state" == disabled ]] || fail_test "historical recovery did not disable management"
+      proof_path=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+      jq -e '.schema_version == 2 and .intent.schema_version == 1 and
+        .limine.fallback != null' "$proof_path" >/dev/null \
+        || fail_test "new recovery proof did not retain schema-1 intent authority"
+      [[ "$(<"${COMMAND_LOG}.install")" == *'--no-efi-register --fallback'* ]] \
+        || fail_test "historical recovery did not rebuild its managed fallback"
+      lifecycle_removal_is_allowed || fail_test "recovered schema-1 intent refused removal"
+    fi
+    [[ $(sha256_file "$root_manifest") == "$root_hash" \
+      && $(sha256_file "$intent_path") == "$intent_hash" ]] \
+      || fail_test "compatibility reader or recovery rewrote historical records"
+  done
+)
+
 case "${TEST_CASE:-all}" in
   success) test_successful_unconfigure ;;
   recovery) test_rebuild_failure_recovers_disabled ;;
@@ -716,6 +812,7 @@ case "${TEST_CASE:-all}" in
   recovery-phase-chain) test_recovery_phase_failure_chain ;;
   no-fallback) test_unconfigure_without_fallback ;;
   no-fallback-recovery) test_recovery_without_fallback ;;
+  legacy-schema) test_schema_one_unconfigure_compatibility ;;
   all)
     test_successful_unconfigure
     test_unconfigure_without_fallback
@@ -731,6 +828,7 @@ case "${TEST_CASE:-all}" in
     test_original_enrollment_setting_is_restored
     test_recovery_phase_failpoints
     test_recovery_phase_failure_chain
+    test_schema_one_unconfigure_compatibility
     ;;
   *) fail_test "unknown TEST_CASE: ${TEST_CASE}" ;;
 esac

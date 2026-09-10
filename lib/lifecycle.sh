@@ -898,8 +898,7 @@ validate_bootnext_manifest_rules() {
 # preserves them afterwards; completion requires the intent and the proof.
 validate_unconfigure_manifest_rules() {
   local document="$1"
-  jq -e --argjson intent_schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
-    --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+  jq -e --argjson schemas "$UNCONFIGURE_READ_SCHEMAS" \
     --argjson phases "$OMASECBOOT_OPERATION_PHASES" "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
     $phases["unconfigure"] as $phases |
     .target_state == "disabled" and .prior_state == "active" and
@@ -912,7 +911,8 @@ validate_unconfigure_manifest_rules() {
     (if .domain_records.unconfigure == null then
       .completed_phases == [] and
       (.current_phase == null or .current_phase == "record-unconfigure")
-     else .domain_records.unconfigure.schema_version == $intent_schema end) and
+     else .domain_records.unconfigure.schema_version as $schema |
+       $schemas | index($schema) != null end) and
     (if .domain_records.final_proof == null then true
      else .current_phase == "prove-unconfigured" or
        (.completed_phases == $phases and .current_phase == null) end) and
@@ -925,7 +925,8 @@ validate_unconfigure_manifest_rules() {
     (if .status == "completed" then
       .file_rollback_policy == "preserve" and .domain_records.unconfigure != null and
       .domain_records.final_proof != null and
-      .domain_records.final_proof.schema_version == $proof_schema and
+      (.domain_records.final_proof.schema_version as $schema |
+        $schemas | index($schema) != null) and
       .completed_phases == $phases and .current_phase == null
      else true end)
   ' <<< "$document" >/dev/null
@@ -1002,7 +1003,7 @@ validate_software_recovery_manifest_rules() {
 # completes only with the proof.
 validate_unconfigure_recovery_manifest_rules() {
   local document="$1"
-  jq -e --argjson proof_schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+  jq -e --argjson schemas "$UNCONFIGURE_READ_SCHEMAS" \
     --argjson phases "$OMASECBOOT_OPERATION_PHASES" "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
     .target_state == "disabled" and .prior_state == "recovery-required" and
     .file_rollback_policy == "preserve" and no_firmware_evidence and
@@ -1017,7 +1018,8 @@ validate_unconfigure_recovery_manifest_rules() {
          (.completed_phases == $phases and .current_phase == null) end) and
       (if .status == "completed" then
         .domain_records.final_proof != null and
-        .domain_records.final_proof.schema_version == $proof_schema and
+        (.domain_records.final_proof.schema_version as $schema |
+          $schemas | index($schema) != null) and
         .completed_phases == $phases and .current_phase == null
        else true end))
   ' <<< "$document" >/dev/null

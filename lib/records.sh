@@ -10,8 +10,14 @@ readonly WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION=1
 readonly MANAGED_SETTINGS_SCHEMA_VERSION=1
 readonly TRACKING_OWNERSHIP_SCHEMA_VERSION=1
+# shellcheck disable=SC2034 # New record writers live in sign.sh.
 readonly UNCONFIGURE_INTENT_SCHEMA_VERSION=2
+# shellcheck disable=SC2034 # New record writers live in sign.sh.
 readonly UNCONFIGURE_PROOF_SCHEMA_VERSION=2
+# Schema 1 always managed both loaders. Read its original semantics while
+# schema 2 writers explicitly record whether the fallback belongs to the intent.
+# shellcheck disable=SC2034 # Historical manifest validation lives in lifecycle.sh.
+readonly UNCONFIGURE_READ_SCHEMAS='[1,2]'
 readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 
 transaction_artifact_reference() {
@@ -50,6 +56,7 @@ validate_domain_reference() {
     && "$path" == "${transaction_dir}/${filename}" ]] || return 1
   validate_artifact_reference_file "$reference" "$transaction_dir" || return 1
   document=$(read_control_document "$path") || return 1
+  [[ $(document_schema_version "$document") == "$schema" ]] || return 1
   "$validator" "$transaction_id" "$document" "$@"
 }
 
@@ -141,20 +148,46 @@ validate_tracking_ownership_record_reference() {
 # The recorded tool version is historical evidence and is checked for shape
 # only; whether the tools may run again is proved against the installed
 # package when they are executed.
+unconfigure_record_schema() {
+  local schema
+  schema=$(document_schema_version "$1") || return 1
+  [[ "$schema" == 1 || "$schema" == 2 ]] || return 1
+  printf '%s\n' "$schema"
+}
+
+# Call only after validating the intent. This interprets historical data in
+# memory and never adds a field to the hash-bound schema-1 document.
+unconfigure_intent_fallback_state() {
+  local schema
+  schema=$(unconfigure_record_schema "$1") || return 1
+  if [[ "$schema" == 1 ]]; then
+    printf 'managed\n'
+  else
+    jq -er '.limine_fallback | select(. == "managed" or . == "absent")' <<< "$1"
+  fi
+}
+
 validate_unconfigure_intent_json() {
   local transaction_id="$1" document="$2" manifest="$3" prior_path prior_lifecycle
-  local managed tracking
-  jq -e --arg id "$transaction_id" --argjson schema "$UNCONFIGURE_INTENT_SCHEMA_VERSION" \
+  local managed tracking schema
+  schema=$(unconfigure_record_schema "$document") || return 1
+  jq -e --arg id "$transaction_id" --argjson schema "$schema" \
     --arg source "$(limine_unsigned_binary_path)" \
     --arg install "$(limine_install_path)" \
     --arg mkinitcpio "$(limine_mkinitcpio_path)" \
     --arg reset "$(limine_reset_enroll_path)" \
     --argjson manifest "$manifest" "$OMASECBOOT_JQ_DEFS"'
     type == "object" and
-    keys == ["limine_fallback","limine_source","limine_tools","managed_settings","operation",
-      "recorded_at","schema_version","tracking_ownership","transaction_id",
-      "windows_state_identity","writer_version"] and
-    (.limine_fallback == "managed" or .limine_fallback == "absent") and
+    (if $schema == 1 then
+      keys == ["limine_source","limine_tools","managed_settings","operation",
+        "recorded_at","schema_version","tracking_ownership","transaction_id",
+        "windows_state_identity","writer_version"]
+     else
+      keys == ["limine_fallback","limine_source","limine_tools","managed_settings","operation",
+        "recorded_at","schema_version","tracking_ownership","transaction_id",
+        "windows_state_identity","writer_version"] and
+      (.limine_fallback == "managed" or .limine_fallback == "absent")
+     end) and
     .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     .operation == "unconfigure" and (.recorded_at | timestamp) and
@@ -192,12 +225,15 @@ validate_unconfigure_intent_json() {
 }
 
 validate_unconfigure_intent_reference() {
-  validate_domain_reference "$1" "$2" "$UNCONFIGURE_INTENT_SCHEMA_VERSION" unconfigure-intent.json validate_unconfigure_intent_json "$3"
+  local schema
+  schema=$(unconfigure_record_schema "$2") || return 1
+  validate_domain_reference "$1" "$2" "$schema" unconfigure-intent.json validate_unconfigure_intent_json "$3"
 }
 
 validate_unconfigure_proof_json() {
   local transaction_id="$1" document="$2" manifest="$3" zero_checksum root intent
-  local intent_document
+  local intent_document schema fallback_state
+  schema=$(unconfigure_record_schema "$document") || return 1
   zero_checksum=$(printf '0%.0s' {1..128})
   if [[ $(jq -r '.kind' <<< "$manifest") == root ]]; then
     root="$manifest"
@@ -210,7 +246,9 @@ validate_unconfigure_proof_json() {
   intent_document=$(read_control_document "$(jq -r '.path' <<< "$intent")") || return 1
   validate_unconfigure_intent_json "$(jq -r '.id' <<< "$root")" "$intent_document" "$root" \
     || return 1
-  jq -e --arg id "$transaction_id" --argjson schema "$UNCONFIGURE_PROOF_SCHEMA_VERSION" \
+  fallback_state=$(unconfigure_intent_fallback_state "$intent_document") || return 1
+  jq -e --arg id "$transaction_id" --argjson schema "$schema" \
+    --arg fallback_state "$fallback_state" \
     --arg zero "$zero_checksum" --arg primary "$(limine_primary_binary_path)" \
     --arg fallback "$(limine_fallback_binary_path)" \
     --arg source "$(limine_unsigned_binary_path)" --argjson manifest "$manifest" \
@@ -226,6 +264,7 @@ validate_unconfigure_proof_json() {
       "schema_version","secure_boot","settings","tracking_ownership","transaction_id",
       "windows","writer_version"] and
     .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
+    ($schema != 1 or $intent.schema_version == 1) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     (.operation == "unconfigure" or .operation == "unconfigure-recovery") and
     (.proved_at | timestamp) and .secure_boot == 0 and
@@ -236,7 +275,7 @@ validate_unconfigure_proof_json() {
     (.managed_settings | artifact_reference) and (.tracking_ownership | artifact_reference) and
     (.limine | type == "object" and keys == ["fallback","primary","source"] and
       (.source | source) and (.primary | target($primary)) and
-      (if $intent_document.limine_fallback == "managed"
+      (if $fallback_state == "managed"
        then (.fallback | target($fallback)) and .fallback.sha256 == .source.sha256
        else .fallback == null end) and
       .source.sha256 == $intent_document.limine_source.sha256 and
@@ -257,7 +296,9 @@ validate_unconfigure_proof_json() {
 }
 
 validate_unconfigure_proof_reference() {
-  validate_domain_reference "$1" "$2" "$UNCONFIGURE_PROOF_SCHEMA_VERSION" final-proof.json validate_unconfigure_proof_json "$3"
+  local schema
+  schema=$(unconfigure_record_schema "$2") || return 1
+  validate_domain_reference "$1" "$2" "$schema" final-proof.json validate_unconfigure_proof_json "$3"
 }
 
 validate_producer_record_json() {
