@@ -106,6 +106,12 @@ readonly OMASECBOOT_JQ_DEFS='
     $new.command_exit_code == $old.command_exit_code and
     ($new.readback_status == "unchanged" or $new.readback_status == "verified" or
       $new.readback_status == "failed") and $new.completed_at != null;
+  def failed_pk_readback:
+    .hierarchy == "PK" and .command_exit_code == 0 and
+    .readback_status == "failed" and .completed_at != null;
+  def failed_pk_readback_resolved($old; $new):
+    ($old | failed_pk_readback) and $new.readback_status == "verified" and
+    firmware_write_resolved($old; $new);
 '
 
 # --- Locking ----------------------------------------------------------------

@@ -169,6 +169,7 @@ ARTIFACT_LOG=""
 WINDOWS_RC=0
 SBCTL_FAIL_PHASE=""
 SBCTL_MISMATCH_PHASE=""
+SBCTL_PK_SETUP_MODE=0
 SBCTL_BAD_KEY=false
 ENROLLMENT_MUTATION_POINT=""
 ENROLLMENT_MUTATION_USED=false
@@ -444,7 +445,7 @@ sbctl() {
     'enroll-keys -m -f --ignore-immutable --partial PK')
       [[ "$SBCTL_FAIL_PHASE" != before-PK ]] || return 35
       write_raw_database PK "$PLAN_SOURCE/PK.esl"
-      write_state_variable SetupMode 0
+      write_state_variable SetupMode "$SBCTL_PK_SETUP_MODE"
       [[ "$SBCTL_FAIL_PHASE" != after-PK ]] || return 36
       ;;
     *)
@@ -539,6 +540,7 @@ setup_fixture() {
   ACTIVATION_READY=true
   SBCTL_FAIL_PHASE=""
   SBCTL_MISMATCH_PHASE=""
+  SBCTL_PK_SETUP_MODE=0
   SBCTL_BAD_KEY=false
   ENROLLMENT_MUTATION_POINT=""
   ENROLLMENT_MUTATION_USED=false
@@ -2091,6 +2093,119 @@ test_firmware_recovery_leaves_unreadable_pending() {
     || fail_test "technical uncertainty resolved an unreadable pending write"
 }
 
+test_firmware_recovery_resolves_failed_pk_readback() {
+  local backup_id root_id root_manifest root_hash seal_hash attempt attempt_hash
+  local final_manifest previous current tampered change
+  setup_fixture recovery-failed-pk
+  # Model the recorded hardware's absent optional mode variables and delayed
+  # SetupMode observation, while keeping its original five-field write rows.
+  rm -f "$(firmware_variable_path AuditMode)" "$(firmware_variable_path DeployedMode)"
+  backup_id=$(prepare_and_activate)
+  enter_setup_mode
+  SBCTL_PK_SETUP_MODE=1
+  if run_enrollment "$backup_id"; then
+    fail_test "unconfirmed SetupMode exit reported enrollment complete"
+  fi
+  read_lifecycle || fail_test "failed PK incident was unreadable"
+  root_id="$_lifecycle_transaction_id"
+  root_manifest=$(lifecycle_manifest_path "$root_id")
+  root_hash=$(sha256_file "$root_manifest")
+  seal_hash=$(sha256_file "$(lifecycle_incident_path "$root_id")")
+  jq -e '.current_phase == "enroll-pk" and .file_rollback_policy == "preserve" and
+    [.firmware_writes[].readback_status] == ["verified","verified","failed"] and
+    all(.firmware_writes[]; .command_exit_code == 0 and
+      keys == ["command_exit_code","completed_at","hierarchy","readback_status","started_at"])' \
+    "$root_manifest" >/dev/null || fail_test "failed PK fixture did not match historical evidence"
+
+  : > "$SBCTL_LOG"
+  : > "$ARTIFACT_LOG"
+  if recover_firmware_incident; then
+    fail_test "failed PK recovered before strict F3 was observed"
+  fi
+  write_state_variable SetupMode 0
+  boot_id_value() { printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n'; }
+  write_raw_database dbx "$PLAN_SOURCE/mismatch.esl"
+  if recover_firmware_incident; then
+    fail_test "failed PK recovery accepted changed dbx"
+  fi
+  [[ ! -s "$SBCTL_LOG" && ! -s "$ARTIFACT_LOG" ]] \
+    || fail_test "refused failed PK recovery mutated artifacts or invoked sbctl"
+  read_lifecycle || fail_test "refused recovery damaged lifecycle state"
+  [[ $(jq -r '.transaction.attempt_count' <<< "$_lifecycle_json") == 0 ]] \
+    || fail_test "refused failed PK recovery consumed an attempt"
+  write_raw_database dbx "$PLAN_SOURCE/dbx.esl"
+
+  ENROLLMENT_MUTATION_POINT=after-recovery-artifact-repair
+  if recover_firmware_incident; then
+    fail_test "interrupted failed PK reconciliation reported success"
+  fi
+  read_lifecycle || fail_test "interrupted PK recovery was unreadable"
+  attempt=$(jq -r '.transaction.last_recovery_attempt.id' <<< "$_lifecycle_json")
+  attempt_hash=$(sha256_file "$(lifecycle_manifest_path "$attempt")")
+  jq -e '.firmware_writes[-1].readback_status == "verified" and
+    .firmware_writes[-1].command_exit_code == 0' "$(lifecycle_manifest_path "$attempt")" \
+    >/dev/null || fail_test "recovery did not persist the fresh PK observation"
+  previous=$(read_control_document "$root_manifest")
+  current=$(read_control_document "$(lifecycle_manifest_path "$attempt")")
+  validate_recovery_manifest_evolution "$previous" "$current" firmware-recovery \
+    || fail_test "valid historical PK reconciliation failed lineage validation"
+  for change in \
+    '.firmware_writes[-1].readback_status = "unchanged"' \
+    '.firmware_writes[-1].command_exit_code = 1' \
+    '.firmware_writes[-1].started_at = "2026-01-01T00:00:00Z"' \
+    '.firmware_writes[0].readback_status = "unchanged"' \
+    '.firmware_writes += [.firmware_writes[-1]]'; do
+    tampered=$(jq -c "$change" <<< "$current")
+    if validate_recovery_manifest_evolution "$previous" "$tampered" firmware-recovery; then
+      fail_test "PK reconciliation lineage accepted changed authority: ${change}"
+    fi
+  done
+  ENROLLMENT_MUTATION_POINT=""
+  ENROLLMENT_MUTATION_USED=false
+  WINDOWS_RC=2
+  recover_firmware_incident || fail_test "failed PK reconciliation did not resume"
+  read_lifecycle || fail_test "completed PK recovery was unreadable"
+  [[ "$_lifecycle_state" == active ]] || fail_test "PK reconciliation did not restore active state"
+  final_manifest=$(lifecycle_manifest_path \
+    "$(jq -r '.last_recovery.final_attempt.id' <<< "$_lifecycle_json")")
+  jq -e '[.firmware_writes[].hierarchy] == ["db","KEK","PK"] and
+    all(.firmware_writes[]; .command_exit_code == 0 and .readback_status == "verified") and
+    .domain_records.firmware != null and .domain_records.final_proof != null' \
+    "$final_manifest" >/dev/null || fail_test "PK reconciliation proof was incomplete"
+  if grep -Fq -- '--partial' "$SBCTL_LOG"; then
+    fail_test "PK reconciliation issued another firmware write"
+  fi
+  [[ $(sha256_file "$root_manifest") == "$root_hash" \
+    && $(sha256_file "$(lifecycle_incident_path "$root_id")") == "$seal_hash" \
+    && $(sha256_file "$(lifecycle_manifest_path "$attempt")") == "$attempt_hash" ]] \
+    || fail_test "PK reconciliation rewrote sealed predecessor evidence"
+}
+
+test_failed_pk_ledger_boundaries() {
+  local ledger candidate frontier
+  ledger='{"firmware_writes":[
+    {"hierarchy":"db","command_exit_code":0,"readback_status":"verified"},
+    {"hierarchy":"KEK","command_exit_code":0,"readback_status":"verified"},
+    {"hierarchy":"PK","command_exit_code":0,"readback_status":"failed",
+      "completed_at":"2026-09-10T12:22:51Z"}]}'
+  firmware_ledger_matches_frontier "$ledger" F3 \
+    || fail_test "terminal successful PK command cannot be reconciled at F3"
+  for frontier in F0 F1 F2 invalid; do
+    if firmware_ledger_matches_frontier "$ledger" "$frontier"; then
+      fail_test "terminal failed PK authorized ${frontier} or a retry"
+    fi
+  done
+  for candidate in \
+    '.firmware_writes[-1].command_exit_code = 1' \
+    '.firmware_writes[-1].command_exit_code = null' \
+    '.firmware_writes[-1].hierarchy = "KEK"' \
+    '.firmware_writes[0].readback_status = "failed"'; do
+    if firmware_ledger_matches_frontier "$(jq -c "$candidate" <<< "$ledger")" F3; then
+      fail_test "unsupported failure acquired PK reconciliation authority: ${candidate}"
+    fi
+  done
+}
+
 run_case() {
   local name="$1" function="$2" log pid registration_signal=""
   if [[ "$enrollment_test_case" != all && "$enrollment_test_case" != "$name" ]]; then
@@ -2199,6 +2314,8 @@ run_case recovery-pending-effect test_firmware_recovery_resolves_pending_effect
 run_case recovery-pending-retry test_firmware_recovery_inherits_resolved_retry
 run_case recovery-retry-limit test_firmware_recovery_retry_limit_is_cumulative
 run_case recovery-post-pk-effect test_firmware_recovery_completes_post_pk_effect
+run_case recovery-failed-pk test_firmware_recovery_resolves_failed_pk_readback
+run_case failed-pk-ledger test_failed_pk_ledger_boundaries
 run_case recovery-windows-gate test_firmware_recovery_requires_windows_gate
 run_case recovery-unreadable-pending test_firmware_recovery_leaves_unreadable_pending
 [[ "$enrollment_test_case_matched" == true ]] \

@@ -346,7 +346,7 @@ explain_setup_observation() {
     fi
     warn "$line"
   done
-  warn "When PK, KEK, and db all read exact against the backup before the PK delete, or against the plan after enrollment, the refusal came from another check (plan export, boot artifacts, or the Windows gate) whose message appears above"
+  warn "Exact trust entries alone do not prove completion: firmware modes, plan validation, boot artifacts, and Windows preparation must also satisfy the current operation"
   return 0
 }
 
@@ -1806,7 +1806,7 @@ validate_enrollment_transaction_binding() {
 
 firmware_ledger_expected_frontier() {
   local document="$1"
-  jq -r '
+  jq -r "$OMASECBOOT_JQ_DEFS"'
     reduce .firmware_writes[] as $write (
       "F0";
       if $write.readback_status == "verified" then
@@ -1818,6 +1818,7 @@ firmware_ledger_expected_frontier() {
         elif ($write.hierarchy == "KEK" and . == "F1") then "pending-F1-F2"
         elif ($write.hierarchy == "PK" and . == "F2") then "pending-F2-F3"
         else "invalid" end
+      elif . == "F2" and ($write | failed_pk_readback) then "failed-PK-F3"
       else "invalid" end
     )
   ' <<< "$document"
@@ -1831,6 +1832,7 @@ firmware_ledger_matches_frontier() {
     pending-F0-F1) [[ "$frontier" == F0 || "$frontier" == F1 ]] ;;
     pending-F1-F2) [[ "$frontier" == F1 || "$frontier" == F2 ]] ;;
     pending-F2-F3) [[ "$frontier" == F2 || "$frontier" == F3 ]] ;;
+    failed-PK-F3) [[ "$frontier" == F3 ]] ;;
     *) return 1 ;;
   esac
 }
@@ -2174,6 +2176,29 @@ reconcile_pending_firmware_write() {
   [[ "$readback_status" != failed ]]
 }
 
+# Older writers classified a successful PK command as failed when SetupMode
+# still read 1. A fresh strict F3 proof may resolve that terminal observation,
+# but never authorizes another write. Only the new recovery attempt changes;
+# the sealed root and any predecessor attempt retain their original evidence.
+reconcile_failed_pk_readback() {
+  local backup_id="$1" document timestamp
+  [[ "$_transaction_operation" == firmware-recovery ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  [[ $(jq -r '.firmware_writes[-1].readback_status // ""' \
+    <<< "$_manifest_json") == failed ]] || return 0
+  json_is "${OMASECBOOT_JQ_DEFS}"'.firmware_writes[-1] | failed_pk_readback' \
+    "$_manifest_json" || return 1
+  validate_enrollment_transaction_binding "$backup_id" || return 1
+  [[ $(classify_firmware_enrollment_frontier "$backup_id") == F3 ]] || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  timestamp=$(utc_timestamp) || return 1
+  document=$(jq -c --arg timestamp "$timestamp" '
+    .firmware_writes[-1].readback_status = "verified" |
+    .firmware_writes[-1].completed_at = $timestamp
+  ' <<< "$_manifest_json") || return 1
+  write_transaction_manifest_json "$document"
+}
+
 firmware_recovery_transaction() {
   local backup_id="$1" frontier
   read_transaction_manifest "$_transaction_id" || return 1
@@ -2186,6 +2211,7 @@ firmware_recovery_transaction() {
   fi
 
   transaction_phase_start "reconcile-firmware-write" || return 1
+  reconcile_failed_pk_readback "$backup_id" || return 1
   reconcile_pending_firmware_write "$backup_id" || return 1
   frontier=$(classify_firmware_enrollment_frontier "$backup_id") || return 1
   read_transaction_manifest "$_transaction_id" || return 1

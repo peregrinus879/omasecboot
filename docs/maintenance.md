@@ -149,6 +149,7 @@ Rechecked 2026-09-09: Arch ships sbctl 0.18-2, efibootmgr 18-4, coreutils 9.11-2
 
 - AuditMode and DeployedMode are UEFI 2.5 variables that the specification defines together. Observed 2026-09-09: the ASUS Vivobook TP3402VA (AMI BIOS TP3402VA.307 of 2024-10-17) exposes neither, while the ASUS ROG Zephyrus GU605CR exposes both; `AGENTS.md` owns the acceptance rule. Recheck if an acceptance machine is refused for exposing only one of the two, or reports either with a payload other than one byte.
 - On the TP3402VA a PK-only delete from the key menu left KEK and db in place with SetupMode reading 1 (A3-setupmode records of 2026-09-09). Firmware that clears more than the PK, or reinstalls its default keys on the next boot, has not been observed yet; the checklist records either as a refusal for that firmware.
+- TP3402VA BIOS 307, A3 at 2026-09-10T12:19:02Z: db and KEK commands returned 0 with verified readback; PK returned 0, the trust databases compared exact against the plan and dbx against the backup, but SetupMode remained 1 and the PK readback was recorded failed. The reboot record at 12:32:09Z showed SetupMode 0 with Secure Boot off. This is a delayed observation, not proof of its cause: UEFI 2.11 section 32 requires immediate transition to User Mode after successful PK enrollment. Historical PK reconciliation retains strict F3 and the original sealed failure. Revalidate on a firmware, kernel, or sbctl change and during the recovery hardware row; same-boot completion with a pending mode remains a separate design.
 
 ### efibootmgr and efivarfs
 

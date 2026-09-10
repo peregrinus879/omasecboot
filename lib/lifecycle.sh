@@ -1171,6 +1171,9 @@ validate_recovery_manifest_evolution() {
         $new[0:(($old | length) - 1)] == $old[0:-1] and
         ($new[($old | length) - 1] == $old[-1] or
           firmware_write_resolved($old[-1]; $new[($old | length) - 1]))
+      elif (($new | length) == ($old | length) and
+        $new[0:-1] == $old[0:-1] and
+        failed_pk_readback_resolved($old[-1]; $new[-1])) then true
       else $new[0:($old | length)] == $old end;
     $current.kind == "recovery-attempt" and $current.operation == $operation and
     $current.prior_state == "recovery-required" and
@@ -2281,6 +2284,12 @@ write_transaction_manifest_json() {
             $new[-1].command_exit_code != null and
             ($old[-1] | .command_exit_code = $new[-1].command_exit_code) == $new[-1]) or
            firmware_write_resolved($old[-1]; $new[-1]))
+        elif ($current.kind == "recovery-attempt" and
+          $current.operation == "firmware-recovery" and
+          $current.current_phase == "reconcile-firmware-write" and
+          ($new | length) == ($old | length) and ($old | length) > 0 and
+          $new[0:-1] == $old[0:-1] and
+          failed_pk_readback_resolved($old[-1]; $new[-1])) then true
         else false end;
       def envelope:
         del(.backups, .completed_phases, .current_phase, .domain_records,

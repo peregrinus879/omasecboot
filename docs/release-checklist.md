@@ -81,6 +81,8 @@ Commands per Tier A row, run in this order with the firmware steps between them:
 
 Pass rule: every mandatory Tier A row passes on the candidate commit, and Tier B rows are mandatory only when Tier A had no Windows installation. A failed mandatory row blocks the tag until the fix lands and the row is rerun. Recommended rows that were not run are listed in the release record as unexercised.
 
+For a historical A3 incident whose terminal PK command returned 0 but whose readback was recorded failed, capture `A3-reboot` with Secure Boot still off, then `A3-repair -- omasecboot repair` on the compatible recovery build. The recovery must establish strict F3 by fresh direct comparison, issue no additional firmware write, preserve the failed root and prior attempt seals, prove boot artifacts, and return the lifecycle to `active`. A SetupMode value of 0 alone does not satisfy that row. Obtain the enablement instruction from `setup` only after recovery succeeds. A kernel transaction performed with Secure Boot off is useful producer evidence but does not replace the post-A4 boot/update acceptance.
+
 Always unexercised in this release, and named as such in the release notes: dbx modification, firmware factory-key restoration, firmware vendors other than those recorded, and any generalization about BitLocker recovery beyond the machines recorded.
 
 ## 5. Tag and publication
