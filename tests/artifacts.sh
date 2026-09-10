@@ -122,6 +122,76 @@ update_tracking_db() {
   mv "$tmp" "$SBCTL_FILES_DB"
 }
 
+# Activation's entry regeneration: the pinned tools are dispatched to these
+# stubs with the same lock handoff the real runner performs. limine-mkinitcpio
+# rebuilds the OS UKI (sbctl's mkinitcpio hook signs it) and rewrites the OS
+# entry without a hash under ENABLE_VERIFICATION=no; limine-snapper-sync
+# rewrites the snapshot entry with the hash of the file as it is now.
+MKINITCPIO_FAIL=false
+limine-mkinitcpio() {
+  printf 'mkinitcpio\n' >> "$ARTIFACT_LOG"
+  [[ "$MKINITCPIO_FAIL" == false ]] || return 1
+  printf 'UKI_REBUILT\nLOCAL_SIGNATURE\n' > "$OS_UKI"
+  sed -i 's|\(path: boot():/EFI/Linux/omarchy_linux.efi\)#[0-9A-Fa-f]\{128\}|\1|' \
+    "$(limine_config_path)"
+}
+
+limine-snapper-sync() {
+  local hash remainder
+  [[ "$*" == --no-force-save ]] || return 2
+  printf 'snapper-sync\n' >> "$ARTIFACT_LOG"
+  read -r hash remainder < <(b2sum "$HISTORY")
+  sed -i "s|\(path: boot():/EFI/Linux/history.efi_sha256_abc\)#[0-9A-Fa-f]\{128\}|\1#${hash}|" \
+    "$(limine_config_path)"
+}
+
+run_bound_limine_tool() {
+  local key="$1" handoff="$2" command
+  shift 3
+  case "$key" in
+    mkinitcpio) command=limine-mkinitcpio ;;
+    snapper-sync) command=limine-snapper-sync ;;
+    *) return 1 ;;
+  esac
+  if [[ "$handoff" == true ]]; then
+    with_limine_lock_handoff "$command" "$@"
+  else
+    "$command" "$@"
+  fi
+}
+
+activation_repair_transaction() {
+  repair_boot_artifacts activation
+}
+
+run_activation_repair() {
+  _activation_limine_tools_json='{"mkinitcpio": {}, "snapper-sync": {}}'
+  run_lifecycle_transaction_with_preflight "$1" "active" "active" \
+    artifact_repair_preflight activation_repair_transaction
+}
+
+# A stock config as limine-entry-tool writes it under ENABLE_VERIFICATION=yes:
+# an OS entry and a snapshot entry, each hashing its unsigned file.
+write_hashed_limine_config() {
+  local os_hash history_hash remainder
+  printf 'UKI\n' > "$OS_UKI"
+  printf 'SNAPSHOT\n' > "$HISTORY"
+  read -r os_hash remainder < <(b2sum "$OS_UKI")
+  read -r history_hash remainder < <(b2sum "$HISTORY")
+  printf '%s\n' \
+    'timeout: 5' \
+    'hash_mismatch_panic: no' \
+    '/+Omarchy' \
+    '    protocol: efi' \
+    "    path: boot():/EFI/Linux/omarchy_linux.efi#${os_hash}" \
+    '    //Snapshots' \
+    '    ///5' \
+    '    ////linux' \
+    '    protocol: efi' \
+    "    path: boot():/EFI/Linux/history.efi_sha256_abc#${history_hash}" \
+    > "$(limine_config_path)"
+}
+
 limine() {
   local binary checksum
   [[ "$1" == enroll-config ]] || return 2
@@ -223,6 +293,8 @@ setup_fixture() {
   PRIMARY="${CASE_DIR}/boot/EFI/limine/limine_x64.efi"
   FALLBACK="${CASE_DIR}/boot/EFI/BOOT/BOOTX64.EFI"
   SNAPSHOT="${CASE_DIR}/boot/EFI/Linux/snapshot.efi_sha256_deadbeef"
+  OS_UKI="${CASE_DIR}/boot/EFI/Linux/omarchy_linux.efi"
+  HISTORY="${CASE_DIR}/boot/EFI/Linux/history.efi_sha256_abc"
   MIXED="${CASE_DIR}/boot/EFI/Tools/Mixed.EfI"
   MICROSOFT="${CASE_DIR}/boot/EFI/Microsoft/Boot/bootmgfw.efi"
   IA32="${CASE_DIR}/boot/EFI/BOOT/BOOTIA32.EFI"
@@ -242,6 +314,7 @@ setup_fixture() {
   SYNC_FAIL_PATH=""
   LIMINE_FAIL_TARGET=""
   LIMINE_BAD_TARGET=""
+  MKINITCPIO_FAIL=false
 
   mkdir -p "${CASE_DIR}/boot/EFI/limine" "${CASE_DIR}/boot/EFI/BOOT" \
     "${CASE_DIR}/boot/EFI/Linux" "${CASE_DIR}/boot/EFI/Tools" \
@@ -867,6 +940,94 @@ test_fallback_present_under_no() {
     || fail_test "the kept fallback was not enrolled alongside the primary"
 }
 
+# Activation on a stock config (the Vivobook TP3402VA, 2026-09-10): the OS
+# entry is regenerated before signing and loses its hash, the snapshot entry
+# is regenerated after signing and hashes the signed file, the checksum
+# enrolled last describes the final config, and nothing stays stale.
+test_activation_regenerates_entries() {
+  local checksum manifest artifact history_hash remainder mkinitcpio_line
+  local first_sign snapper_line first_enroll
+  write_hashed_limine_config
+  [[ -z "$(list_stale_limine_path_hashes)" ]] || fail_test "the fixture's hashes did not match"
+  run_activation_repair "artifact-activation" > "${CASE_DIR}/activation.out" 2>&1 \
+    || fail_test "activation repair failed: $(<"${CASE_DIR}/activation.out")"
+  # The enroll phase signs its staged loaders too, so the order proved here is
+  # mkinitcpio, the artifact signing, snapper-sync, then the first enrollment.
+  mkinitcpio_line=$(grep -n -m1 '^mkinitcpio$' "$ARTIFACT_LOG" | cut -d: -f1)
+  first_sign=$(grep -n -m1 '^sign:' "$ARTIFACT_LOG" | cut -d: -f1)
+  snapper_line=$(grep -n -m1 '^snapper-sync$' "$ARTIFACT_LOG" | cut -d: -f1)
+  first_enroll=$(grep -n -m1 '^enroll:' "$ARTIFACT_LOG" | cut -d: -f1)
+  [[ -n "$mkinitcpio_line" && -n "$first_sign" && -n "$snapper_line" && -n "$first_enroll" ]] \
+    || fail_test "activation did not run every regeneration and signing step: $(<"$ARTIFACT_LOG")"
+  [[ "$mkinitcpio_line" -lt "$first_sign" && "$first_sign" -lt "$snapper_line" \
+    && "$snapper_line" -lt "$first_enroll" ]] \
+    || fail_test "activation order was not mkinitcpio, sign, snapper-sync, enroll: $(<"$ARTIFACT_LOG")"
+  grep -Fxq "sign:${HISTORY}" "$ARTIFACT_LOG" || fail_test "the snapshot UKI was not signed in the sign phase"
+  [[ $(grep -n -Fx "sign:${HISTORY}" "$ARTIFACT_LOG" | cut -d: -f1) -lt "$snapper_line" ]] \
+    || fail_test "the snapshot entry was regenerated before its file was signed"
+  grep -Fxq '    path: boot():/EFI/Linux/omarchy_linux.efi' "$(limine_config_path)" \
+    || fail_test "the regenerated OS entry still carries a hash"
+  read -r history_hash remainder < <(b2sum "$HISTORY")
+  grep -Fxq "    path: boot():/EFI/Linux/history.efi_sha256_abc#${history_hash}" \
+    "$(limine_config_path)" || fail_test "the snapshot entry does not hash the signed file"
+  grep -aFxq 'LOCAL_SIGNATURE' "$HISTORY" || fail_test "the snapshot UKI was not signed"
+  grep -aFxq 'UKI_REBUILT' "$OS_UKI" || fail_test "the OS UKI was not rebuilt"
+  [[ -z "$(list_stale_limine_path_hashes)" ]] || fail_test "a stale hash survived activation"
+  checksum=$(current_limine_config_checksum) || fail_test "config checksum failed"
+  verify_limine_embedded_checksum "$PRIMARY" "$checksum" \
+    || fail_test "the enrolled checksum does not describe the final config"
+  verify_all_efi_artifacts "$checksum" || fail_test "final EFI proof failed after activation"
+  manifest=""
+  for artifact in "$(state_dir_path)"/transactions/*/manifest.json; do
+    [[ $(jq -r '.operation' "$artifact") != artifact-activation ]] || manifest="$artifact"
+  done
+  [[ -n "$manifest" ]] || fail_test "activation manifest was not found"
+  jq -e --arg config "$(limine_config_path)" --arg uki "$OS_UKI" '.completed_phases == [
+    "backup-artifacts",
+    "configure-limine",
+    "regenerate-entries",
+    "clean-tracking",
+    "sign-efi",
+    "regenerate-snapshot-entries",
+    "enroll-config",
+    "verify-config",
+    "prove-artifacts"
+  ] and .status == "completed" and
+    ([.backups[] | select(.target == $config)] | length) == 1 and
+    ([.backups[] | select(.target == $uki)] | length) == 1' "$manifest" >/dev/null \
+    || fail_test "activation phases or backups were not recorded as required"
+}
+
+# A regeneration failure rolls the config and the UKI back to their recorded
+# state and leaves recovery pending, like every other repair phase.
+test_activation_regeneration_failure_rolls_back() {
+  local config_hash uki_hash
+  write_hashed_limine_config
+  config_hash=$(sha256_file "$(limine_config_path)")
+  uki_hash=$(sha256_file "$OS_UKI")
+  MKINITCPIO_FAIL=true
+  if run_activation_repair "artifact-activation-failure" >/dev/null 2>&1; then
+    fail_test "a failed limine-mkinitcpio did not fail activation"
+  fi
+  assert_recovery_rollback "regenerate-entries"
+  assert_hash "$config_hash" "$(limine_config_path)" "limine.conf was not restored after the regeneration failure"
+  assert_hash "$uki_hash" "$OS_UKI" "the OS UKI was not restored after the regeneration failure"
+}
+
+# Without hashed paths activation regenerates nothing and runs the phases as
+# recorded.
+test_activation_without_hashes_skips_regeneration() {
+  printf 'UKI\n' > "$OS_UKI"
+  printf '%s\n' 'timeout: 5' '/+Omarchy' '    protocol: efi' \
+    '    path: boot():/EFI/Linux/omarchy_linux.efi' > "$(limine_config_path)"
+  run_activation_repair "artifact-activation-plain" \
+    || fail_test "activation without hashed paths failed"
+  if grep -Eq '^(mkinitcpio|snapper-sync)$' "$ARTIFACT_LOG"; then
+    fail_test "activation regenerated entries that carried no hash"
+  fi
+  grep -aFxq 'LOCAL_SIGNATURE' "$OS_UKI" || fail_test "the OS UKI was not signed"
+}
+
 run_case() {
   local name="$1" test_function="$2"
   (
@@ -893,6 +1054,9 @@ run_case proof-drift test_final_proof_drift_rollback
 run_case fallback-not-deployed test_fallback_not_deployed
 run_case fallback-missing test_fallback_missing_is_refused
 run_case fallback-kept test_fallback_present_under_no
+run_case activation-regenerates test_activation_regenerates_entries
+run_case activation-regeneration-failure test_activation_regeneration_failure_rolls_back
+run_case activation-plain test_activation_without_hashes_skips_regeneration
 FIXTURE_ORIGINAL_VERIFICATION=yes run_case setting-drift test_managed_setting_drift_repair
 
 printf 'artifact tests passed\n'

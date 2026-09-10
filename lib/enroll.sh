@@ -1452,6 +1452,10 @@ activate_enrollment_plan_preflight() {
   current_firmware_variable_matches_backup "$backup_id" db || return 1
   current_firmware_variable_matches_backup "$backup_id" dbx || return 1
   secure_boot_windows_gate || return 1
+  _activation_limine_tools_json=$(capture_activation_limine_tools) || {
+    fail "Lifecycle activation requires the pinned limine-mkinitcpio and limine-snapper-sync"
+    return 1
+  }
   artifact_repair_preflight
 }
 
@@ -1465,7 +1469,7 @@ activate_enrollment_plan_transaction() {
   bind_enrollment_transaction "$backup_id" || return 1
   transaction_phase_complete "bind-enrollment-plan" || return 1
   enrollment_failpoint "before-activation-artifact-repair" || return 1
-  repair_boot_artifacts || return 1
+  repair_boot_artifacts activation || return 1
   revalidate_enrollment_plan_export "$backup_id"
 }
 
@@ -1692,7 +1696,27 @@ validate_setup_instruction_boundary() {
   fi
   artifact_repair_preflight || return 1
   verify_all_efi_artifacts "$_repair_config_checksum" || return 1
+  limine_path_hashes_are_current || return 1
   secure_boot_windows_gate
+}
+
+# A firmware instruction is printed only while every Limine path hash
+# describes its file, because Limine refuses a stale one once Secure Boot
+# and the enrolled config checksum are both active.
+limine_path_hashes_are_current() {
+  local stale line
+  stale=$(list_stale_limine_path_hashes) || {
+    fail "Limine path hashes could not be verified against the ESP"
+    return 1
+  }
+  [[ -n "$stale" ]] || return 0
+  fail "Limine path hashes are stale; Limine refuses these entries once Secure Boot is on:"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    fail "  $(limine_config_path):${line}"
+  done <<< "$stale"
+  fail "Run sudo limine-mkinitcpio for the OS entry, or sudo limine-snapper-sync for snapshot entries, then run this command again"
+  return 1
 }
 
 current_pk_is_absent() {

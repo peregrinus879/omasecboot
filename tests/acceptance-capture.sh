@@ -126,6 +126,10 @@ capture_state() {
   block "Installed hooks" bash -c 'ls -la /usr/share/libalpm/hooks/*omasecboot* /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/pre.d/*omasecboot* /etc/boot/hooks/post.d/*omasecboot* 2>&1; sha256sum /usr/share/libalpm/hooks/*omasecboot* /etc/boot/hooks/*/*omasecboot* 2>/dev/null'
   block "Stale source install" bash -c 'ls -la /usr/local/bin/omasecboot /usr/local/lib/omasecboot 2>&1'
   block "EFI artifacts" bash -c 'find /boot/EFI -type f \( -iname "*.efi" -o -name "*.efi_*" \) -exec sha256sum {} + 2>/dev/null | sort -k2'
+  block "Snapshot UKIs kept by limine-snapper-sync" bash -c 'find /boot -path "*/limine_history/*" -type f -exec sha256sum {} + 2>/dev/null | sort -k2'
+  block "Limine loader directory" bash -c 'ls -la /boot/EFI/limine /boot/EFI/BOOT 2>&1'
+  block "Limine config layers (owner, mode, links)" bash -c 'stat -c "%U:%G %a %h %n" /etc/default/limine /etc/limine-entry-tool.conf /etc/limine-entry-tool.d/*.conf /usr/share/limine-entry-tool.d/*.conf 2>&1'
+  block "Limine path hashes versus files" bash -c 'grep -o "boot():/[^#[:space:]]*#[0-9A-Fa-f]\{128\}" /boot/limine.conf 2>/dev/null | sort -u | while IFS= read -r uri; do file="/boot/${uri#boot():/}"; file="${file%#*}"; hash="${uri##*#}"; if [ -f "$file" ]; then actual=$(b2sum "$file" | cut -d" " -f1); [ "$actual" = "$hash" ] && printf "match  %s\n" "$uri" || printf "STALE  %s\n" "$uri"; else printf "absent %s\n" "$uri"; fi; done; true'
   block "Limine checksum enrollment (first 16 hex digits)" bash -c 'for f in /boot/EFI/limine/limine_x64.efi /boot/EFI/BOOT/BOOTX64.EFI; do h=$(grep -a -o "++CONFIG_B2SUM_SIGNATURE++[0-9a-f]\{128\}" "$f" 2>/dev/null | head -1 | cut -c27-42); printf "%s: %s\n" "$f" "${h:-absent}"; done; printf "limine.conf b2sum: "; b2sum /boot/limine.conf | cut -c1-16'
   file_block "/etc/default/limine" /etc/default/limine
   file_block "/boot/limine.conf" /boot/limine.conf

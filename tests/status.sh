@@ -196,6 +196,29 @@ run_section show_limine_config_status false
 expect_status 0 "unhashed path without Secure Boot"
 expect_output "missing BLAKE2B hashes" "unhashed path without Secure Boot"
 
+# A present hash is checked for every protocol: matching passes, stale fails
+# under Secure Boot and warns without it, both naming the entry and the
+# regenerating command.
+mkdir -p "${ESP_DIR}/EFI/Linux"
+printf 'UKI\n' > "${ESP_DIR}/EFI/Linux/arch.efi"
+read -r good_hash _ < <(b2sum "${ESP_DIR}/EFI/Linux/arch.efi")
+write_config '/Omarchy' '    protocol: efi' "    path: boot():/EFI/Linux/arch.efi#${good_hash}"
+run_section show_limine_config_status true
+expect_status 0 "matching path hash"
+expect_output "Limine path hashes match their files" "matching path hash"
+stale_hash=$(printf 'f%.0s' {1..128})
+write_config '/Omarchy' '    protocol: efi' "    path: boot():/EFI/Linux/arch.efi#${stale_hash}"
+run_section show_limine_config_status true
+expect_status 1 "stale path hash under Secure Boot"
+expect_output "Limine path hashes are stale; Limine refuses these entries with Secure Boot on" \
+  "stale path hash under Secure Boot"
+expect_output "path: boot():/EFI/Linux/arch.efi#${stale_hash}" "stale path hash under Secure Boot"
+expect_output "Run sudo limine-mkinitcpio for the OS entry" "stale path hash under Secure Boot"
+run_section show_limine_config_status false
+expect_status 0 "stale path hash without Secure Boot"
+expect_output "stops at a hash prompt" "stale path hash without Secure Boot"
+rm -f "${ESP_DIR}/EFI/Linux/arch.efi"
+
 write_defaults 'ENABLE_VERIFICATION=no' 'ENABLE_ENROLL_LIMINE_CONFIG=no'
 run_section show_limine_config_status true
 expect_status 1 "enrollment disabled"

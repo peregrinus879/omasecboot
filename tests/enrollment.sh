@@ -221,6 +221,15 @@ lifecycle_activation_environment_is_ready() {
   [[ "$ACTIVATION_READY" == true ]]
 }
 
+capture_activation_limine_tools() {
+  printf '{"mkinitcpio": {}, "snapper-sync": {}}\n'
+}
+
+# The instruction boundary reads limine.conf for path hashes; the fixture
+# owns that path and the ESP root, never the host's.
+limine_config_path() { printf '%s/limine.conf\n' "${CASE_DIR:-$TEST_DIR}"; }
+esp_path() { printf '%s/boot\n' "${CASE_DIR:-$TEST_DIR}"; }
+
 secure_boot_windows_gate() {
   return "$WINDOWS_RC"
 }
@@ -1163,6 +1172,30 @@ test_sbctl_leftover_key_directories_refused() {
   grep -Fq "Local sbctl key directories without keys: ${SBCTL_ROOT}/keys/PK" \
     "${CASE_DIR}/leftover-explain.out" \
     || fail_test "the observation did not name the leftover directory"
+}
+
+# A stale or unresolvable Limine path hash refuses the firmware instruction
+# with the regenerating command as the remedy, and clears once it is gone.
+test_stale_path_hash_refuses_instruction() {
+  local backup_id
+  setup_fixture stale-path-hash
+  backup_id=$(prepare_and_activate)
+  mkdir -p "$(dirname "$(limine_config_path)")"
+  printf '%s\n' '/Linux' '    protocol: efi' \
+    "    path: hdd(1):/EFI/Linux/arch.efi#$(printf 'f%.0s' {1..128})" \
+    > "$(limine_config_path)"
+  if validate_setup_instruction_boundary "$backup_id" 3 > "${CASE_DIR}/stale.out" 2>&1; then
+    fail_test "a stale path hash did not refuse the instruction"
+  fi
+  grep -Fq 'Limine path hashes are stale; Limine refuses these entries once Secure Boot is on' \
+    "${CASE_DIR}/stale.out" || fail_test "the stale hash refusal gave no reason"
+  grep -Fq 'path: hdd(1):/EFI/Linux/arch.efi#' "${CASE_DIR}/stale.out" \
+    || fail_test "the stale hash refusal did not name the entry"
+  grep -Fq 'Run sudo limine-mkinitcpio for the OS entry' "${CASE_DIR}/stale.out" \
+    || fail_test "the stale hash refusal gave no remedy"
+  rm -f "$(limine_config_path)"
+  validate_setup_instruction_boundary "$backup_id" 3 \
+    || fail_test "the instruction stayed refused after the stale hash was gone"
 }
 
 # The README remedy leaves the key directory itself (700 from an earlier
@@ -2143,6 +2176,7 @@ run_case sbctl-state-absent test_sbctl_state_directory_absent
 run_case sbctl-state-absent-rollback test_sbctl_state_directory_absent_rollback
 run_case sbctl-leftover-directories test_sbctl_leftover_key_directories_refused
 run_case sbctl-key-directory-present test_sbctl_key_directory_present
+run_case stale-path-hash test_stale_path_hash_refuses_instruction
 run_case sbctl-key-directory-present-rollback test_sbctl_key_directory_present_rollback
 run_case sbctl-state-writable test_sbctl_state_directory_writable
 run_case preflight-reasons test_preflight_reasons
