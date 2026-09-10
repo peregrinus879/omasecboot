@@ -52,6 +52,10 @@ limine_default_config_path() {
   printf '%s/limine-defaults\n' "$CASE_DIR"
 }
 
+limine_entry_tool_config_files() {
+  printf '%s\n' "$(limine_default_config_path)"
+}
+
 limine_unsigned_binary_path() {
   printf '%s/BOOTX64.EFI\n' "$CASE_DIR"
 }

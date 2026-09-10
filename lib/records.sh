@@ -10,8 +10,8 @@ readonly WINDOWS_RECOVERY_RECORD_SCHEMA_VERSION=1
 readonly WINDOWS_RECOVERY_PROOF_SCHEMA_VERSION=1
 readonly MANAGED_SETTINGS_SCHEMA_VERSION=1
 readonly TRACKING_OWNERSHIP_SCHEMA_VERSION=1
-readonly UNCONFIGURE_INTENT_SCHEMA_VERSION=1
-readonly UNCONFIGURE_PROOF_SCHEMA_VERSION=1
+readonly UNCONFIGURE_INTENT_SCHEMA_VERSION=2
+readonly UNCONFIGURE_PROOF_SCHEMA_VERSION=2
 readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 
 transaction_artifact_reference() {
@@ -151,9 +151,10 @@ validate_unconfigure_intent_json() {
     --arg reset "$(limine_reset_enroll_path)" \
     --argjson manifest "$manifest" "$OMASECBOOT_JQ_DEFS"'
     type == "object" and
-    keys == ["limine_source","limine_tools","managed_settings","operation","recorded_at",
-      "schema_version","tracking_ownership","transaction_id","windows_state_identity",
-      "writer_version"] and
+    keys == ["limine_fallback","limine_source","limine_tools","managed_settings","operation",
+      "recorded_at","schema_version","tracking_ownership","transaction_id",
+      "windows_state_identity","writer_version"] and
+    (.limine_fallback == "managed" or .limine_fallback == "absent") and
     .schema_version == $schema and .transaction_id == $id and (.transaction_id | uuid) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     .operation == "unconfigure" and (.recorded_at | timestamp) and
@@ -235,9 +236,11 @@ validate_unconfigure_proof_json() {
     (.managed_settings | artifact_reference) and (.tracking_ownership | artifact_reference) and
     (.limine | type == "object" and keys == ["fallback","primary","source"] and
       (.source | source) and (.primary | target($primary)) and
-      (.fallback | target($fallback)) and
+      (if $intent_document.limine_fallback == "managed"
+       then (.fallback | target($fallback)) and .fallback.sha256 == .source.sha256
+       else .fallback == null end) and
       .source.sha256 == $intent_document.limine_source.sha256 and
-      .primary.sha256 == .source.sha256 and .fallback.sha256 == .source.sha256) and
+      .primary.sha256 == .source.sha256) and
     (if $manifest.kind == "root" then
       .operation == "unconfigure" and .root_incident == null and
       $manifest.operation == "unconfigure" and $manifest.prior_state == "active" and

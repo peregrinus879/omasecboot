@@ -32,6 +32,7 @@ TRACKED_PATHS="$ROOT_EFI"
 
 state_dir_path() { printf '%s/state\n' "$TEST_DIR"; }
 limine_default_config_path() { printf '%s\n' "$DEFAULTS_FILE"; }
+limine_entry_tool_config_files() { printf '%s\n' "$DEFAULTS_FILE"; }
 control_owner_uid() { id -u; }
 durable_sync() { :; }
 limine_enrollment_hooks_present() { return 1; }

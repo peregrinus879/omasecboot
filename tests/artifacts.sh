@@ -50,6 +50,14 @@ limine_default_config_path() {
   printf '%s/limine-defaults\n' "$CASE_DIR"
 }
 
+# Only the fixture's defaults file and its optional drop-in count as
+# limine-entry-tool configuration; the host's layers never leak in.
+limine_entry_tool_config_files() {
+  [[ ! -e "${CASE_DIR}/limine-dropin.conf" ]] \
+    || printf '%s\n' "${CASE_DIR}/limine-dropin.conf"
+  printf '%s\n' "$(limine_default_config_path)"
+}
+
 sbctl_config_path() {
   printf '%s\n' "$SBCTL_CONFIG"
 }
@@ -772,6 +780,93 @@ test_final_mapping_failure_rollback() {
   assert_recovery_rollback "prove-artifacts"
 }
 
+# ENABLE_LIMINE_FALLBACK=no with no fallback loader on the ESP (Omarchy 4.0.3
+# on the Vivobook TP3402VA, 2026-09-10): the primary is the whole managed
+# set, the defaults file outranks the drop-in, and a quoted value parses.
+test_fallback_not_deployed() {
+  local checksum manifest artifact
+  printf 'ENABLE_LIMINE_FALLBACK=yes\n' > "${CASE_DIR}/limine-dropin.conf"
+  printf 'ENABLE_LIMINE_FALLBACK="no"\n' >> "$(limine_default_config_path)"
+  rm -f "$FALLBACK"
+  [[ "$(limine_fallback_policy)" == no ]] \
+    || fail_test "the defaults file did not override the drop-in"
+  if limine_fallback_is_managed; then
+    fail_test "an absent fallback under policy no was managed"
+  fi
+  run_artifact_repair "artifact-no-fallback" > "${CASE_DIR}/no-fallback.out" 2>&1 \
+    || fail_test "repair without a fallback loader failed: $(<"${CASE_DIR}/no-fallback.out")"
+  grep -Fq 'Limine fallback loader is not deployed (ENABLE_LIMINE_FALLBACK=no)' \
+    "${CASE_DIR}/no-fallback.out" || fail_test "the repair did not say the fallback is not deployed"
+  checksum=$(current_limine_config_checksum) || fail_test "config checksum failed"
+  verify_limine_embedded_checksum "$PRIMARY" "$checksum" \
+    || fail_test "primary Limine checksum was not proved"
+  [[ ! -e "$FALLBACK" ]] || fail_test "repair created a fallback loader"
+  verify_all_efi_artifacts "$checksum" || fail_test "final EFI proof failed without a fallback"
+  [[ $(grep -Fc 'enroll:' "$ARTIFACT_LOG") -eq 1 ]] \
+    || fail_test "enrollment did not stop at the primary"
+  jq -e --arg fallback "$FALLBACK" 'has($fallback) | not' "$SBCTL_FILES_DB" >/dev/null \
+    || fail_test "tracking registered an absent fallback"
+  manifest=""
+  for artifact in "$(state_dir_path)"/transactions/*/manifest.json; do
+    [[ $(jq -r '.operation' "$artifact") != artifact-no-fallback ]] || manifest="$artifact"
+  done
+  [[ -n "$manifest" ]] || fail_test "no-fallback repair manifest was not found"
+  jq -e --arg fallback "$FALLBACK" \
+    '.status == "completed" and ([.backups[] | select(.target == $fallback)] | length) == 0' \
+    "$manifest" >/dev/null || fail_test "the transaction recorded an absent fallback"
+}
+
+# A policy that deploys the fallback (unset, an empty value, or yes) with the
+# loader missing is refused before any transaction, naming the loader and
+# the remedy; an unreadable value is refused as such.
+test_fallback_missing_is_refused() {
+  local generation
+  rm -f "$FALLBACK"
+  read_lifecycle || fail_test "missing-fallback fixture lifecycle is unreadable"
+  generation=$_lifecycle_generation
+  if run_artifact_repair "artifact-missing-fallback" > "${CASE_DIR}/missing.out" 2>&1; then
+    fail_test "a missing fallback under an unset policy was accepted"
+  fi
+  grep -Fq "Limine fallback loader is missing at ${FALLBACK} while ENABLE_LIMINE_FALLBACK is unset; run limine-install to deploy it" \
+    "${CASE_DIR}/missing.out" || fail_test "the missing fallback refusal did not name the loader: $(<"${CASE_DIR}/missing.out")"
+  grep -Fq 'preflight failed; no transaction was started' "${CASE_DIR}/missing.out" \
+    || fail_test "the missing fallback refusal started a transaction"
+  printf 'ENABLE_LIMINE_FALLBACK=no\nENABLE_LIMINE_FALLBACK=""\n' >> "$(limine_default_config_path)"
+  [[ "$(limine_fallback_policy)" == unset ]] || fail_test "an empty last value did not read as unset"
+  printf 'ENABLE_LIMINE_FALLBACK=yes\n' > "${CASE_DIR}/limine-dropin.conf"
+  [[ "$(limine_fallback_policy)" == unset ]] \
+    || fail_test "a drop-in outranked the defaults file"
+  printf 'ENABLE_LIMINE_FALLBACK=yes\n' >> "$(limine_default_config_path)"
+  if run_artifact_repair "artifact-missing-fallback-yes" > "${CASE_DIR}/missing-yes.out" 2>&1; then
+    fail_test "a missing fallback under policy yes was accepted"
+  fi
+  grep -Fq 'while ENABLE_LIMINE_FALLBACK is yes' "${CASE_DIR}/missing-yes.out" \
+    || fail_test "the refusal did not report policy yes"
+  printf 'ENABLE_LIMINE_FALLBACK=maybe\n' >> "$(limine_default_config_path)"
+  if run_artifact_repair "artifact-bad-policy" > "${CASE_DIR}/bad-policy.out" 2>&1; then
+    fail_test "an unreadable fallback policy was accepted"
+  fi
+  grep -Fq 'ENABLE_LIMINE_FALLBACK could not be resolved' "${CASE_DIR}/bad-policy.out" \
+    || fail_test "the unreadable policy was not named"
+  read_lifecycle || fail_test "refusals damaged the lifecycle"
+  [[ "$_lifecycle_state" == active && $_lifecycle_generation -eq generation ]] \
+    || fail_test "a refused preflight published a transaction"
+}
+
+# A fallback loader that exists stays in the managed set whatever the policy
+# says, so it never boots with a stale config checksum.
+test_fallback_present_under_no() {
+  local checksum
+  printf 'ENABLE_LIMINE_FALLBACK=no\n' >> "$(limine_default_config_path)"
+  limine_fallback_is_managed || fail_test "an existing fallback under policy no was not managed"
+  run_artifact_repair "artifact-fallback-kept" || fail_test "repair with a kept fallback failed"
+  checksum=$(current_limine_config_checksum) || fail_test "config checksum failed"
+  verify_limine_embedded_checksum "$FALLBACK" "$checksum" \
+    || fail_test "the kept fallback was not enrolled"
+  [[ $(grep -Fc 'enroll:' "$ARTIFACT_LOG") -eq 2 ]] \
+    || fail_test "the kept fallback was not enrolled alongside the primary"
+}
+
 run_case() {
   local name="$1" test_function="$2"
   (
@@ -795,6 +890,9 @@ run_case final-mapping-failure test_final_mapping_failure_rollback
 run_case ownership-retirement test_ownership_retirement
 run_case proof-failure test_final_proof_failure_rollback
 run_case proof-drift test_final_proof_drift_rollback
+run_case fallback-not-deployed test_fallback_not_deployed
+run_case fallback-missing test_fallback_missing_is_refused
+run_case fallback-kept test_fallback_present_under_no
 FIXTURE_ORIGINAL_VERIFICATION=yes run_case setting-drift test_managed_setting_drift_repair
 
 printf 'artifact tests passed\n'

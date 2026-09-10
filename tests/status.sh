@@ -20,6 +20,7 @@ ESP_DIR="${TEST_DIR}/esp"
 mkdir -p "$ESP_DIR"
 
 limine_default_config_path() { printf '%s\n' "$DEFAULTS_FILE"; }
+limine_entry_tool_config_files() { printf '%s\n' "$DEFAULTS_FILE"; }
 limine_config_path() { printf '%s\n' "$CONFIG_FILE"; }
 esp_path() { printf '%s\n' "$ESP_DIR"; }
 windows_target_state_path() { printf '%s\n' "$STATE_FILE"; }
@@ -248,6 +249,20 @@ expect_status 1 "shadowing config"
 expect_output "Possible Limine config shadowing file" "shadowing config"
 expect_no_output "not proved" "shadowing config"
 rm -f "${ESP_DIR}/EFI/limine/limine.conf"
+
+# ENABLE_LIMINE_FALLBACK=no without a fallback loader narrows the proof to
+# the primary and says so; an unreadable policy value is refused.
+write_defaults 'ENABLE_LIMINE_FALLBACK=no'
+VERIFY_OK=true
+run_section show_limine_checksum_status
+expect_status 0 "primary-only checksum"
+expect_output "enrolled in the primary boot binary (fallback loader not deployed, ENABLE_LIMINE_FALLBACK=no)" \
+  "primary-only checksum"
+write_defaults 'ENABLE_LIMINE_FALLBACK=maybe'
+run_section show_limine_checksum_status
+expect_status 1 "invalid fallback policy"
+expect_output "ENABLE_LIMINE_FALLBACK could not be resolved" "invalid fallback policy"
+write_defaults
 
 # --- Windows ----------------------------------------------------------------
 

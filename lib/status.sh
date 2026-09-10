@@ -424,21 +424,30 @@ show_limine_config_status() {
 
 # Shadowing config candidates on the ESP and the enrolled checksum proof.
 show_limine_checksum_status() {
-  local shadow_config shadow_config_found=false current_config_checksum
+  local shadow_config shadow_config_found=false current_config_checksum scope
   while IFS= read -r shadow_config; do
     if [[ -e "$shadow_config" || -L "$shadow_config" ]]; then
       fail "Possible Limine config shadowing file: ${shadow_config}"
       shadow_config_found=true
     fi
   done < <(limine_shadow_config_paths)
+  if ! limine_fallback_policy >/dev/null; then
+    fail "ENABLE_LIMINE_FALLBACK could not be resolved from the limine-entry-tool configuration"
+    return 1
+  fi
+  if limine_fallback_is_managed; then
+    scope="both boot binaries"
+  else
+    scope="the primary boot binary (fallback loader not deployed, ENABLE_LIMINE_FALLBACK=no)"
+  fi
   if [[ "$shadow_config_found" == false ]] \
     && current_config_checksum=$(current_limine_config_checksum) \
     && verify_limine_config_targets "$current_config_checksum"; then
-    pass "Current Limine config checksum enrolled in both boot binaries"
+    pass "Current Limine config checksum enrolled in ${scope}"
     return 0
   fi
   [[ "$shadow_config_found" == true ]] \
-    || fail "Current Limine config checksum is not proved in both boot binaries"
+    || fail "Current Limine config checksum is not proved in ${scope}"
   return 1
 }
 

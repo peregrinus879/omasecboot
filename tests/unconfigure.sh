@@ -30,8 +30,10 @@ QUIET=true
 UNCONFIGURE_RECOVERY_FAILPOINT=""
 
 limine_targets_are_unenrolled() {
-  [[ $(read_limine_embedded_checksum "$(limine_primary_binary_path)") == "$LIMINE_ZERO_CHECKSUM" \
-    && $(read_limine_embedded_checksum "$(limine_fallback_binary_path)") == \
+  [[ $(read_limine_embedded_checksum "$(limine_primary_binary_path)") == "$LIMINE_ZERO_CHECKSUM" ]] \
+    || return 1
+  [[ ! -e "$(limine_fallback_binary_path)" ]] \
+    || [[ $(read_limine_embedded_checksum "$(limine_fallback_binary_path)") == \
       "$LIMINE_ZERO_CHECKSUM" ]]
 }
 
@@ -46,6 +48,7 @@ pacman_database_lock_path() { printf '%s/pacman-db.lck\n' "$CASE_DIR"; }
 esp_path() { printf '%s/boot\n' "$CASE_DIR"; }
 limine_config_path() { printf '%s/boot/limine.conf\n' "$CASE_DIR"; }
 limine_default_config_path() { printf '%s/limine-defaults\n' "$CASE_DIR"; }
+limine_entry_tool_config_files() { printf '%s\n' "$(limine_default_config_path)"; }
 limine_unsigned_binary_path() { printf '%s/stock-BOOTX64.EFI\n' "$CASE_DIR"; }
 sbctl_config_path() { printf '%s/sbctl.conf\n' "$CASE_DIR"; }
 sbctl_database_candidate_paths() { printf '%s\n' "$SBCTL_FILES_DB"; }
@@ -123,14 +126,25 @@ limine-reset-enroll() {
   fi
 }
 
+# limine-install 1.38.0 deploys the fallback with --fallback (or with
+# ENABLE_LIMINE_FALLBACK unset and the loader missing, which the fixtures
+# never combine); the arguments are logged for the fallback-policy cases.
 limine-install() {
-  [[ "$*" == "--no-efi-register --fallback" ]] || return 2
+  local fallback=false
+  case "$*" in
+    '--no-efi-register') ;;
+    '--no-efi-register --fallback') fallback=true ;;
+    *) return 2 ;;
+  esac
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false \
     && "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] || return 2
   printf 'install\n' >> "$COMMAND_LOG"
+  printf '%s\n' "$*" >> "${COMMAND_LOG}.install"
   if [[ "$INSTALL_NOOP" == false ]]; then
     cp "$(limine_unsigned_binary_path)" "$(limine_primary_binary_path)" || return 1
-    cp "$(limine_unsigned_binary_path)" "$(limine_fallback_binary_path)" || return 1
+    if [[ "$fallback" == true ]]; then
+      cp "$(limine_unsigned_binary_path)" "$(limine_fallback_binary_path)" || return 1
+    fi
     LIMINE_INSTALLED=true
   fi
 }
@@ -216,7 +230,14 @@ setup_fixture() {
     > "$(limine_config_path)"
   checksum=$(printf 'f%.0s' {1..128})
   write_limine_binary "$PRIMARY" "$checksum" MANAGED_EFI
-  write_limine_binary "$FALLBACK" "$checksum" MANAGED_EFI
+  # FIXTURE_FALLBACK=absent models a stock install with
+  # ENABLE_LIMINE_FALLBACK=no and no fallback loader; it applies to one fixture.
+  if [[ "${FIXTURE_FALLBACK:-managed}" == absent ]]; then
+    printf 'ENABLE_LIMINE_FALLBACK=no\n' >> "$(limine_default_config_path)"
+  else
+    write_limine_binary "$FALLBACK" "$checksum" MANAGED_EFI
+  fi
+  FIXTURE_FALLBACK=managed
   write_limine_binary "$(limine_unsigned_binary_path)" "$(printf '0%.0s' {1..128})" STOCK_EFI
   printf 'EXTERNAL\n' > "$EXTERNAL"
   jq -cn --arg primary "$PRIMARY" --arg external "$EXTERNAL" '{
@@ -308,6 +329,77 @@ test_successful_unconfigure() {
   [[ "$(tr '\n' ' ' < "$COMMAND_LOG")" == 'reset install mkinitcpio reset ' ]] \
     || fail_test "stock Limine children did not run in order"
   lifecycle_removal_is_allowed || fail_test "proved disabled state did not allow removal"
+}
+
+# Stock Omarchy without a fallback loader (ENABLE_LIMINE_FALLBACK=no, as the
+# Vivobook TP3402VA's 4.0.3 install): the intent records the fallback as
+# absent, the stock rebuild runs without --fallback, and the proof carries no
+# fallback target.
+test_unconfigure_without_fallback() {
+  local manifest intent proof
+  FIXTURE_FALLBACK=absent
+  setup_fixture no-fallback
+  [[ ! -e "$FALLBACK" ]] || fail_test "the no-fallback fixture wrote a fallback"
+  run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
+    || fail_test "no-fallback ownership seed failed"
+  run_unconfigure || fail_test "unconfiguration without a fallback failed"
+  read_lifecycle || fail_test "no-fallback disabled lifecycle is unreadable"
+  [[ "$_lifecycle_state" == disabled ]] || fail_test "no-fallback disabled state was not committed"
+  manifest=$(jq -r '.last_transaction.manifest' <<< "$_lifecycle_json")
+  intent=$(jq -r '.domain_records.unconfigure.path' "$manifest")
+  jq -e '.limine_fallback == "absent"' "$intent" >/dev/null \
+    || fail_test "the intent did not record the fallback as absent"
+  proof=$(jq -r '.domain_records.final_proof.path' "$manifest")
+  jq -e '.limine.fallback == null and .limine.primary.sha256 == .limine.source.sha256' \
+    "$proof" >/dev/null || fail_test "the proof did not record the primary alone"
+  [[ "$(<"${COMMAND_LOG}.install")" == '--no-efi-register' ]] \
+    || fail_test "limine-install was asked to deploy a fallback: $(<"${COMMAND_LOG}.install")"
+  [[ ! -e "$FALLBACK" ]] || fail_test "unconfiguration created a fallback loader"
+  jq -e --arg fallback "$FALLBACK" \
+    '([.backups[] | select(.target == $fallback)] | length) == 0' "$manifest" >/dev/null \
+    || fail_test "the transaction backed up an absent fallback"
+  limine_targets_are_unenrolled || fail_test "the primary was not reset without a fallback"
+  lifecycle_removal_is_allowed || fail_test "disabled state without a fallback refused removal"
+}
+
+# Recovery on that machine follows the intent's record: a fallback loader
+# that appears after the intent blocks recovery, and its removal lets the
+# attempt complete with the fallback still recorded absent.
+test_recovery_without_fallback() {
+  local rc=0 proof
+  FIXTURE_FALLBACK=absent
+  setup_fixture no-fallback-recovery
+  run_lifecycle_transaction seed-ownership active active seed_tracking_ownership \
+    || fail_test "no-fallback recovery seed failed"
+  REBUILD_FAIL=true
+  if run_unconfigure; then
+    fail_test "no-fallback recovery fixture unexpectedly completed"
+  fi
+  read_lifecycle || fail_test "no-fallback recovery fixture is unreadable"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "the failed rebuild did not require recovery"
+  REBUILD_FAIL=false
+  write_limine_binary "$FALLBACK" "$(printf '0%.0s' {1..128})" FOREIGN_EFI
+  with_boot_repair_lock || fail_test "could not lock no-fallback recovery"
+  if run_unconfigure_recovery_locked; then
+    release_boot_repair_lock
+    fail_test "recovery accepted a fallback that appeared after the intent"
+  fi
+  release_boot_repair_lock
+  read_lifecycle || fail_test "blocked recovery damaged the lifecycle"
+  [[ "$_lifecycle_state" == recovery-required ]] \
+    || fail_test "a foreign fallback did not keep recovery pending"
+  rm -f "$FALLBACK"
+  with_boot_repair_lock || fail_test "could not relock no-fallback recovery"
+  run_unconfigure_recovery_locked || rc=$?
+  release_boot_repair_lock
+  [[ $rc -eq 0 ]] || fail_test "no-fallback recovery failed"
+  read_lifecycle || fail_test "recovered no-fallback lifecycle is unreadable"
+  [[ "$_lifecycle_state" == disabled ]] || fail_test "no-fallback recovery did not publish disabled"
+  proof=$(jq -r '.last_recovery.proof.path' <<< "$_lifecycle_json")
+  jq -e '.operation == "unconfigure-recovery" and .limine.fallback == null' "$proof" >/dev/null \
+    || fail_test "no-fallback recovery proof recorded a fallback"
+  [[ ! -e "$FALLBACK" ]] || fail_test "no-fallback recovery created a fallback loader"
 }
 
 test_unknown_original_blocks_before_transition() {
@@ -622,8 +714,12 @@ case "${TEST_CASE:-all}" in
   recovery) test_rebuild_failure_recovers_disabled ;;
   recovery-phases) test_recovery_phase_failpoints ;;
   recovery-phase-chain) test_recovery_phase_failure_chain ;;
+  no-fallback) test_unconfigure_without_fallback ;;
+  no-fallback-recovery) test_recovery_without_fallback ;;
   all)
     test_successful_unconfigure
+    test_unconfigure_without_fallback
+    test_recovery_without_fallback
     test_unknown_original_blocks_before_transition
     test_three_way_conflict_blocks_before_transition
     test_rebuild_failure_preserves_files

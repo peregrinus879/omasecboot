@@ -7,6 +7,7 @@ readonly LIMINE_CONFIG_MARKER='++CONFIG_B2SUM_SIGNATURE++'
 LIMINE_ZERO_CHECKSUM=$(printf '0%.0s' {1..128})
 readonly LIMINE_ZERO_CHECKSUM
 _limine_settings_changed=false
+_unconfigure_fallback_state=""
 
 # Runs a command, discarding its standard output in quiet mode.
 run_visible() {
@@ -43,6 +44,88 @@ limine_mkinitcpio_path() {
 
 limine_reset_enroll_path() {
   printf '%s\n' /usr/bin/limine-reset-enroll
+}
+
+# limine-entry-tool 1.38.0 reads its settings from four layers, a later
+# assignment winning: /usr/share/limine-entry-tool.d/*.conf,
+# /etc/limine-entry-tool.conf, /etc/limine-entry-tool.d/*.conf, and
+# /etc/default/limine (docs/maintenance.md). The suites override this list.
+readonly LIMINE_USR_DROPIN_DIR="/usr/share/limine-entry-tool.d"
+readonly LIMINE_ETC_CONF="/etc/limine-entry-tool.conf"
+readonly LIMINE_ETC_DROPIN_DIR="/etc/limine-entry-tool.d"
+
+limine_entry_tool_config_files() {
+  local file
+  for file in "$LIMINE_USR_DROPIN_DIR"/*.conf; do
+    [[ ! -f "$file" ]] || printf '%s\n' "$file"
+  done
+  [[ ! -f "$LIMINE_ETC_CONF" ]] || printf '%s\n' "$LIMINE_ETC_CONF"
+  for file in "$LIMINE_ETC_DROPIN_DIR"/*.conf; do
+    [[ ! -f "$file" ]] || printf '%s\n' "$file"
+  done
+  printf '%s\n' "$(limine_default_config_path)"
+}
+
+# The effective ENABLE_LIMINE_FALLBACK across those layers: yes, no, or unset
+# (an empty value is unset, as limine-install reads it). A layer that cannot
+# be read fails, and any other value is refused rather than guessed.
+limine_fallback_policy() {
+  local file line entries raw="" found=false
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ -e "$file" || -L "$file" ]] || continue
+    validate_control_file "$file" || return 1
+    entries=$(list_limine_default_entries "$file" ENABLE_LIMINE_FALLBACK) || return 1
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      raw=${line#*=}
+      found=true
+    done <<< "$entries"
+  done < <(limine_entry_tool_config_files)
+  if [[ "$raw" == \"*\" && "$raw" == *\" && ${#raw} -ge 2 ]]; then
+    raw=${raw:1:${#raw}-2}
+  fi
+  if [[ "$found" == false || -z "$raw" ]]; then
+    printf 'unset\n'
+    return 0
+  fi
+  [[ "$raw" == yes || "$raw" == no ]] || return 1
+  printf '%s\n' "$raw"
+}
+
+# The Limine loaders this tool enrolls, proves, backs up, and rebuilds: the
+# primary always; the fallback when the policy deploys it (yes, or unset,
+# which limine-install treats as deploy once when missing), or when the file
+# exists whatever the policy says. With the policy no and no file, the
+# fallback is outside the managed set.
+limine_managed_binary_paths() {
+  local policy fallback
+  policy=$(limine_fallback_policy) || return 1
+  fallback=$(limine_fallback_binary_path)
+  printf '%s\n' "$(limine_primary_binary_path)"
+  case "$policy" in
+    yes|unset) printf '%s\n' "$fallback" ;;
+    no) [[ ! -e "$fallback" && ! -L "$fallback" ]] || printf '%s\n' "$fallback" ;;
+    *) return 1 ;;
+  esac
+}
+
+limine_fallback_is_managed() {
+  local path
+  while IFS= read -r path; do
+    [[ "$path" != "$(limine_fallback_binary_path)" ]] || return 0
+  done < <(limine_managed_binary_paths)
+  return 1
+}
+
+# Names a missing managed loader with the policy that requires it.
+fail_missing_limine_loader() {
+  local file="$1" policy="$2"
+  if [[ "$file" == "$(limine_fallback_binary_path)" ]]; then
+    fail "Limine fallback loader is missing at ${file} while ENABLE_LIMINE_FALLBACK is ${policy}; run limine-install to deploy it"
+  else
+    fail "Limine primary loader is missing at ${file}; run limine-install to deploy it"
+  fi
 }
 
 list_limine_default_entries() {
@@ -375,23 +458,29 @@ install_enrolled_limine_binary() {
 
 enroll_limine_config_targets() {
   local checksum="$1" binary
+  local -a binaries=()
   [[ "$checksum" =~ ^[0-9a-f]{128}$ ]] || return 1
-  for binary in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
+  mapfile -t binaries < <(limine_managed_binary_paths)
+  [[ ${#binaries[@]} -ge 1 ]] || return 1
+  for binary in "${binaries[@]}"; do
     transaction_backup_file "$binary" || return 1
     install_enrolled_limine_binary "$binary" "$checksum" || return 1
   done
 }
 
 verify_limine_config_targets() {
-  local expected="$1" current
+  local expected="$1" current binary
+  local -a binaries=()
   current=$(current_limine_config_checksum) || return 1
   [[ "$current" == "$expected" ]] || {
     fail "$(limine_config_path) changed during artifact repair"
     return 1
   }
-  verify_limine_embedded_checksum "$(limine_primary_binary_path)" "$expected" \
-    || return 1
-  verify_limine_embedded_checksum "$(limine_fallback_binary_path)" "$expected"
+  mapfile -t binaries < <(limine_managed_binary_paths)
+  [[ ${#binaries[@]} -ge 1 ]] || return 1
+  for binary in "${binaries[@]}"; do
+    verify_limine_embedded_checksum "$binary" "$expected" || return 1
+  done
 }
 
 sbctl_entry_should_be_removed() {
@@ -1017,10 +1106,33 @@ unconfigure_limine_source_is_unchanged() {
     && "$(sha256_file "$source")" == "$_unconfigure_limine_source_hash" ]]
 }
 
+# The intent records whether the fallback loader belongs to the managed set
+# ("managed") or was absent under ENABLE_LIMINE_FALLBACK=no ("absent"); the
+# stock rebuild and the proof follow that record, never the live policy.
+unconfigure_limine_targets() {
+  printf '%s\n' "$(limine_primary_binary_path)"
+  [[ "$_unconfigure_fallback_state" != managed ]] \
+    || printf '%s\n' "$(limine_fallback_binary_path)"
+}
+
+unconfigure_fallback_state_is_current() {
+  local fallback
+  fallback=$(limine_fallback_binary_path)
+  case "$_unconfigure_fallback_state" in
+    managed) validate_control_file "$fallback" ;;
+    absent) [[ ! -e "$fallback" && ! -L "$fallback" ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 unconfigured_limine_targets_match_source() {
   local target hash
   unconfigure_limine_source_is_unchanged || return 1
-  for target in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
+  unconfigure_fallback_state_is_current || return 1
+  _unconfigure_primary_hash=""
+  _unconfigure_fallback_hash=""
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
     validate_control_file "$target" || return 1
     [[ $(read_limine_embedded_checksum "$target") == "$LIMINE_ZERO_CHECKSUM" ]] || return 1
     hash=$(sha256_file "$target") || return 1
@@ -1030,7 +1142,8 @@ unconfigured_limine_targets_match_source() {
     else
       _unconfigure_fallback_hash="$hash"
     fi
-  done
+  done < <(unconfigure_limine_targets)
+  [[ -n "$_unconfigure_primary_hash" ]]
 }
 
 unconfigure_windows_state_identity() {
@@ -1052,6 +1165,7 @@ unconfigure_inputs_are_current() {
   validate_control_file "$(limine_default_config_path)" || return 1
   validate_control_file "$(limine_config_path)" || return 1
   unconfigure_limine_source_is_unchanged || return 1
+  unconfigure_fallback_state_is_current || return 1
   read_current_firmware_modes || return 1
   [[ "$_secure_boot_mode" == 0 ]] || return 1
   limine_managed_settings_are_restorable "$_unconfigure_managed_settings_json" || return 1
@@ -1154,7 +1268,7 @@ run_bound_unconfigure_limine_tool() {
 }
 
 unconfigure_preflight() {
-  local command
+  local command policy target
   for command in b2sum find findmnt jq mountpoint sbctl sha256sum; do
     command -v "$command" >/dev/null 2>&1 || {
       fail "Required unconfiguration command not found: ${command}"
@@ -1169,10 +1283,21 @@ unconfigure_preflight() {
   esp_is_mounted_vfat || return 1
   validate_control_file "$(limine_default_config_path)" || return 1
   validate_control_file "$(limine_config_path)" || return 1
-  validate_control_file "$(limine_primary_binary_path)" || return 1
-  validate_control_file "$(limine_fallback_binary_path)" || return 1
-  read_limine_embedded_checksum "$(limine_primary_binary_path)" >/dev/null || return 1
-  read_limine_embedded_checksum "$(limine_fallback_binary_path)" >/dev/null || return 1
+  policy=$(limine_fallback_policy) || {
+    fail "ENABLE_LIMINE_FALLBACK could not be resolved from the limine-entry-tool configuration (yes, no, or unset expected)"
+    return 1
+  }
+  _unconfigure_fallback_state=absent
+  ! limine_fallback_is_managed || _unconfigure_fallback_state=managed
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      fail_missing_limine_loader "$target" "$policy"
+      return 1
+    fi
+    validate_control_file "$target" || return 1
+    read_limine_embedded_checksum "$target" >/dev/null || return 1
+  done < <(unconfigure_limine_targets)
   capture_unconfigure_limine_source || return 1
   collect_discovered_efi_files || return 1
   sbctl_tracking_preflight || return 1
@@ -1207,6 +1332,7 @@ persist_unconfigure_intent() {
     --arg source_identity "$_unconfigure_limine_source_identity" \
     --arg source_hash "$_unconfigure_limine_source_hash" \
     --arg windows_identity "$_unconfigure_windows_identity" \
+    --arg fallback_state "$_unconfigure_fallback_state" \
     --argjson managed "$_unconfigure_managed_reference_json" \
     --argjson tracking "$_unconfigure_tracking_reference_json" \
     --argjson tools "$_unconfigure_limine_tools_json" '{
@@ -1219,6 +1345,7 @@ persist_unconfigure_intent() {
       tracking_ownership: $tracking,
       windows_state_identity: $windows_identity,
       limine_source: {path: $source, identity: $source_identity, sha256: $source_hash},
+      limine_fallback: $fallback_state,
       limine_tools: $tools
     }') || return 1
   persist_transaction_domain_record unconfigure unconfigure-intent.json \
@@ -1228,8 +1355,10 @@ persist_unconfigure_intent() {
 }
 
 run_checked_stock_limine_rebuild() {
+  local -a install_args=(--no-efi-register)
+  [[ "$_unconfigure_fallback_state" != managed ]] || install_args+=(--fallback)
   run_visible run_bound_unconfigure_limine_tool install true \
-    --no-efi-register --fallback || return 1
+    "${install_args[@]}" || return 1
   run_visible run_bound_unconfigure_limine_tool mkinitcpio true || return 1
   run_visible run_bound_unconfigure_limine_tool reset false || return 1
   durable_sync "$(esp_path)" || return 1
@@ -1249,6 +1378,7 @@ persist_unconfigure_proof() {
     --arg primary "$(limine_primary_binary_path)" --arg primary_hash "$_unconfigure_primary_hash" \
     --arg fallback "$(limine_fallback_binary_path)" \
     --arg fallback_hash "$_unconfigure_fallback_hash" \
+    --arg fallback_state "$_unconfigure_fallback_state" \
     --arg source "$(limine_unsigned_binary_path)" \
     --arg source_hash "$_unconfigure_limine_source_hash" \
     --arg zero_checksum "$LIMINE_ZERO_CHECKSUM" \
@@ -1271,7 +1401,9 @@ persist_unconfigure_proof() {
       limine: {
         source: {path: $source, sha256: $source_hash},
         primary: {path: $primary, config_checksum: $zero_checksum, sha256: $primary_hash},
-        fallback: {path: $fallback, config_checksum: $zero_checksum, sha256: $fallback_hash}
+        fallback: (if $fallback_state == "managed"
+          then {path: $fallback, config_checksum: $zero_checksum, sha256: $fallback_hash}
+          else null end)
       }
     }') || return 1
   persist_transaction_domain_record final_proof final-proof.json \
@@ -1312,6 +1444,8 @@ load_unconfigure_recovery_context() {
   _unconfigure_limine_source_hash=$(jq -r '.limine_source.sha256' \
     <<< "$intent_document") || return 1
   _unconfigure_limine_tools_json=$(jq -c '.limine_tools' \
+    <<< "$intent_document") || return 1
+  _unconfigure_fallback_state=$(jq -r '.limine_fallback' \
     <<< "$intent_document") || return 1
 
   managed_path=$(jq -r '.path' <<< "$_unconfigure_managed_reference_json") || return 1
@@ -1388,7 +1522,9 @@ unconfigure_software_state() {
   transaction_backup_file "$(limine_default_config_path)" || return 1
   transaction_backup_file "$(limine_config_path)" || return 1
   transaction_backup_file "$(limine_primary_binary_path)" || return 1
-  transaction_backup_file "$(limine_fallback_binary_path)" || return 1
+  if [[ "$_unconfigure_fallback_state" == managed ]]; then
+    transaction_backup_file "$(limine_fallback_binary_path)" || return 1
+  fi
   for file in "${_discovered_efi_files[@]}"; do
     transaction_backup_file "$file" || return 1
   done
@@ -1444,27 +1580,42 @@ artifact_repair_refresh_config_checksum() {
 }
 
 artifact_repair_preflight() {
-  local file primary_found=false fallback_found=false
+  local file policy discovered found
+  local -a managed=()
   artifact_environment_preflight || return 1
   artifact_repair_refresh_config_checksum || return 1
-  for file in "$(limine_primary_binary_path)" "$(limine_fallback_binary_path)"; do
+  policy=$(limine_fallback_policy) || {
+    fail "ENABLE_LIMINE_FALLBACK could not be resolved from the limine-entry-tool configuration (yes, no, or unset expected)"
+    return 1
+  }
+  mapfile -t managed < <(limine_managed_binary_paths)
+  [[ ${#managed[@]} -ge 1 ]] || return 1
+  for file in "${managed[@]}"; do
+    if [[ ! -e "$file" && ! -L "$file" ]]; then
+      fail_missing_limine_loader "$file" "$policy"
+      return 1
+    fi
     read_limine_embedded_checksum "$file" >/dev/null || {
       fail "Could not find one valid Limine config checksum slot in ${file}"
       return 1
     }
   done
+  [[ ${#managed[@]} -eq 2 ]] \
+    || warn "Limine fallback loader is not deployed (ENABLE_LIMINE_FALLBACK=no); managing $(limine_primary_binary_path) only"
   collect_discovered_efi_files || {
     fail "Could not discover a complete EFI artifact set under $(esp_path)"
     return 1
   }
-  for file in "${_discovered_efi_files[@]}"; do
-    [[ "$file" == "$(limine_primary_binary_path)" ]] && primary_found=true
-    [[ "$file" == "$(limine_fallback_binary_path)" ]] && fallback_found=true
+  for file in "${managed[@]}"; do
+    found=false
+    for discovered in "${_discovered_efi_files[@]}"; do
+      [[ "$discovered" != "$file" ]] || found=true
+    done
+    [[ "$found" == true ]] || {
+      fail "Managed Limine loader ${file} is missing from EFI discovery"
+      return 1
+    }
   done
-  [[ "$primary_found" == true && "$fallback_found" == true ]] || {
-    fail "Both bootable Limine x64 binaries must be present in EFI discovery"
-    return 1
-  }
   validate_discovered_sbctl_mappings || {
     fail "sbctl source and output mappings are ambiguous for EFI repair"
     return 1
@@ -1640,10 +1791,15 @@ persist_final_artifact_proof() {
 }
 
 repair_boot_artifacts() {
+  local binary
+  local -a binaries=()
   transaction_phase_start "backup-artifacts" || return 1
   transaction_backup_file "$(limine_default_config_path)" || return 1
-  transaction_backup_file "$(limine_primary_binary_path)" || return 1
-  transaction_backup_file "$(limine_fallback_binary_path)" || return 1
+  mapfile -t binaries < <(limine_managed_binary_paths)
+  [[ ${#binaries[@]} -ge 1 ]] || return 1
+  for binary in "${binaries[@]}"; do
+    transaction_backup_file "$binary" || return 1
+  done
   backup_sbctl_tracking_stores || return 1
   transaction_phase_complete "backup-artifacts" || return 1
 
