@@ -86,30 +86,42 @@ resolve_limine_producer_context() {
   resolve_limine_producer_process "$PPID"
 }
 
+# 0: supported producer; 1: unrecognized caller; 2: a recognized producer
+# whose identity or invocation is unsafe. Only 1 may use owned-child admission.
 resolve_limine_producer_process() {
-  local owner="$1" wrapper
+  local owner="$1" wrapper path script="" rc
   [[ "$owner" =~ ^[1-9][0-9]*$ ]] || return 1
   reset_producer_context
-  if process_runs_script "$owner" /usr/bin/limine-entry-tool; then
-    set_producer_owner "$owner" script /usr/bin/limine-entry-tool || return 1
-    process_cmdline_has_argument "$owner" --no-mutex && return 1
+  for path in /usr/bin/limine-entry-tool \
+    /usr/share/libalpm/scripts/limine-mkinitcpio-install /usr/bin/limine-snapper-sync; do
+    rc=0
+    process_runs_script "$owner" "$path" || rc=$?
+    case "$rc" in
+      0) script=$path; break ;;
+      1) ;;
+      *) return 2 ;;
+    esac
+  done
+  if [[ "$script" == /usr/bin/limine-entry-tool ]]; then
+    set_producer_owner "$owner" script /usr/bin/limine-entry-tool || return 2
+    process_cmdline_has_argument "$owner" --no-mutex && return 2
     _producer_class=limine
     _producer_subtype="entry-tool"
     _producer_caller=limine-entry-tool
-  elif process_runs_script "$owner" \
-    /usr/share/libalpm/scripts/limine-mkinitcpio-install; then
+  elif [[ "$script" == /usr/share/libalpm/scripts/limine-mkinitcpio-install ]]; then
     set_producer_owner "$owner" script \
-      /usr/share/libalpm/scripts/limine-mkinitcpio-install || return 1
+      /usr/share/libalpm/scripts/limine-mkinitcpio-install || return 2
     _producer_class=limine
     _producer_subtype=uki-build
     _producer_caller=limine-mkinitcpio-install
-  elif process_runs_script "$owner" /usr/bin/limine-snapper-sync; then
-    set_producer_owner "$owner" script /usr/bin/limine-snapper-sync || return 1
+  elif [[ "$script" == /usr/bin/limine-snapper-sync ]]; then
+    set_producer_owner "$owner" script /usr/bin/limine-snapper-sync || return 2
+    process_cmdline_has_argument "$owner" --restore-kernels && return 2
     if process_cmdline_has_argument "$owner" --restore \
       && process_cmdline_has_argument "$owner" --no-mutex; then
       _producer_class=restore
       _producer_subtype=full-restore
-      wrapper=$(process_parent_pid "$owner") || return 1
+      wrapper=$(process_parent_pid "$owner") || return 2
       if [[ "$(process_effective_uid "$wrapper" 2>/dev/null || true)" == \
         "$(control_owner_uid)" ]] \
         && process_runs_script "$wrapper" /usr/bin/limine-snapper-restore; then
@@ -118,9 +130,8 @@ resolve_limine_producer_process() {
         _producer_caller=limine-snapper-sync
       fi
     else
-      process_cmdline_has_argument "$owner" --restore && return 1
-      process_cmdline_has_argument "$owner" --restore-kernels && return 1
-      process_cmdline_has_argument "$owner" --no-mutex && return 1
+      process_cmdline_has_argument "$owner" --restore && return 2
+      process_cmdline_has_argument "$owner" --no-mutex && return 2
       _producer_class=snapshot
       _producer_subtype=snapshot-sync
       _producer_caller=limine-snapper-sync
@@ -502,12 +513,12 @@ producer_limine_lock() {
 producer_limine_pre_locked() {
   read_lifecycle || return 1
   if [[ "$_producer_class" == restore ]]; then
+    validate_control_file "$(snapshot_restore_lock_path)" || return 1
     case "$_lifecycle_state" in
       unmanaged|disabled) return 0 ;;
       active) ;;
       *) return 1 ;;
     esac
-    validate_control_file "$(snapshot_restore_lock_path)" || return 1
     begin_registered_producer_lease
     return
   fi
@@ -543,8 +554,13 @@ producer_limine_hook_pre() {
       ;;
   esac
   resolve_limine_producer_context || {
-    [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] \
-      && return 0
+    rc=$?
+    [[ $rc -eq 1 ]] || {
+      fail "Boot mutation blocked: recognized producer identity or invocation is unsafe"
+      return 100
+    }
+    producer_runtime_is_clear || return 100
+    [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] && return 0
     # An unrecognized child of the owning transaction (unconfiguration runs
     # limine-install, which runs these hooks) is admitted on its token,
     # manifest, and ancestry proofs; the parent holds the locks and waits.
@@ -565,14 +581,20 @@ producer_limine_hook_post() {
   require_control_root || return 100
   read_lifecycle || return 100
   case "$_lifecycle_state" in
-    unmanaged|disabled) return 0 ;;
-    active|transition|recovery-required) ;;
+    unmanaged|disabled|active|transition|recovery-required) ;;
     *)
       fail "Post-hook producer repair blocked: lifecycle state is unsupported"
       return 100
       ;;
   esac
   resolve_limine_producer_context || {
+    rc=$?
+    [[ $rc -eq 1 ]] || {
+      fail "Post-hook producer repair blocked: recognized producer identity or invocation is unsafe"
+      return 100
+    }
+    producer_runtime_is_clear || return 100
+    [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]] && return 0
     if [[ "$_lifecycle_state" == transition ]] && current_transition_is_owned; then
       return 0
     fi
@@ -580,7 +602,24 @@ producer_limine_hook_post() {
     return 100
   }
   producer_limine_lock post || return 100
-  if current_transition_is_owned; then
+  read_lifecycle || {
+    release_boot_repair_lock
+    return 100
+  }
+  if [[ "$_producer_class" == restore ]] \
+    && ! validate_control_file "$(snapshot_restore_lock_path)"; then
+    release_boot_repair_lock
+    return 100
+  fi
+  if [[ "$_lifecycle_state" == unmanaged || "$_lifecycle_state" == disabled ]]; then
+    if [[ "$_producer_class" != restore ]]; then
+      producer_runtime_is_clear || rc=1
+    fi
+    release_boot_repair_lock
+    [[ $rc -eq 0 ]] || return 100
+    return 0
+  fi
+  if [[ "$_producer_class" != restore ]] && current_transition_is_owned; then
     release_boot_repair_lock
     return 0
   fi
@@ -588,6 +627,9 @@ producer_limine_hook_post() {
     rc=1
   elif producer_lease_is_current_context; then
     complete_registered_producer_locked "$_producer_class" || rc=$?
+  elif [[ "$_producer_class" == restore ]]; then
+    # A full restore must complete its own lease, never an enclosing producer's.
+    rc=1
   elif ! producer_lease_is_nested_here; then
     rc=1
   fi

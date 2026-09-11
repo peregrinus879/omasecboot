@@ -365,13 +365,30 @@ process_has_ancestor() {
 process_runs_script() {
   local pid="$1" expected="$2" executable script
   local -a arguments
-  validate_control_file "$expected" || return 1
-  executable=$(readlink -f "/proc/${pid}/exe" 2>/dev/null) || return 1
-  [[ "$executable" == /usr/bin/bash ]] || return 1
-  mapfile -d '' -t arguments < "/proc/${pid}/cmdline" || return 1
+  # Identify before checking safety: an unsafe known script must not become
+  # an unrelated caller eligible for a more permissive admission path.
+  executable=$(readlink -f "/proc/${pid}/exe" 2>/dev/null) || return 2
+  mapfile -d '' -t arguments < "/proc/${pid}/cmdline" || return 2
+  [[ "$executable" != "$expected" ]] || return 2
   [[ ${#arguments[@]} -ge 2 ]] || return 1
-  script=$(readlink -f "${arguments[1]}" 2>/dev/null) || return 1
-  [[ "$script" == "$expected" ]]
+  if [[ "${arguments[1]}" == -* || "${arguments[1]}" == +* ]]; then
+    # A shell command/options form does not establish a script identity.
+    [[ "$executable" != /usr/bin/bash ]] || return 2
+    return 1
+  fi
+  if [[ "${arguments[1]}" != "$expected" ]]; then
+    script=${arguments[1]}
+    case "$script" in
+      /proc/self/fd/*) script="/proc/${pid}/fd/${script##*/}" ;;
+      /*) ;;
+      *) script="/proc/${pid}/cwd/${script}" ;;
+    esac
+    script=$(readlink -f -- "$script" 2>/dev/null) || return 2
+    [[ "$script" != *' (deleted)' ]] || return 2
+    [[ "$script" == "$expected" ]] || return 1
+  fi
+  [[ "$executable" == /usr/bin/bash ]] || return 2
+  validate_control_file "$expected" || return 2
 }
 
 process_runs_executable() {

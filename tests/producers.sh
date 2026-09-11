@@ -438,6 +438,143 @@ producer_package_pre < "$large_targets" \
     || fail_test "blocked inactive snapshot producer wrote lifecycle state"
 )
 
+for inactive_context in entry-tool snapshot; do
+  (
+    reset_case
+    LIMINE_CONTEXT=$inactive_context
+    inactive_reads=0
+    read_lifecycle() {
+      inactive_reads=$((inactive_reads + 1))
+      [[ $inactive_reads -eq 1 ]] || boot_locks_are_held || return 1
+      _lifecycle_state=unmanaged
+    }
+    producer_limine_hook_post || fail_test "inactive ${inactive_context} post-hook failed"
+    [[ $inactive_reads -eq 2 ]] \
+      || fail_test "inactive post-hook skipped its locked lifecycle reread"
+    [[ ! -e "$(lifecycle_file_path)" ]] || fail_test "inactive post-hook published a lease"
+    inactive_reads=0
+    : > "$(snapshot_restore_lock_path)"
+    if producer_limine_hook_post; then
+      fail_test "inactive post-hook overlapped a full restore"
+    else
+      [[ $? -eq 100 ]] || fail_test "inactive post-hook refusal was not fatal"
+    fi
+  )
+done
+(
+  reset_case
+  unsafe_script="${CASE_DIR}/known-producer"
+  printf '#!/bin/bash\n' > "$unsafe_script"
+  chmod 700 "$unsafe_script"
+  control_validator=$(declare -f validate_control_file)
+  eval "${control_validator/validate_control_file/validate_fixture_control_file}"
+  validate_control_file() {
+    case "$1" in
+      /usr/bin/limine-entry-tool|/usr/bin/limine-snapper-sync|\
+        /usr/share/libalpm/scripts/limine-mkinitcpio-install)
+        validate_fixture_control_file "$unsafe_script"
+        ;;
+      *) validate_fixture_control_file "$@" ;;
+    esac
+  }
+  # Fixture only the process's NUL-separated argv, using this real Bash process
+  # and the real control-file validator against an owned, mode-changing file.
+  # This exercises recognition itself, not a preselected resolver error code.
+  mapfile() {
+    builtin mapfile "$@" < <(printf '%s\0' /usr/bin/bash /usr/bin/limine-entry-tool)
+  }
+  resolve_limine_producer_process "$BASHPID" \
+    || fail_test "safe known-script identity fixture did not resolve"
+  chmod 666 "$unsafe_script"
+  if resolve_limine_producer_process "$BASHPID"; then
+    fail_test "unsafe canonical producer path was accepted"
+  else
+    [[ $? -eq 2 ]] || fail_test "unsafe canonical producer became unrecognized"
+  fi
+  read_lifecycle() { _lifecycle_state=transition; }
+  current_transition_is_owned() { return 0; }
+  resolve_limine_producer_context() { resolve_limine_producer_process "$BASHPID"; }
+  for hook_phase in pre post; do
+    if "producer_limine_hook_${hook_phase}"; then
+      fail_test "unsafe canonical producer used owned-child admission"
+    else
+      [[ $? -eq 100 ]] || fail_test "unsafe canonical producer was not fatal"
+    fi
+  done
+  chmod 700 "$unsafe_script"
+  mapfile() {
+    builtin mapfile "$@" < <(printf '%s\0' /usr/bin/bash +x /usr/bin/limine-entry-tool --no-mutex)
+  }
+  if resolve_limine_producer_process "$BASHPID"; then
+    fail_test "Bash + option admitted an unsafe known producer"
+  else
+    [[ $? -eq 2 ]] || fail_test "Bash + option disguised a known producer as unrecognized"
+  fi
+  for hook_phase in pre post; do
+    if "producer_limine_hook_${hook_phase}"; then
+      fail_test "Bash + option used owned-child admission"
+    else
+      [[ $? -eq 100 ]] || fail_test "Bash + option refusal was not fatal"
+    fi
+  done
+)
+(
+  reset_case
+  LIMINE_CONTEXT=snapshot
+  inactive_reads=0
+  read_lifecycle() {
+    inactive_reads=$((inactive_reads + 1))
+    if [[ $inactive_reads -eq 1 ]]; then
+      _lifecycle_state=disabled
+    else
+      boot_locks_are_held || return 1
+      _lifecycle_state=active
+    fi
+  }
+  if producer_limine_hook_post; then
+    fail_test "post-hook used an inactive observation after activation"
+  else
+    [[ $? -eq 100 ]] || fail_test "post-hook lifecycle race was not fatal"
+  fi
+  [[ $inactive_reads -ge 2 ]] || fail_test "post-hook did not reread under both locks"
+)
+for hook_phase in pre post; do
+  (
+    reset_case
+    LIMINE_CONTEXT=restore
+    if "producer_limine_hook_${hook_phase}"; then
+      fail_test "inactive full restore was admitted without its marker"
+    else
+      [[ $? -eq 100 ]] || fail_test "missing restore marker did not return fatal status"
+    fi
+    : > "$(snapshot_restore_lock_path)"
+    chmod 644 "$(snapshot_restore_lock_path)"
+    "producer_limine_hook_${hook_phase}" \
+      || fail_test "inactive full restore with its marker was rejected"
+  )
+  (
+    reset_case
+    read_lifecycle() { _lifecycle_state=transition; }
+    current_transition_is_owned() { return 0; }
+    resolve_limine_producer_context() { return 2; }
+    if "producer_limine_hook_${hook_phase}"; then
+      fail_test "a known unsafe producer used the unrecognized owned-child exception"
+    else
+      [[ $? -eq 100 ]] || fail_test "unsafe owned producer did not return fatal status"
+    fi
+    # Positive control: a genuinely unrecognized owned child still works.
+    resolve_limine_producer_context() { return 1; }
+    "producer_limine_hook_${hook_phase}" \
+      || fail_test "genuinely unrecognized owned child was rejected"
+    : > "$(snapshot_restore_lock_path)"
+    if "producer_limine_hook_${hook_phase}"; then
+      fail_test "owned-child exception admitted an unrecognized full restore"
+    else
+      [[ $? -eq 100 ]] || fail_test "owned-child restore refusal was not fatal"
+    fi
+  )
+done
+
 for producer_failpoint in after-producer-manifest-write after-producer-transition-write; do
   reset_case
   activate_case
@@ -592,6 +729,45 @@ eval "$producer_limine_lock_definition"
     || fail_test "owned transition rejected its own unrecognized child in the post-hook"
   [[ $(sha256_file "$(lifecycle_file_path)") == "$owned_hash" ]] \
     || fail_test "owned child admission changed the lifecycle transition"
+  # Use an actual child Bash process executing an open descriptor, as the
+  # bound unconfiguration tool does. Keep real resolver and ownership proofs.
+  cat > "${CASE_DIR}/unknown-owned-child" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+for lib in common lifecycle records software discover sign producers; do
+  source "$1/lib/${lib}.sh"
+done
+CASE_DIR=$2
+expected_resolution=$3
+state_dir_path() { printf '%s/state\n' "$CASE_DIR"; }
+snapshot_restore_lock_path() { printf '%s/limine-snapper-restore.lock\n' "$CASE_DIR"; }
+control_owner_uid() { id -u; }
+require_control_root() { return 0; }
+resolve_limine_producer_context() { resolve_limine_producer_process "$BASHPID"; }
+rc=0
+resolve_limine_producer_context || rc=$?
+[[ $rc -eq $expected_resolution ]] || exit 91
+current_transition_is_owned || exit 92
+for phase in pre post; do
+  rc=0
+  "producer_limine_hook_${phase}" || rc=$?
+  if [[ $expected_resolution -eq 1 ]]; then
+    [[ $rc -eq 0 ]] || exit 93
+  else
+    [[ $rc -eq 100 ]] || exit 94
+  fi
+done
+EOF
+  exec {unknown_child_fd}< "${CASE_DIR}/unknown-owned-child"
+  /bin/bash "/proc/self/fd/${unknown_child_fd}" "$ROOT_DIR" "$CASE_DIR" 1 \
+    > "${CASE_DIR}/unknown-child.out" 2>&1 \
+    || fail_test "real open-FD owned unknown child failed: $(<"${CASE_DIR}/unknown-child.out")"
+  /bin/bash +x "/proc/self/fd/${unknown_child_fd}" "$ROOT_DIR" "$CASE_DIR" 2 --no-mutex \
+    > "${CASE_DIR}/plus-option-child.out" 2>&1 \
+    || fail_test "real Bash + option child failed: $(<"${CASE_DIR}/plus-option-child.out")"
+  exec {unknown_child_fd}<&-
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$owned_hash" ]] \
+    || fail_test "real child classification changed its parent's transition"
   LIMINE_CONTEXT="entry-tool"
 
   printf -v OMASECBOOT_TRANSACTION_TOKEN '%s' forged
@@ -620,6 +796,16 @@ eval "$producer_limine_lock_definition"
   else
     [[ $? -eq 100 ]] || fail_test "transition-time full restore was not fatal"
   fi
+  : > "$(snapshot_restore_lock_path)"
+  chmod 644 "$(snapshot_restore_lock_path)"
+  if (producer_limine_hook_post) >/dev/null 2>&1; then
+    fail_test "full-restore post-hook used unrelated owned-transition suppression"
+  else
+    [[ $? -eq 100 ]] || fail_test "unrelated owned restore post-hook was not fatal"
+  fi
+  rm -f "$(snapshot_restore_lock_path)"
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$owned_hash" ]] \
+    || fail_test "rejected restore post-hook changed its unrelated owning transition"
 
   LIMINE_CONTEXT="entry-tool"
   with_boot_repair_lock || fail_test "owned-transition completion could not lock"
@@ -628,6 +814,39 @@ eval "$producer_limine_lock_definition"
   commit_lifecycle_transaction || fail_test "owned transition did not commit"
   release_boot_repair_lock
 )
+
+for enclosing_context in package entry-tool snapshot; do
+  (
+    reset_case
+    activate_case
+    producer_limine_lock() { with_boot_repair_lock; }
+    if [[ "$enclosing_context" == package ]]; then
+      producer_package_pre <<< 'usr/lib/modules/6.18.0/modules.builtin' \
+        || fail_test "enclosing package lease did not start"
+    else
+      LIMINE_CONTEXT=$enclosing_context
+      producer_limine_hook_pre || fail_test "enclosing ${enclosing_context} lease did not start"
+    fi
+    read_lifecycle || fail_test "enclosing lease is unreadable"
+    enclosing_manifest=$(lifecycle_manifest_path "$_lifecycle_transaction_id")
+    enclosing_record=$(jq -r '.domain_records.producer.path' "$enclosing_manifest")
+    enclosing_state_hash=$(sha256_file "$(lifecycle_file_path)")
+    enclosing_manifest_hash=$(sha256_file "$enclosing_manifest")
+    enclosing_record_hash=$(sha256_file "$enclosing_record")
+    : > "$(snapshot_restore_lock_path)"
+    chmod 644 "$(snapshot_restore_lock_path)"
+    if (LIMINE_CONTEXT=restore; producer_limine_hook_post) >/dev/null 2>&1; then
+      fail_test "restore post-hook used nested suppression under ${enclosing_context}"
+    else
+      [[ $? -eq 100 ]] || fail_test "nested restore refusal was not fatal"
+    fi
+    [[ $(sha256_file "$(lifecycle_file_path)") == "$enclosing_state_hash" \
+      && $(sha256_file "$enclosing_manifest") == "$enclosing_manifest_hash" \
+      && $(sha256_file "$enclosing_record") == "$enclosing_record_hash" \
+      && -f "$(snapshot_restore_lock_path)" ]] \
+      || fail_test "nested restore refusal changed the enclosing lease or marker"
+  )
+done
 
 (
   reset_case
@@ -1129,6 +1348,16 @@ jq -e '
   .domain_records.producer != null
 ' "$(lifecycle_manifest_path "$restore_id")" >/dev/null \
   || fail_test "full-restore lease was not specialized"
+restore_state_hash=$(sha256_file "$(lifecycle_file_path)")
+mv "$(snapshot_restore_lock_path)" "$(snapshot_restore_lock_path).saved"
+if (producer_limine_hook_post) >/dev/null 2>&1; then
+  fail_test "full-restore lease completed after losing its marker"
+else
+  [[ $? -eq 100 ]] || fail_test "missing active restore marker was not fatal"
+fi
+[[ $(sha256_file "$(lifecycle_file_path)") == "$restore_state_hash" ]] \
+  || fail_test "missing restore marker changed the durable lease"
+mv "$(snapshot_restore_lock_path).saved" "$(snapshot_restore_lock_path)"
 producer_limine_hook_post || fail_test "full-restore post repair failed"
 [[ -e "$(snapshot_restore_lock_path)" ]] \
   || fail_test "OmaSecBoot removed the upstream full-restore marker"
@@ -1179,6 +1408,8 @@ resolve_limine_producer_process "$resolver_owner" \
 resolver_owner_no_mutex=true
 if resolve_limine_producer_process "$resolver_owner"; then
   fail_test "entry-tool --no-mutex bypassed producer admission"
+else
+  [[ $? -eq 2 ]] || fail_test "unsafe entry-tool was classified as an unknown caller"
 fi
 
 resolver_owner_script=/usr/share/libalpm/scripts/limine-mkinitcpio-install
@@ -1198,6 +1429,8 @@ resolve_limine_producer_process "$resolver_owner" \
 resolver_owner_no_mutex=true
 if resolve_limine_producer_process "$resolver_owner"; then
   fail_test "snapshot sync --no-mutex bypassed producer admission"
+else
+  [[ $? -eq 2 ]] || fail_test "unsafe snapshot sync was classified as an unknown caller"
 fi
 
 resolver_owner_script=/usr/bin/limine-snapper-sync
@@ -1218,12 +1451,16 @@ resolve_limine_producer_process "$resolver_owner" \
 resolver_owner_no_mutex=false
 if resolve_limine_producer_process "$resolver_owner"; then
   fail_test "restore process without --no-mutex bypassed producer admission"
+else
+  [[ $? -eq 2 ]] || fail_test "unsafe restore was classified as an unknown caller"
 fi
 resolver_owner_no_mutex=true
 resolver_owner_script=/usr/bin/unrecognized-producer
 if HOOK_CALLER=limine-snapper-restore HOOK_CMDLINE='--restore --no-mutex' \
   resolve_limine_producer_process "$resolver_owner" >/dev/null 2>&1; then
   fail_test "forged legacy hook environment selected a restore producer"
+else
+  [[ $? -eq 1 ]] || fail_test "genuinely unrecognized caller lost its distinct classification"
 fi
 
 # The reconstruction commands run the producer's own tool without the hook
