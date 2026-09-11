@@ -51,6 +51,10 @@ _windows_preflight_firmware_state=absent
 _windows_preflight_bitlocker_state=absent
 _windows_preflight_loader_state=absent
 _windows_preflight_gum=""
+_windows_preflight_block_inventory=""
+# Successful human answers belong only to this process, never its environment
+# or durable lifecycle records. Sourcing starts empty even with imported names.
+declare -g +x _windows_preflight_ack_pid="" _windows_preflight_ack_observation=""
 _windows_bootnext_record_json=""
 _windows_bootnext_record_path=""
 _windows_efibootmgr_fd=""
@@ -874,6 +878,7 @@ windows_preflight_reset() {
   _windows_preflight_bitlocker_state=absent
   _windows_preflight_loader_state=absent
   _windows_preflight_gum=""
+  _windows_preflight_block_inventory=""
   _windows_preflight_bitlocker_devices=()
   _windows_preflight_loader_devices=()
   _windows_preflight_esp_candidates=()
@@ -994,33 +999,42 @@ windows_preflight_read_block_inventory() {
     return 0
   fi
   if ! json=$(LC_ALL=C lsblk --json --paths --list \
-    --output PATH,MAJ:MIN,TYPE,PARTTYPE,RM,TRAN,SUBSYSTEMS 2>/dev/null); then
+    --output PATH,MAJ:MIN,TYPE,PARTUUID,PARTTYPE,RM,TRAN,SUBSYSTEMS 2>/dev/null); then
     windows_preflight_mark_unknown bitlocker \
       "Could not read the block-device inventory"
     windows_preflight_mark_unknown loader \
       "Could not read the ESP inventory"
     return 0
   fi
-  if ! jq -e '
+  # Slurp first so an extra JSON document cannot hide an invalid first one.
+  json=$(jq -cs . <<< "$json" 2>/dev/null) || return 1
+  if ! json_is '
+    length == 1 and (.[0] |
+    type == "object" and keys == ["blockdevices"] and
     (.blockdevices | type) == "array" and
     all(.blockdevices[];
       type == "object" and
-      (keys == ["maj:min", "parttype", "path", "rm", "subsystems", "tran", "type"]) and
+      (keys == ["maj:min", "parttype", "partuuid", "path", "rm", "subsystems", "tran", "type"]) and
       (.path | type) == "string" and
       (."maj:min" | type) == "string" and
       (.type | type) == "string" and
+      (.partuuid == null or (.partuuid | type) == "string") and
       (.parttype == null or (.parttype | type) == "string") and
       (.rm | type) == "boolean" and
       (.tran == null or (.tran | type) == "string") and
-      (.subsystems == null or (.subsystems | type) == "string"))
-  ' <<< "$json" >/dev/null 2>&1; then
+      (.subsystems == null or (.subsystems | type) == "string")))
+  ' "$json"; then
     windows_preflight_mark_unknown bitlocker \
       "Block-device inventory has an unsupported JSON shape"
     windows_preflight_mark_unknown loader \
       "ESP inventory has an unsupported JSON shape"
     return 0
   fi
-  rows=$(jq -c '.blockdevices[] | select(.type == "part")' <<< "$json") \
+  _windows_preflight_block_inventory=$(jq -cS '
+    .[0] | .blockdevices |= sort_by(.path)
+  ' <<< "$json") || return 1
+  rows=$(jq -c '.blockdevices[] | select(.type == "part")' \
+    <<< "$_windows_preflight_block_inventory") \
     || return 1
   [[ -z "$rows" ]] || mapfile -t partitions <<< "$rows"
 
@@ -1245,6 +1259,55 @@ windows_preflight_gum_path() {
   command -v gum
 }
 
+# Dedicated seam for hermetic UI tests. Captured stdout is valid for gum choose;
+# the input and prompt stream must both still be attached to a terminal.
+windows_preflight_has_terminal() {
+  [[ -t 0 && -t 2 ]]
+}
+
+windows_preflight_forget_answers() {
+  _windows_preflight_ack_pid=""
+  _windows_preflight_ack_observation=""
+}
+
+# Compare observations, not just their present/absent summaries. A complete
+# known scan determines each partition's BitLocker and loader result through
+# its identity and membership in the positive lists. No private mount path is
+# part of this comparison. Full validated firmware inventory is conservative:
+# even an unrelated boot-option change requires fresh human answers.
+windows_preflight_prompt_observation() {
+  local state
+  for state in "$_windows_preflight_firmware_state" \
+    "$_windows_preflight_bitlocker_state" "$_windows_preflight_loader_state"; do
+    case "$state" in present|absent) ;; *) return 1 ;; esac
+  done
+  [[ -n "$_windows_inventory_raw" && -n "$_windows_preflight_block_inventory" ]] \
+    || return 1
+  # lsblk 2.42.3 emits PARTUUID as string or null, RM as boolean. GPT and DOS
+  # partition identities permit reuse; missing, unsupported, or duplicate IDs
+  # only disable this optimization, not the existing detection/acknowledgment.
+  json_is '
+    [.blockdevices[] | select(.type == "part") | .partuuid] |
+    all(.[]; type == "string" and
+      test("^([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{2})$") and
+      . != "00000000-0000-0000-0000-000000000000" and
+      (test("^00000000-[0-9A-Fa-f]{2}$") | not)) and
+    (map(ascii_downcase) | unique | length) == length
+  ' "$_windows_preflight_block_inventory" || return 1
+  jq -cnS --arg firmware "$_windows_inventory_raw" \
+    --argjson blocks "$_windows_preflight_block_inventory" \
+    --arg firmware_state "$_windows_preflight_firmware_state" \
+    --arg bitlocker_state "$_windows_preflight_bitlocker_state" \
+    --arg loader_state "$_windows_preflight_loader_state" \
+    --arg bitlocker_devices "${_windows_preflight_bitlocker_devices[*]}" \
+    --arg loader_devices "${_windows_preflight_loader_devices[*]}" '{
+      firmware: $firmware, blocks: $blocks,
+      firmware_state: $firmware_state, bitlocker_state: $bitlocker_state,
+      loader_state: $loader_state, bitlocker_devices: $bitlocker_devices,
+      loader_devices: $loader_devices
+    }'
+}
+
 windows_preflight_confirm() {
   local prompt="$1"
   "$_windows_preflight_gum" confirm "$prompt"
@@ -1282,9 +1345,15 @@ windows_preflight_choose() {
 
 # The read-only Windows encryption gate: collects the firmware, BitLocker, and
 # loader signals, then requires the edition, management, and preparation
-# acknowledgments whenever any signal is present or unknown.
+# acknowledgments whenever any signal is present or unknown. Only a successful
+# questionnaire for identical fresh observations in this process may be reused.
 windows_encryption_gate() {
-  local collection_rc=0 edition management
+  local collection_rc=0 edition management observation=""
+  local prior_pid="$_windows_preflight_ack_pid"
+  local prior_observation="$_windows_preflight_ack_observation"
+  # Clear before collection: every failure, unknown, cancellation, or negative
+  # scan invalidates earlier answers, including a later return to that identity.
+  windows_preflight_forget_answers
   windows_collect_encryption_preflight || collection_rc=$?
   case "$collection_rc" in
     0) ;;
@@ -1313,6 +1382,21 @@ windows_encryption_gate() {
     return 0
   fi
 
+  if ! windows_preflight_has_terminal; then
+    windows_preflight_print_guidance
+    windows_preflight_inconclusive \
+      "Windows preparation acknowledgments require an interactive terminal with stdin and stderr attached"
+    return 2
+  fi
+  observation=$(windows_preflight_prompt_observation) || observation=""
+  if [[ -n "$observation" && "$prior_pid" == "$BASHPID" \
+    && "$prior_observation" == "$observation" ]]; then
+    pass "Reusing Windows preparation answers from this invocation; fresh detection and identities are unchanged"
+    _windows_preflight_result=prepared
+    _windows_preflight_ack_pid=$BASHPID
+    _windows_preflight_ack_observation="$observation"
+    return 0
+  fi
   if ! _windows_preflight_gum=$(windows_preflight_gum_path); then
     windows_preflight_print_guidance
     windows_preflight_inconclusive \
@@ -1381,6 +1465,11 @@ windows_encryption_gate() {
   fi
   pass "Windows encryption preparation acknowledged"
   _windows_preflight_result=prepared
+  if [[ -n "$observation" ]]; then
+    _windows_preflight_ack_pid=$BASHPID
+    _windows_preflight_ack_observation="$observation"
+  fi
+  return 0
 }
 
 windows_classify_target_state() {

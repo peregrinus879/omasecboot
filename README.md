@@ -147,6 +147,8 @@ Adoption refuses `unknown` for any value, because `unconfigure` must always be a
 
 `sudo omasecboot windows preflight` is a read-only preparation gate. It inspects three independent signals: a Windows entry in the firmware boot options, a BitLocker filesystem signature on any internal partition, and a Microsoft boot manager on an internal GPT ESP. It never mounts or modifies NTFS. It may mount an internal FAT ESP read-only under a private path and reads only the boot manager's header to confirm it is present.
 
+During one command invocation, repeated checks recollect the technical observations but reuse a successfully answered questionnaire when the firmware and partition identities and detection results remain identical. A changed identity or technical uncertainty invalidates those answers. A later invocation asks afresh; acknowledgments are never stored in the enrollment plan. Positive or unknown results require an interactive terminal, while a complete negative can be reported without one.
+
 Exit status:
 
 | Status | Meaning |

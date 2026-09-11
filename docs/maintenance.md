@@ -167,6 +167,7 @@ Rechecked 2026-09-09: Arch ships sbctl 0.18-2, efibootmgr 18-4, coreutils 9.11-2
 
 ### Windows
 
+- Windows preparation reuse is process-local and bound to fresh validated firmware inventory, the canonical block inventory including PARTUUID, tri-state detection and per-device results. util-linux's explicit `PATH,MAJ:MIN,TYPE,PARTUUID,PARTTYPE,RM,TRAN,SUBSYSTEMS` JSON shape was checked on 2.42.3 on 2026-09-10. Missing or ambiguous partition IDs disable reuse, not detection. Changed or unknown observations discard previous answers. Recheck the collection contract whenever the lsblk columns, firmware parser, or loader inspection changes; no cross-invocation acknowledgment is persisted.
 - Microsoft documents Device Encryption decryption through Settings on Home and no Home suspension workflow; Pro, Enterprise, and Education have documented BitLocker suspension; managed devices require administrator approval. Windows 11 24H2 broadens automatic-encryption eligibility without making encryption universal.
 - UEFI BootNext is a one-boot request that firmware deletes before transferring control, so later absence cannot distinguish consumption from another deletion and does not prove Windows booted. Limine's `efi_boot_entry` requests a direct firmware handoff; it proves nothing about Windows boot, measurements, PCR7, or BitLocker recovery. Firmware and Windows certificate servicing after replacing the OEM PK are limitations, not benefits.
 

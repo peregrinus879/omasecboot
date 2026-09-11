@@ -44,6 +44,7 @@ cat > "${BIN_DIR}/efibootmgr" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 [[ $# -eq 1 && "$1" == -v ]] || exit 2
+printf 'efibootmgr\n' >> "$CALL_LOG"
 [[ ! -s "$EFI_ERROR_FIXTURE" ]] || /usr/bin/cat "$EFI_ERROR_FIXTURE" >&2
 /usr/bin/cat "$EFI_FIXTURE"
 exit "$EFI_RC"
@@ -52,11 +53,12 @@ EOF
 cat > "${BIN_DIR}/lsblk" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-expected='--json --paths --list --output PATH,MAJ:MIN,TYPE,PARTTYPE,RM,TRAN,SUBSYSTEMS'
+expected='--json --paths --list --output PATH,MAJ:MIN,TYPE,PARTUUID,PARTTYPE,RM,TRAN,SUBSYSTEMS'
 [[ "$*" == "$expected" ]] || {
   printf 'unexpected lsblk arguments: %s\n' "$*" >&2
   exit 2
 }
+printf 'lsblk\n' >> "$CALL_LOG"
 [[ "$LSBLK_RC" == 0 ]] || exit "$LSBLK_RC"
 /usr/bin/cat "$LSBLK_FIXTURE"
 EOF
@@ -104,6 +106,7 @@ EOF
 cat > "${BIN_DIR}/findmnt" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+printf 'findmnt:%s\n' "$*" >> "$CALL_LOG"
 target="" previous="" columns=""
 for argument in "$@"; do
   if [[ "$previous" == --mountpoint ]]; then
@@ -178,6 +181,7 @@ cat > "${BIN_DIR}/gum" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$GUM_LOG"
+[[ "$GUM_CANCEL" == false ]] || exit 130
 case "${1:-}" in
   choose)
     if [[ "$*" == *'Windows edition'* ]]; then
@@ -190,6 +194,10 @@ case "${1:-}" in
     ;;
   confirm)
     case "$*" in
+      *'Back up firmware trust and prepare a Secure Boot enrollment plan?'*|\
+      *'Replace the current PK with the planned OmaSecBoot PK?'*|\
+      *'Confirm this firmware can delete only PK without clearing KEK, db, or dbx?'*|\
+      *'Confirm retained trust entries and recovery preparation were reviewed?'*) exit 0 ;;
       *administrator*) [[ "$GUM_ADMIN_APPROVED" == true ]] ;;
       *recovery\ key*) [[ "$GUM_RECOVERY_APPROVED" == true ]] ;;
       *Device\ Encryption*) [[ "$GUM_PREPARATION_APPROVED" == true ]] ;;
@@ -213,12 +221,21 @@ export LOADER_SOURCE CALL_LOG GUM_LOG TEST_MOUNT_ID
 export EFI_RC=0 LSBLK_RC=0
 export GUM_EDITION=Home GUM_MANAGEMENT='Personal device'
 export GUM_ADMIN_APPROVED=true GUM_RECOVERY_APPROVED=true
-export GUM_PREPARATION_APPROVED=true
+export GUM_PREPARATION_APPROVED=true GUM_CANCEL=false
 PATH="${BIN_DIR}:${ORIGINAL_PATH}"
 export PATH
 
+# A fresh shell can be given even a forged matching PID in its environment;
+# sourcing must discard it, together with the imported observation.
+if [[ "${1:-}" == --fresh-prompt-invocation ]]; then
+  export _windows_preflight_ack_pid=$BASHPID
+fi
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/bin/omasecboot"
+[[ -z "$_windows_preflight_ack_pid" && -z "$_windows_preflight_ack_observation" ]] \
+  || fail_test "imported human acknowledgments survived initialization"
+/bin/bash -c '[[ ! -v _windows_preflight_ack_pid && ! -v _windows_preflight_ack_observation ]]' \
+  || fail_test "human acknowledgment globals were exported"
 
 control_owner_uid() {
   id -u
@@ -238,10 +255,12 @@ windows_runtime_dir_path() {
 
 windows_block_device_matches() {
   local path="$1" maj="$2"
+  printf 'device-match:%s\n' "$path" >> "$CALL_LOG"
   /usr/bin/grep -Fxq "${path}"$'\t'"${maj}" "$DEVICE_MAP"
 }
 
 windows_preflight_device_reads() {
+  printf 'device-read:%s\n' "$1" >> "$CALL_LOG"
   ! /usr/bin/grep -Fxq "$1" "$UNREADABLE_DEVICES"
 }
 
@@ -259,14 +278,21 @@ windows_preflight_gum_path() {
   printf '%s/gum\n' "$BIN_DIR"
 }
 
+eval "original_$(declare -f windows_preflight_has_terminal)"
+windows_preflight_has_terminal() {
+  [[ "$TEST_PROMPT_TERMINAL" == true ]] || original_windows_preflight_has_terminal
+}
+
 LOCK_FAIL_LIMINE=false
 LOCK_FAIL_REPAIR=false
 with_limine_lock() {
+  printf 'lock:limine\n' >> "$CALL_LOG"
   [[ "$LOCK_FAIL_LIMINE" == false ]] || return 1
   _OMASECBOOT_LIMINE_LOCK_OWNED=local
 }
 
 with_repair_lock() {
+  printf 'lock:repair\n' >> "$CALL_LOG"
   [[ "$LOCK_FAIL_REPAIR" == false ]] || return 1
   _OMASECBOOT_REPAIR_LOCK_OWNED=true
 }
@@ -314,7 +340,7 @@ write_firmware_present() {
   {
     printf 'BootOrder: 0007\n'
     printf 'Boot0007* Windows Boot Manager\tformatted-path\n'
-    printf '      dp: %s\n' "$WINDOWS_DP"
+    printf '      dp: %s\n' "${1:-$WINDOWS_DP}"
   } > "$EFI_FIXTURE"
 }
 
@@ -330,6 +356,7 @@ write_inventory() {
         path: $esp,
         "maj:min": $maj,
         type: "part",
+        partuuid: "00112233-4455-6677-8899-aabbccddeeff",
         parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
         rm: $removable,
         tran: $transport,
@@ -339,6 +366,7 @@ write_inventory() {
         path: "/dev/windows-os",
         "maj:min": "259:6",
         type: "part",
+        partuuid: "11223344-5566-7788-99aa-bbccddeeff00",
         parttype: "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",
         rm: false,
         tran: "nvme",
@@ -358,11 +386,13 @@ write_two_esp_inventory() {
     blockdevices: [
       {
         path: "/dev/esp-a", "maj:min": $first, type: "part",
+        partuuid: "00112233-4455-6677-8899-aabbccddeeff",
         parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
         rm: false, tran: "nvme", subsystems: "block:nvme:pci"
       },
       {
         path: "/dev/esp-b", "maj:min": $second, type: "part",
+        partuuid: "11223344-5566-7788-99aa-bbccddeeff00",
         parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
         rm: false, tran: "nvme", subsystems: "block:nvme:pci"
       }
@@ -387,6 +417,10 @@ write_reusable_mount() {
 }
 
 reset_case() {
+  # Each independent fixture models a new invocation. Repetition/drift tests
+  # deliberately call run_gate again without resetting these process globals.
+  windows_preflight_forget_answers
+  TEST_PROMPT_TERMINAL=true
   rm -rf "${TEST_DIR}/run" "${TEST_DIR}/reusable-esp"
   mkdir -m 700 "${TEST_DIR}/run"
   : > "$EFI_ERROR_FIXTURE"
@@ -413,6 +447,7 @@ reset_case() {
   GUM_ADMIN_APPROVED=true
   GUM_RECOVERY_APPROVED=true
   GUM_PREPARATION_APPROVED=true
+  GUM_CANCEL=false
   GUM_AVAILABLE=true
   LOCK_FAIL_LIMINE=false
   LOCK_FAIL_REPAIR=false
@@ -420,7 +455,7 @@ reset_case() {
   _OMASECBOOT_REPAIR_LOCK_OWNED=false
   QUIET=false
   export EFI_RC LSBLK_RC GUM_EDITION GUM_MANAGEMENT
-  export GUM_ADMIN_APPROVED GUM_RECOVERY_APPROVED GUM_PREPARATION_APPROVED
+  export GUM_ADMIN_APPROVED GUM_RECOVERY_APPROVED GUM_PREPARATION_APPROVED GUM_CANCEL
   export GUM_AVAILABLE LOCK_FAIL_LIMINE LOCK_FAIL_REPAIR
 }
 
@@ -449,8 +484,45 @@ assert_no_runtime_artifacts() {
   fi
 }
 
+assert_gum_count() {
+  local actual
+  actual=$(wc -l < "$GUM_LOG")
+  [[ "$actual" -eq "$1" ]] \
+    || fail_test "expected $1 actual gum invocations, got ${actual}"
+}
+
+assert_call_count() {
+  local actual
+  actual=$(/usr/bin/grep -Fxc "$2" "$CALL_LOG" || true)
+  [[ "$actual" -eq "$1" ]] \
+    || fail_test "expected $1 calls to $2, got ${actual}"
+}
+
+assert_prepared() {
+  [[ $GATE_RC -eq 0 && $_windows_preflight_result == prepared ]] \
+    || fail_test "Windows gate did not finish prepared"
+}
+
+edit_inventory() {
+  jq "$1" "$LSBLK_FIXTURE" > "${LSBLK_FIXTURE}.new"
+  mv "${LSBLK_FIXTURE}.new" "$LSBLK_FIXTURE"
+}
+
 case_output="${TEST_DIR}/case.out"
-TEST_FAILURE_LOGS=("$case_output" "$CALL_LOG")
+TEST_FAILURE_LOGS=("$case_output" "$CALL_LOG" "$GUM_LOG")
+
+if [[ "${1:-}" == --fresh-prompt-invocation ]]; then
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 3
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 3
+  printf 'fresh invocation prompted, then reused only its own answers\n'
+  exit 0
+fi
 
 reset_case
 run_gate "$case_output"
@@ -808,28 +880,411 @@ run_gate "$case_output"
   || fail_test "matching stale ESP mount was not reconciled"
 assert_no_runtime_artifacts
 
+# The same invocation repeats every technical probe and proof, but asks the
+# managed Pro questionnaire only once. Reordering JSON or using an existing
+# mount changes no partition/loader observation and must not defeat reuse.
 reset_case
-windows_preflight_read_block_inventory() {
-  return 1
-}
+write_firmware_present
+printf '/dev/windows-os\n' > "$BITLOCKER_DEVICES"
+printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
+GUM_EDITION=Pro
+GUM_MANAGEMENT='Managed by an organization'
 run_gate "$case_output"
-[[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "internal inventory failure did not fail closed"
-/usr/bin/grep -Fq 'Block-device inventory processing failed safely' "$case_output" \
-  || fail_test "internal inventory failure omitted the BitLocker blocker"
-/usr/bin/grep -Fq 'ESP inventory processing failed safely' "$case_output" \
-  || fail_test "internal inventory failure omitted the loader blocker"
+assert_prepared
+assert_gum_count 5
+edit_inventory '.blockdevices |= reverse'
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 5
+write_reusable_mount "${TEST_DIR}/reusable-esp"
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 5
+/usr/bin/grep -Fq 'Reusing Windows preparation answers from this invocation' "$case_output" \
+  || fail_test "reuse omitted its concise progress message"
+if /usr/bin/grep -Fq 'Suspend-BitLocker' "$case_output"; then
+  fail_test "reuse printed the questionnaire guidance again"
+fi
+for call in efibootmgr lsblk lock:limine lock:repair \
+  blkid:BitLocker:/dev/windows-os blkid:BitLocker:/dev/linux-esp \
+  blkid:vfat:/dev/linux-esp; do
+  assert_call_count 3 "$call"
+done
+assert_call_count 9 device-match:/dev/linux-esp
+assert_call_count 3 device-match:/dev/windows-os
+assert_call_count 3 'dd:bs=2 count=1 iflag=fullblock,noatime status=none'
+assert_no_runtime_artifacts
+/bin/bash -c '[[ ! -v _windows_preflight_ack_pid && ! -v _windows_preflight_ack_observation ]]' \
+  || fail_test "successful human answers leaked into a child environment"
+
+# A different PARTUUID at the same path and major:minor is a different target,
+# even if every detector still reports exactly the same summary.
+for partition in 0 1; do
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  edit_inventory ".blockdevices[${partition}].partuuid = \"22334455-6677-8899-aabb-ccddeeff0011\""
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 6
+  write_inventory
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 9
+done
 
 reset_case
-windows_preflight_scan_esps() {
-  return 1
-}
+write_firmware_present
 run_gate "$case_output"
+assert_prepared
+write_firmware_present "${WINDOWS_DP/33 22 11 00/34 22 11 00}"
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 6
+write_firmware_present
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 9
+
+# A BitLocker signal moving between known partitions is a new observation
+# even when the overall state remains present and every identity is unchanged.
+reset_case
+write_two_esp_inventory "$TEST_MAJ_MIN" 999:2
+printf '/dev/esp-a\n/dev/esp-b\n' > "$VFAT_DEVICES"
+printf '/dev/esp-a\n' > "$BITLOCKER_DEVICES"
+run_gate "$case_output"
+assert_prepared
+printf '/dev/esp-b\n' > "$BITLOCKER_DEVICES"
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 8
+
+# A changed loader observation alone must also require fresh answers.
+reset_case
+write_firmware_present
+printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
+run_gate "$case_output"
+assert_prepared
+: > "$LOADER_DEVICES"
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 6
+
+# Null PARTUUID is real lsblk output, including for whole disks. Lack of a
+# stable unique partition ID disables reuse rather than adding a gate blocker.
+for identity in null '""' '"unrecognized"' '"00000000-0000-0000-0000-000000000000"' \
+  '"00112233-4455-6677-8899-aabbccddeeff"'; do
+  reset_case
+  write_firmware_present
+  edit_inventory ".blockdevices[1].partuuid = ${identity}"
+  run_gate "$case_output"
+  assert_prepared
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 6
+done
+reset_case
+write_firmware_present
+edit_inventory '.blockdevices += [{path: "/dev/nvme0n1", "maj:min": "259:0",
+  type: "disk", partuuid: null, parttype: null, rm: false, tran: "nvme",
+  subsystems: "block:nvme:pci"}] | .blockdevices[1].partuuid = "1234abcd-02"'
+run_gate "$case_output"
+assert_prepared
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 3
+
+# Reject non-contract JSON, including a stream whose last document is valid.
+for mutation in 'del(.blockdevices[0].partuuid)' '.blockdevices[0].partuuid = 7' \
+  '.blockdevices[0].partuuid = false' '.blockdevices[0].partuuid = []' \
+  '.blockdevices[0].rm = "false"' '.blockdevices[0].rm = null' \
+  '.blockdevices[0].children = []' '.blockdevices[0].tran = false' \
+  '.blockdevices[0].subsystems = []' '.blockdevices[0]."maj:min" = 259' \
+  '.blockdevices[0].path = null' '.blockdevices[0].type = null' \
+  '.blockdevices = null' '.extra = []' '[.]' '., .'; do
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  edit_inventory "$mutation"
+  run_gate "$case_output"
+  [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+    || fail_test "unsupported lsblk JSON passed: ${mutation}"
+  [[ -z "$_windows_preflight_ack_observation" ]] \
+    || fail_test "invalid JSON retained prepared answers"
+done
+
+# Fresh technical uncertainty invalidates an earlier successful questionnaire.
+# Restoring the exact old observation must ask again, not revive old answers.
+for failure in firmware inventory bitlocker loader signal; do
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  case "$failure" in
+    firmware) EFI_RC=1 ;;
+    inventory) LSBLK_RC=1 ;;
+    bitlocker) printf '/dev/windows-os\n' > "$BLKID_UNKNOWN_DEVICES" ;;
+    loader) printf '/dev/linux-esp\n' > "$MOUNT_FAIL_DEVICES" ;;
+    signal) printf '/dev/linux-esp\n' > "$MOUNT_SIGNAL_DEVICES" ;;
+  esac
+  run_gate "$case_output"
+  if [[ "$failure" == signal ]]; then
+    [[ $GATE_RC -eq 143 && $_windows_preflight_result == declined ]] \
+      || fail_test "collection cancellation did not propagate"
+  else
+    [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+      || fail_test "fresh ${failure} uncertainty reused old answers"
+  fi
+  [[ -z "$_windows_preflight_ack_pid" && -z "$_windows_preflight_ack_observation" ]] \
+    || fail_test "failed collection retained prepared answers"
+  gum_before=$(wc -l < "$GUM_LOG")
+  EFI_RC=0
+  LSBLK_RC=0
+  : > "$BLKID_UNKNOWN_DEVICES"
+  : > "$MOUNT_FAIL_DEVICES"
+  : > "$MOUNT_SIGNAL_DEVICES"
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count "$((gum_before + 3))"
+done
+
+for failure in cancellation recovery-key administrator decryption suspension missing-gum; do
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  # Force a new questionnaire, then reject it. No answer prefix is reusable.
+  write_firmware_present "${WINDOWS_DP/33 22 11 00/34 22 11 00}"
+  case "$failure" in
+    cancellation) GUM_CANCEL=true ;;
+    recovery-key) GUM_RECOVERY_APPROVED=false ;;
+    administrator) GUM_MANAGEMENT='Managed by an organization'; GUM_ADMIN_APPROVED=false ;;
+    decryption|suspension)
+      printf '/dev/windows-os\n' > "$BITLOCKER_DEVICES"
+      GUM_PREPARATION_APPROVED=false
+      [[ "$failure" != suspension ]] || GUM_EDITION=Pro
+      ;;
+    missing-gum) GUM_AVAILABLE=false ;;
+  esac
+  run_gate "$case_output"
+  [[ $GATE_RC -ne 0 && -z "$_windows_preflight_ack_observation" ]] \
+    || fail_test "failed ${failure} questionnaire cached human answers"
+  gum_before=$(wc -l < "$GUM_LOG")
+  write_firmware_present
+  : > "$BITLOCKER_DEVICES"
+  GUM_CANCEL=false
+  GUM_RECOVERY_APPROVED=true
+  GUM_ADMIN_APPROVED=true
+  GUM_MANAGEMENT='Personal device'
+  GUM_PREPARATION_APPROVED=true
+  GUM_AVAILABLE=true
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count "$((gum_before + 3))"
+done
+
+# The real terminal predicate, with redirected stdin/stderr, must stop before
+# any gum invocation. Complete-negative headless scans still succeed.
+reset_case
+TEST_PROMPT_TERMINAL=false
+run_gate "$case_output" < /dev/null
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == negative ]] \
+  || fail_test "complete negative headless scan failed"
+assert_gum_count 0
+write_firmware_present
+for observation in positive unknown; do
+  [[ "$observation" != unknown ]] || EFI_RC=1
+  run_gate "$case_output" < /dev/null
+  [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+    || fail_test "non-TTY ${observation} scan did not return technical unknown"
+  /usr/bin/grep -Fq 'interactive terminal with stdin and stderr attached' "$case_output" \
+    || fail_test "non-TTY scan omitted its terminal requirement"
+  assert_gum_count 0
+done
+assert_call_count 3 efibootmgr
+assert_call_count 3 lsblk
+assert_call_count 3 lock:limine
+
+reset_case
+write_firmware_present
+run_gate "$case_output"
+assert_prepared
+TEST_PROMPT_TERMINAL=false
+run_gate "$case_output" < /dev/null
 [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
-  || fail_test "internal ESP scan failure did not fail closed"
-/usr/bin/grep -Fq 'Windows preflight collection failed safely' "$case_output" \
-  || fail_test "internal ESP scan failure omitted its blocker"
-/usr/bin/grep -Fq 'Windows Home' "$case_output" \
-  || fail_test "internal ESP scan failure omitted preparation guidance"
+  || fail_test "cached answers bypassed the real terminal requirement"
+assert_gum_count 3
+TEST_PROMPT_TERMINAL=true
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 6
+write_firmware_absent
+run_gate "$case_output"
+[[ $GATE_RC -eq 0 && $_windows_preflight_result == negative ]] \
+  || fail_test "fresh complete negative scan reused a positive result"
+write_firmware_present
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 9
+
+# Bash subshells retain $$ and copy globals. Only BASHPID distinguishes them.
+reset_case
+write_firmware_present
+run_gate "$case_output"
+assert_prepared
+parent_pid=$BASHPID
+(
+  [[ "$parent_pid" != "$BASHPID" && "$_windows_preflight_ack_pid" == "$parent_pid" ]] \
+    || fail_test "subshell fixture did not inherit the parent acknowledgment"
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 6
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 6
+)
+run_gate "$case_output"
+assert_prepared
+assert_gum_count 6
+TEST_FAILURE_LOGS+=("${TEST_DIR}/fresh-invocation.out")
+_windows_preflight_ack_pid="$_windows_preflight_ack_pid" \
+  _windows_preflight_ack_observation="$_windows_preflight_ack_observation" \
+  /bin/bash "${BASH_SOURCE[0]}" --fresh-prompt-invocation \
+  > "${TEST_DIR}/fresh-invocation.out" 2>&1 \
+  || fail_test "fresh invocation failed its actual prompt assertions"
+
+# Exercise the actual setup dispatcher, its preparation/activation preflights,
+# and its instruction boundary in one source scope. Only unrelated firmware,
+# artifact and transaction effects are fixtures. The Windows gate, collection,
+# mount/loader proof and external gum calls remain real throughout all stages.
+(
+  reset_case
+  write_firmware_present
+  printf '/dev/windows-os\n' > "$BITLOCKER_DEVICES"
+  printf '/dev/linux-esp\n' > "$LOADER_DEVICES"
+  GUM_EDITION=Pro
+  GUM_MANAGEMENT='Managed by an organization'
+  setup_prepared=false
+  setup_confirmed=false
+  require_gum() { :; }
+  check_deps() { :; }
+  check_recovery_deps() { :; }
+  check_efi_mode() { :; }
+  recover_lifecycle_if_required() { _lifecycle_recovery_performed=false; }
+  current_setup_backup_id() {
+    [[ "$setup_prepared" == true ]] || return 1
+    printf 'fixture-backup\n'
+  }
+  run_lifecycle_transaction_with_preflight() {
+    local operation="$1" preflight="$4" body="$5"
+    shift 5
+    printf 'stage:%s\n' "$operation" >> "$CALL_LOG"
+    "$preflight" "$@" || return "$?"
+    "$body" "$@"
+  }
+  prepare_secure_boot_transaction() { setup_prepared=true; }
+  activate_enrollment_plan_transaction() { setup_confirmed=true; }
+  validate_efivarfs_mount() { :; }
+  classify_local_sbctl_keys() { _local_key_state=complete; }
+  read_current_firmware_modes() {
+    _setup_mode=0
+    _secure_boot_mode=0
+    _audit_mode=absent
+    _deployed_mode=absent
+  }
+  lifecycle_activation_environment_is_ready() { :; }
+  validate_firmware_backup() { :; }
+  validate_enrollment_plan() { [[ "$2" == false || "$setup_confirmed" == true ]]; }
+  revalidate_enrollment_plan_export() { :; }
+  current_optional_modes_match_backup() { :; }
+  current_firmware_variable_matches_backup() { :; }
+  planned_trust_is_representable() { :; }
+  capture_activation_limine_tools() { printf '[]\n'; }
+  artifact_repair_preflight() {
+    _repair_config_checksum=fixture-checksum
+    printf 'artifact-preflight\n' >> "$CALL_LOG"
+  }
+  verify_all_efi_artifacts() { printf 'artifact-proof\n' >> "$CALL_LOG"; }
+  list_stale_limine_path_hashes() { :; }
+  esp_path() { printf '%s/setup-esp\n' "$TEST_DIR"; }
+  limine_config_path() { printf '%s/limine.conf\n' "$(esp_path)"; }
+  mkdir -p "$(esp_path)"
+  printf '%s\n' '/Omarchy' 'protocol: efi' \
+    'path: boot():/EFI/Linux/omarchy_linux.efi' > "$(limine_config_path)"
+  load_enrollment_pk_fingerprints() {
+    _enrollment_current_pk_hash=fixture-current
+    _enrollment_planned_pk_hash=fixture-planned
+  }
+  firmware_plan_path() { printf '%s/fixture-plan\n' "$TEST_DIR"; }
+  observe_setup_state() { printf '3\n'; }
+  explain_setup_observation() { return 1; }
+  run_artifact_repair() { return 1; }
+  main setup > "$case_output" 2>&1 || fail_test "setup real-gate integration failed"
+  [[ "$setup_prepared" == true && "$setup_confirmed" == true ]] \
+    || fail_test "setup did not pass through preparation and activation"
+  /usr/bin/grep -Fq 'In firmware settings, delete only PK' "$case_output" \
+    || fail_test "setup did not complete its real instruction boundary"
+  [[ $(/usr/bin/grep -Fc 'Reusing Windows preparation answers' "$case_output") -eq 2 ]] \
+    || fail_test "activation and instruction did not reuse preparation answers"
+  # Four setup-specific confirmations plus the five managed Pro answers.
+  assert_gum_count 9
+  for call in efibootmgr lsblk lock:limine lock:repair \
+    blkid:BitLocker:/dev/windows-os blkid:BitLocker:/dev/linux-esp \
+    blkid:vfat:/dev/linux-esp; do
+    assert_call_count 3 "$call"
+  done
+  assert_call_count 3 'dd:bs=2 count=1 iflag=fullblock,noatime status=none'
+  assert_call_count 1 stage:prepare-secure-boot
+  assert_call_count 1 stage:activate-secure-boot-plan
+  assert_call_count 2 artifact-preflight
+  assert_call_count 1 artifact-proof
+  assert_no_runtime_artifacts
+) || fail_test "setup real-gate integration failed"
+
+(
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  original_inventory=$(declare -f windows_preflight_read_block_inventory)
+  windows_preflight_read_block_inventory() { return 1; }
+  run_gate "$case_output"
+  [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+    || fail_test "internal inventory failure did not fail closed"
+  /usr/bin/grep -Fq 'Block-device inventory processing failed safely' "$case_output" \
+    || fail_test "internal inventory failure omitted the BitLocker blocker"
+  /usr/bin/grep -Fq 'ESP inventory processing failed safely' "$case_output" \
+    || fail_test "internal inventory failure omitted the loader blocker"
+  [[ -z "$_windows_preflight_ack_observation" ]] \
+    || fail_test "internal inventory failure retained prepared answers"
+  eval "$original_inventory"
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 10
+)
+
+(
+  reset_case
+  write_firmware_present
+  run_gate "$case_output"
+  assert_prepared
+  original_scan=$(declare -f windows_preflight_scan_esps)
+  windows_preflight_scan_esps() { return 1; }
+  run_gate "$case_output"
+  [[ $GATE_RC -eq 2 && $_windows_preflight_result == technical-unknown ]] \
+    || fail_test "internal ESP scan failure did not fail closed"
+  /usr/bin/grep -Fq 'Windows preflight collection failed safely' "$case_output" \
+    || fail_test "internal ESP scan failure omitted its blocker"
+  /usr/bin/grep -Fq 'Windows Home' "$case_output" \
+    || fail_test "internal ESP scan failure omitted preparation guidance"
+  [[ -z "$_windows_preflight_ack_observation" ]] \
+    || fail_test "internal collection failure retained prepared answers"
+  eval "$original_scan"
+  run_gate "$case_output"
+  assert_prepared
+  assert_gum_count 6
+)
 
 printf 'windows preflight tests passed\n'
