@@ -202,12 +202,33 @@ list_enrolled_entries() {
 
 # Cleanup must catch stale entries even if sbctl's CLI view is incomplete.
 # Prefer CLI rows, but merge in database rows when the database is readable.
+# Status requests require-db: a present store must be completely observed;
+# an absent store is empty only with searchable ancestry and an empty CLI view.
 list_enrolled_entries_for_cleanup() {
-  local cli_entries="" db_entries=""
+  local cli_entries="" db_entries="" mode="${1:-optional-db}" files_db parent
   local cli_rc=0 db_rc=0
+  [[ $# -le 1 ]] || return 1
+  case "$mode" in optional-db|require-db) ;; *) return 1 ;; esac
 
   cli_entries=$(list_enrolled_entries_from_cli) || cli_rc=$?
-  db_entries=$(list_enrolled_entries_from_db) || db_rc=$?
+  if [[ "$mode" == require-db ]]; then
+    files_db=$(resolve_sbctl_files_db_path) || return 1
+    path_has_no_symlink_components "$files_db" || return 1
+    if [[ -e "$files_db" || -L "$files_db" ]]; then
+      validate_control_file "$files_db" || return 1
+      db_entries=$(list_enrolled_entries_from_db) || return 1
+    else
+      parent=$(dirname -- "$files_db") || return 1
+      while [[ ! -e "$parent" && ! -L "$parent" ]]; do
+        [[ "$parent" != / ]] || return 1
+        parent=$(dirname -- "$parent") || return 1
+      done
+      [[ -d "$parent" && -r "$parent" && -x "$parent" \
+        && $cli_rc -eq 0 && -z "$cli_entries" ]] || return 1
+    fi
+  else
+    db_entries=$(list_enrolled_entries_from_db) || db_rc=$?
+  fi
 
   if [[ $cli_rc -gt 1 || ( $cli_rc -ne 0 && $db_rc -ne 0 ) ]]; then
     return 1

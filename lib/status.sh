@@ -78,16 +78,21 @@ list_unmanaged_windows_chainloads() {
 }
 
 list_windows_firmware_entries() {
-  command -v efibootmgr >/dev/null 2>&1 || return 0
-  efibootmgr -v 2>/dev/null | grep -i 'bootmgfw\.efi' || true
+  local rc=0
+  grep -i 'bootmgfw\.efi' <<< "$1" || rc=$?
+  [[ $rc -le 1 ]]
 }
 
 list_omarchy_direct_boot_entries() {
-  command -v efibootmgr >/dev/null 2>&1 || return 0
-  efibootmgr -v 2>/dev/null | grep -Ei '^Boot[0-9A-Fa-f]+\*?[[:space:]]+Omarchy.*\\EFI\\Linux\\omarchy.*\.efi' || true
+  local rc=0
+  grep -Ei '^Boot[0-9A-Fa-f]+\*?[[:space:]]+Omarchy.*\\EFI\\Linux\\omarchy.*\.efi' <<< "$1" || rc=$?
+  [[ $rc -le 1 ]]
 }
 
 show_lifecycle_status() {
+  # cmd_status displays this section before show_status. Preserve its verdict
+  # so a later successful file section cannot imply a healthy lifecycle.
+  _status_lifecycle_ok=false
   if ! read_lifecycle; then
     fail "Lifecycle state is invalid or unsafe"
     return 1
@@ -122,20 +127,53 @@ show_lifecycle_status() {
       return 1
       ;;
   esac
+  _status_lifecycle_ok=true
 }
 
-# Firmware and key state from one sbctl status document; prints the raw status
-# when the document is unavailable.
+firmware_status_json_is_valid() {
+  json_is '[., inputs] | length == 1 and (.[0] |
+    type == "object" and
+    (.installed | type) == "boolean" and
+    (.setup_mode | type) == "boolean" and
+    (.secure_boot | type) == "boolean")' "$1"
+}
+
+# Firmware and key state from one successful, strictly typed sbctl query.
+# Raw display output is not a substitute for the parsed observation.
 show_firmware_status() {
-  local json="$1" ok=true installed_state setup_mode_state secure_boot_state vendors
-  if [[ -z "$json" || "$json" == "null" ]]; then
-    sbctl status
-    echo
-    return 0
+  local json="$1" query_rc="${2:-0}" ok=true states
+  local installed_state setup_mode_state secure_boot_state vendors
+  local direct_setup=false direct_secure=false
+  _status_secure_boot_state=unknown
+  if [[ "$query_rc" != 0 ]]; then
+    fail "Firmware and key status unknown: sbctl status --json failed; verification incomplete"
+    return 1
   fi
-  read -r installed_state setup_mode_state secure_boot_state < <(
-    jq -r '[.installed, .setup_mode, .secure_boot] | map(. // false) | @tsv' <<< "$json"
-  )
+  if ! firmware_status_json_is_valid "$json"; then
+    fail "Firmware and key status unknown: sbctl status JSON is unavailable or invalid; verification incomplete"
+    return 1
+  fi
+  if ! states=$(jq -r '[.installed, .setup_mode, .secure_boot] | @tsv' <<< "$json"); then
+    fail "Firmware and key status unknown: could not parse sbctl status JSON; verification incomplete"
+    return 1
+  fi
+  IFS=$'\t' read -r installed_state setup_mode_state secure_boot_state <<< "$states"
+  # sbctl 0.18 suppresses individual mode-read errors into boolean defaults.
+  # Use the same strict direct mode reader as enrollment before treating those
+  # fields as observations. A changed or unreadable mode is not a clean pass.
+  if ! read_current_firmware_modes; then
+    fail "Firmware and key status unknown: direct firmware modes could not be verified"
+    return 1
+  fi
+  [[ "$_setup_mode" != 1 ]] || direct_setup=true
+  [[ "$_secure_boot_mode" != 1 ]] || direct_secure=true
+  if [[ "$setup_mode_state" != "$direct_setup" || "$secure_boot_state" != "$direct_secure" ]]; then
+    fail "Firmware mode observations disagree; rerun status after firmware activity finishes"
+    return 1
+  fi
+  # The aggregate owns this invocation-local value. Only the directly
+  # cross-checked observation may determine downstream enforcement messages.
+  _status_secure_boot_state="$secure_boot_state"
   vendors=$(jq -r '
     .vendors // [] | if type == "array" then
       map(tostring) | sort | unique | join(", ")
@@ -157,10 +195,11 @@ show_firmware_status() {
   fi
   if [[ "$setup_mode_state" == "true" ]]; then
     warn "Setup Mode active"
+    ok=false
   else
     pass "Setup Mode disabled"
   fi
-  [[ -n "$vendors" && "$vendors" != "null" ]] && echo -e "  ${DIM}Vendor keys: ${vendors}${NC}"
+  [[ -n "$vendors" && "$vendors" != "null" ]] && print_message "  ${DIM}Vendor keys: ${vendors}${NC}"
   [[ "$ok" == true ]]
 }
 
@@ -239,7 +278,7 @@ show_service_status() {
   else
     warn "limine-snapper-sync.service not active (${active_state:-unknown})"
     if ! command -v inotifywait >/dev/null 2>&1; then
-      echo -e "  ${DIM}limine-snapper-sync's optional file watcher requires ${BOLD}inotify-tools${NC}${DIM} (not needed by this repo's Limine post-hook)${NC}"
+      print_message "  ${DIM}limine-snapper-sync's optional file watcher requires ${BOLD}inotify-tools${NC}${DIM} (not needed by this repo's Limine post-hook)${NC}"
     fi
   fi
 }
@@ -247,7 +286,7 @@ show_service_status() {
 show_esp_status() {
   if ! { command -v mountpoint && command -v findmnt; } >/dev/null 2>&1; then
     warn "mountpoint/findmnt unavailable; cannot verify $(esp_path) mount"
-    return 0
+    return 1
   fi
   if esp_is_mounted_vfat; then
     pass "$(esp_path) mounted as vfat"
@@ -322,48 +361,57 @@ show_limine_config_status() {
   if [[ -n "$color_warnings" ]]; then
     warn "Limine 12 expects interface colors as RRGGBB values"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
+      print_message "    ${YELLOW}!${NC} $(limine_config_path):${line}"
     done <<< "$color_warnings"
   fi
   if [[ "$enable_enroll" != "yes" ]]; then
-    echo -e "  ${DIM}Limine 12 path-hash enforcement inactive unless config enrollment is active${NC}"
+    print_message "  ${DIM}Limine 12 path-hash enforcement inactive unless config enrollment is active${NC}"
     [[ "$ok" == true ]]
     return $?
   fi
-  unhashed_paths=$(list_limine_unhashed_paths) || unhashed_paths=""
-  if [[ -z "$unhashed_paths" ]]; then
+  if ! unhashed_paths=$(list_limine_unhashed_paths); then
+    fail "Could not enumerate unhashed Limine paths; path-hash readiness is unverified"
+    ok=false
+  elif [[ -z "$unhashed_paths" ]]; then
     pass "Limine 12 path-hash readiness passed for non-EFI loaded paths"
   elif [[ "$limine_v12_or_newer" == true && "$secure_boot_state" == "true" ]]; then
     fail "Limine 12 Secure Boot path-hash enforcement may block boot"
     while IFS= read -r line; do
-      echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
+      print_message "    ${RED}✗${NC} $(limine_config_path):${line}"
     done <<< "$unhashed_paths"
     ok=false
   else
     warn "Limine 12 readiness: non-EFI loaded paths are missing BLAKE2B hashes"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
+      print_message "    ${YELLOW}!${NC} $(limine_config_path):${line}"
     done <<< "$unhashed_paths"
   fi
   # A hash that is present is checked for every protocol; a stale one panics
   # once Secure Boot and config enrollment are both active, and stops at a
   # prompt before that.
   local hashed_paths stale_paths
-  hashed_paths=$(list_limine_entry_paths hashed) || hashed_paths=""
-  if [[ -n "$hashed_paths" ]]; then
-    stale_paths=$(list_stale_limine_path_hashes) || stale_paths="unresolved"
-    if [[ -z "$stale_paths" ]]; then
+  if ! hashed_paths=$(list_limine_entry_paths hashed); then
+    fail "Could not enumerate hashed Limine paths; path hashes are unverified"
+    ok=false
+  elif [[ -n "$hashed_paths" ]]; then
+    if ! stale_paths=$(list_stale_limine_path_hashes); then
+      fail "Could not verify Limine path hashes against their files"
+      ok=false
+    elif [[ -z "$stale_paths" ]]; then
       pass "Limine path hashes match their files"
     else
       if [[ "$secure_boot_state" == "true" ]]; then
         fail "Limine path hashes are stale; Limine refuses these entries with Secure Boot on"
+        ok=false
+      elif [[ "$secure_boot_state" != "false" ]]; then
+        fail "Limine path hashes are stale; Secure Boot enforcement state is unknown"
         ok=false
       else
         warn "Limine path hashes are stale; Limine stops at a hash prompt for these entries until they are regenerated"
       fi
       while IFS= read -r line; do
         [[ -n "$line" ]] || continue
-        echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
+        print_message "    ${RED}✗${NC} $(limine_config_path):${line}"
       done <<< "$stale_paths"
       warn "For the current OS entry, run sudo limine-mkinitcpio and verify again. A normal snapshot sync does not repair historical hashes; preserve the snapshots and report the affected entries for migration"
     fi
@@ -402,47 +450,77 @@ show_limine_checksum_status() {
 
 # Firmware boot entries and the managed Windows handoff.
 show_windows_status() {
-  local ok=true line direct_boot_entries
-  direct_boot_entries=$(list_omarchy_direct_boot_entries)
+  local ok=true line direct_boot_entries="" windows_boot_entries=""
+  local inventory_ok=false target_ok=false windows_boot_count=0 boot_number
+  local _windows_error="" _windows_inventory_raw=""
+  local _windows_boot_number="" _windows_label="" _windows_partuuid=""
+  local _windows_partition_number _windows_hd_start _windows_hd_size
+  local _windows_device_path _windows_maj_min _windows_reusable_mount
+  # These are the two stages of find_windows_boot_entry. Call them in this
+  # shell to retain the complete identity and distinguish absence from a
+  # failed inventory read. All displayed firmware entries use that same read.
+  if windows_parse_firmware_inventory; then
+    inventory_ok=true
+    for boot_number in "${!_windows_inventory_exact[@]}"; do
+      [[ "${_windows_inventory_exact[$boot_number]}" != true ]] \
+        || windows_boot_count=$((windows_boot_count + 1))
+    done
+    if [[ $windows_boot_count -gt 0 ]] && windows_select_firmware_target; then
+      target_ok=true
+    fi
+    if ! direct_boot_entries=$(list_omarchy_direct_boot_entries "$_windows_inventory_raw") \
+      || ! windows_boot_entries=$(list_windows_firmware_entries "$_windows_inventory_raw"); then
+      fail "Could not enumerate firmware boot entries for display"
+      ok=false
+    fi
+  else
+    fail "Windows firmware inventory is unverified: ${_windows_error:-could not read or parse EFI boot entries}"
+    ok=false
+  fi
   if [[ -n "$direct_boot_entries" ]]; then
     warn "Omarchy Direct Boot firmware entry enabled"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} ${line}"
+      print_message "    ${YELLOW}!${NC} ${line}"
     done <<< "$direct_boot_entries"
-    echo -e "  ${DIM}Direct Boot bypasses the Limine menu, including snapshots and repo-managed Windows entries.${NC}"
+    print_message "  ${DIM}Direct Boot bypasses the Limine menu, including snapshots and repo-managed Windows entries.${NC}"
   fi
 
-  local windows_boot_entries windows_boot_count windows_target windows_target_rc=0
-  local target_number target_label
-  windows_target=$(find_windows_boot_entry 2>/dev/null) || windows_target_rc=$?
-  windows_boot_entries=$(list_windows_firmware_entries)
-  windows_boot_count=$(grep -c . <<< "$windows_boot_entries") || windows_boot_count=0
-  if [[ $windows_target_rc -eq 0 && -n "$windows_target" ]]; then
+  if [[ "$target_ok" == true ]]; then
     pass "Unique active Windows firmware handoff target"
   elif [[ $windows_boot_count -gt 0 ]]; then
     warn "Windows firmware entries do not resolve to one safe handoff target"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} ${line}"
+      [[ -n "$line" ]] || continue
+      print_message "    ${YELLOW}!${NC} ${line}"
     done <<< "$windows_boot_entries"
+    [[ -z "$_windows_error" ]] || warn "$_windows_error"
     ok=false
-  else
-    echo -e "  ${DIM}No Windows Boot Manager found (check BIOS boot settings)${NC}"
+  elif [[ "$inventory_ok" == true ]]; then
+    print_message "  ${DIM}No Windows Boot Manager found (check BIOS boot settings)${NC}"
   fi
 
-  local windows_state_file
-  local _windows_error _windows_block_state _windows_state_kind
+  local windows_state_file record_present=false record_matches=false
+  local _windows_block_state _windows_state_kind
   local _windows_block_start _windows_block_count
   local _windows_state_boot_number _windows_state_label
   local _windows_state_partuuid _windows_state_loader_path
   windows_state_file=$(windows_target_state_path)
   if read_windows_target_state; then
+    record_present=true
     pass "Durable Windows firmware target identity recorded"
-    IFS=$'\t' read -r target_number target_label <<< "$windows_target"
-    if [[ $windows_target_rc -eq 0 ]] \
-      && [[ "$_windows_state_boot_number" != "$target_number" \
-        || "$_windows_state_label" != "$target_label" ]]; then
-      fail "Recorded Windows target Boot${_windows_state_boot_number} is not the firmware target Boot${target_number}; run sudo omasecboot windows setup again"
+    if [[ "$target_ok" != true ]]; then
+      if [[ "$inventory_ok" == true && $windows_boot_count -eq 0 ]]; then
+        fail "Recorded Windows target Boot${_windows_state_boot_number} is absent from the firmware inventory"
+      else
+        fail "Recorded Windows target Boot${_windows_state_boot_number} could not be verified against a unique firmware target"
+      fi
       ok=false
+    elif ! windows_state_matches_resolved_target; then
+      fail "Recorded Windows target identity is stale (recorded Boot${_windows_state_boot_number}, resolved Boot${_windows_boot_number}); number, label, PARTUUID, and loader path must all match"
+      warn "Restore the recorded firmware target identity or stop and report the mismatch; windows setup cannot retarget an existing record"
+      ok=false
+    else
+      record_matches=true
     fi
     if windows_managed_block_state "$_windows_state_label"; then
       case "$_windows_block_state" in
@@ -479,7 +557,7 @@ show_windows_status() {
     warn "Managed Windows entry has no durable target identity"
     ok=false
   else
-    echo -e "  ${DIM}No managed Windows firmware handoff configured${NC}"
+    print_message "  ${DIM}No managed Windows firmware handoff configured${NC}"
   fi
 
   local unmanaged_windows_chainloads
@@ -487,11 +565,18 @@ show_windows_status() {
   if [[ -n "$unmanaged_windows_chainloads" ]]; then
     warn "Windows EFI chainload entry may trigger BitLocker"
     while IFS= read -r line; do
-      echo -e "    ${YELLOW}!${NC} $(limine_config_path):${line}"
+      print_message "    ${YELLOW}!${NC} $(limine_config_path):${line}"
     done <<< "$unmanaged_windows_chainloads"
-    echo -e "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
-    echo -e "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
-    echo -e "  ${DIM}Run sudo omasecboot windows setup to add the validated firmware handoff; remove the chainload entry from limine.conf yourself.${NC}"
+    print_message "  ${DIM}Omarchy Quattro's limine-scan creates this protocol: efi form.${NC}"
+    print_message "  ${DIM}OmaSecBoot uses firmware BootNext to keep Limine out of the Windows measurement chain.${NC}"
+    if [[ "$record_matches" == true ]]; then
+      print_message "  ${DIM}Use the recorded firmware handoff; remove the chainload entry from limine.conf yourself.${NC}"
+    elif [[ "$record_present" == false && "$target_ok" == true \
+      && ! -e "$windows_state_file" && ! -L "$windows_state_file" ]]; then
+      print_message "  ${DIM}Run sudo omasecboot windows setup to add the validated firmware handoff; remove the chainload entry from limine.conf yourself.${NC}"
+    else
+      print_message "  ${DIM}Resolve the unverified firmware handoff before using it; remove the chainload entry from limine.conf yourself.${NC}"
+    fi
   fi
   [[ "$ok" == true ]]
 }
@@ -501,18 +586,18 @@ show_windows_status() {
 show_tracked_files_status() {
   if [[ "$EUID" != "$(control_owner_uid)" ]]; then
     echo
-    echo -e "  ${DIM}Run as root for file verification: ${BOLD}sudo omasecboot status${NC}"
-    return 0
+    print_message "  ${DIM}Run as root for file verification: ${BOLD}sudo omasecboot status${NC}"
+    return 1
   fi
   echo
-  echo -e "  ${BOLD}Tracked Files${NC}"
+  print_message "  ${BOLD}Tracked Files${NC}"
   local ok=true file enrolled_raw enrolled_rc=0 stale_entries stale_rc=0
   local stale_file stale_output discovered_raw discovery_rc=0
   local -a enrolled=() discovered=() untracked=() missing_tracked=()
   local -A enrolled_map=()
 
   enrolled_raw=$(list_enrolled_paths) || enrolled_rc=$?
-  stale_entries=$(list_stale_sbctl_entries) || stale_rc=$?
+  stale_entries=$(list_stale_sbctl_entries require-db) || stale_rc=$?
   discovered_raw=$(discover_efi_files) || discovery_rc=$?
   if [[ $discovery_rc -ne 0 ]]; then
     fail "Could not discover the EFI artifacts under $(esp_path)"
@@ -521,7 +606,10 @@ show_tracked_files_status() {
     mapfile -t discovered <<< "$discovered_raw"
   fi
 
-  if [[ $stale_rc -eq 0 && -n "$stale_entries" ]]; then
+  if [[ $stale_rc -ne 0 ]]; then
+    fail "Could not check stale sbctl tracking entries; tracking verification is incomplete"
+    ok=false
+  elif [[ -n "$stale_entries" ]]; then
     while IFS=$'\t' read -r stale_file stale_output; do
       stale_output="${stale_output:-$stale_file}"
       if [[ ! -e "$stale_file" || ! -e "$stale_output" ]]; then
@@ -557,9 +645,9 @@ show_tracked_files_status() {
     done
     for file in "${enrolled[@]}"; do
       if sbctl_file_signature_state "$file"; then
-        echo -e "    ${GREEN}✓${NC} $file"
+        print_message "    ${GREEN}✓${NC} $file"
       else
-        echo -e "    ${RED}✗${NC} $file"
+        print_message "    ${RED}✗${NC} $file"
         ok=false
       fi
     done
@@ -567,10 +655,10 @@ show_tracked_files_status() {
       echo
       warn "Untracked EFI files found (${#untracked[@]})"
       for file in "${untracked[@]}"; do
-        echo -e "    ${YELLOW}!${NC} $file"
+        print_message "    ${YELLOW}!${NC} $file"
       done
       if printf '%s\n' "${untracked[@]}" | grep -Eq '\.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_'; then
-        echo -e "  ${DIM}Snapshot UKIs exist outside sbctl's database. Run sudo omasecboot sign before rebooting.${NC}"
+        print_message "  ${DIM}Snapshot UKIs exist outside sbctl's database. Run sudo omasecboot sign before rebooting.${NC}"
       fi
       ok=false
     fi
@@ -580,9 +668,9 @@ show_tracked_files_status() {
     echo
     warn "Stale sbctl tracked files found"
     for stale_file in "${missing_tracked[@]}"; do
-      echo -e "    ${YELLOW}!${NC} $stale_file"
+      print_message "    ${YELLOW}!${NC} $stale_file"
     done
-    echo -e "  ${DIM}Run sudo omasecboot cleanup to remove stale tracking safely.${NC}"
+    print_message "  ${DIM}Run sudo omasecboot cleanup to remove stale tracking safely.${NC}"
     ok=false
   fi
 
@@ -599,23 +687,26 @@ show_tracked_files_status() {
 
 show_status() {
   header "Secure Boot Status"
-  local all_ok=true json secure_boot_state
-  json=$(sbctl status --json 2>/dev/null) || true
-  show_firmware_status "$json" || all_ok=false
-  secure_boot_state=$(jq -r '.secure_boot // false' <<< "$json" 2>/dev/null) \
-    || secure_boot_state=false
+  local all_ok="${_status_lifecycle_ok:-false}" json query_rc=0 _status_secure_boot_state=unknown
+  json=$(sbctl status --json 2>/dev/null) || query_rc=$?
+  show_firmware_status "$json" "$query_rc" || all_ok=false
   echo
   show_hook_status || all_ok=false
   show_service_status
   echo
-  echo -e "  ${BOLD}ESP Mount${NC}"
+  print_message "  ${BOLD}ESP Mount${NC}"
   show_esp_status || all_ok=false
   echo
-  echo -e "  ${BOLD}Limine Config${NC}"
-  show_limine_config_status "$secure_boot_state" || all_ok=false
+  print_message "  ${BOLD}Limine Config${NC}"
+  show_limine_config_status "$_status_secure_boot_state" || all_ok=false
   show_limine_checksum_status || all_ok=false
   show_windows_status || all_ok=false
   show_tracked_files_status || all_ok=false
   echo
-  [[ "$all_ok" == true ]]
+  if [[ "$all_ok" == true ]]; then
+    pass "Status verification passed"
+  else
+    fail "Status verification failed or incomplete; review the findings above"
+    return 1
+  fi
 }

@@ -627,7 +627,7 @@ sbctl_entry_should_be_removed() {
 
 list_stale_sbctl_entries() {
   local entries rc=0
-  entries=$(list_enrolled_entries_for_cleanup) || rc=$?
+  entries=$(list_enrolled_entries_for_cleanup "$@") || rc=$?
   if [[ $rc -ne 0 ]]; then
     return 1
   fi
@@ -653,7 +653,7 @@ clean_stale_entries() {
     fail "Could not record sbctl tracking state before cleanup"
     return 1
   }
-  stale=$(list_stale_sbctl_entries) || rc=$?
+  stale=$(list_stale_sbctl_entries optional-db) || rc=$?
   if [[ $rc -ne 0 ]]; then
     fail "Could not read sbctl tracking state"
     return 1

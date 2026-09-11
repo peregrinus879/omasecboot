@@ -207,7 +207,7 @@ Use `omasecboot <command> --help` or `-h`, including `omasecboot windows <comman
 | `setup` | Prepare or reuse a validated plan, confirm PK fingerprints, prove artifacts, and print the next firmware instruction |
 | `enroll` | Write the confirmed db, KEK, and PK plan from Setup Mode with per-write read-back |
 | `adopt [--...-original VALUE]` | Record an existing configuration as `active` with its original values |
-| `status` | Show Secure Boot state, lifecycle, hooks, both Limine checksums, Limine 12 readiness, Windows entries, stale sbctl entries, and file verification. Run it with sudo; lifecycle records are root-only |
+| `status` | Show lifecycle, firmware, hooks, managed Limine checksums, path-hash readiness, Windows targets, and EFI tracking/signatures. Run with sudo for protected observations; exit 0 means verification passed, and exit 1 means failed or incomplete |
 | `sign` | Repair `/etc/default/limine`, re-enroll the checksum into both Limine executables, clean stale tracking, sign and track every artifact, and prove the result. Never rebuilds UKIs or runs `limine-update` |
 | `cleanup` | Remove stale sbctl tracking entries |
 | `windows available` | Exit 0 silently if the durable Windows opt-in exists and still matches one valid firmware target; no root required |
