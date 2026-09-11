@@ -213,7 +213,8 @@ expect_status 1 "stale path hash under Secure Boot"
 expect_output "Limine path hashes are stale; Limine refuses these entries with Secure Boot on" \
   "stale path hash under Secure Boot"
 expect_output "path: boot():/EFI/Linux/arch.efi#${stale_hash}" "stale path hash under Secure Boot"
-expect_output "Run sudo limine-mkinitcpio for the OS entry" "stale path hash under Secure Boot"
+expect_output "For the current OS entry, run sudo limine-mkinitcpio" "stale path hash under Secure Boot"
+expect_output "A normal snapshot sync does not repair historical hashes" "historical hash remedy"
 run_section show_limine_config_status false
 expect_status 0 "stale path hash without Secure Boot"
 expect_output "stops at a hash prompt" "stale path hash without Secure Boot"

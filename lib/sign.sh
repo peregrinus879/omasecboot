@@ -57,12 +57,12 @@ limine_snapper_sync_path() {
 # chainload.c at v12.8.0, docs/maintenance.md). Prints "line: key: value"
 # for each path of limine.conf in one of two modes: "unhashed" lists paths
 # without a hash on entries whose protocol needs one, "hashed" lists every
-# path that carries a hash.
+# path that carries a hash, including malformed hashes that proof must reject.
 list_limine_entry_paths() {
   local mode="$1" config
   [[ "$mode" == unhashed || "$mode" == hashed ]] || return 1
   config=$(limine_config_path)
-  [[ -f "$config" ]] || return 0
+  [[ -f "$config" ]] || return 1
 
   awk -v mode="$mode" '
     function normalise_protocol(value) {
@@ -86,7 +86,7 @@ list_limine_entry_paths() {
     }
     function remember_path(key, value, line_no) {
       if (mode == "hashed") {
-        if (has_hash(value)) print line_no ": " key ": " value
+        if (index(value, "#") > 0) print line_no ": " key ": " value
         return
       }
       if (!has_hash(value)) {
@@ -130,7 +130,7 @@ list_limine_entry_paths() {
       }
 
       if (key == "global_dtb") {
-        if (mode == "hashed" && has_hash(value)) print NR ": " key ": " value
+        if (mode == "hashed" && index(value, "#") > 0) print NR ": " key ": " value
         if (mode == "unhashed" && !has_hash(value)) print NR ": " key ": " value
         next
       }
@@ -146,27 +146,36 @@ list_limine_entry_paths() {
 # (only boot():/ resolves, against the mounted ESP). Each line is
 # "line: key: value" as list_limine_entry_paths prints it.
 list_stale_limine_path_hashes() {
-  local line rest value hash path file actual remainder esp
-  esp=$(esp_path) || return 1
+  local line rest value hash path file actual esp paths
+  # Process substitution does not propagate the enumerator's exit status.
+  # Capture the complete result before using any of it as proof.
+  paths=$(list_limine_entry_paths hashed) || return 1
+  [[ -n "$paths" ]] || return 0
+  esp=$(realpath -e -- "$(esp_path)") || return 1
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     rest=${line#*: }
     value=${rest#*: }
-    value=${value%%[[:space:]]*}
     hash=${value##*#}
     path=${value%#*}
     file=""
-    [[ "$path" != 'boot():/'* ]] || file="${esp}/${path#boot():/}"
-    if [[ -z "$file" || ! -f "$file" ]]; then
+    if [[ ! "$hash" =~ ^[0-9A-Fa-f]{128}$ ]]; then
       printf '%s\n' "$line"
       continue
     fi
-    read -r actual remainder < <(b2sum "$file" 2>/dev/null) || {
+    [[ "$path" != 'boot():/'* ]] || file="${esp}/${path#boot():/}"
+    if [[ -z "$file" || ! -f "$file" ]] \
+      || ! file=$(realpath -e -- "$file") || [[ "$file" != "${esp}/"* ]]; then
+      printf '%s\n' "$line"
+      continue
+    fi
+    actual=$(b2sum < "$file" 2>/dev/null) || {
       printf '%s\n' "$line"
       continue
     }
+    actual=${actual%% *}
     [[ "${actual,,}" == "${hash,,}" ]] || printf '%s\n' "$line"
-  done < <(list_limine_entry_paths hashed)
+  done <<< "$paths"
 }
 
 # limine-entry-tool 1.38.0 reads its settings from four layers, a later
@@ -1428,11 +1437,14 @@ capture_activation_limine_tools() {
 # stale hash once Secure Boot and config enrollment are active. Activation
 # therefore regenerates the OS entry (and rebuilds the UKI) through
 # limine-mkinitcpio under the managed settings before signing, and the
-# snapshot entries through limine-snapper-sync after signing, so any hash
-# either disappears or describes the signed file. Both run only while a
-# hashed path exists.
+# snapshot entries through limine-snapper-sync after signing. Native snapshot
+# sync preserves historical hash records; final instruction proof still
+# refuses stale history until a compatible migration is available. Both
+# producers run only while a hashed path exists.
 regenerate_limine_os_entry() {
-  [[ -n "$(list_limine_entry_paths hashed)" ]] || return 0
+  local paths
+  paths=$(list_limine_entry_paths hashed) || return 1
+  [[ -n "$paths" ]] || return 0
   qact "Regenerating the Limine OS entry through limine-mkinitcpio"
   run_visible run_bound_limine_tool mkinitcpio true "$_activation_limine_tools_json" || {
     fail "limine-mkinitcpio failed while regenerating the Limine entries"
@@ -1442,7 +1454,9 @@ regenerate_limine_os_entry() {
 }
 
 regenerate_limine_snapshot_entries() {
-  [[ -n "$(list_limine_entry_paths hashed)" ]] || return 0
+  local paths
+  paths=$(list_limine_entry_paths hashed) || return 1
+  [[ -n "$paths" ]] || return 0
   qact "Regenerating the Limine snapshot entries through limine-snapper-sync"
   run_visible run_bound_limine_tool snapper-sync true "$_activation_limine_tools_json" \
     --no-force-save || {

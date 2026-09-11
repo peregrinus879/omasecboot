@@ -498,6 +498,8 @@ setup_fixture() {
   chmod 644 "$SBCTL_ROOT/files.json" "$SBCTL_ROOT/bundles.json"
   : > "$SBCTL_LOG"
   : > "$ARTIFACT_LOG"
+  printf '%s\n' '/Omarchy' 'protocol: efi' \
+    'path: boot():/EFI/Linux/omarchy_linux.efi' > "$(limine_config_path)"
   printf '#!/bin/sh\nexit 97\n' > "${CASE_DIR}/bin/sbctl"
   chmod 700 "${CASE_DIR}/bin/sbctl"
   printf '12345678-1234-4234-8234-123456789abc\n' > "$DMI_DIR/product_uuid"
@@ -1182,7 +1184,7 @@ test_stale_path_hash_refuses_instruction() {
   local backup_id
   setup_fixture stale-path-hash
   backup_id=$(prepare_and_activate)
-  mkdir -p "$(dirname "$(limine_config_path)")"
+  mkdir -p "$(dirname "$(limine_config_path)")" "$(esp_path)"
   printf '%s\n' '/Linux' '    protocol: efi' \
     "    path: hdd(1):/EFI/Linux/arch.efi#$(printf 'f%.0s' {1..128})" \
     > "$(limine_config_path)"
@@ -1193,11 +1195,23 @@ test_stale_path_hash_refuses_instruction() {
     "${CASE_DIR}/stale.out" || fail_test "the stale hash refusal gave no reason"
   grep -Fq 'path: hdd(1):/EFI/Linux/arch.efi#' "${CASE_DIR}/stale.out" \
     || fail_test "the stale hash refusal did not name the entry"
-  grep -Fq 'Run sudo limine-mkinitcpio for the OS entry' "${CASE_DIR}/stale.out" \
+  grep -Fq 'For the current OS entry, run sudo limine-mkinitcpio' "${CASE_DIR}/stale.out" \
     || fail_test "the stale hash refusal gave no remedy"
   rm -f "$(limine_config_path)"
+  if validate_setup_instruction_boundary "$backup_id" 3 >/dev/null 2>&1; then
+    fail_test "a missing configuration authorized a firmware instruction"
+  fi
+  printf '%s\n' '/Linux' 'protocol: efi' \
+    'path: boot():/EFI/Linux/arch.efi' > "$(limine_config_path)"
   validate_setup_instruction_boundary "$backup_id" 3 \
     || fail_test "the instruction stayed refused after the stale hash was gone"
+  printf '%s\n' '/Linux' 'protocol: linux' \
+    'kernel_path: boot():/vmlinuz' > "$(limine_config_path)"
+  if validate_setup_instruction_boundary "$backup_id" 3 > "${CASE_DIR}/unhashed.out" 2>&1; then
+    fail_test "an unhashed non-EFI resource authorized a firmware instruction"
+  fi
+  grep -Fq 'Limine requires BLAKE2B hashes' "${CASE_DIR}/unhashed.out" \
+    || fail_test "the missing required hash refusal gave no reason"
 }
 
 # The README remedy leaves the key directory itself (700 from an earlier

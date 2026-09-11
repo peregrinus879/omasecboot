@@ -123,10 +123,11 @@ update_tracking_db() {
 }
 
 # Activation's entry regeneration: the pinned tools are dispatched to these
-# stubs with the same lock handoff the real runner performs. limine-mkinitcpio
-# rebuilds the OS UKI (sbctl's mkinitcpio hook signs it) and rewrites the OS
-# entry without a hash under ENABLE_VERIFICATION=no; limine-snapper-sync
-# rewrites the snapshot entry with the hash of the file as it is now.
+# stubs with the same lock handoff the real runner performs. The mkinitcpio
+# stub rebuilds the OS UKI and removes its hash under ENABLE_VERIFICATION=no.
+# The snapshot stub deliberately rewrites a hash to test final enrollment
+# ordering; native 1.31.0 retains historical hashes (docs/maintenance.md), so
+# this fixture is not evidence of historical migration.
 MKINITCPIO_FAIL=false
 limine-mkinitcpio() {
   printf 'mkinitcpio\n' >> "$ARTIFACT_LOG"
@@ -940,10 +941,9 @@ test_fallback_present_under_no() {
     || fail_test "the kept fallback was not enrolled alongside the primary"
 }
 
-# Activation on a stock config (the Vivobook TP3402VA, 2026-09-10): the OS
-# entry is regenerated before signing and loses its hash, the snapshot entry
-# is regenerated after signing and hashes the signed file, the checksum
-# enrolled last describes the final config, and nothing stays stale.
+# Activation ordering with a deliberately rewriting snapshot fixture: the OS
+# entry changes before signing, the snapshot entry changes afterwards, and
+# the last enrolled checksum must describe all final producer edits.
 test_activation_regenerates_entries() {
   local checksum manifest artifact history_hash remainder mkinitcpio_line
   local first_sign snapper_line first_enroll
@@ -1028,8 +1028,75 @@ test_activation_without_hashes_skips_regeneration() {
   grep -aFxq 'LOCAL_SIGNATURE' "$OS_UKI" || fail_test "the OS UKI was not signed"
 }
 
+test_path_hash_proof_boundaries() {
+  local config path checksum result invalid producer_calls regenerator
+  config=$(limine_config_path)
+  path="$(esp_path)/EFI/Linux/path with spaces.efi"
+  printf 'fixture image\n' > "$path"
+  checksum=$(b2sum < "$path")
+  checksum=${checksum%% *}
+  printf '%s\n' '/Omarchy' 'protocol: efi' \
+    "path: boot():/EFI/Linux/path with spaces.efi#${checksum^^}" > "$config"
+  result=$(list_stale_limine_path_hashes) || fail_test "valid spaced path could not be verified"
+  [[ -z "$result" ]] || fail_test "valid spaced path or uppercase hash was rejected"
+  b2sum() {
+    printf '%s  -\n' "$checksum"
+    return 7
+  }
+  result=$(list_stale_limine_path_hashes) || fail_test "failed checksum could not be reported"
+  [[ -n "$result" ]] || fail_test "plausible checksum output hid the hash command failure"
+  unset -f b2sum
+  for invalid in broken '' "${checksum}0" "${checksum} trailing"; do
+    printf '%s\n' '/Omarchy' 'protocol: efi' \
+      "path: boot():/EFI/Linux/path with spaces.efi#${invalid}" > "$config"
+    result=$(list_stale_limine_path_hashes) || fail_test "malformed hash enumeration failed"
+    [[ -n "$result" ]] || fail_test "malformed EFI URI hash was waived: ${invalid}"
+  done
+  printf '%s\n' "global_dtb: boot():/tree.dtb#broken" > "$config"
+  [[ -n "$(list_stale_limine_path_hashes)" ]] \
+    || fail_test "malformed global DTB hash was waived"
+  printf 'outside fixture\n' > "${CASE_DIR}/outside.efi"
+  checksum=$(b2sum < "${CASE_DIR}/outside.efi")
+  checksum=${checksum%% *}
+  printf '%s\n' '/Omarchy' 'protocol: efi' \
+    "path: boot():/../outside.efi#${checksum}" > "$config"
+  [[ -n "$(list_stale_limine_path_hashes)" ]] \
+    || fail_test "boot-relative path escaped the ESP during proof"
+  rm "$config"
+  if list_stale_limine_path_hashes; then
+    fail_test "missing configuration was treated as a proved empty path set"
+  fi
+  list_limine_entry_paths() {
+    printf '3: path: boot():/EFI/Linux/image.efi#broken\n'
+    return 7
+  }
+  if list_stale_limine_path_hashes; then
+    fail_test "partial failed enumeration was accepted as path-hash proof"
+  fi
+  producer_calls="${CASE_DIR}/unexpected-regeneration.log"
+  _activation_limine_tools_json='{}'
+  run_bound_limine_tool() {
+    printf '%s\n' "$1" >> "$producer_calls"
+    return 0
+  }
+  durable_sync() { return 0; }
+  for regenerator in regenerate_limine_os_entry regenerate_limine_snapshot_entries; do
+    : > "$producer_calls"
+    if "$regenerator"; then
+      fail_test "${regenerator} accepted failed path enumeration"
+    fi
+    [[ ! -s "$producer_calls" ]] \
+      || fail_test "${regenerator} invoked a producer after failed path enumeration"
+  done
+}
+
 run_case() {
   local name="$1" test_function="$2"
+  case "${ARTIFACT_TEST_CASE:-all}" in
+    all) ;;
+    path-hash-proof) [[ "$name" == path-hash-proof ]] || return 0 ;;
+    *) fail_test "unknown ARTIFACT_TEST_CASE: ${ARTIFACT_TEST_CASE}" ;;
+  esac
   (
     setup_fixture "$name"
     "$test_function"
@@ -1037,6 +1104,7 @@ run_case() {
 }
 
 run_case discovery test_discovery_and_tracking_sources
+run_case path-hash-proof test_path_hash_proof_boundaries
 run_case sbctl-config test_sbctl_config_resolution
 run_case preflight test_preflight_validation
 run_case mappings test_mapping_validation

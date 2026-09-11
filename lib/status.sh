@@ -365,7 +365,7 @@ show_limine_config_status() {
         [[ -n "$line" ]] || continue
         echo -e "    ${RED}✗${NC} $(limine_config_path):${line}"
       done <<< "$stale_paths"
-      warn "Run sudo limine-mkinitcpio for the OS entry, or sudo limine-snapper-sync for snapshot entries, then sudo omasecboot status"
+      warn "For the current OS entry, run sudo limine-mkinitcpio and verify again. A normal snapshot sync does not repair historical hashes; preserve the snapshots and report the affected entries for migration"
     fi
   fi
   [[ "$ok" == true ]]

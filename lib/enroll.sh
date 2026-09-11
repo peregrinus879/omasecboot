@@ -1704,18 +1704,31 @@ validate_setup_instruction_boundary() {
 # describes its file, because Limine refuses a stale one once Secure Boot
 # and the enrolled config checksum are both active.
 limine_path_hashes_are_current() {
-  local stale line
+  local stale unhashed line
   stale=$(list_stale_limine_path_hashes) || {
     fail "Limine path hashes could not be verified against the ESP"
     return 1
   }
-  [[ -n "$stale" ]] || return 0
-  fail "Limine path hashes are stale; Limine refuses these entries once Secure Boot is on:"
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    fail "  $(limine_config_path):${line}"
-  done <<< "$stale"
-  fail "Run sudo limine-mkinitcpio for the OS entry, or sudo limine-snapper-sync for snapshot entries, then run this command again"
+  unhashed=$(list_limine_entry_paths unhashed) || {
+    fail "Limine paths requiring hashes could not be enumerated"
+    return 1
+  }
+  [[ -n "$stale" || -n "$unhashed" ]] || return 0
+  if [[ -n "$stale" ]]; then
+    fail "Limine path hashes are stale; Limine refuses these entries once Secure Boot is on:"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      fail "  $(limine_config_path):${line}"
+    done <<< "$stale"
+  fi
+  if [[ -n "$unhashed" ]]; then
+    fail "Limine requires BLAKE2B hashes for these non-EFI resources under Secure Boot:"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      fail "  $(limine_config_path):${line}"
+    done <<< "$unhashed"
+  fi
+  fail "For the current OS entry, run sudo limine-mkinitcpio and verify again. A normal snapshot sync does not repair historical hashes; preserve the snapshots and report the affected entries for migration"
   return 1
 }
 
