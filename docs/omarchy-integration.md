@@ -18,7 +18,7 @@ Intel Mac firmware is refused with Omarchy's existing Apple `bios_vendor` guard 
 
 ## Removal wrapper
 
-Runs `/usr/bin/omasecboot unconfigure` when the lifecycle is `active`, then removes the package with pacman. The package's own PreTransaction guard refuses removal from any other state, so the wrapper never bypasses it.
+Runs `/usr/bin/omasecboot unconfigure` when the lifecycle is `active`. Exit 3 means only recovery completed: report that outcome and ask the operator to run the removal flow again, rather than continuing to package removal. Exit 75 means the boot state is busy. Remove the package only after a fresh observation establishes verified `disabled` or pristine state; the package's own PreTransaction guard remains authoritative.
 
 ## Menu entries
 

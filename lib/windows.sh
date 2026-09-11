@@ -2488,7 +2488,7 @@ run_windows_handoff_setup() {
 }
 
 add_windows_boot_entry() {
-  local boot_number label
+  local boot_number label rc
   header "Windows Dual-Boot"
   find_windows_boot_entry >/dev/null || {
     windows_report_error
@@ -2503,6 +2503,8 @@ add_windows_boot_entry() {
     return 1
   fi
   run_windows_handoff_setup || {
+    rc=$?
+    (( rc != 75 )) || return 75
     windows_report_error
     return 1
   }

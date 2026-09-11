@@ -11,6 +11,47 @@ test_harness_init dispatcher
 source "${ROOT_DIR}/bin/omasecboot"
 
 REAL_RECOVER_LIFECYCLE_IF_REQUIRED=$(declare -f recover_lifecycle_if_required)
+REAL_REQUIRE_GUM=$(declare -f require_gum)
+
+expect_status() {
+  local expected="$1" rc=0
+  shift
+  "$@" > "${TEST_DIR}/command.out" 2> "${TEST_DIR}/command.err" || rc=$?
+  [[ $rc -eq $expected ]] || fail_test "$*: expected status ${expected}, got ${rc}"
+}
+
+# Exercise the actual executable as an unprivileged user with only launch
+# plumbing on PATH. None of the operational dependencies can answer here.
+[[ $EUID -ne 0 ]] || fail_test "run the dispatcher suite as an unprivileged user"
+help_bin="${TEST_DIR}/help-bin"
+mkdir -p "$help_bin"
+for tool in dirname readlink; do
+  ln -s "$(command -v "$tool")" "${help_bin}/${tool}"
+done
+for topic in '' setup adopt enroll windows status sign cleanup unconfigure repair \
+  version help 'windows available' 'windows preflight' 'windows setup' \
+  'windows suppress' 'windows bootnext'; do
+  read -r -a help_args <<< "$topic"
+  for help_flag in --help -h; do
+    PATH="$help_bin" TERM=xterm /bin/bash "${ROOT_DIR}/bin/omasecboot" \
+      --quiet "${help_args[@]}" "$help_flag" \
+      > "${TEST_DIR}/actual-help.out" 2> "${TEST_DIR}/actual-help.err" \
+      || fail_test "dependency-free help failed: ${topic} ${help_flag}"
+    [[ ! -s "${TEST_DIR}/actual-help.err" ]] \
+      || fail_test "help emitted a diagnostic: ${topic} ${help_flag}"
+    grep -Fq 'Usage' "${TEST_DIR}/actual-help.out" \
+      || fail_test "help omitted usage: ${topic} ${help_flag}"
+    if grep -Fq $'\033' "${TEST_DIR}/actual-help.out"; then
+      fail_test "redirected help contained an ANSI escape: ${topic} ${help_flag}"
+    fi
+  done
+done
+main adopt --help > "${TEST_DIR}/adopt-help.out"
+for choice in '--verification-original yes|no|unset' '--enrollment-original yes|no|unset' \
+  '--before-save-original present|absent' '--after-save-original present|absent'; do
+  grep -Fq -- "$choice" "${TEST_DIR}/adopt-help.out" \
+    || fail_test "adoption help omitted ${choice}"
+done
 
 state_dir_path() {
   printf '%s/state\n' "$TEST_DIR"
@@ -309,6 +350,8 @@ setup_marker="${TEST_DIR}/setup-prepared"
 SETUP_STATE=3
 RECOVERY_OCCURRED=false
 PLAN_CONFIRMED=false
+SETUP_ENVIRONMENT_READY=true
+lifecycle_activation_environment_is_ready() { [[ "$SETUP_ENVIRONMENT_READY" == true ]]; }
 check_deps() { :; }
 check_core_deps() { :; }
 check_recovery_deps() { :; }
@@ -316,6 +359,15 @@ check_efi_mode() { :; }
 check_root() { :; }
 require_gum() { :; }
 gum() { [[ "$1" == confirm ]]; }
+(
+  SETUP_ENVIRONMENT_READY=false
+  recover_lifecycle_if_required() { _lifecycle_recovery_performed=false; }
+  current_setup_backup_id() { fail_test "unsupported setup inspected a plan before admission"; }
+  prepare_state_aware_setup() { fail_test "unsupported setup started key/plan preparation"; }
+  expect_status 1 cmd_setup
+  grep -Fq 'no setup preparation was started' "${TEST_DIR}/command.err" \
+    || fail_test "early setup admission did not explain its refusal"
+)
 disabled_lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
 if cmd_adopt --verification-original unknown --enrollment-original yes \
   --before-save-original absent --after-save-original absent \
@@ -367,6 +419,22 @@ run_unconfigure() { printf 'unconfigure\n' >> "$mutation_log"; }
 add_windows_boot_entry() { printf 'windows-setup\n' >> "$mutation_log"; }
 suppress_stale_windows_entry() { printf 'windows-suppress\n' >> "$mutation_log"; }
 run_windows_bootnext() { printf 'windows-bootnext\n' >> "$mutation_log"; }
+
+# Noninteractive setup fails clearly before backup preparation, even when a
+# gum command exists. Recovery remains the first lifecycle action.
+(
+  eval "$REAL_REQUIRE_GUM"
+  setup_rc=0
+  cmd_setup </dev/null > "${TEST_DIR}/setup-no-tty.out" \
+    2> "${TEST_DIR}/setup-no-tty.err" || setup_rc=$?
+  exit "$setup_rc"
+) && fail_test "noninteractive setup succeeded"
+[[ ! -e "$setup_marker" ]] || fail_test "noninteractive setup prepared a backup"
+grep -Fq 'interactive terminal is required' "${TEST_DIR}/setup-no-tty.err" \
+  || fail_test "noninteractive setup omitted its terminal requirement on stderr"
+[[ $(<"$mutation_log") == recover ]] \
+  || fail_test "noninteractive setup started preparation"
+: > "$mutation_log"
 
 cmd_setup >/dev/null || fail_test "enabled setup route failed"
 cmd_setup >/dev/null || fail_test "enabled setup repair route failed"
@@ -511,20 +579,77 @@ check_deps() { fail_test "command-specific dependencies ran before recovery"; }
 check_core_deps() { fail_test "command-specific dependencies ran before recovery"; }
 check_efi_mode() { fail_test "command-specific EFI checks ran before recovery"; }
 require_gum() { fail_test "interactive dependencies ran before recovery"; }
-cmd_setup >/dev/null || fail_test "setup recovery-only route failed"
-# The menu reboots on success, so recovery without a request is not success.
-if cmd_windows bootnext >/dev/null; then
-  fail_test "BootNext recovery-only route claimed a handoff request"
-else
-  [[ $? -eq 3 ]] || fail_test "BootNext recovery-only route did not return status 3"
-fi
-[[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover' ]] \
+# Every public mutation reports recovery-only as 3. A menu or shell chain
+# must never mistake successful recovery for the requested operation.
+: > "$mutation_log"
+for command in setup adopt enroll sign cleanup unconfigure; do
+  expect_status 3 main "$command"
+  grep -Fq "run ${command} again" "${TEST_DIR}/command.out" \
+    || fail_test "${command} recovery omitted its required next action"
+done
+for command in setup suppress bootnext; do
+  expect_status 3 main windows "$command"
+done
+expect_status 3 main adopt --verification-original unset --enrollment-original no \
+  --before-save-original present --after-save-original absent
+expect_status 0 main repair
+[[ $(grep -c '^recover$' "$mutation_log") -eq 11 \
+  && $(wc -l < "$mutation_log") -eq 11 ]] \
   || fail_test "a recovered command started an unintended second mutation"
-cmd_adopt --verification-original unknown --enrollment-original no \
-  --before-save-original absent --after-save-original absent >/dev/null \
-  || fail_test "adoption recovery-only route failed"
-[[ $(<"$mutation_log") == "${expected_mutations}"$'\nrecover\nrecover\nrecover' ]] \
-  || fail_test "recovered adoption started an unintended second mutation"
+
+# Validate every supplied original before root/dependency checks or recovery,
+# including invalid values subsequently repeated with a valid replacement.
+(
+  check_root() { fail_test "invalid arguments reached the root check"; }
+  check_recovery_deps() { fail_test "invalid arguments reached recovery dependencies"; }
+  recover_lifecycle_if_required() { fail_test "invalid arguments invoked recovery"; }
+  for option in --verification-original --enrollment-original \
+    --before-save-original --after-save-original; do
+    case "$option" in
+      --verification-original|--enrollment-original) valid=yes; invalid=present ;;
+      *) valid=absent; invalid=yes ;;
+    esac
+    for value in unknown invalid '' "$invalid"; do
+      expect_status 2 main adopt "$option" "$value"
+      expect_status 2 main adopt "$option" "$value" "$option" "$valid"
+    done
+    expect_status 2 main adopt "$option"
+  done
+  expect_status 2 main adopt --unsupported yes
+  for command in setup enroll sign cleanup unconfigure repair; do
+    expect_status 2 main "$command" unexpected
+  done
+  expect_status 2 main windows bootnext unexpected
+)
+
+# Busy is a retryable admission outcome, not a failed recovery. Unsafe state
+# keeps its failure classification, and neither result starts a new request.
+recover_lifecycle_if_required() {
+  printf 'recover\n' >> "$mutation_log"
+  _lifecycle_recovery_performed=false
+  return "$RECOVERY_RC"
+}
+for RECOVERY_RC in 75 1; do
+  for command in setup adopt enroll sign cleanup unconfigure repair; do
+    expect_status "$RECOVERY_RC" main "$command"
+    if [[ "$RECOVERY_RC" == 75 ]]; then
+      grep -Fq "no new ${command} operation was started" "${TEST_DIR}/command.err" \
+        || fail_test "${command} did not explain busy admission on stderr"
+      if grep -Fq 'recovery failed' "${TEST_DIR}/command.err"; then
+        fail_test "${command} misreported contention as failed recovery"
+      fi
+    else
+      grep -Fq 'Lifecycle recovery failed' "${TEST_DIR}/command.err" \
+        || fail_test "${command} lost its recovery failure diagnostic"
+    fi
+  done
+  for command in setup suppress bootnext; do
+    expect_status "$RECOVERY_RC" main windows "$command"
+  done
+done
+[[ $(grep -c '^recover$' "$mutation_log") -eq 31 \
+  && $(wc -l < "$mutation_log") -eq 31 ]] \
+  || fail_test "busy or unsafe admission started a requested operation"
 for command in setup enroll sign cleanup unconfigure repair; do
   if "cmd_${command}" unexpected >/dev/null 2>&1; then
     fail_test "enabled ${command} command accepted an extra argument"

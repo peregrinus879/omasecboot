@@ -100,6 +100,8 @@ OmaSecBoot keeps a durable record under `/var/lib/omasecboot` that says whether 
 
 Every mutating command first writes a transaction manifest and backups, then mutates, then commits the stable state last. If a command finds an interrupted transaction, it completes that recovery and returns without starting new work; run the command again afterwards.
 
+A recovery-only mutation returns **3**, so a caller cannot mistake recovery for completion of the requested operation. `repair` itself returns 0 when recovery completes or none is required. Waiting for a busy boot lock returns **75** after the bounded wait; wait for the current operation to finish and retry. An unsafe lock path or failed proof is an error, not ordinary contention.
+
 ## Setting Up Secure Boot
 
 Run these steps in order. Each command prints the next instruction only after it has proved the current state by direct read-back.
@@ -198,6 +200,8 @@ Updating `omasecboot` itself is not a boot mutation and is allowed in any lifecy
 
 All mutating commands require root, refuse unknown arguments, and complete any pending recovery before doing new work.
 
+Use `omasecboot <command> --help` or `-h`, including `omasecboot windows <command> --help`, without root or operational dependencies. The global `--quiet` option precedes the command and suppresses optional progress while preserving warnings and required instructions. Diagnostics go to stderr. Redirected output is plain text; `NO_COLOR` and a dumb terminal also disable color. Interactive confirmation needs a terminal attached to stdin and stderr; there is no noninteractive confirmation bypass.
+
 | Command | Purpose |
 |---|---|
 | `setup` | Prepare or reuse a validated plan, confirm PK fingerprints, prove artifacts, and print the next firmware instruction |
@@ -210,7 +214,7 @@ All mutating commands require root, refuse unknown arguments, and complete any p
 | `windows preflight` | The read-only encryption preparation gate |
 | `windows setup` | Record the validated target and write the managed Limine entry |
 | `windows suppress` | Remove the managed Limine entry, keep the opt-in |
-| `windows bootnext` | Request one firmware handoff to Windows; exit 3 means lifecycle recovery ran and no request was made, so run it again |
+| `windows bootnext` | Request one firmware handoff to Windows; as with other mutations, exit 3 means recovery ran and the request was not made |
 | `unconfigure` | Restore recorded settings and stock boot state, commit `disabled` |
 | `repair` | Resume the interrupted operation recorded in the lifecycle |
 | `version` | Print `omasecboot 1.0.0` |
@@ -263,6 +267,7 @@ These are four different operations. None of them is a factory reset.
 | `... blocked while full snapshot restore is running` | The `limine-snapper-restore` marker under `/run/lock` exists: a full restore is running, or one crashed and left it behind | Wait for the restore to finish; a reboot clears a stale marker. After confirming no restore is running you may remove `/run/lock/limine-snapper-restore.lock` yourself |
 | `Boot-mutating package transaction blocked: ... disable lifecycle before changing pinned producers` | A pacman transaction would change a supported package while active | See Day-to-Day Operation |
 | `Boot-mutating package transaction blocked: lifecycle is transition ...` | Another OmaSecBoot transaction is running or was interrupted | Wait, then `sudo omasecboot repair` |
+| `Boot state is busy` (exit 75) | Another operation holds a required boot lock | Wait for that operation to finish, then retry. Do not delete the lock file or infer that recovery failed |
 | `Package removal requires verified disabled or pristine lifecycle state` | The removal guard refused | Run `unconfigure` first |
 | `Lifecycle: recovery-required (...)` | A mutation or rollback failed | `sudo omasecboot repair`; do not intervene manually |
 | `Enrollment requires validated Setup Mode; current setup state is N` | `enroll` was run outside state 2 | Follow the instruction `setup` prints for that state |

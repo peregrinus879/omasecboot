@@ -315,7 +315,7 @@ registered_producer_repair() {
 
   transaction_phase_start "reconstruct-producer" || return 1
   producer_reconstruction_preflight || return 1
-  run_registered_producer_preparation "$producer" "$recovery" || return 1
+  run_registered_producer_preparation "$producer" "$recovery" || return "$?"
   transaction_phase_complete "reconstruct-producer" || return 1
   artifact_repair_preflight || return 1
   repair_boot_artifacts

@@ -1017,7 +1017,7 @@ test_absent_mode_variables() {
 test_observation_explanation() {
   local backup_id output
   setup_fixture observation-explanation
-  output=$(explain_setup_observation)
+  output=$(explain_setup_observation 2>&1)
   grep -Fq 'Observed: SetupMode=0 SecureBoot=0 AuditMode=0 DeployedMode=0' <<< "$output" \
     || fail_test "explanation without a backup omitted the mode variables"
   if grep -Fq 'versus' <<< "$output"; then
@@ -1026,7 +1026,7 @@ test_observation_explanation() {
   backup_id=$(prepare_and_activate)
   enter_setup_mode
   rm -f "$(firmware_variable_path KEK)"
-  output=$(explain_setup_observation "$backup_id")
+  output=$(explain_setup_observation "$backup_id" 2>&1)
   grep -Fq 'Observed: SetupMode=1 SecureBoot=0 AuditMode=0 DeployedMode=0' <<< "$output" \
     || fail_test "explanation omitted the mode variables"
   grep -Fq 'KEK: absent, versus backup: different, versus plan: different' <<< "$output" \
@@ -1050,7 +1050,7 @@ test_observation_explanation() {
     fail_test "post-db failure fixture reported success"
   fi
   SBCTL_FAIL_PHASE=""
-  output=$(explain_setup_observation "$backup_id")
+  output=$(explain_setup_observation "$backup_id" 2>&1)
   grep -Fq 'Lifecycle: recovery-required; run sudo omasecboot repair and do not intervene manually' \
     <<< "$output" || fail_test "explanation omitted the pending recovery"
   if grep -Fqi 'nothing was changed' <<< "$output"; then
@@ -1065,7 +1065,7 @@ test_observation_explanation() {
     || fail_test "recovered enrollment was not observed as state 4"
   # A damaged plan reads as unknown, never as a firmware difference.
   mv "$(firmware_plan_path "$backup_id")/db.entries" "${CASE_DIR}/db.entries.aside"
-  output=$(explain_setup_observation "$backup_id")
+  output=$(explain_setup_observation "$backup_id" 2>&1)
   grep -Fq "Enrollment plan ${backup_id}: failed validation" <<< "$output" \
     || fail_test "explanation did not report the damaged plan"
   grep -Fq 'db: present, versus backup: different, versus plan: unknown' <<< "$output" \
@@ -1077,7 +1077,7 @@ test_observation_explanation() {
   if validate_setup_instruction_boundary "$backup_id" 3; then
     fail_test "a db serviced after enrollment passed the state 3 boundary"
   fi
-  output=$(explain_setup_observation "$backup_id")
+  output=$(explain_setup_observation "$backup_id" 2>&1)
   grep -Fq 'db: present, versus backup: different, versus plan: different' <<< "$output" \
     || fail_test "explanation did not name the serviced db"
   grep -Fq 'PK: present, versus backup: different, versus plan: exact' <<< "$output" \

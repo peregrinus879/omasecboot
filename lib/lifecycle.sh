@@ -2730,7 +2730,7 @@ recover_lifecycle_if_required() {
   local rc=0
   _lifecycle_recovery_performed=false
   require_control_root || return 1
-  with_boot_repair_lock || return 1
+  with_boot_repair_lock || return "$?"
   lifecycle_package_boundary_is_clear || {
     release_boot_repair_lock
     return 1
@@ -3479,7 +3479,7 @@ run_lifecycle_transaction_with_preflight() {
   local callback_rc=0 begin_rc=0
 
   require_control_root || return 1
-  with_boot_repair_lock || return 1
+  with_boot_repair_lock || return "$?"
   lifecycle_package_boundary_is_clear || {
     release_boot_repair_lock
     return 1

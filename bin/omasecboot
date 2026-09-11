@@ -25,11 +25,16 @@ done
 # a caller that chains on success (the Windows menu) never mistakes recovery
 # for the request it asked for.
 run_recoverable_command() {
-  local name="$1" recovery_status="$2"
+  local name="$1" recovery_status="$2" rc
   shift 2
   check_root "$name"
   check_recovery_deps
   recover_lifecycle_if_required || {
+    rc=$?
+    if (( rc == 75 )); then
+      warn "Boot state is busy; no new ${name} operation was started. Retry after the current operation finishes."
+      return 75
+    fi
     fail "Lifecycle recovery failed; no new ${name} mutation was attempted"
     return 1
   }
@@ -48,7 +53,7 @@ cmd_setup() {
     return 2
   }
   header "Secure Boot Setup"
-  run_recoverable_command setup 0 setup_mutation
+  run_recoverable_command setup 3 setup_mutation
 }
 
 # A declined plan confirmation leaves the prepared backup and plan recorded
@@ -59,10 +64,14 @@ setup_plan_declined() {
 }
 
 setup_mutation() {
-  local backup_id state repair_required=true backup_rc=0
+  local backup_id state repair_required=true backup_rc=0 rc
+  require_gum
   check_deps
   check_efi_mode
-  require_gum
+  lifecycle_activation_environment_is_ready || {
+    fail "Setup requires the supported installed command, producer packages, and hooks; no setup preparation was started"
+    return 1
+  }
 
   backup_id=$(current_setup_backup_id) || backup_rc=$?
   if (( backup_rc == 2 )); then
@@ -75,6 +84,8 @@ setup_mutation() {
       return 1
     }
     prepare_state_aware_setup true || {
+      rc=$?
+      (( rc != 75 )) || return 75
       fail "Setup preparation did not complete; the lifecycle line below says whether recovery is required"
       explain_setup_observation
       return 1
@@ -99,6 +110,8 @@ setup_mutation() {
     gum confirm "Confirm retained trust entries and recovery preparation were reviewed?" \
       || setup_plan_declined || return 1
     activate_confirmed_enrollment_plan "$backup_id" true true true || {
+      rc=$?
+      (( rc != 75 )) || return 75
       fail "Plan activation did not complete; the lifecycle line below says whether recovery is required"
       explain_setup_observation "$backup_id"
       return 1
@@ -107,6 +120,8 @@ setup_mutation() {
   fi
   if [[ "$repair_required" == true ]]; then
     run_artifact_repair sign || {
+      rc=$?
+      (( rc != 75 )) || return 75
       fail "Boot artifact repair did not complete; the lifecycle line below says whether recovery is required"
       explain_setup_observation "$backup_id"
       return 1
@@ -154,11 +169,11 @@ cmd_enroll() {
     return 2
   }
   header "Key Enrollment"
-  run_recoverable_command enroll 0 enroll_mutation
+  run_recoverable_command enroll 3 enroll_mutation
 }
 
 enroll_mutation() {
-  local backup_id state
+  local backup_id state rc
   check_deps
   check_efi_mode
   require_gum
@@ -184,6 +199,8 @@ enroll_mutation() {
     return 1
   }
   run_enrollment "$backup_id" || {
+    rc=$?
+    (( rc != 75 )) || return 75
     fail "Enrollment did not complete; the lifecycle line below says whether recovery is required"
     explain_setup_observation "$backup_id"
     return 1
@@ -218,11 +235,30 @@ verify_adoption_observations() {
     "$expected_after_save" ]] || return 1
 }
 
+validate_adoption_original() {
+  local option="$1" value="$2"
+  if [[ "$value" == unknown ]]; then
+    fail "Adoption requires known original values so unconfiguration remains available"
+    return 2
+  fi
+  case "$option" in
+    --verification-original|--enrollment-original)
+      case "$value" in yes|no|unset) return 0 ;; esac
+      fail "Invalid value for ${option}: ${value}. Expected yes, no, or unset."
+      ;;
+    --before-save-original|--after-save-original)
+      case "$value" in present|absent) return 0 ;; esac
+      fail "Invalid value for ${option}: ${value}. Expected present or absent."
+      ;;
+    *) fail "Unknown adoption option: ${option}" ;;
+  esac
+  return 2
+}
+
 cmd_adopt() {
   local original_verification="" original_enrollment=""
   local original_before_save="" original_after_save=""
 
-  header "Adopt Existing Configuration"
   while (( $# > 0 )); do
     case "$1" in
       --verification-original|--enrollment-original|--before-save-original|--after-save-original)
@@ -230,6 +266,9 @@ cmd_adopt() {
           fail "Missing value for $1"
           return 2
         }
+        # Validate every supplied value before recovery, including an earlier
+        # occurrence of an option repeated later on the command line.
+        validate_adoption_original "$1" "$2" || return "$?"
         case "$1" in
           --verification-original) original_verification="$2" ;;
           --enrollment-original) original_enrollment="$2" ;;
@@ -244,7 +283,8 @@ cmd_adopt() {
         ;;
     esac
   done
-  run_recoverable_command adopt 0 adopt_mutation "$original_verification" \
+  header "Adopt Existing Configuration"
+  run_recoverable_command adopt 3 adopt_mutation "$original_verification" \
     "$original_enrollment" "$original_before_save" "$original_after_save"
 }
 
@@ -252,7 +292,7 @@ adopt_mutation() {
   local original_verification="$1" original_enrollment="$2"
   local original_before_save="$3" original_after_save="$4"
   local observed_verification observed_enrollment
-  local observed_before_save observed_after_save config
+  local observed_before_save observed_after_save config rc
 
   if [[ "$original_verification" == unknown || "$original_enrollment" == unknown \
     || "$original_before_save" == unknown || "$original_after_save" == unknown ]]; then
@@ -326,6 +366,8 @@ adopt_mutation() {
     "$observed_enrollment" "$original_enrollment" \
     "$observed_before_save" "$original_before_save" \
     "$observed_after_save" "$original_after_save" || {
+    rc=$?
+    (( rc != 75 )) || return 75
     fail "Could not commit the adoption record"
     return 1
   }
@@ -333,15 +375,21 @@ adopt_mutation() {
 }
 
 cmd_windows_help() {
+  if (( $# > 0 )); then
+    cmd_command_help "windows $1"
+    return "$?"
+  fi
   header "Windows Dual-Boot"
-  echo -e "  ${BOLD}Usage${NC}   sudo omasecboot windows <command>"
+  print_message "  ${BOLD}Usage${NC}   omasecboot [--quiet] windows <command>"
   echo
-  echo -e "  ${BOLD}Commands${NC}"
+  print_message "  ${BOLD}Commands${NC}"
   echo "    available   Check the recorded Windows handoff without root or output"
   echo "    preflight   Run the read-only Windows encryption preparation gate"
   echo "    setup       Configure the validated firmware handoff"
   echo "    suppress    Suppress an unsafe managed handoff"
   echo "    bootnext    Request one direct firmware handoff"
+  echo
+  echo "  Use omasecboot windows <command> --help for requirements and outcomes."
   echo
 }
 
@@ -360,6 +408,7 @@ cmd_windows_available() {
 }
 
 windows_setup_mutation() {
+  require_gum
   check_deps
   check_efi_mode
   add_windows_boot_entry
@@ -378,17 +427,21 @@ windows_bootnext_mutation() {
 }
 
 cmd_windows() {
+  if [[ $# -eq 2 && ( "$2" == --help || "$2" == -h ) ]]; then
+    cmd_windows_help "$1"
+    return "$?"
+  fi
   if (( $# > 1 )); then
     cmd_windows_help
     fail "Expected one Windows command"
-    return 1
+    return 2
   fi
 
   case "${1:-}" in
     available) cmd_windows_available ;;
     preflight) cmd_windows_preflight ;;
-    setup) run_recoverable_command "windows setup" 0 windows_setup_mutation ;;
-    suppress) run_recoverable_command "windows suppress" 0 windows_suppress_mutation ;;
+    setup) run_recoverable_command "windows setup" 3 windows_setup_mutation ;;
+    suppress) run_recoverable_command "windows suppress" 3 windows_suppress_mutation ;;
     bootnext) run_recoverable_command "windows bootnext" 3 windows_bootnext_mutation ;;
     help|--help|-h)
       cmd_windows_help
@@ -410,7 +463,7 @@ cmd_cleanup() {
     fail "Cleanup does not accept arguments"
     return 2
   }
-  run_recoverable_command cleanup 0 cleanup_mutation
+  run_recoverable_command cleanup 3 cleanup_mutation
 }
 
 cleanup_mutation() {
@@ -423,7 +476,7 @@ cmd_sign() {
     fail "Signing does not accept arguments"
     return 2
   }
-  run_recoverable_command sign 0 sign_mutation
+  run_recoverable_command sign 3 sign_mutation
 }
 
 sign_mutation() {
@@ -438,7 +491,7 @@ cmd_unconfigure() {
     return 2
   }
   header "Disable OmaSecBoot Management"
-  run_recoverable_command unconfigure 0 unconfigure_mutation
+  run_recoverable_command unconfigure 3 unconfigure_mutation
 }
 
 unconfigure_mutation() {
@@ -453,6 +506,7 @@ unconfigure_mutation() {
 }
 
 cmd_repair() {
+  local rc
   [[ $# -eq 0 ]] || {
     fail "Repair does not accept arguments"
     return 2
@@ -461,6 +515,15 @@ cmd_repair() {
   check_root repair
   check_recovery_deps
   recover_lifecycle_if_required || {
+    rc=$?
+    if (( rc == 75 )); then
+      if [[ "$_lifecycle_recovery_performed" == true ]]; then
+        warn "Boot state is busy; lifecycle recovery did not complete. Retry after the current operation finishes."
+      else
+        warn "Boot state is busy; no new repair operation was started. Retry after the current operation finishes."
+      fi
+      return 75
+    fi
     fail "Lifecycle recovery failed"
     return 1
   }
@@ -510,7 +573,7 @@ cmd_guard() {
       ;;
     removal)
       require_control_root || return 1
-      with_boot_repair_lock || return 1
+      with_boot_repair_lock || return "$?"
       if ! lifecycle_removal_is_allowed; then
         fail "Package removal requires verified disabled or pristine lifecycle state"
         rc=1
@@ -522,15 +585,66 @@ cmd_guard() {
   esac
 }
 
+cmd_command_help() {
+  local name="$1" description interactive=false mutation=true
+  case "$name" in
+    setup) description="Prepare the firmware backup and confirmed trust plan, then repair and prove boot artifacts."; interactive=true ;;
+    adopt) description="Record an existing configuration and its known originals so it can be unconfigured." ;;
+    enroll) description="Enroll the confirmed firmware trust plan after validating Setup Mode."; interactive=true ;;
+    sign) description="Repair and prove managed EFI artifacts and current Limine config enrollment." ;;
+    cleanup) description="Remove stale sbctl tracking entries under lifecycle protection." ;;
+    unconfigure) description="Restore recorded settings and stock boot state, then disable management."; interactive=true ;;
+    repair) description="Resume only the registered interrupted operation; succeed if recovery completes or none is required." ;;
+    status) description="Show lifecycle and Secure Boot status with file verification. Root is needed for complete protected-state observations."; mutation=false ;;
+    version) description="Show the installed OmaSecBoot version."; mutation=false ;;
+    windows) cmd_windows_help; return ;;
+    "windows available") description="Silently check whether the opt-in record still matches one valid firmware target. No root required."; mutation=false ;;
+    "windows preflight") description="Run the read-only Windows encryption preparation gate as root; follow its required acknowledgments."; mutation=false ;;
+    "windows setup") description="Configure a validated Windows firmware handoff and prove the managed Limine entry."; interactive=true ;;
+    "windows suppress") description="Remove an unsafe managed Windows handoff after proving suppression is required." ;;
+    "windows bootnext") description="Request one direct Windows firmware handoff. This command does not reboot or prove Windows booted." ;;
+    help) cmd_help; return ;;
+    *) fail "Unknown help topic: ${name}"; return 2 ;;
+  esac
+  header "${name} Help"
+  printf '  Usage: omasecboot [--quiet] %s' "$name"
+  [[ "$name" != adopt ]] || printf ' [original-value options]'
+  printf '\n\n  %s\n\n' "$description"
+  if [[ "$name" == adopt ]]; then
+    printf '%s\n' \
+      '  Original-value options:' \
+      '    --verification-original yes|no|unset' \
+      '    --enrollment-original yes|no|unset' \
+      '    --before-save-original present|absent' \
+      '    --after-save-original present|absent' \
+      '  Omitted originals are prompted for in a terminal; unknown values are refused.' ''
+  fi
+  if [[ "$mutation" == true ]]; then
+    printf '%s\n' '  Run as root. Pending lifecycle recovery runs before any new requested operation.'
+    if [[ "$name" == repair ]]; then
+      printf '%s\n' '  Exit 0: recovery completed or none was required.'
+    else
+      printf '%s\n' '  Exit 3: recovery completed; the requested operation was not started. Run it again.'
+    fi
+    printf '%s\n' '  Exit 75: boot state is busy; retry after the current operation finishes.'
+  fi
+  if [[ "$interactive" == true ]]; then
+    printf '%s\n' '  Confirmation requires gum and a terminal with stdin and stderr attached.'
+  fi
+  printf '\n%s\n' \
+    '  --help, -h  Show help without root or operational dependencies.' \
+    '  --quiet     Global option: suppress optional progress, keeping warnings and required instructions.' ''
+}
+
 cmd_help() {
   [[ $# -eq 0 ]] || return 2
   header "Command Help"
   echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
   echo "  Mutations use durable recovery and fail closed on unproved state."
   echo
-  echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
+  print_message "  ${BOLD}Usage${NC}   omasecboot [--quiet] <command>"
   echo
-  echo -e "  ${BOLD}Commands${NC}"
+  print_message "  ${BOLD}Commands${NC}"
   echo "    setup       Prepare and prove the Secure Boot lifecycle"
   echo "    adopt       Record an existing configuration explicitly"
   echo "    enroll      Enroll the confirmed firmware trust plan"
@@ -543,7 +657,13 @@ cmd_help() {
   echo "    version     Show the installed OmaSecBoot version"
   echo "    help        Show this help"
   echo
-  echo -e "  ${DIM}Safety:${NC} Change firmware trust only when setup or enroll prints a validated instruction."
+  printf '%s\n' \
+    '  --help, -h  Show global or command help without root or operational dependencies.' \
+    '  --quiet     Suppress optional progress; warnings and required instructions stay visible.' \
+    '  Use omasecboot <command> --help for command requirements and options.' '' \
+    '  Mutations require root. Exit 3 means recovery completed without starting the requested operation.' \
+    '  repair itself returns 0 after completed recovery. Exit 75 means boot state is busy.' ''
+  print_message "  ${DIM}Safety:${NC} Change firmware trust only when setup or enroll prints a validated instruction."
   echo
 }
 
@@ -557,6 +677,11 @@ main() {
       *)       break ;;
     esac
   done
+
+  if [[ $# -eq 2 && ( "$2" == --help || "$2" == -h ) ]]; then
+    cmd_command_help "$1"
+    return "$?"
+  fi
 
   case "${1:-}" in
     setup)    shift; cmd_setup "$@" ;;

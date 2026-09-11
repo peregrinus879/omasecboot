@@ -24,24 +24,40 @@ readonly WINDOWS_BOOTNEXT_LOADER_PATH='\EFI\Microsoft\Boot\bootmgfw.efi'
 
 # --- Colors ------------------------------------------------------------------
 
-readonly GREEN='\033[0;32m'
-readonly RED='\033[0;31m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly DIM='\033[2m'
-readonly BOLD='\033[1m'
-readonly NC='\033[0m'
+output_supports_color() {
+  [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != dumb && -z "${NO_COLOR:-}" ]]
+}
+
+# Some callers decorate arguments themselves. Use real escapes, never text
+# that would require interpreting an operator's paths or messages with %b.
+if output_supports_color && [[ -t 2 ]]; then
+  readonly GREEN=$'\033[0;32m' RED=$'\033[0;31m' YELLOW=$'\033[1;33m'
+  readonly BLUE=$'\033[0;34m' DIM=$'\033[2m' BOLD=$'\033[1m' NC=$'\033[0m'
+else
+  readonly GREEN='' RED='' YELLOW='' BLUE='' DIM='' BOLD='' NC=''
+fi
 
 # --- Output helpers ----------------------------------------------------------
 
-header() { echo -e "\n${BOLD}OmaSecBoot${NC} ${DIM}-${NC} ${BOLD}$*${NC}\n"; }
-pass()   { echo -e "  ${GREEN}✓${NC} $*"; }
-fail()   { echo -e "  ${RED}✗${NC} $*"; }
-warn()   { echo -e "  ${YELLOW}!${NC} $*"; }
-act()    { echo -e "  ${BLUE}→${NC} $*"; }
+print_message() {
+  local text="$*" decoration
+  # Also handle a helper redirected after the library was loaded on a TTY.
+  if ! output_supports_color; then
+    for decoration in "$GREEN" "$RED" "$YELLOW" "$BLUE" "$DIM" "$BOLD" "$NC"; do
+      [[ -z "$decoration" ]] || text=${text//"$decoration"/}
+    done
+  fi
+  printf '%s\n' "$text"
+}
+
+header() { print_message $'\n'"${BOLD}OmaSecBoot${NC} ${DIM}-${NC} ${BOLD}$*${NC}"$'\n'; }
+pass()   { print_message "  ${GREEN}✓${NC} $*"; }
+fail()   { print_message "  ${RED}✗${NC} $*" >&2; }
+warn()   { print_message "  ${YELLOW}!${NC} $*" >&2; }
+act()    { print_message "  ${BLUE}→${NC} $*"; }
 die()    { fail "$*"; exit 1; }
 
-# Quiet mode: only show errors
+# Quiet mode suppresses optional progress, never warnings or required guidance.
 QUIET=false
 qpass() { [[ "$QUIET" == true ]] || pass "$@"; }
 qact()  { [[ "$QUIET" == true ]] || act "$@"; }
@@ -307,9 +323,22 @@ inherited_limine_fd_is_valid() {
 lock_inherited_limine_fd() {
   command -v flock >/dev/null 2>&1 || return 1
   inherited_limine_fd_is_valid || return 1
-  flock -w 30 200 || return 1
+  flock -E 75 -w 30 200 || {
+    lock_acquisition_failed "inherited Limine global lock" "$?"
+    return "$?"
+  }
   inherited_limine_fd_is_valid || return 1
   _OMASECBOOT_LIMINE_LOCK_OWNED=inherited
+}
+
+lock_acquisition_failed() {
+  local name="$1" rc="$2"
+  if (( rc == 75 )); then
+    warn "Boot state is busy: ${name} is held by another operation"
+  else
+    fail "Could not acquire ${name} (status ${rc})"
+  fi
+  return "$rc"
 }
 
 inherited_repair_fd_is_valid() {
@@ -317,6 +346,7 @@ inherited_repair_fd_is_valid() {
 }
 
 with_repair_lock() {
+  local lock_file rc
   [[ "$_OMASECBOOT_REPAIR_LOCK_OWNED" == true ]] && return 0
   command -v flock >/dev/null 2>&1 || {
     fail "flock not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
@@ -324,15 +354,18 @@ with_repair_lock() {
   }
   ensure_state_layout || return 1
 
-  if inherited_repair_fd_is_valid \
-    && flock -n 201 \
-    && inherited_repair_fd_is_valid; then
-    _OMASECBOOT_REPAIR_LOCK_OWNED=true
-    _OMASECBOOT_REPAIR_LOCK_MODE=inherited
-    return 0
+  if inherited_repair_fd_is_valid; then
+    flock -E 75 -n 201 || {
+      lock_acquisition_failed "inherited repair lock" "$?"
+      return "$?"
+    }
+    if inherited_repair_fd_is_valid; then
+      _OMASECBOOT_REPAIR_LOCK_OWNED=true
+      _OMASECBOOT_REPAIR_LOCK_MODE=inherited
+      return 0
+    fi
   fi
 
-  local lock_file
   exec 201>&- || true
   lock_file="$(state_dir_path)/repair.lock"
   prepare_control_lock_file "$lock_file" 644 || {
@@ -344,10 +377,11 @@ with_repair_lock() {
     exec 201>&-
     return 1
   }
-  flock -w 30 201 || {
+  flock -E 75 -w 30 201 || {
+    rc=$?
     exec 201>&-
-    fail "Could not acquire repair lock"
-    return 1
+    lock_acquisition_failed "repair lock" "$rc"
+    return "$rc"
   }
   fd_matches_path 201 "$lock_file" || {
     exec 201>&-
@@ -358,6 +392,7 @@ with_repair_lock() {
 }
 
 with_limine_lock() {
+  local lock_file rc
   [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" != false ]] && return 0
   command -v flock >/dev/null 2>&1 || {
     fail "flock not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
@@ -366,10 +401,14 @@ with_limine_lock() {
 
   if lock_inherited_limine_fd; then
     return 0
+  else
+    rc=$?
+    # Validation uses 1; flock uses sysexits codes and explicit conflict 75.
+    # Only an invalid inherited descriptor falls back to the current path.
+    (( rc == 1 )) || return "$rc"
   fi
 
   exec 200>&- || true
-  local lock_file
   lock_file=$(limine_lock_path)
   prepare_control_lock_file "$lock_file" 644 || {
     fail "Unsafe Limine lock path: ${lock_file}"
@@ -380,10 +419,11 @@ with_limine_lock() {
     exec 200>&-
     return 1
   }
-  flock -w 30 200 || {
+  flock -E 75 -w 30 200 || {
+    rc=$?
     exec 200>&-
-    fail "Could not acquire Limine global lock"
-    return 1
+    lock_acquisition_failed "Limine global lock" "$rc"
+    return "$rc"
   }
   fd_matches_path 200 "$lock_file" || {
     exec 200>&-
@@ -411,10 +451,12 @@ boot_locks_are_held() {
 }
 
 with_boot_repair_lock() {
-  with_limine_lock || return 1
+  local rc
+  with_limine_lock || return "$?"
   with_repair_lock || {
+    rc=$?
     release_limine_lock
-    return 1
+    return "$rc"
   }
 }
 
@@ -436,7 +478,8 @@ with_limine_lock_handoff() {
   if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == local ]]; then
     with_delegated_limine_lock "$@" || child_rc=$?
     if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false ]]; then
-      with_limine_lock || return 1
+      (( child_rc != 75 )) || return 75
+      with_limine_lock || return "$?"
     fi
     return "$child_rc"
   fi
@@ -445,12 +488,19 @@ with_limine_lock_handoff() {
   flock -u 200 || return 1
   _OMASECBOOT_LIMINE_LOCK_OWNED=false
   "$@" || child_rc=$?
-  flock -w 30 200 || lock_rc=$?
+  flock -E 75 -w 30 200 || lock_rc=$?
   if [[ $lock_rc -eq 0 ]] && inherited_limine_fd_is_valid; then
     _OMASECBOOT_LIMINE_LOCK_OWNED=inherited
   else
     _OMASECBOOT_LIMINE_LOCK_OWNED=false
-    with_limine_lock || return 1
+    # Do not wait twice for the same lock. If its pathname was replaced,
+    # recover the current lock as required by the handoff protocol instead.
+    if (( lock_rc == 75 )) && inherited_limine_fd_is_valid; then
+      lock_acquisition_failed "inherited Limine global lock after handoff" "$lock_rc"
+      return "$lock_rc"
+    fi
+    with_limine_lock || return "$?"
+    (( lock_rc == 0 )) || return "$lock_rc"
     return 1
   fi
   return "$child_rc"

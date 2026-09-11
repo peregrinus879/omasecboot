@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC1091,SC2154 # Fixtures source modules and inspect their globals.
+# shellcheck disable=SC1091,SC2154,SC2329 # Fixtures source modules, inspect globals and override indirect callbacks.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -7,20 +7,9 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "${ROOT_DIR}/tests/lib/harness.sh"
 test_harness_init producer-repair
 
-# shellcheck source=../lib/common.sh
-source "${ROOT_DIR}/lib/common.sh"
-# shellcheck source=../lib/lifecycle.sh
-source "${ROOT_DIR}/lib/lifecycle.sh"
-# shellcheck source=../lib/records.sh
-source "${ROOT_DIR}/lib/records.sh"
-# shellcheck source=../lib/software.sh
-source "${ROOT_DIR}/lib/software.sh"
-# shellcheck source=../lib/discover.sh
-source "${ROOT_DIR}/lib/discover.sh"
-# shellcheck source=../lib/sign.sh
-source "${ROOT_DIR}/lib/sign.sh"
-# shellcheck source=../lib/producers.sh
-source "${ROOT_DIR}/lib/producers.sh"
+# The public repair dispatcher must preserve the recovery callback's result.
+# shellcheck source=../bin/omasecboot
+source "${ROOT_DIR}/bin/omasecboot"
 
 export QUIET=true
 
@@ -418,11 +407,97 @@ run_conflict_case() (
   assert_recovered_case "$context" "$root_id"
 )
 
-run_repair_case package
-run_repair_case uki-build
-run_repair_case entry-tool
-run_repair_case snapshot-sync
-run_repair_case full-restore
-run_conflict_case package
+run_recovery_contention_case() (
+  trap - EXIT
+  local root_id root_hash root_seal_hash attempt_id attempt_manifest rc=0
+  local witness busy=true
+  setup_fixture recovery-contention
+  set_producer_context uki-build || fail_test "contention: producer context failed"
+  with_boot_repair_lock || fail_test "contention: could not lock the producer root"
+  read_lifecycle || fail_test "contention: active lifecycle was unreadable"
+  begin_registered_producer_lease || fail_test "contention: producer lease failed"
+  read_lifecycle || fail_test "contention: producer lease was unreadable"
+  root_id=$_lifecycle_transaction_id
+  adopt_transaction_context "$root_id" || fail_test "contention: could not adopt root context"
+  rollback_and_mark_recovery 97 "fixture producer interruption" failed \
+    || fail_test "contention: could not publish failed producer root"
+  release_boot_repair_lock
+  root_hash=$(sha256_file "$(lifecycle_manifest_path "$root_id")")
+  root_seal_hash=$(sha256_file "$(lifecycle_incident_path "$root_id")")
+  witness="${CASE_DIR}/contention-witness.json"
+
+  check_root() { return 0; }
+  rebuild_with_competing_lock() {
+    create_uki_output || return 1
+    [[ "$busy" == true ]] || return 0
+    jq -cn --arg id "$_transaction_id" \
+      --arg lifecycle_hash "$(sha256_file "$(lifecycle_file_path)")" \
+      --arg manifest_hash "$(sha256_file "$(lifecycle_manifest_path "$_transaction_id")")" \
+      '{id: $id, lifecycle_hash: $lifecycle_hash, manifest_hash: $manifest_hash}' \
+      > "$witness" || return 1
+    # A distinct open file description acquires FD 200's released lock. This
+    # descriptor belongs to the command subshell and closes when it exits.
+    exec 9>> "$(limine_lock_path)"
+    command flock -n 9
+  }
+  run_package_producer_reconstruction() {
+    with_limine_lock_handoff rebuild_with_competing_lock
+  }
+  flock() {
+    if [[ "$*" == '-E 75 -w 30 200' ]]; then
+      command flock -E 75 -w 0.05 200
+    else
+      command flock "$@"
+    fi
+  }
+
+  (trap - EXIT; main repair) > "${CASE_DIR}/repair.out" 2> "${CASE_DIR}/repair.err" || rc=$?
+  [[ $rc -eq 75 ]] || fail_test "contention: public repair lost temporary status (${rc})"
+  grep -Fq 'lifecycle recovery did not complete' "${CASE_DIR}/repair.err" \
+    || fail_test "contention: public repair omitted its incomplete-recovery outcome"
+  if grep -Eqi 'recovery failed|nothing (was )?changed' "${CASE_DIR}/repair.err"; then
+    fail_test "contention: public repair misreported the mutation or failure"
+  fi
+  grep -Fxq 'RECONSTRUCTED UKI' "$(esp_path)/EFI/Linux/omarchy_linux.efi" \
+    || fail_test "contention: fixture never reached reconstruction"
+  attempt_id=$(jq -r '.id' "$witness")
+  attempt_manifest=$(lifecycle_manifest_path "$attempt_id")
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$(jq -r '.lifecycle_hash' "$witness")" \
+    && $(sha256_file "$attempt_manifest") == "$(jq -r '.manifest_hash' "$witness")" ]] \
+    || fail_test "contention: recovery published state after losing the shared lock"
+  read_lifecycle || fail_test "contention: retained recovery transition is unreadable"
+  [[ "$_lifecycle_state" == transition && "$_lifecycle_transaction_id" == "$attempt_id" ]] \
+    || fail_test "contention: recovery lost its durable attempt"
+  [[ ! -e "$(lifecycle_incident_path "$attempt_id")" ]] \
+    || fail_test "contention: an unlocked attempt was sealed"
+  [[ $(sha256_file "$(lifecycle_manifest_path "$root_id")") == "$root_hash" \
+    && $(sha256_file "$(lifecycle_incident_path "$root_id")") == "$root_seal_hash" ]] \
+    || fail_test "contention: recovery changed its sealed predecessor"
+
+  # The prior command has exited and its competing descriptor is gone. The
+  # actual public recovery path must reconcile and finish the retained attempt.
+  busy=false
+  main repair > "${CASE_DIR}/retry.out" 2> "${CASE_DIR}/retry.err" \
+    || fail_test "contention: public repair did not recover on retry"
+  read_lifecycle || fail_test "contention: recovered state is unreadable"
+  [[ "$_lifecycle_state" == active ]] || fail_test "contention: retry did not restore active state"
+  jq -e '.last_recovery.attempt_count == 2 and
+    .last_recovery.final_attempt.status == "completed"' <<< "$_lifecycle_json" \
+    >/dev/null || fail_test "contention: retry did not preserve the interrupted attempt"
+)
+
+case "${PRODUCER_REPAIR_TEST_CASE:-all}" in
+  contention) run_recovery_contention_case ;;
+  all)
+    run_repair_case package
+    run_repair_case uki-build
+    run_repair_case entry-tool
+    run_repair_case snapshot-sync
+    run_repair_case full-restore
+    run_conflict_case package
+    run_recovery_contention_case
+    ;;
+  *) fail_test "unknown PRODUCER_REPAIR_TEST_CASE: ${PRODUCER_REPAIR_TEST_CASE}" ;;
+esac
 
 printf 'producer repair integration tests passed\n'

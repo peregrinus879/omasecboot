@@ -54,6 +54,10 @@ check_efi_mode() {
 require_gum() {
   command -v gum >/dev/null 2>&1 \
     || die "gum not installed. Run: ${BOLD}sudo pacman -S gum${NC}"
+  # gum choose returns its selection on stdout, which may be captured. Input
+  # and the prompt's stderr must remain attached to an interactive terminal.
+  [[ -t 0 && -t 2 ]] \
+    || die "An interactive terminal is required for confirmation. Run this command in a terminal with stdin and stderr attached."
 }
 
 # --- Lifecycle activation environment -----------------------------------------
