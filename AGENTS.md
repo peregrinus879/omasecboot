@@ -113,6 +113,7 @@ One name per concept, in code, tests, and documentation:
 
 - Run `make test` after code, hook, install, packaging, or menu changes. `tests/package.sh` needs a git checkout plus makepkg, fakeroot, pacman, bsdtar, vercmp, jq, git, and make. `tests/package-root.sh` runs only as root in a disposable container with `OMASECBOOT_DISPOSABLE_ROOT=1`; CI runs it on every push, and `docs/release-checklist.md` carries the local Docker rehearsal to run before changing either package test or the workflow.
 - Run `make lint` after any change: one `bash -n` per script, `shellcheck -x` over all of them, and the menu fragment parsed with `jq`.
+- Producer patch/recipe changes also run `make test-integration LIMINE_ENTRY_TOOL_SOURCE=...` and `make test-native LIMINE_ENTRY_TOOL_SOURCE=... LIMINE_NATIVE_JAVA_HOME=...` with the pinned source and JDK 25. The native suite executes actual Java publisher classes with fixture configuration; packaged-command/FAT and boot acceptance remain separate. The integration recipe builds development 1.38.0-1.3, while current runtime admission remains 1.38.0-1.1 and 1.38.0-1.2 until paired producer/core support is ready.
 
 ## Conventions
 

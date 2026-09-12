@@ -6,7 +6,7 @@
   "tag_object": "fbde7d4fc100a1fbb5196b7e5f0062da49dd0798",
   "commit": "57092d98ba9d355f180b883dea0e9cfefeace8b1",
   "release_url": "https://gitlab.com/Zesko/limine-entry-tool/-/releases/1.38.0",
-  "verified_on": "2026-09-10",
+  "verified_on": "2026-09-12",
   "archive": {
     "url": "https://gitlab.com/Zesko/limine-entry-tool/-/archive/57092d98ba9d355f180b883dea0e9cfefeace8b1/limine-entry-tool-57092d98ba9d355f180b883dea0e9cfefeace8b1.tar.gz",
     "sha256": "ad9c88c506114de4da7b47ec4839093f86b5e912822fc84b52ba71b0fc2b1e72",
@@ -37,6 +37,121 @@
       "patched_sha256": "90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99"
     }
   ],
+  "native": {
+    "schema": 1,
+    "patch": {
+      "file": "0002-propagate-native-failures.patch",
+      "sha256": "bd9f4a9cc54b4ba5623b55a79e09f0c9b34381f1a98b199b503a66f2cdcafc72",
+      "strip": 1,
+      "purpose": "Propagate detected native addition, copy, attempted hash, backup, configuration write, sync and rename failures; preserve owned scanner mount cleanup and treat path arguments and diagnostic messages literally.",
+      "removal_trigger": "Recheck the next upstream release; remove when upstream passes the same native failure and successful-no-op contracts.",
+      "scope": "Detected publication failures only. No complete output inventory, atomic multi-file publication, signing policy, native deletion guarantee or lifecycle protocol is added. Missing optional hash-tool availability keeps upstream policy."
+    },
+    "files": [
+      {
+        "path": "src/main/java/org/limine/entry/tool/Main.java",
+        "sha256": "b0f7b89375b6b13fa82b4ade1e3900cd51180002ec012704c4bafa2c67040e7f",
+        "patched_sha256": "20b24e981c836b9487f207d5320df3664335ac24f19d711034b7f090bbe3ceef"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/formats/limine8/Limine.java",
+        "sha256": "a383a9e05c69fe83ba36450d608060b27df500aa0b6b6b0f09d33f18d0b322db",
+        "patched_sha256": "a383a9e05c69fe83ba36450d608060b27df500aa0b6b6b0f09d33f18d0b322db"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/formats/limine8/LimineEntry.java",
+        "sha256": "0eb30de9641863fdf43926577ddcee470aa7f2f8024f2a6a723a36c6cc9db36a",
+        "patched_sha256": "0eb30de9641863fdf43926577ddcee470aa7f2f8024f2a6a723a36c6cc9db36a"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/BootOptions.java",
+        "sha256": "a9cbeee26e29830f399eea74f5c0add923d11744a8631f5ee6ff6da7399a492b",
+        "patched_sha256": "a9cbeee26e29830f399eea74f5c0add923d11744a8631f5ee6ff6da7399a492b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/Config.java",
+        "sha256": "b4e0f2cdeb3cb6ea05875166b6b1a7879da14bda9bfe1e54b3257d18f41a37b6",
+        "patched_sha256": "b4e0f2cdeb3cb6ea05875166b6b1a7879da14bda9bfe1e54b3257d18f41a37b6"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/ConsoleColor.java",
+        "sha256": "0f2e77df4d74216c8a5322cfadf5c27765b97be96c33624b519092104f9cd315",
+        "patched_sha256": "0f2e77df4d74216c8a5322cfadf5c27765b97be96c33624b519092104f9cd315"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/EfiBootEntry.java",
+        "sha256": "21382e9b5d050d539e37bf1cc6e1311d24abc8970820edb005ae6f31f85b79f5",
+        "patched_sha256": "21382e9b5d050d539e37bf1cc6e1311d24abc8970820edb005ae6f31f85b79f5"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/EntryOptions.java",
+        "sha256": "07ef1f08c79be22550ff006fe7a2bf947555ca2f2d9ca7fca81b9412a84a503e",
+        "patched_sha256": "07ef1f08c79be22550ff006fe7a2bf947555ca2f2d9ca7fca81b9412a84a503e"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/LogLevel.java",
+        "sha256": "a91e707a685c6884bb08f38f638377db87870456bc135799f780005c29c5a724",
+        "patched_sha256": "a91e707a685c6884bb08f38f638377db87870456bc135799f780005c29c5a724"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/Output.java",
+        "sha256": "daadf4550b1a737329809d85532a8233fc8f0bcfa5dac52854125ab0bf850322",
+        "patched_sha256": "daadf4550b1a737329809d85532a8233fc8f0bcfa5dac52854125ab0bf850322"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/TreeNode.java",
+        "sha256": "88daee795b48e9e2168d6c699e8359cc48fa9eb49d7373905f4e377e1d7ce301",
+        "patched_sha256": "88daee795b48e9e2168d6c699e8359cc48fa9eb49d7373905f4e377e1d7ce301"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ConfigReader.java",
+        "sha256": "96f6b99f491c5660a656b198de62a9af2917b223c46d9e5375ee258e20b6106d",
+        "patched_sha256": "96f6b99f491c5660a656b198de62a9af2917b223c46d9e5375ee258e20b6106d"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/EfiScanner.java",
+        "sha256": "1385e27ece2503ed61735cb93ea7c07174c85f58536e246422c2bac13bd4a372",
+        "patched_sha256": "1385e27ece2503ed61735cb93ea7c07174c85f58536e246422c2bac13bd4a372"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineManager.java",
+        "sha256": "28c90ed866dfa327ae5589b027d6bc6eda75775181dda0bc45d283ac131cee03",
+        "patched_sha256": "53ee6350c210e166768757239495fab37d5d7261b1b4466cc6112463e8c87248"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineReader.java",
+        "sha256": "9ee51f51648e30b5ca341eaaa1dc8ffdcfe217624d7491f8acb9c0969053420e",
+        "patched_sha256": "9ee51f51648e30b5ca341eaaa1dc8ffdcfe217624d7491f8acb9c0969053420e"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineWriter.java",
+        "sha256": "7b16e7c7db0a2097d4effbfcc302fd2eeed4df90c5730588f2930ba107617953",
+        "patched_sha256": "f69fcbe29ba19f91a8e6c43f46fb21303d84bc7548cfd8dd53ca99815d84ef7c"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/MacroReplacer.java",
+        "sha256": "00139c66a81abb08b5653a3359c4d57ccfcaa96bfe53687a293f3b3ebf3a7218",
+        "patched_sha256": "00139c66a81abb08b5653a3359c4d57ccfcaa96bfe53687a293f3b3ebf3a7218"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/TerminalReader.java",
+        "sha256": "10d1029303e64b5ce39ee333a4c88e26ab804d10492b49ed76ba88f378ab001b",
+        "patched_sha256": "10d1029303e64b5ce39ee333a4c88e26ab804d10492b49ed76ba88f378ab001b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/Utility.java",
+        "sha256": "2b4b2f03f5362e4fdeb9cb40f8cab8ac41bef10c780397bde87832d1c92ac4c7",
+        "patched_sha256": "f192f67770f48e4cde85b2d519ab3a5f93421a29810adbeac26043a7ecebe150"
+      }
+    ],
+    "test": {
+      "command": "bash tests/integration/limine-native.sh /absolute/path/to/unpatched-source-root /absolute/path/to/jdk25",
+      "input": "The complete bound Java source set is copied and verified before compilation. Both versions execute actual publisher classes. JDK25 is supplied by the caller; package builds use the recipe's separately hash-bound GraalVM archive.",
+      "isolation": "Bubblewrap user/mount/PID/network namespaces, read-only runtime/JDK, fixture-only filesystem/configuration/HOME/XDG, bounded Java heap and processor count. No host-execution fallback. External hash/sync/logger/cleanup commands have controlled fault injection.",
+      "scope": "Tests supply Config directly and exercise the real manager, reader, writer and helpers. They do not exercise full production configuration admission, FAT discovery or the whole scanner path; scanner cases cover its owned-mount scope. Production FAT validation is unchanged. Packaged CLI, firmware and boot acceptance are separate.",
+      "logs": "LIMINE_NATIVE_KEEP=1 retains the printed private source/class/fixture/transcript directory; otherwise cleanup removes it."
+    }
+  },
   "test": {
     "command": "bash tests/integration/limine-producer.sh /absolute/path/to/unpatched-source-root",
     "input": "No network access by the test. Supply the extracted pinned archive or an equivalent tree containing the three files above. The test copies and verifies each input SHA-256 before execution, verifies the patch and patched bytes, and leaves the caller's source unchanged. The archive digest binds the fetched archive; per-file digests are the executable input contract.",

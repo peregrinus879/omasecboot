@@ -9,13 +9,14 @@ _commit=57092d98ba9d355f180b883dea0e9cfefeace8b1
 _source_dir="${_pkgname}-${_commit}"
 _gradle_version=9.7.1
 pkgver="${_pkgver}${_extver}"
-pkgrel=1.2
+pkgrel=1.3
 pkgdesc="Install kernels for the Limine bootloader."
 arch=('x86_64' 'aarch64')
 url="https://gitlab.com/Zesko/limine-entry-tool"
 source=(
   "${url}/-/archive/${_commit}/${_source_dir}.tar.gz"
   '0001-propagate-mkinitcpio-failures.patch'
+  '0002-propagate-native-failures.patch'
 )
 source_x86_64=("https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.2.4/graalvm-community-jdk-25i2-25.0.4_linux-x64_bin.tar.gz")
 source_aarch64=(
@@ -46,6 +47,7 @@ conflicts=('limine-entry-tool')
 sha256sums=(
   'ad9c88c506114de4da7b47ec4839093f86b5e912822fc84b52ba71b0fc2b1e72'
   'ec5394d01ea403cd10dd7680ded3a45de45b779c6a009e4396fa913f77f4b317'
+  'bd9f4a9cc54b4ba5623b55a79e09f0c9b34381f1a98b199b503a66f2cdcafc72'
 )
 sha256sums_x86_64=('3f4a89de8eaa96f2ed677f09957c7e872cd8467aad3537f8b5394c1b8c4b942e')
 sha256sums_aarch64=(
@@ -61,12 +63,29 @@ prepare() {
     '7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31' \
     'install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions' \
     '90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99' \
-    'install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio' |
+    'install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio' \
+    'b0f7b89375b6b13fa82b4ade1e3900cd51180002ec012704c4bafa2c67040e7f' \
+    'src/main/java/org/limine/entry/tool/Main.java' \
+    '28c90ed866dfa327ae5589b027d6bc6eda75775181dda0bc45d283ac131cee03' \
+    'src/main/java/org/limine/entry/tool/processes/LimineManager.java' \
+    '7b16e7c7db0a2097d4effbfcc302fd2eeed4df90c5730588f2930ba107617953' \
+    'src/main/java/org/limine/entry/tool/processes/LimineWriter.java' \
+    '2b4b2f03f5362e4fdeb9cb40f8cab8ac41bef10c780397bde87832d1c92ac4c7' \
+    'src/main/java/org/limine/entry/tool/processes/Utility.java' |
     sha256sum --check --strict || return 1
   patch -Np1 --fuzz=0 --batch --forward -i "$srcdir/0001-propagate-mkinitcpio-failures.patch" || return 1
+  patch -Np1 --fuzz=0 --batch --forward -i "$srcdir/0002-propagate-native-failures.patch" || return 1
   printf '%s  %s\n' \
     '3fe2631ba4f5ac8fc380fe9d63557c4f235ecfad5d4c5e123269bdeb27e97f01' \
-    'install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install' |
+    'install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install' \
+    '20b24e981c836b9487f207d5320df3664335ac24f19d711034b7f090bbe3ceef' \
+    'src/main/java/org/limine/entry/tool/Main.java' \
+    '53ee6350c210e166768757239495fab37d5d7261b1b4466cc6112463e8c87248' \
+    'src/main/java/org/limine/entry/tool/processes/LimineManager.java' \
+    'f69fcbe29ba19f91a8e6c43f46fb21303d84bc7548cfd8dd53ca99815d84ef7c' \
+    'src/main/java/org/limine/entry/tool/processes/LimineWriter.java' \
+    'f192f67770f48e4cde85b2d519ab3a5f93421a29810adbeac26043a7ecebe150' \
+    'src/main/java/org/limine/entry/tool/processes/Utility.java' |
     sha256sum --check --strict || return 1
 
   cd "$srcdir" || return 1

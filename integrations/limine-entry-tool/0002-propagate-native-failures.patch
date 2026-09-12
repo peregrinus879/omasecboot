@@ -1,0 +1,478 @@
+--- a/src/main/java/org/limine/entry/tool/Main.java
++++ b/src/main/java/org/limine/entry/tool/Main.java
+@@ -84,7 +84,7 @@
+                 if (remainingArgs.size() < 4) {
+                     System.err.println(ConsoleColor.RED_BOLD + "Invalid arguments" + ConsoleColor.RESET);
+                     printHelp();
+-                    return;
++                    throw new IOException("Missing kernel addition operands");
+                 }
+                 kernelName = remainingArgs.get(1);
+                 String initramfsPath = remainingArgs.get(2);
+@@ -97,7 +97,7 @@
+                 if (remainingArgs.size() < 3) {
+                     System.err.println(ConsoleColor.RED_BOLD + "Invalid arguments" + ConsoleColor.RESET);
+                     printHelp();
+-                    return;
++                    throw new IOException("Missing UKI addition operands");
+                 }
+                 kernelName = remainingArgs.get(1);
+                 String ukiPath = remainingArgs.get(2);
+@@ -108,7 +108,7 @@
+                 if (remainingArgs.size() < 3) {
+                     System.err.println(ConsoleColor.RED_BOLD + "Invalid arguments" + ConsoleColor.RESET);
+                     printHelp();
+-                    return;
++                    throw new IOException("Missing EFI addition operands");
+                 }
+                 String efiName = remainingArgs.get(1);
+                 String efiPath = remainingArgs.get(2);
+@@ -448,40 +448,54 @@
+         }
+     }
+ 
++    record EfiMount(String path) implements AutoCloseable {
++        @Override
++        public void close() throws IOException {
++            if (!Utility.getCommandOutput(List.of("umount", "--", path), false, true).isSuccess()) {
++                throw new IOException("Failed to unmount: " + path);
++            }
++        }
++    }
++
+     private static void scanEfiEntries() throws IOException {
+         ConfigReader.detectColorSupport();
+         Config.ENABLE_OS_GENERATION = false;
+         boolean isSuccess = true;
+         EfiBootEntry selectedEntry = EfiScanner.showEfiEntriesAndSelect();
+         if (selectedEntry != null) {
++            boolean previousQuiet = Config.QUIET;
+             Config.QUIET = true;
+-            EntryOptions options = new EntryOptions().setPriority(20).setEntryOverwrite(true);
+-            String mountPoint = Utility.getMountPoint(selectedEntry.gptUuid());
+-            if (mountPoint.isEmpty()) {
+-                String tempMountPoint = "/run/let";
+-                Utility.ensureDirectoryExists(tempMountPoint);
+-                if (Utility.runCommand("mount /dev/disk/by-partuuid/" + selectedEntry.gptUuid() + " " + tempMountPoint, false, false)) {
+-                    String fs = Utility.getFileSystemType(tempMountPoint, true);
++            try {
++                EntryOptions options = new EntryOptions().setPriority(20).setEntryOverwrite(true);
++                String mountPoint = Utility.getMountPoint(selectedEntry.gptUuid());
++                if (mountPoint.isEmpty()) {
++                    String tempMountPoint = "/run/let";
++                    Utility.ensureDirectoryExists(tempMountPoint);
++                    if (Utility.runCommand("mount /dev/disk/by-partuuid/" + selectedEntry.gptUuid() + " " + tempMountPoint, false, false)) {
++                        try (EfiMount mount = new EfiMount(tempMountPoint)) {
++                            String fs = Utility.getFileSystemType(tempMountPoint, true);
++                            if ("vfat".equalsIgnoreCase(fs) || "iso9660".equalsIgnoreCase(fs)) {
++                                addEfi(selectedEntry.name(), selectedEntry.comment(), options, tempMountPoint + selectedEntry.efiPath(), false);
++                            } else {
++                                isSuccess = false;
++                                warnMessage("Limine does not support the filesystem:", fs + " on the boot partition");
++                            }
++                        }
++                    } else {
++                        isSuccess = false;
++                    }
++                } else {
++                    String fs = Utility.getFileSystemType(mountPoint, true);
+                     if ("vfat".equalsIgnoreCase(fs) || "iso9660".equalsIgnoreCase(fs)) {
+-                        addEfi(selectedEntry.name(), selectedEntry.comment(), options, tempMountPoint + selectedEntry.efiPath(), false);
++                        addEfi(selectedEntry.name(), selectedEntry.comment(), options, mountPoint + selectedEntry.efiPath(), false);
+                     } else {
+                         isSuccess = false;
+                         warnMessage("Limine does not support the filesystem:", fs + " on the boot partition");
+                     }
+-                    Utility.runCommand("umount " + tempMountPoint, false, false);
+-                } else {
+-                    isSuccess = false;
+-                }
+-            } else {
+-                String fs = Utility.getFileSystemType(mountPoint, true);
+-                if ("vfat".equalsIgnoreCase(fs) || "iso9660".equalsIgnoreCase(fs)) {
+-                    addEfi(selectedEntry.name(), selectedEntry.comment(), options, mountPoint + selectedEntry.efiPath(), false);
+-                } else {
+-                    isSuccess = false;
+-                    warnMessage("Limine does not support the filesystem:", fs + " on the boot partition");
+                 }
++            } finally {
++                Config.QUIET = previousQuiet;
+             }
+-            Config.QUIET = false;
+             if (isSuccess) {
+                 infoMessage("EFI entry added to Limine:", "\"" + selectedEntry.name() + "\", uuid(" + selectedEntry.gptUuid() + "):" + selectedEntry.efiPath());
+             } else {
+@@ -498,4 +512,4 @@
+         Config.ENABLE_OS_GENERATION = false;
+         new LimineReader(config).printTree(depth);
+     }
+-}
+\ No newline at end of file
++}
+--- a/src/main/java/org/limine/entry/tool/processes/Utility.java
++++ b/src/main/java/org/limine/entry/tool/processes/Utility.java
+@@ -21,16 +21,8 @@
+     private static final int MACHINE_ID_LENGTH = 32;
+     private static final String MACHINE_ID_FILE_PATH = "/etc/machine-id";
+ 
+-    public static void ensureDirectoryExists(String dirPath) {
+-        // Construct the full directory path
+-        File dir = new File(dirPath);
+-        // Check if the directory exists
+-        if (!dir.exists()) {
+-            // If it doesn't exist, create the directory
+-            if (!dir.mkdirs()) {
+-                errorMessage("Failed to create directory:", dir.getPath());
+-            }
+-        }
++    public static void ensureDirectoryExists(String dirPath) throws IOException {
++        Files.createDirectories(Path.of(dirPath));
+     }
+ 
+     /**
+@@ -115,17 +107,35 @@
+         return hash.toString();
+     }
+ 
+-    public static String computeBlake2(String absoluteFilePath) {
++    public static String computeBlake2(String absoluteFilePath) throws IOException {
+         return blake2IntegrityCheck(absoluteFilePath, 2);
+     }
+ 
+-    private static String blake2sum(String absoluteFilePath) {
+-        Output output = Utility.getCommandOutput(Config.HASH_COMMAND + " " + absoluteFilePath, false, true);
+-        if (output.isSuccess()) {
+-            return Utility.extractHash(output.text().getFirst());
+-        } else {
+-            return "";
++    private static String blake2sum(String absoluteFilePath) throws IOException {
++        Output output = Utility.getCommandOutput(List.of(Config.HASH_COMMAND, "--",
++                Path.of(absoluteFilePath).toAbsolutePath().toString()), false, true);
++        if (!output.isSuccess() || output.text().size() != 1) {
++            throw new IOException("Failed to hash file: " + absoluteFilePath);
++        }
++        String hash = Utility.extractHash(output.text().getFirst());
++        // GNU b2sum prefixes escaped filenames with a backslash before the hash.
++        if (hash.startsWith("\\")) {
++            hash = hash.substring(1);
+         }
++        if (!hash.matches("[0-9a-fA-F]{128}")) {
++            throw new IOException("Invalid BLAKE2 hash for file: " + absoluteFilePath);
++        }
++        return hash.toLowerCase(Locale.ROOT);
++    }
++
++    private static CompletableFuture<String> blake2Async(String absoluteFilePath) {
++        return CompletableFuture.supplyAsync(() -> {
++            try {
++                return blake2sum(absoluteFilePath);
++            } catch (IOException e) {
++                throw new UncheckedIOException(e);
++            }
++        });
+     }
+ 
+     /**
+@@ -136,13 +146,13 @@
+      * @param repeatIfCorrupted The number of times to retry if corruption is detected.
+      * @return The final hash if no corruption is detected.
+      */
+-    public static String blake2IntegrityCheck(String absoluteFilePath, int repeatIfCorrupted) {
++    public static String blake2IntegrityCheck(String absoluteFilePath, int repeatIfCorrupted) throws IOException {
+         int attempts = 0;
+         while (attempts <= repeatIfCorrupted) {
+             try {
+                 // Run hash calculation asynchronously in two threads using CompletableFuture
+-                CompletableFuture<String> hashFuture1 = CompletableFuture.supplyAsync(() -> blake2sum(absoluteFilePath));
+-                CompletableFuture<String> hashFuture2 = CompletableFuture.supplyAsync(() -> blake2sum(absoluteFilePath));
++                CompletableFuture<String> hashFuture1 = blake2Async(absoluteFilePath);
++                CompletableFuture<String> hashFuture2 = blake2Async(absoluteFilePath);
+ 
+                 // Get the hash results from both futures
+                 String hashResult1 = hashFuture1.get();
+@@ -154,19 +164,20 @@
+                 } else {
+                     // Log and print an error message if corruption is detected
+                     String errMessage = String.format(
+-                            "Hardware (RAM/CPU) error detected! Hash mismatch for file: %s (attempt %d/%d).",
++                            "Hash mismatch for file: %s (attempt %d/%d).",
+                             absoluteFilePath, attempts + 1, repeatIfCorrupted + 1
+                     );
+                     errorMessage(errMessage);
+ 
+                     if (attempts == repeatIfCorrupted) {
+-                        // If max attempts reached, return the first result and log a critical error
+-                        errorMessage("Repeated hash mismatches. Hardware is faulty. Returning corrupted hash for file:" + absoluteFilePath);
+-                        return hashResult1;
++                        throw new IOException("Repeated hash mismatches for file: " + absoluteFilePath);
+                     }
+                 }
+-            } catch (InterruptedException | ExecutionException e) {
+-                throw new RuntimeException("Error occurred while calculating the hash.", e);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                throw new IOException("Interrupted while calculating the hash.", e);
++            } catch (ExecutionException e) {
++                throw new IOException("Error occurred while calculating the hash.", e.getCause());
+             }
+             attempts++;
+         }
+@@ -174,9 +185,9 @@
+         throw new IllegalStateException("Unexpected state in hash calculation.");
+     }
+ 
+-    public static void copyFile(String sourceFilePath, String targetFilePath, boolean force, boolean showOutput) {
++    public static void copyFile(String sourceFilePath, String targetFilePath, boolean force, boolean showOutput) throws IOException {
+         if (sourceFilePath == null || sourceFilePath.isBlank()) {
+-            return;
++            throw new IOException("Copy source is missing");
+         }
+         Path source = Path.of(sourceFilePath);
+         Path target = Path.of(targetFilePath);
+@@ -190,16 +201,19 @@
+                 infoMessage("Copied:", sourceFilePath + " -> " + targetFilePath);
+             }
+         } catch (IOException e) {
+-            errorMessage("Failed to copy:", sourceFilePath + " -> " + targetFilePath + " (" + e.getMessage() + ")");
++            throw new IOException("Failed to copy: " + sourceFilePath + " -> " + targetFilePath, e);
+         }
+     }
+ 
+-    public static void copyFile(String sourceFilePath, String targetFilePath) {
++    public static void copyFile(String sourceFilePath, String targetFilePath) throws IOException {
+         copyFile(sourceFilePath, targetFilePath, true, true);
+     }
+ 
+-    public static void copyFileIfMissingOrDifferent(String sourceFilePath, String targetFilePath) {
+-        if (!isFilePresent(sourceFilePath) || Objects.equals(sourceFilePath, targetFilePath)) {
++    public static void copyFileIfMissingOrDifferent(String sourceFilePath, String targetFilePath) throws IOException {
++        if (sourceFilePath == null || sourceFilePath.isBlank() || !isFilePresent(sourceFilePath)) {
++            throw new IOException("Copy source not found: " + sourceFilePath);
++        }
++        if (Objects.equals(sourceFilePath, targetFilePath)) {
+             return;
+         }
+         if (!isCommandPresent(Config.HASH_COMMAND)) {
+@@ -218,9 +232,9 @@
+         }
+     }
+ 
+-    public static void moveFile(String sourceFilePath, String targetFilePath, boolean force, boolean showOutput) {
++    public static void moveFile(String sourceFilePath, String targetFilePath, boolean force, boolean showOutput) throws IOException {
+         if (sourceFilePath == null || sourceFilePath.isBlank()) {
+-            return;
++            throw new IOException("Move source is missing");
+         }
+         Path source = Path.of(sourceFilePath);
+         Path target = Path.of(targetFilePath);
+@@ -234,7 +248,7 @@
+                 infoMessage("Moved:", sourceFilePath + " -> " + targetFilePath);
+             }
+         } catch (IOException e) {
+-            errorMessage("Failed to move:", sourceFilePath + " -> " + targetFilePath + " (" + e.getMessage() + ")");
++            throw new IOException("Failed to move: " + sourceFilePath + " -> " + targetFilePath, e);
+         }
+     }
+ 
+@@ -280,8 +294,16 @@
+      * @return List of strings containing the output of the command.
+      */
+     public static Output getCommandOutput(String commandLine, boolean exitIfError, boolean displayErrorMessage) {
++        return getCommandOutput(List.of("bash", "-c", commandLine), commandLine, exitIfError, displayErrorMessage);
++    }
++
++    public static Output getCommandOutput(List<String> command, boolean exitIfError, boolean displayErrorMessage) {
++        return getCommandOutput(command, String.join(" ", command), exitIfError, displayErrorMessage);
++    }
++
++    private static Output getCommandOutput(List<String> command, String commandLine, boolean exitIfError, boolean displayErrorMessage) {
+         // Use ProcessBuilder to create and start the process
+-        ProcessBuilder processBuilder = new ProcessBuilder("bash", "-c", commandLine)
++        ProcessBuilder processBuilder = new ProcessBuilder(command)
+                 .redirectErrorStream(true);// Redirect error stream to the standard output stream
+         try {
+             Process process = processBuilder.start();
+@@ -388,9 +410,8 @@
+      */
+     public static void loggerSend(String message, LogLevel logLevel) {
+         try {
+-            // Bugfix: Do not use Runtime.getRuntime() that has a bug to escape some character like '-'
+-            // Use ProcessBuilder instead.
+-            Process process = new ProcessBuilder("bash", "-c", "logger -t limine-entry-tool -p " + logLevel.level + " \"" + message + "\"").start();
++            // File paths in a diagnostic are data, never shell commands.
++            Process process = new ProcessBuilder("logger", "-t", "limine-entry-tool", "-p", logLevel.level, "--", message).start();
+             process.waitFor();
+         } catch (IOException | InterruptedException ignored) {
+         }
+--- a/src/main/java/org/limine/entry/tool/processes/LimineManager.java
++++ b/src/main/java/org/limine/entry/tool/processes/LimineManager.java
+@@ -8,6 +8,7 @@
+ import org.limine.entry.tool.objects.TreeNode;
+ 
+ import java.io.File;
++import java.io.IOException;
+ import java.util.*;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+@@ -27,15 +28,15 @@
+         this.isUpdateNeeded = false;
+     }
+ 
+-    public static boolean addEfi(TreeNode rootNode, String efiName, String comment, EntryOptions entryOptions, String efiFilePath, Config config) {
++    public static boolean addEfi(TreeNode rootNode, String efiName, String comment, EntryOptions entryOptions, String efiFilePath, Config config) throws IOException {
+         // Check if efiFilePath is valid
+         efiFilePath = Utility.correctCaseSensitivePath(efiFilePath);
+         if (efiFilePath == null) {
+-            return false;
++            throw new IOException("EFI input file could not be resolved");
+         }
+         String mountPoint = Utility.getMountPointIfFat32(efiFilePath);
+         if (mountPoint.isEmpty()) {
+-            return false;
++            throw new IOException("EFI input is not on a supported mounted filesystem: " + efiFilePath);
+         }
+         String pathFunction;
+         if (Objects.equals(Utility.removeSurroundingSlashes(mountPoint), Utility.removeSurroundingSlashes(config.espPath()))) {
+@@ -179,15 +180,13 @@
+     /**
+      * Adds an initramfs and vmlinuz to the Limine boot entries.
+      */
+-    public void addKernel(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String initramfsPath, String vmlinuzPath, String suffixName) {
++    public void addKernel(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String initramfsPath, String vmlinuzPath, String suffixName) throws IOException {
+ 
+         if (!Utility.isFilePresent(initramfsPath)) {
+-            errorMessage("The file:", initramfsPath + " not found");
+-            return;
++            throw new IOException("Initramfs not found: " + initramfsPath);
+         }
+         if (!Utility.isFilePresent(vmlinuzPath)) {
+-            errorMessage("The file:", vmlinuzPath + " not found");
+-            return;
++            throw new IOException("Kernel not found: " + vmlinuzPath);
+         }
+ 
+         String dirPath = Utility.buildPath(config.espPath(), config.machineID(), kernelName) + File.separator;
+@@ -240,11 +239,10 @@
+     /**
+      * Adding a UKI (Unified kernel image) to the Limine boot entries.
+      */
+-    public void addUki(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String ukiFilePath) {
++    public void addUki(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String ukiFilePath) throws IOException {
+ 
+         if (!Utility.isFilePresent(ukiFilePath)) {
+-            errorMessage("The file:", ukiFilePath + " not found");
+-            return;
++            throw new IOException("UKI not found: " + ukiFilePath);
+         }
+ 
+         String dirPath = Utility.buildPath(config.espPath(), Config.DEFAULT_UKI_DIR_PATH) + File.separator;
+@@ -285,7 +283,7 @@
+         this.isUpdateNeeded = true;
+     }
+ 
+-    private List<String> createBootConfig(String kernelName, List<String> kernelComments, String kernelCmdline, String initramfsFileName, String vmlinuzFileName) {
++    private List<String> createBootConfig(String kernelName, List<String> kernelComments, String kernelCmdline, String initramfsFileName, String vmlinuzFileName) throws IOException {
+         String initramfsFullPath = Utility.buildPath(config.espPath(), config.machineID(), kernelName, initramfsFileName);
+         initramfsFullPath = Utility.correctCaseSensitivePath(initramfsFullPath);
+ 
+@@ -293,9 +291,10 @@
+         vmlinuzFullPath = Utility.correctCaseSensitivePath(vmlinuzFullPath);
+ 
+         String espPath = Utility.buildPath(config.espPath());
+-        assert initramfsFullPath != null;
++        if (initramfsFullPath == null || vmlinuzFullPath == null) {
++            throw new IOException("Published kernel or initramfs could not be resolved");
++        }
+         String initramfsEspPath = initramfsFullPath.substring(espPath.length());
+-        assert vmlinuzFullPath != null;
+         String vmlinuzEspPath = vmlinuzFullPath.substring(espPath.length());
+ 
+         List<String> bootConfig = new ArrayList<>();
+@@ -316,7 +315,7 @@
+         for (String modulePath : bootOptions.initrds()) {
+             String moduleFullPath = Utility.correctCaseSensitivePath(Utility.buildPath(config.espPath(), modulePath));
+             if (moduleFullPath == null) {
+-                Utility.errorMessage("Invalid 'initrd=" + modulePath + "' path:", Utility.buildPath(config.espPath(), modulePath) + " not found");
++                throw new IOException("Extra initrd not found: " + Utility.buildPath(config.espPath(), modulePath));
+             } else {
+                 bootConfig.add(Config.SPACES + Limine.MODULE_PATH + " " + config.pathFunction() + Utility.buildPath(modulePath) + this.b2sum(moduleFullPath));
+             }
+@@ -329,12 +328,14 @@
+         return bootConfig;
+     }
+ 
+-    private List<String> createUkiBootConfig(List<String> kernelComments, String kernelCmdline, String ukiFileName) {
++    private List<String> createUkiBootConfig(List<String> kernelComments, String kernelCmdline, String ukiFileName) throws IOException {
+         String ukiFullPath = Utility.buildPath(config.espPath(), Config.DEFAULT_UKI_DIR_PATH, ukiFileName);
+         ukiFullPath = Utility.correctCaseSensitivePath(ukiFullPath);
+ 
+         String espPath = Utility.buildPath(config.espPath());
+-        assert ukiFullPath != null;
++        if (ukiFullPath == null) {
++            throw new IOException("Published UKI could not be resolved");
++        }
+         String ukiEspPath = ukiFullPath.substring(espPath.length());
+ 
+         List<String> bootConfig = new ArrayList<>();
+@@ -351,14 +352,9 @@
+         return bootConfig;
+     }
+ 
+-    private String b2sum(String absoluteFilePath) {
++    private String b2sum(String absoluteFilePath) throws IOException {
+         if (Config.ENABLE_VERIFICATION) {
+-            String b2sum = Utility.computeBlake2(absoluteFilePath);
+-            if (b2sum.isEmpty()) {
+-                return "";
+-            } else {
+-                return Limine.HASH + b2sum;
+-            }
++            return Limine.HASH + Utility.computeBlake2(absoluteFilePath);
+         } else {
+             return "";
+         }
+--- a/src/main/java/org/limine/entry/tool/processes/LimineWriter.java
++++ b/src/main/java/org/limine/entry/tool/processes/LimineWriter.java
+@@ -54,7 +54,7 @@
+     /**
+      * Back up limine.conf
+      */
+-    public void backup() {
++    public void backup() throws IOException {
+         String limineConfigFilePath = Utility.buildPath(config.espPath(), Config.LIMINE_CONFIG_FILE);
+         if (Utility.isFilePresent(limineConfigFilePath)) {
+             // Auto time-based backup. Check if an older backup exists.
+@@ -69,22 +69,19 @@
+         }
+     }
+ 
+-    public void save(TreeNode rootNode) {
++    public void save(TreeNode rootNode) throws IOException {
+         List<String> lines = new ArrayList<>();
+         this.writeNodeToLines(rootNode, lines, 0);
+ 
+         String limineConfigPath = Utility.buildPath(config.espPath(), Config.LIMINE_CONFIG_FILE);
+         Path limineTmpConfigPath = Paths.get(limineConfigPath + ".tmp");
+ 
+-        try {
+-            Files.write(limineTmpConfigPath, lines, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+-            Utility.runCommand("sync -f " + limineTmpConfigPath, false, false);
+-            Utility.moveFile(limineTmpConfigPath.toString(), limineConfigPath, true, false);
+-            infoMessage("Updated:", limineConfigPath);
+-        } catch (IOException e) {
+-            errorMessage("Failed to write:", limineConfigPath);
+-            exitWithError("Reason:", e.getMessage());
++        Files.write(limineTmpConfigPath, lines, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
++        if (!Utility.getCommandOutput(List.of("sync", "-f", "--", limineTmpConfigPath.toString()), false, true).isSuccess()) {
++            throw new IOException("Failed to sync configuration: " + limineTmpConfigPath);
+         }
++        Utility.moveFile(limineTmpConfigPath.toString(), limineConfigPath, true, false);
++        infoMessage("Updated:", limineConfigPath);
+     }
+ 
+     private void writeNodeToLines(TreeNode node, List<String> lines, int depth) {
+@@ -101,4 +98,3 @@
+     }
+ }
+ 
+-

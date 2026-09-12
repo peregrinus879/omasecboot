@@ -23,9 +23,10 @@ TEST_SUITES = checks status guards dispatcher enrollment unconfigure producers \
               windows windows-preflight windows-entry
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 LIMINE_ENTRY_TOOL_SOURCE ?=
+LIMINE_NATIVE_JAVA_HOME ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-pacman-contract $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-pacman-contract $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -95,7 +96,8 @@ package-limine-entry-tool:
 	  trap 'rm -rf "$$build"' EXIT; \
 	  mkdir -p "$$dest"; \
 	  cp integrations/limine-entry-tool/PKGBUILD \
-	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch "$$build/"; \
+	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch \
+	    integrations/limine-entry-tool/0002-propagate-native-failures.patch "$$build/"; \
 	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -122,6 +124,11 @@ $(TEST_TARGETS): test-%:
 # source; the suite verifies source and patch digests before executing them.
 test-integration:
 	bash tests/integration/limine-producer.sh "$(LIMINE_ENTRY_TOOL_SOURCE)"
+
+# Compile and exercise the actual native publisher classes in isolated JDK25
+# fixtures. Source and JDK are caller-supplied; the suite performs no downloads.
+test-native:
+	bash tests/integration/limine-native.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
 
 # Real stock-pacman metadata and hook contracts, with fixture-only state in
 # unprivileged Bubblewrap namespaces. No source checkout or network is needed.

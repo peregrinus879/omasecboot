@@ -61,7 +61,7 @@ OmaSecBoot drives three boot-artifact producers whose hook protocol it audits pe
 
 | Package | Supported version | Source |
 |---|---|---|
-| `limine-mkinitcpio-hook` | 1.38.0-1.1 or integrated 1.38.0-1.2 | Omarchy Package Repository or this repository's integration recipe |
+| `limine-mkinitcpio-hook` | 1.38.0-1.1 or integrated 1.38.0-1.2 | Omarchy Package Repository (stock) or the audited 1.2 development build |
 | `limine-snapper-sync` | 1.31.0-1.1 | Omarchy Package Repository |
 | `sbctl` | 0.18-2 | Arch `extra` |
 | `efibootmgr` | 18 or newer | Arch `core` |
@@ -328,9 +328,11 @@ Run `make lint` and `make test` for the hermetic and package gates. The same nin
 
 Producer integration patches and their source digests live under `integrations/`. The offline shell-producer contract suite runs with `make test-integration LIMINE_ENTRY_TOOL_SOURCE=/absolute/path/to/pinned/source`, using the commit and archive identified by `integrations/limine-entry-tool/source.json`. It verifies original and patched behavior in isolated Bubblewrap environments with controlled external build/install commands. Native UKI creation, full filesystem restore, and firmware behavior require their separate integration and hardware evidence.
 
+`make test-native LIMINE_ENTRY_TOOL_SOURCE=/absolute/path/to/pinned/source LIMINE_NATIVE_JAVA_HOME=/absolute/path/to/jdk25` compiles and runs the actual Java publisher classes against original and patched sources. The source manifest binds every compiled upstream Java file. The suite needs JDK 25, Bubblewrap, jq, patch, ShellCheck and the usual Bash/coreutils tools; it downloads nothing and keeps configuration, boot paths, HOME and XDG paths inside fixtures. Set `LIMINE_NATIVE_KEEP=1` to retain the printed fixture directory and logs. It checks detected publication failures and successful output bytes/naming, while full packaged-command admission, actual FAT discovery and boot acceptance remain separate. Like the shell-producer gate, this target is separate from `make test` and current CI.
+
 `make test-pacman-contract` runs the installed stock pacman against disposable local package archives and databases in unprivileged Bubblewrap namespaces. It needs pacman, Bubblewrap, libarchive's `bsdtar`, ShellCheck and the usual Bash/coreutils tools; it uses no network, host package database, signing keys or boot files. The suite checks declaration completeness pitfalls, matching pre/post hook targets, early and terminal failures, and retries. Set `TMPDIR` to an existing private scratch directory and `PACMAN_CONTRACT_KEEP=1` to retain its printed fixture directory and transcripts. This separate integration target is not part of `make test` or the current CI matrix; it establishes stock-tool contracts, not production lifecycle or boot acceptance.
 
-`make package-limine-entry-tool PKGDEST=/absolute/output/directory` builds the integrated `limine-mkinitcpio-hook` development package in a disposable source tree. Its recipe retains the upstream package layout and checks the pinned source, patch and GraalVM inputs; the build requires the recipe's declared tools, including Gradle on x86_64. Activation accepts this build and its stock predecessor. The guard still refuses replacement of an active producer; the supported active-update path remains release-blocking work.
+`make package-limine-entry-tool PKGDEST=/absolute/output/directory` builds development `limine-mkinitcpio-hook` 1.38.0-1.3 with the shell and native failure-propagation patches. Its recipe retains the upstream package layout and checks the pinned sources, patches and GraalVM inputs; the build requires the recipe's declared tools, including Gradle on x86_64. This build is for integration development and is not yet in the activation set above. Complete producer/core protocol support and the active-update path remain release-blocking work; the guard still refuses replacement of an active producer.
 
 ### Design philosophy
 
