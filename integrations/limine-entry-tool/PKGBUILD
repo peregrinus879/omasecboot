@@ -1,0 +1,123 @@
+# Upstream maintainer: Zesko
+# Recipe reference: omacom-io/omarchy-pkgs at 5902ed9.
+# Source and patch bindings must match source.json; makepkg checks them directly.
+_pkgname="limine-entry-tool"
+pkgname="limine-mkinitcpio-hook"
+_pkgver=1.38.0
+_extver=""
+_commit=57092d98ba9d355f180b883dea0e9cfefeace8b1
+_source_dir="${_pkgname}-${_commit}"
+_gradle_version=9.7.1
+pkgver="${_pkgver}${_extver}"
+pkgrel=1.2
+pkgdesc="Install kernels for the Limine bootloader."
+arch=('x86_64' 'aarch64')
+url="https://gitlab.com/Zesko/limine-entry-tool"
+source=(
+  "${url}/-/archive/${_commit}/${_source_dir}.tar.gz"
+  '0001-propagate-mkinitcpio-failures.patch'
+)
+source_x86_64=("https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.2.4/graalvm-community-jdk-25i2-25.0.4_linux-x64_bin.tar.gz")
+source_aarch64=(
+  "https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.2.4/graalvm-community-jdk-25i2-25.0.4_linux-aarch64_bin.tar.gz"
+  "https://services.gradle.org/distributions/gradle-${_gradle_version}-bin.zip"
+)
+license=("GPL3")
+provides=('limine-entry-tool')
+options=(!debug !strip)
+_graalvm_version=graalvm_ce_jdk25
+depends=(
+  'bash'
+  'grep'
+  'tar'
+  'limine'
+  'mkinitcpio'
+  'efibootmgr'
+)
+optdepends=(
+  'kernel-modules-hook: Safely keeps kernel on upgrade failure'
+  'sbctl: Signs UEFI boot files for Secure Boot when enabled'
+  'journalctl-desktop-notification: Sends desktop notifications when errors occur'
+)
+makedepends=('git')
+makedepends_x86_64=('gradle')
+backup=(etc/limine-entry-tool.conf)
+conflicts=('limine-entry-tool')
+sha256sums=(
+  'ad9c88c506114de4da7b47ec4839093f86b5e912822fc84b52ba71b0fc2b1e72'
+  'ec5394d01ea403cd10dd7680ded3a45de45b779c6a009e4396fa913f77f4b317'
+)
+sha256sums_x86_64=('3f4a89de8eaa96f2ed677f09957c7e872cd8467aad3537f8b5394c1b8c4b942e')
+sha256sums_aarch64=(
+  '22286f7ecd21b9aedb3226b9bf797469e1bd3eefc491e12ef3dd49b452d230b7'
+  'acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a'
+)
+
+prepare() {
+  cd "$srcdir/${_source_dir}" || return 1
+  printf '%s  %s\n' \
+    'e7ee93664395a1ee8c187ff4a6e5c304ad7a798101d7b983a4dfa78368983d58' \
+    'install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install' \
+    '7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31' \
+    'install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions' \
+    '90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99' \
+    'install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio' |
+    sha256sum --check --strict || return 1
+  patch -Np1 --fuzz=0 --batch --forward -i "$srcdir/0001-propagate-mkinitcpio-failures.patch" || return 1
+  printf '%s  %s\n' \
+    '3fe2631ba4f5ac8fc380fe9d63557c4f235ecfad5d4c5e123269bdeb27e97f01' \
+    'install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install' |
+    sha256sum --check --strict || return 1
+
+  cd "$srcdir" || return 1
+  [[ -d "${_graalvm_version}" ]] && rm -rf "${_graalvm_version}"
+  mv graalvm-community-*/ "${_graalvm_version}"
+  if ! command -v "${_graalvm_version}"/bin/javac >/dev/null 2>&1; then
+    printf 'Error: %s/bin/javac not found.\n' "${_graalvm_version}" >&2
+    return 1
+  fi
+}
+
+build() {
+  cd "$srcdir/${_source_dir}" || return 1
+  export GRAALVM_HOME="$srcdir/${_graalvm_version}"
+  export JAVA_HOME="${GRAALVM_HOME}"
+  export NATIVE_IMAGE_OPTIONS="-march=compatibility --future-defaults=all"
+  local gradle=/usr/bin/gradle
+  [[ $CARCH == aarch64 ]] && gradle="$srcdir/gradle-${_gradle_version}/bin/gradle"
+  "$gradle" clean nativeCompile -Dorg.gradle.java.home="${JAVA_HOME}"
+}
+
+package() {
+  cd "$srcdir/${_source_dir}" || return 1
+  local src="install/arch-linux"
+
+  # directories
+  install -dm 755 \
+    "$pkgdir/usr/share/doc/limine-entry-tool" \
+    "$pkgdir/etc/boot/hooks/pre.d" \
+    "$pkgdir/etc/boot/hooks/post.d" \
+    "$pkgdir/usr/lib/limine"
+
+  # docs
+  install -Dm 644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/limine-entry-tool/"
+
+  # files
+  cp -a "$src/limine-entry-tool/etc" "$src/limine-entry-tool/usr" "$pkgdir/"
+  cp -a "$src/limine-mkinitcpio-hook/etc" "$src/limine-mkinitcpio-hook/usr" "$pkgdir/"
+  install -Dm 755 "build/native/nativeCompile/limine-entry-tool" "$pkgdir/usr/lib/limine/"
+
+  # limine hook symlinks
+  ln -sf /usr/bin/limine-reset-enroll "$pkgdir/etc/boot/hooks/pre.d/10-limine-reset-enroll"
+  ln -sf /usr/bin/limine-enroll-config "$pkgdir/etc/boot/hooks/post.d/90-limine-enroll-config"
+
+  cd "$pkgdir" || return 1
+  printf '%s  %s\n' \
+    '3fe2631ba4f5ac8fc380fe9d63557c4f235ecfad5d4c5e123269bdeb27e97f01' \
+    'usr/share/libalpm/scripts/limine-mkinitcpio-install' \
+    '7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31' \
+    'usr/lib/limine/limine-common-functions' \
+    '90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99' \
+    'usr/bin/limine-mkinitcpio' |
+    sha256sum --check --strict
+}

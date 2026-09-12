@@ -126,9 +126,9 @@ lifecycle_activation_environment_is_ready() {
   local command key
   command=$(current_omasecboot_executable_path) || return 1
   validate_control_file "$command" && [[ -x "$command" ]] || return 1
-  [[ $(producer_package_version limine-mkinitcpio-hook) == \
-      "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" \
-    && $(producer_package_version limine-snapper-sync) == \
+  limine_mkinitcpio_version_is_supported \
+    "$(producer_package_version limine-mkinitcpio-hook)" \
+    && [[ $(producer_package_version limine-snapper-sync) == \
       "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" \
     && $(producer_package_version sbctl) == "$SUPPORTED_SBCTL_VERSION" ]] || {
     fail "Lifecycle activation requires the exact supported producer packages"

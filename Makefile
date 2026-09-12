@@ -15,9 +15,17 @@ PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
                00-omasecboot-transition-guard.hook \
                zzz-omasecboot.hook
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) $(wildcard limine-hooks/*) \
-          $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
+          $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh) \
+          $(wildcard tests/integration/*.sh)
+TEST_SUITES = checks status guards dispatcher enrollment unconfigure producers \
+              lifecycle producer-repair producer-ownership recovery-publication \
+              software-recovery artifacts unconfigure-tools install package \
+              windows windows-preflight windows-entry
+TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
+LIMINE_ENTRY_TOOL_SOURCE ?=
+PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package lint test
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -75,31 +83,42 @@ package:
 	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
 	  LOGDEST="$$build" BUILDDIR="$$build/build" \
 	  makepkg --config "$$build/makepkg.conf" --force --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
-	echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
+	  echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
+
+# Keep upstream build trees out of the checkout. This is a development build
+# of the existing producer package; it does not install it or change runtime
+# compatibility admission. Requires its declared build tools, including Gradle.
+package-limine-entry-tool:
+	@set -eu; \
+	  dest=$$(realpath -m -- "$(PKGDEST)"); \
+	  build=$$(mktemp -d "$${TMPDIR:-/tmp}/omasecboot-producer-package.XXXXXX"); \
+	  trap 'rm -rf "$$build"' EXIT; \
+	  mkdir -p "$$dest"; \
+	  cp integrations/limine-entry-tool/PKGBUILD \
+	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch "$$build/"; \
+	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
+	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
+	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
+	    LOGDEST="$$build" BUILDDIR="$$build/build" \
+	    makepkg --config "$$build/makepkg.conf" --nodeps --noconfirm --noprogressbar --nosign
 
 # bash -n parses only its first operand, so every script gets its own call.
 lint:
-	@for script in $(SCRIPTS); do bash -n "$$script" || exit 1; done
+	@for script in $(SCRIPTS) $(PACKAGE_RECIPES); do bash -n "$$script" || exit 1; done
 	shellcheck -x $(SCRIPTS)
-	jq empty omarchy/omarchy-menu.jsonc
+	# makepkg consumes package metadata and supplies srcdir/pkgdir at execution.
+	shellcheck --shell=bash --exclude=SC2034,SC2154 $(PACKAGE_RECIPES)
+	jq empty omarchy/omarchy-menu.jsonc $(wildcard integrations/*/source.json)
 
-test:
-	bash tests/lifecycle.sh
-	bash tests/producers.sh
-	bash tests/producer-repair.sh
-	bash tests/producer-ownership.sh
-	bash tests/recovery-publication.sh
-	bash tests/software-recovery.sh
-	bash tests/artifacts.sh
-	bash tests/unconfigure.sh
-	bash tests/unconfigure-tools.sh
-	bash tests/guards.sh
-	bash tests/dispatcher.sh
-	bash tests/checks.sh
-	bash tests/status.sh
-	bash tests/install.sh
-	bash tests/package.sh
-	bash tests/windows.sh
-	bash tests/windows-preflight.sh
-	bash tests/windows-entry.sh
-	bash tests/enrollment.sh
+# Independent targets preserve the complete suite set and allow bounded local
+# parallelism through make -jN --output-sync=target test. Enrollment also has
+# its own bounded case workers; choose both limits for the available host.
+test: $(TEST_TARGETS)
+
+$(TEST_TARGETS): test-%:
+	bash tests/$*.sh
+
+# Offline, real-producer contract tests. The caller supplies extracted pinned
+# source; the suite verifies source and patch digests before executing them.
+test-integration:
+	bash tests/integration/limine-producer.sh "$(LIMINE_ENTRY_TOOL_SOURCE)"

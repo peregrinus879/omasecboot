@@ -1327,7 +1327,7 @@ unconfigure_validate_all_conflicts() {
 unconfigure_limine_tools_are_pinned() {
   local path version
   version=$(producer_package_version limine-mkinitcpio-hook) || return 1
-  [[ "$version" == "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ]] || return 1
+  limine_mkinitcpio_version_is_supported "$version" || return 1
   for path in "$(limine_install_path)" "$(limine_mkinitcpio_path)" \
     "$(limine_reset_enroll_path)"; do
     validate_control_file "$path" || return 1

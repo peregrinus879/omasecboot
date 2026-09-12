@@ -6,6 +6,9 @@ readonly ESP="/boot"
 readonly OMASECBOOT_VERSION="1.0.0"
 # shellcheck disable=SC2034 # Used by sourced lib files.
 readonly SUPPORTED_LIMINE_MKINITCPIO_VERSION=1.38.0-1.1
+# Retain the stock provider when adding the source-bound integration build.
+# Changing a preferred version must not remove a predecessor's recovery path.
+readonly SUPPORTED_LIMINE_MKINITCPIO_VERSIONS=(1.38.0-1.1 1.38.0-1.2)
 # shellcheck disable=SC2034 # Used by sourced lib files.
 readonly SUPPORTED_SBCTL_VERSION=0.18-2
 # shellcheck disable=SC2034 # Used by sourced lib files.
@@ -259,6 +262,14 @@ producer_package_version() {
   validate_control_file /usr/bin/pacman || return 1
   output=$(/usr/bin/pacman -Q "$package" 2>/dev/null) || return 1
   parse_pacman_query_version "$package" "$output"
+}
+
+limine_mkinitcpio_version_is_supported() {
+  local version
+  for version in "${SUPPORTED_LIMINE_MKINITCPIO_VERSIONS[@]}"; do
+    [[ "$1" != "$version" ]] || return 0
+  done
+  return 1
 }
 
 producer_file_owner_package() {

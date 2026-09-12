@@ -1,0 +1,72 @@
+Subject: [PATCH] Propagate mkinitcpio build and install failures
+
+Check UKI and regular kernel installs, forward each selected kernel's
+failure, and keep an aggregate status while processing the remaining
+kernels. Keep pre/post hooks and their exit codes, and preserve errors
+from the final removed-kernel cleanup. Per-kernel build failure still
+stops that kernel's work; selection, naming, and configuration are intact.
+
+--- a/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
++++ b/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
+@@ -203,7 +203,7 @@
+ 		return 1
+ 	fi
+ 	#sb_sign "$tmp_uki" # Not needed, as it is already handled by mkinitcpio's sbctl hook
+-	install_uki "$kernel_name" "$tmp_uki" "$comment"
++	install_uki "$kernel_name" "$tmp_uki" "$comment" || return 1
+ 	return 0
+ }
+ 
+@@ -235,7 +235,7 @@
+ 	if [[ -f "$BOOT_KERNEL_DIR/initramfs-${KERNEL_NAME}" ]]; then
+ 		rm -r "$BOOT_KERNEL_DIR"
+ 	fi
+-	install_kernel "$KERNEL_NAME" "$tmp_initramfs" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION}"
++	install_kernel "$KERNEL_NAME" "$tmp_initramfs" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION}" || return 1
+ 
+ 	if [[ "${MKINITCPIO_FALLBACK:-}" == "yes" || "${MKINITCPIO_FALLBACK:-}" == "$KERNEL_NAME" ]]; then
+ 		info_msg "Building fallback initramfs for ${KERNEL_NAME} (${KERNEL_VERSION})"
+@@ -244,7 +244,7 @@
+ 			error_msg "mkinitcpio failed for kernel ${KERNEL_VERSION}, skipping."
+ 			return 1
+ 		fi
+-		install_kernel "$KERNEL_NAME" "$tmp_initramfs_fb" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION} fallback" "-fallback"
++		install_kernel "$KERNEL_NAME" "$tmp_initramfs_fb" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION} fallback" "-fallback" || return 1
+ 	elif [[ -f "$INITRAMFS_FALLBACK_PATH" ]]; then
+ 		limine-entry-tool --remove-kernel "${KERNEL_NAME}-fallback" --keep-files --no-mutex --no-hooks --quiet
+ 		rm -f "$INITRAMFS_FALLBACK_PATH"
+@@ -266,9 +266,9 @@
+ 	set_kernel_context "$kernel_dir" "$kernel_name" || return 0
+ 
+ 	if [[ "${ENABLE_UKI:-}" == "yes" ]] && is_uefi; then
+-		process_uki_kernel || return 0
++		process_uki_kernel || return 1
+ 	else
+-		process_regular_kernel || return 0
++		process_regular_kernel || return 1
+ 	fi
+ }
+ 
+@@ -282,9 +282,9 @@
+ 		exit 2
+ 	fi
+ 
+-	local kernel_dir
++	local kernel_dir result=0
+ 	for kernel_dir in "${KERNEL_DIRS[@]}"; do
+-		process_kernel "$kernel_dir" || true
++		process_kernel "$kernel_dir" || result=1
+ 	done
+ 
+ 	if ! run_boot_hooks post; then
+@@ -295,8 +295,9 @@
+ 
+ 	if [[ -f "/var/lib/limine/removed_kernels.list" ]]; then
+ 		info_msg "Clean up kernel entries if they are unused."
+-		/usr/share/libalpm/scripts/limine-mkinitcpio-remove post
++		/usr/share/libalpm/scripts/limine-mkinitcpio-remove post || result=$?
+ 	fi
++	return "$result"
+ }
+ 
+ main

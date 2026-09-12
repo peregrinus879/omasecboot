@@ -127,6 +127,7 @@ real_activation_hook_path=$(declare -f activation_hook_path)
 real_producer_package_version=$(declare -f producer_package_version)
 real_unconfigure_limine_tools_are_pinned=$(declare -f unconfigure_limine_tools_are_pinned)
 ACTIVATION_PACKAGES_SUPPORTED=true
+ACTIVATION_MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
 ACTIVATION_UNCONFIGURE_SUPPORTED=true
 current_omasecboot_executable_path() { printf '%s\n' "$activation_command"; }
 activation_hook_path() { printf '%s/%s\n' "$activation_hook_dir" "$1"; }
@@ -136,7 +137,7 @@ pacman_configured_hook_dirs() { printf '%s/\n' "$activation_admin_hook_dir"; }
 producer_package_version() {
   [[ "$ACTIVATION_PACKAGES_SUPPORTED" == true ]] || return 1
   case "$1" in
-    limine-mkinitcpio-hook) printf '%s\n' "$SUPPORTED_LIMINE_MKINITCPIO_VERSION" ;;
+    limine-mkinitcpio-hook) printf '%s\n' "$ACTIVATION_MKINITCPIO_VERSION" ;;
     limine-snapper-sync) printf '%s\n' "$SUPPORTED_LIMINE_SNAPPER_SYNC_VERSION" ;;
     sbctl) printf '%s\n' "$SUPPORTED_SBCTL_VERSION" ;;
     efibootmgr) printf '%s\n' "${WINDOWS_EFIBOOTMGR_MINIMUM_VERSION}-1" ;;
@@ -178,6 +179,14 @@ for activation_key in removal transaction package-sign limine-pre limine-post; d
 done
 lifecycle_activation_environment_is_ready \
   || fail_test "current activation environment was rejected"
+ACTIVATION_MKINITCPIO_VERSION=1.38.0-1.2
+lifecycle_activation_environment_is_ready \
+  || fail_test "integrated producer activation environment was rejected"
+ACTIVATION_MKINITCPIO_VERSION=1.38.0-1.3
+if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
+  fail_test "an unaudited future producer was accepted for activation"
+fi
+ACTIVATION_MKINITCPIO_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
 write_activation_hook transaction 0
 if lifecycle_activation_environment_is_ready >/dev/null 2>&1; then
   fail_test "stale activation hook schema was accepted"

@@ -8,11 +8,9 @@ arch=('any')
 url='https://github.com/peregrinus879/omasecboot'
 license=('MIT')
 # These are resolver floors so that ordinary system updates keep resolving.
-# The audited producer set (limine-mkinitcpio-hook 1.38.0-1.1,
-# limine-snapper-sync 1.31.0-1.1, sbctl 0.18-2) is enforced exactly at runtime:
-# lifecycle activation refuses any other version and the package guard blocks
-# changes to those three packages while the lifecycle is active. efibootmgr
-# only needs release 18 or newer.
+# Runtime admission enforces the audited producer versions documented in
+# README.md. The package guard blocks changes to those three producer packages
+# while the lifecycle is active. efibootmgr only needs release 18 or newer.
 depends=(
   'bash'
   'coreutils>=9.5'
@@ -39,6 +37,6 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname-$pkgver" || return 1
   make DESTDIR="$pkgdir" install
 }

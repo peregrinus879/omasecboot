@@ -45,6 +45,15 @@ producer_file_owner_package() { printf '%s\n' "$PIN_OWNER"; }
 
 unconfigure_limine_tools_are_pinned \
   || fail_test "supported package-owned Limine tools were rejected"
+for PIN_VERSION in 1.38.0-1.1 1.38.0-1.2; do
+  unconfigure_limine_tools_are_pinned \
+    || fail_test "audited stock/integrated producer lost its unconfiguration path"
+done
+PIN_VERSION=1.38.0-1.3
+if unconfigure_limine_tools_are_pinned; then
+  fail_test "an unaudited future producer build was accepted"
+fi
+PIN_VERSION="$SUPPORTED_LIMINE_MKINITCPIO_VERSION"
 PIN_OWNER=unrelated-package
 if unconfigure_limine_tools_are_pinned; then
   fail_test "Limine tool owned by another package was accepted"

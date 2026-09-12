@@ -8,6 +8,8 @@ What remains outside this repository before OmaSecBoot reaches Omarchy users, an
 2. omarchy-pkgs: a recipe for `omasecboot` with `source: local` metadata against the tagged archive and its recorded SHA-256. The recipe declares the same resolver floors as `PKGBUILD`; the exact producer versions are enforced by the tool at runtime, not by the recipe.
 3. omacom/omarchy, based on `upstream/quattro`: a setup wrapper, a removal wrapper, three menu entries, and a manual page, each with focused tests. Tags, pushes, pull requests, and branch deletion stay maintainer-owned.
 
+The core, producer integration patches, package recipes, and cross-tool tests are maintained together in OmaSecBoot. Producer patches apply to pinned upstream sources in disposable build trees and preserve the owning package's files and data model. omarchy-pkgs carries the resulting reviewed build recipes; each integration records its compatibility contract and upstream removal trigger. Missing migration, transaction-admission, or restore interfaces must be resolved before the corresponding release claim is made.
+
 Install only `omasecboot` from the Omarchy Package Repository; its dependencies bring the rest. Removal drops only `omasecboot` and preserves the durable state under `/var/lib/omasecboot`.
 
 ## Setup wrapper

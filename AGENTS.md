@@ -8,6 +8,8 @@ Naming boundary: `OmaSecBoot` is the product name; `omasecboot` is the sole user
 
 OmaSecBoot fills the gaps the other tools leave on the way to Secure Boot (sbctl, Limine and limine-entry-tool with its hooks, efibootmgr, pacman) and changes as little as possible. It follows those tools' contracts and the machine's configuration as they are, read from upstream source and recorded in the ledger, rather than imposing a layout, a setting, or a file set of its own. Every precondition it enforces must be needed for a correct and recoverable Secure Boot state, never for the tool's convenience; a stock configuration the other tools accept is one this tool accepts.
 
+Producer integration changes belong in this repository as reviewed, versioned patches against pinned upstream sources, with corresponding package recipes and integration tests. Temporary upstream build trees are disposable. Preserve upstream package file ownership and data-model ownership; carry each patch's compatibility evidence and upstream removal trigger in the maintenance ledger.
+
 ## Load Map
 
 - `README.md` - operator documentation: requirements, installation, lifecycle, setup, Windows, hooks, commands, recovery, undo, troubleshooting, boundaries.
@@ -50,7 +52,7 @@ The dispatcher sources the modules in this order and each owns one concern:
 
 ## Dependencies
 
-Runtime: sbctl, jq, openssl, gum (interactive commands only), efibootmgr, util-linux, diffutils, limine, and the base toolchain (bash, coreutils, findutils, gawk, grep, pacman, systemd). Declared package dependencies: the same plus `limine-mkinitcpio-hook` and `limine-snapper-sync`, which supply the Limine tools the hooks and unconfiguration run. `PKGBUILD` declares resolver floors only; activation enforces the three exact producer package versions and the efibootmgr floor at runtime.
+Runtime: sbctl, jq, openssl, gum (interactive commands only), efibootmgr, util-linux, diffutils, limine, and the base toolchain (bash, coreutils, findutils, gawk, grep, pacman, systemd). Declared package dependencies: the same plus `limine-mkinitcpio-hook` and `limine-snapper-sync`, which supply the Limine tools the hooks and unconfiguration run. `PKGBUILD` declares resolver floors only; activation enforces the explicitly audited producer version set and the efibootmgr floor at runtime. The Limine mkinitcpio set retains both stock 1.38.0-1.1 and integrated 1.38.0-1.2; admitting the new build does not retire the old build's unconfiguration support or admit unaudited future versions.
 
 ## Terminology
 

@@ -5,7 +5,7 @@
 OmaSecBoot provisions signing keys, signs every EFI artifact Omarchy boots, enrolls the current Limine configuration checksum into both Limine executables, backs up and replaces firmware trust under explicit confirmation, and adds a validated Windows firmware handoff for dual-boot systems. Every mutation runs as a durable transaction that can be resumed or rolled back, and every firmware instruction is printed only after a direct read-back proof.
 
 > [!CAUTION]
-> **Development status, 2026-09-07:** the source implementation, hermetic test suites, and Arch package layout are complete. No tagged release or published package exists, CI covers only the hermetic suites and a container package check, and the current code has no recorded real-machine firmware validation. Do not install this over an existing Secure Boot setup, and do not treat the hermetic tests as proof of firmware behavior. The release gates are in the [release checklist](docs/release-checklist.md).
+> **Development status, 2026-09-10:** pre-release. Hermetic and container checks and partial dedicated-hardware acceptance exist, but the complete release acceptance has not passed. Producer output completeness, snapshot migration, supported updates, and restore continuity remain open in the [maintenance ledger](docs/maintenance.md). No tagged release or published package exists. Do not install this over an existing Secure Boot setup or treat hermetic tests as firmware evidence. The release gates are in the [release checklist](docs/release-checklist.md).
 
 ## Why This Tool
 
@@ -57,11 +57,11 @@ OmaSecBoot fills those gaps for this exact stack and delegates everything else t
 - The ESP mounted at `/boot`.
 - For dual boot: Windows Boot Manager present in the firmware boot entries, and the Windows recovery keys backed up before any firmware change.
 
-OmaSecBoot drives three boot-artifact producers whose hook protocol it audits per version, so lifecycle activation and the package guard pin them exactly; anything else fails closed until a new OmaSecBoot release audits it. efibootmgr only needs to be new enough.
+OmaSecBoot drives three boot-artifact producers whose hook protocol it audits per version. Lifecycle activation accepts the explicit audited versions below, retaining the stock provider alongside the integrated build so a supporting release does not remove the predecessor's unconfiguration path. Other versions require an audit before admission. efibootmgr only needs to be new enough.
 
 | Package | Supported version | Source |
 |---|---|---|
-| `limine-mkinitcpio-hook` | 1.38.0-1.1 | Omarchy Package Repository |
+| `limine-mkinitcpio-hook` | 1.38.0-1.1 or integrated 1.38.0-1.2 | Omarchy Package Repository or this repository's integration recipe |
 | `limine-snapper-sync` | 1.31.0-1.1 | Omarchy Package Repository |
 | `sbctl` | 0.18-2 | Arch `extra` |
 | `efibootmgr` | 18 or newer | Arch `core` |
@@ -323,6 +323,12 @@ Before any Setup Mode instruction, the raw PK, KEK, db, and dbx payloads, their 
 ### Contributing
 
 `AGENTS.md` is the contributor contract: module ownership, invariants, terminology, and verification. Sources and compatibility findings are in [docs/maintenance.md](docs/maintenance.md).
+
+Run `make lint` and `make test` for the hermetic and package gates. The same nineteen suites can run with bounded parallelism using `make -j4 --output-sync=target test`; enrollment has its own case-worker limit, so size the two limits together.
+
+Producer integration patches and their source digests live under `integrations/`. The offline shell-producer contract suite runs with `make test-integration LIMINE_ENTRY_TOOL_SOURCE=/absolute/path/to/pinned/source`, using the commit and archive identified by `integrations/limine-entry-tool/source.json`. It verifies original and patched behavior in isolated Bubblewrap environments with controlled external build/install commands. Native UKI creation, full filesystem restore, and firmware behavior require their separate integration and hardware evidence.
+
+`make package-limine-entry-tool PKGDEST=/absolute/output/directory` builds the integrated `limine-mkinitcpio-hook` development package in a disposable source tree. Its recipe retains the upstream package layout and checks the pinned source, patch and GraalVM inputs; the build requires the recipe's declared tools, including Gradle on x86_64. Activation accepts this build and its stock predecessor. The guard still refuses replacement of an active producer; the supported active-update path remains release-blocking work.
 
 ### Design philosophy
 
