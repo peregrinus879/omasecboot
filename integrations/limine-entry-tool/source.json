@@ -152,6 +152,109 @@
       "logs": "LIMINE_NATIVE_KEEP=1 retains the printed private source/class/fixture/transcript directory; otherwise cleanup removes it."
     }
   },
+  "description": {
+    "schema": 1,
+    "patch": {
+      "file": "0003-describe-native-outputs.patch",
+      "sha256": "e5403a5bb8c2053a6de66068954d9f404d614f460d8f25c5b65a8a749db666db",
+      "strip": 1,
+      "purpose": "Describe native context and prospective addition layouts without initialization, authentication, hooks or logging; share naming, configuration parsing and scoped native entry associations with publication.",
+      "removal_trigger": "Recheck upstream releases; remove when an upstream read-only operation interface satisfies the same description, absence, error and mutation-parity contracts.",
+      "scope": "Native-operation description only. No installed-kernel inventory, shell build-selection policy, publication success, lifecycle or boot proof. Observed config/entry data is as-read; hash-tool availability requires fresh evaluation."
+    },
+    "files": [
+      {
+        "path": "src/main/java/org/limine/entry/tool/Main.java",
+        "sha256": "b0f7b89375b6b13fa82b4ade1e3900cd51180002ec012704c4bafa2c67040e7f",
+        "base_sha256": "20b24e981c836b9487f207d5320df3664335ac24f19d711034b7f090bbe3ceef",
+        "patched_sha256": "ef5dce3c47f184d86047b10889fe80fa42c556b114367668d323718473897d6e"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/BootOptions.java",
+        "sha256": "a9cbeee26e29830f399eea74f5c0add923d11744a8631f5ee6ff6da7399a492b",
+        "base_sha256": "a9cbeee26e29830f399eea74f5c0add923d11744a8631f5ee6ff6da7399a492b",
+        "patched_sha256": "1ae717cc091060c9811356d6bd21354367386df2c0e6cb991318a7290861fd64"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/objects/TreeNode.java",
+        "sha256": "88daee795b48e9e2168d6c699e8359cc48fa9eb49d7373905f4e377e1d7ce301",
+        "base_sha256": "88daee795b48e9e2168d6c699e8359cc48fa9eb49d7373905f4e377e1d7ce301",
+        "patched_sha256": "ed1158faf59bdc44409449910aef9e9649e4c520b0cfb190a5f94a87e2e15c96"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ConfigReader.java",
+        "sha256": "96f6b99f491c5660a656b198de62a9af2917b223c46d9e5375ee258e20b6106d",
+        "base_sha256": "96f6b99f491c5660a656b198de62a9af2917b223c46d9e5375ee258e20b6106d",
+        "patched_sha256": "d7ffb8098e17ebf90d505ed9e0560e30e4f0348bc4881560a0142e60af4e8de5"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/Utility.java",
+        "sha256": "2b4b2f03f5362e4fdeb9cb40f8cab8ac41bef10c780397bde87832d1c92ac4c7",
+        "base_sha256": "f192f67770f48e4cde85b2d519ab3a5f93421a29810adbeac26043a7ecebe150",
+        "patched_sha256": "4abdccb4402df6e83e72f9039e1a33e3f6fd23ed9f4d89530cb42a6986c263cb"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/MacroReplacer.java",
+        "sha256": "00139c66a81abb08b5653a3359c4d57ccfcaa96bfe53687a293f3b3ebf3a7218",
+        "base_sha256": "00139c66a81abb08b5653a3359c4d57ccfcaa96bfe53687a293f3b3ebf3a7218",
+        "patched_sha256": "a14fb4b127deac96d4d82def9f78e1aaa2a08748395d3ed83d67811b14d7a133"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineReader.java",
+        "sha256": "9ee51f51648e30b5ca341eaaa1dc8ffdcfe217624d7491f8acb9c0969053420e",
+        "base_sha256": "9ee51f51648e30b5ca341eaaa1dc8ffdcfe217624d7491f8acb9c0969053420e",
+        "patched_sha256": "33bd9a660c3b53546d2fd4b2f712f8c2d269c27d4460d4155dd956cf173646ad"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineManager.java",
+        "sha256": "28c90ed866dfa327ae5589b027d6bc6eda75775181dda0bc45d283ac131cee03",
+        "base_sha256": "53ee6350c210e166768757239495fab37d5d7261b1b4466cc6112463e8c87248",
+        "patched_sha256": "4add0b7c8f99478a63aa3e5b3c65c9c43c70f266fba990eeea232a92619426a2"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/JsonOutput.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "06255840e98ff9af8747652cbc575f558fb219a71f83da9d3adc511d65a94e80"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ReadObservation.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "9a7cbaa35f7c2ae8ec236a7de8e559e20cc648578ef0076d90588ae3632db8d1"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/OutputLayout.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "6485701852be4bd87561f401d8906543e5f1a7978914de5b16e5fe984478682b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/NativeDescription.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "583a2c30bfd0b21655484c2eb60e0da0346cb0452398ba47eff7289f383d0943"
+      },
+      {
+        "path": "install/arch-linux/limine-entry-tool/usr/bin/limine-entry-tool",
+        "sha256": "3a3d9a07cf36ccd2d5fe626343abb90da19850051d192251f26fb582ef632458",
+        "base_sha256": "3a3d9a07cf36ccd2d5fe626343abb90da19850051d192251f26fb582ef632458",
+        "patched_sha256": "7402fb5df3ea6422a79b7b9b7550c8c842b161fd1fa0f4b378f7b624973cf6e2"
+      },
+      {
+        "path": "README.md",
+        "sha256": "9e514e5d8011a40a03674c6e0f62250a867dafc83ed93e52485101b5492c8cad",
+        "base_sha256": "9e514e5d8011a40a03674c6e0f62250a867dafc83ed93e52485101b5492c8cad",
+        "patched_sha256": "f65870ae95fa0c2945d9e8c8610739bad018aea9515af548899c676c9bfc0642"
+      }
+    ],
+    "test": {
+      "command": "bash tests/integration/limine-description.sh /absolute/path/to/unpatched-source-root /absolute/path/to/jdk25 [native-executable]",
+      "composition": "Apply the native failure patch and then the description patch, validating intermediate/final file bindings. The original source remains unchanged. The shell build/install patch is independently tested and applied by the package recipe.",
+      "scope": "Real wrapper and native query at unprivileged namespace UID, with writable/read-only fixture domains, side-effect sentinels, configuration/association/error cases, as-read generation and macro interleaving, JSON round trips and actual publication parity. The optional executable runs queries through the built ELF; deterministic helpers and publication parity still use actual Java classes. Mutation/FAT admission, shell build selection, package inventory and lifecycle/boot proof remain separate.",
+      "logs": "LIMINE_DESCRIPTION_KEEP=1 retains the printed private source/class/fixture/transcript directory; otherwise the suite removes it."
+    }
+  },
   "test": {
     "command": "bash tests/integration/limine-producer.sh /absolute/path/to/unpatched-source-root",
     "input": "No network access by the test. Supply the extracted pinned archive or an equivalent tree containing the three files above. The test copies and verifies each input SHA-256 before execution, verifies the patch and patched bytes, and leaves the caller's source unchanged. The archive digest binds the fetched archive; per-file digests are the executable input contract.",

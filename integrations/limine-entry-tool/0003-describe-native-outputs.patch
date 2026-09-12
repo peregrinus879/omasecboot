@@ -1,0 +1,1203 @@
+--- a/src/main/java/org/limine/entry/tool/Main.java
++++ b/src/main/java/org/limine/entry/tool/Main.java
+@@ -13,6 +13,9 @@
+ public class Main {
+ 
+     static void main(String[] args) throws IOException {
++        if (args.length > 0 && args[0].equals("--describe")) {
++            System.exit(NativeDescription.run(java.util.Arrays.copyOfRange(args, 1, args.length)));
++        }
+         // First, parse flags (e.g., --quiet, --help, --version) and store them
+         List<String> remainingArgs = new ArrayList<>();
+         String comment = "";
+@@ -213,6 +216,13 @@
+                 Usage: limine-entry-tool [options] [--quiet]
+                 
+                 Options:
++                    --describe context
++                    --describe add-uki <kernel name> <prospective UKI source>
++                    --describe add-kernel <kernel name> <prospective initramfs> <prospective kernel> [suffix]
++                        Print versioned JSON native-operation facts without initialization or mutation.
++                        --describe must be first; mutation controls are not accepted.
++                        Missing resources may be described; this is not publication or boot proof.
++                
+                     --add-kernel <kernel name> <initramfs path> <vmlinuz path> [suffix] [--comment <comment>]
+                         Add a kernel entry under the current OS entry (alias: --add)
+                 
+--- a/src/main/java/org/limine/entry/tool/objects/BootOptions.java
++++ b/src/main/java/org/limine/entry/tool/objects/BootOptions.java
+@@ -7,17 +7,23 @@
+ 
+ public class BootOptions {
+ 
+-    public static final Map<String, String> KERNEL_CMDLINE_MAP = new ConfigReader().readBootOptions();
++    private static class LegacyOptions {
++        private static final Map<String, String> VALUES = new ConfigReader().readBootOptions();
++    }
+ 
+     public static String getKernelCmdline(String key) {
+-        String cmdline = KERNEL_CMDLINE_MAP.get(key);
++        return getKernelCmdline(LegacyOptions.VALUES, key);
++    }
++
++    public static String getKernelCmdline(Map<String, String> values, String key) {
++        String cmdline = values.get(key);
+ 
+         if ((cmdline == null || cmdline.isBlank()) && key.contains("fallback")) {
+-            cmdline = KERNEL_CMDLINE_MAP.get("fallback");
++            cmdline = values.get("fallback");
+         }
+ 
+         if (cmdline == null || cmdline.isBlank()) {
+-            cmdline = KERNEL_CMDLINE_MAP.get("default");
++            cmdline = values.get("default");
+         }
+         return cmdline;
+     }
+--- a/src/main/java/org/limine/entry/tool/objects/TreeNode.java
++++ b/src/main/java/org/limine/entry/tool/objects/TreeNode.java
+@@ -13,13 +13,19 @@
+     private final LinkedList<TreeNode> nodes;
+     private final int depth;
+     private final String parentNodeName;
++    private final MacroReplacer macros;
+     public String name, cleanName;
+     private EntryOptions options;
+     private boolean enableLineBreak;
+ 
+     public TreeNode(String name, int depth, String parentNodeName) {
++        this(name, depth, parentNodeName, new MacroReplacer());
++    }
++
++    public TreeNode(String name, int depth, String parentNodeName, MacroReplacer macros) {
+         this.name = name;
+-        this.cleanName = MacroReplacer.replaceMacros(Limine.cleanName(name));
++        this.macros = macros;
++        this.cleanName = macros.replaceMacros(Limine.cleanName(name));
+         this.configLines = new ArrayList<>();
+         this.nodes = new LinkedList<>();
+         this.depth = depth;
+@@ -42,24 +48,54 @@
+ 
+     public TreeNode findOsNode(String machineID, String osName, int selectedDepth) {
+         TreeNode node = findNodeByMachineID(machineID, selectedDepth);
+-        if (node == null) {
+-            return findNodeByCleanName(osName, machineID, selectedDepth);
+-        } else {
+-            return node;
++        return node == null ? findNodeByCleanName(osName, machineID, selectedDepth) : node;
++    }
++
++    private List<TreeNode> nodesAtDepth(int selectedDepth) {
++        if (selectedDepth <= 0) return List.of(this);
++        List<TreeNode> result = new ArrayList<>();
++        for (TreeNode node : nodes) {
++            result.addAll(node.nodesAtDepth(selectedDepth - 1));
+         }
++        return result;
++    }
++
++    public List<TreeNode> findOsCandidates(String machineID, String osName, int selectedDepth) {
++        List<TreeNode> atDepth = nodesAtDepth(selectedDepth);
++        List<TreeNode> identities = atDepth.stream()
++                .filter(node -> node.matchesMachineID(machineID)).toList();
++        if (!identities.isEmpty()) return identities;
++        return atDepth.stream().filter(node -> node.matchesCleanName(osName, machineID)).toList();
++    }
++
++    private boolean matchesCleanName(String nodeCleanName, String machineID) {
++        if (nodeCleanName == null || nodeCleanName.isEmpty() || !nodeCleanName.equals(cleanName)) return false;
++        return options == null || options.getMachineID() == null || options.getMachineID().isEmpty()
++                || options.getMachineID().equals(machineID);
++    }
++
++    private boolean matchesMachineID(String machineID) {
++        return machineID.equals(getOrCreateOptions().getMachineID());
++    }
++
++    public MacroReplacer getMacros() {
++        return macros;
++    }
++
++    public boolean matchesKernelID(String kernelID) {
++        String recordedID = getOrCreateOptions().getKernelID();
++        return kernelID.equals(recordedID) || (recordedID.isEmpty() && kernelID.equals(getCleanName()));
++    }
++
++    public List<TreeNode> findKernelCandidates(String kernelID) {
++        return nodes.stream().filter(node -> node.matchesKernelID(kernelID)).toList();
+     }
+ 
+     public TreeNode findNodeByCleanName(String nodeCleanName, String machineID, int selectedDepth) {
+         if (nodeCleanName == null || nodeCleanName.isEmpty()) return null;
+         // Check for match at target depth
+         if (selectedDepth <= 0) {
+-            if (!nodeCleanName.equals(this.cleanName)) return null;
+-            // Match if machineID is null/empty or matches current machine
+-            boolean machineIDMatches = this.options == null
+-                    || this.options.getMachineID() == null
+-                    || this.options.getMachineID().isEmpty()
+-                    || this.options.getMachineID().equals(machineID);
+-            return machineIDMatches ? this : null;
++            return matchesCleanName(nodeCleanName, machineID) ? this : null;
+         }
+         // Search children with reduced depth
+         int remainingDepth = selectedDepth - 1;
+@@ -85,7 +121,7 @@
+ 
+     public TreeNode findNodeByMachineID(String machineID, int selectedDepth) {
+         if (0 >= selectedDepth) {
+-            if (machineID.equals(this.getOrCreateOptions().getMachineID())) {
++            if (matchesMachineID(machineID)) {
+                 return this;
+             }
+             return null;
+@@ -178,7 +214,7 @@
+             this.options = new EntryOptions();
+             for (String line : this.configLines) {
+                 if (line.trim().startsWith(Limine.COMMENT.toString())) {
+-                    this.options.parseComment(MacroReplacer.replaceMacros(line));
++                    this.options.parseComment(macros.replaceMacros(line));
+                 }
+             }
+         }
+--- a/src/main/java/org/limine/entry/tool/processes/ConfigReader.java
++++ b/src/main/java/org/limine/entry/tool/processes/ConfigReader.java
+@@ -6,6 +6,8 @@
+ 
+ import java.io.BufferedReader;
+ import java.io.IOException;
++import java.io.StringReader;
++import java.io.UncheckedIOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.Paths;
+@@ -23,17 +25,25 @@
+ 
+     private final Map<String, String> configs = new HashMap<>();
+     private final Map<String, String> kernelCmdlineMap = new HashMap<>();
++    private final ReadObservation observation;
+ 
+     public ConfigReader() {
++        this(null);
++    }
++
++    public ConfigReader(ReadObservation observation) {
++        this.observation = observation;
+         // Load configs in order: lowest to highest priority
+         loadConfigDir("/usr/share/limine-entry-tool.d"); // 1. Lowest priority
+         loadConfigFile("/etc/limine-entry-tool.conf");   // 2.
+         loadConfigDir("/etc/limine-entry-tool.d");       // 3.
+         loadConfigFile(Config.DEFAULT_CONFIG_FILE_PATH); // 4. Highest priority
+ 
+-        boolean quiet = "yes".equalsIgnoreCase(configs.get("QUIET_MODE"));
+-        Config.QUIET = Config.QUIET || quiet;
+-        detectColorSupport();
++        if (observation == null) {
++            boolean quiet = "yes".equalsIgnoreCase(configs.get("QUIET_MODE"));
++            Config.QUIET = Config.QUIET || quiet;
++            detectColorSupport();
++        }
+     }
+ 
+     public static void detectColorSupport() {
+@@ -50,6 +60,16 @@
+ 
+     private void loadConfigDir(String dirPath) {
+         Path dir = Paths.get(dirPath);
++        if (observation != null) {
++            try {
++                for (Path file : observation.configDirectory(dir)) {
++                    loadConfigFile(file.toString());
++                }
++            } catch (IOException e) {
++                throw new UncheckedIOException(e);
++            }
++            return;
++        }
+         if (!Files.isDirectory(dir)) return;
+ 
+         try (Stream<Path> stream = Files.list(dir)) {
+@@ -63,9 +83,20 @@
+ 
+     private void loadConfigFile(String filePath) {
+         Path path = Paths.get(filePath);
+-        if (!Files.exists(path)) return;
++        String observedText = null;
++        if (observation != null) {
++            try {
++                observedText = observation.optionalText(path);
++                if (observedText == null) return;
++            } catch (IOException e) {
++                throw new UncheckedIOException(e);
++            }
++        } else if (!Files.exists(path)) {
++            return;
++        }
+ 
+-        try (BufferedReader reader = Files.newBufferedReader(path)) {
++        try (BufferedReader reader = observation == null ? Files.newBufferedReader(path)
++                : new BufferedReader(new StringReader(observedText))) {
+             String line;
+             while ((line = reader.readLine()) != null) {
+                 line = line.trim();
+@@ -96,6 +127,7 @@
+                 }
+             }
+         } catch (IOException e) {
++            if (observation != null) throw new UncheckedIOException(e);
+             exitWithError("Failed to load config file:", filePath + " due to " + e.getMessage());
+         }
+     }
+@@ -135,13 +167,38 @@
+         return true;
+     }
+ 
+-    public Config readConfig() {
++    public String targetOs() throws IOException {
+         String targetOs = configs.get("TARGET_OS_NAME");
+         if (targetOs == null || targetOs.isBlank()) {
+-            targetOs = getLinuxDistroName();
++            targetOs = observation == null ? getLinuxDistroName() : readLinuxDistroName(observation);
+         } else {
+             targetOs = Limine.cleanName(targetOs);
+         }
++        return targetOs;
++    }
++
++    public String configuredEspPath() {
++        return configs.get("ESP_PATH");
++    }
++
++    public String ukiPrefix(String machineID) {
++        String customUkiName = configs.get("CUSTOM_UKI_NAME");
++        Pattern validName = Pattern.compile("^[a-z0-9]+$");
++        return customUkiName != null && !customUkiName.isBlank() && validName.matcher(customUkiName).matches()
++                ? customUkiName : machineID;
++    }
++
++    public boolean verificationEnabled() {
++        return Utility.isCommandPresent(Config.HASH_COMMAND) && "yes".equalsIgnoreCase(configs.get("ENABLE_VERIFICATION"));
++    }
++
++    public Config readConfig() {
++        String targetOs;
++        try {
++            targetOs = targetOs();
++        } catch (IOException e) {
++            throw new UncheckedIOException(e);
++        }
+ 
+         String espPath = configs.get("ESP_PATH");
+         if (espPath == null || espPath.isBlank()) {
+@@ -170,12 +227,7 @@
+             }
+         }
+ 
+-        String enableVerification = configs.get("ENABLE_VERIFICATION");
+-        if (enableVerification != null) {
+-            Config.ENABLE_VERIFICATION = Utility.isCommandPresent(Config.HASH_COMMAND) && "yes".equalsIgnoreCase(enableVerification);
+-        } else {
+-            Config.ENABLE_VERIFICATION = false;
+-        }
++        Config.ENABLE_VERIFICATION = verificationEnabled();
+ 
+         String configBackupThreshold = configs.get("CONFIG_BACKUP_THRESHOLD");
+         if (configBackupThreshold != null) {
+@@ -202,13 +254,7 @@
+ 
+         String machineID = readMachineID();
+ 
+-        String customUkiName = configs.get("CUSTOM_UKI_NAME");
+-        Pattern validName = Pattern.compile("^[a-z0-9]+$");
+-        if (customUkiName != null && !customUkiName.isBlank() && validName.matcher(customUkiName).matches()) {
+-            Config.UKI_FILE_PREFIX = customUkiName;
+-        } else {
+-            Config.UKI_FILE_PREFIX = machineID;
+-        }
++        Config.UKI_FILE_PREFIX = ukiPrefix(machineID);
+ 
+         return new Config(machineID, targetOs, espPath, Limine.DEFAULT_PATH_FUNCTION.toString());
+     }
+@@ -216,7 +262,15 @@
+     public Map<String, String> readBootOptions() {
+         String defaultCmdline = kernelCmdlineMap.get("default");
+         if (defaultCmdline == null || defaultCmdline.isBlank()) {
+-            kernelCmdlineMap.put("default", readKernelCmdline());
++            if (observation == null) {
++                kernelCmdlineMap.put("default", readKernelCmdline());
++            } else {
++                try {
++                    kernelCmdlineMap.put("default", readKernelCmdline(observation));
++                } catch (IOException e) {
++                    throw new UncheckedIOException(e);
++                }
++            }
+         }
+         return kernelCmdlineMap;
+     }
+--- a/src/main/java/org/limine/entry/tool/processes/Utility.java
++++ b/src/main/java/org/limine/entry/tool/processes/Utility.java
+@@ -41,6 +41,16 @@
+         return machineID;
+     }
+ 
++    public static String readExistingMachineID(ReadObservation observation) throws IOException {
++        String text = observation.optionalText(Path.of(MACHINE_ID_FILE_PATH));
++        if (text == null) throw new NoSuchFileException(MACHINE_ID_FILE_PATH);
++        String machineID = text.trim();
++        if (machineID.length() != MACHINE_ID_LENGTH) {
++            throw new IOException("Invalid machine-ID length: " + machineID.length());
++        }
++        return machineID;
++    }
++
+     public static boolean isFilePresent(String filePath) {
+         File file = new File(filePath);
+         return file.exists() && file.isFile();
+@@ -456,7 +466,7 @@
+         if (Files.exists(etcCmdline)) {
+             try {
+                 String content = Files.readString(etcCmdline);
+-                content = content.replace("\n", " ").trim();
++                    content = normalizeKernelCmdline(content);
+                 if (!content.isBlank()) {
+                     return content;
+                 }
+@@ -478,7 +488,7 @@
+         if (Files.exists(procCmdline)) {
+             try {
+                 String content = Files.readString(procCmdline);
+-                return content.replace("\n", " ").trim();
++                return normalizeKernelCmdline(content);
+             } catch (IOException ignored) {
+                 return "";
+             }
+@@ -487,55 +497,72 @@
+         return "";
+     }
+ 
++    private static String normalizeKernelCmdline(String content) {
++        return content.replace("\n", " ").trim();
++    }
+ 
+-    public static String getLinuxDistroName() {
+-        Path osReleasePath = Paths.get("/etc/os-release");
+-        try {
+-            if (Files.exists(osReleasePath)) {
+-                List<String> lines = Files.readAllLines(osReleasePath);
+-
+-                for (String line : lines) {
+-                    if (line.startsWith("PRETTY_NAME=")) {
+-                        return line.split("=")[1].replace("\"", "");
+-                    }
+-                }
+-                for (String line : lines) {
+-                    if (line.startsWith("NAME=")) {
+-                        return line.split("=")[1].replace("\"", "");
+-                    }
+-                }
+-            }
+-
+-            Path debianVersionPath = Paths.get("/etc/debian_version");
+-            Path redhatVersionPath = Paths.get("/etc/redhat-release");
+-
+-            // Fallbacks if /etc/os-release is not available
+-            if (Files.exists(Paths.get("/etc/lsb-release"))) {
+-                return getLinuxDistroNameFromLsbReleaseFile();
+-
+-            } else if (Files.exists(debianVersionPath)) {
+-                return "Debian " + Files.readString(debianVersionPath).trim();
++    public static String readKernelCmdline(ReadObservation observation) throws IOException {
++        String configured = observation.optionalText(Path.of("/etc/kernel/cmdline"));
++        if (configured != null && !normalizeKernelCmdline(configured).isBlank()) {
++            return normalizeKernelCmdline(configured);
++        }
++        Map<String, Object> root = observation.path(Path.of("/"));
++        Map<String, Object> pid1 = observation.path(Path.of("/proc/1/root/."));
++        if (!root.get("status").equals("present") || !pid1.get("status").equals("present")) {
++            throw new IOException("Unable to establish root context for kernel command line");
++        }
++        Map<?, ?> rootIdentity = (Map<?, ?>) root.get("identity");
++        Map<?, ?> pid1Identity = (Map<?, ?>) pid1.get("identity");
++        if (!Objects.equals(rootIdentity.get("dev"), pid1Identity.get("dev"))
++                || !Objects.equals(rootIdentity.get("ino"), pid1Identity.get("ino"))) {
++            throw new IOException("Kernel command line is unavailable in this chroot");
++        }
++        String current = observation.optionalText(Path.of("/proc/cmdline"));
++        return current == null ? "" : normalizeKernelCmdline(current);
++    }
+ 
+-            } else if (Files.exists(redhatVersionPath)) {
+-                return Files.readString(redhatVersionPath).trim();
+ 
+-            }
++    public static String getLinuxDistroName() {
++        try {
++            return readLinuxDistroName(null);
+         } catch (IOException e) {
+             errorMessage("Error reading Linux Distro information:", e.getMessage());
+         }
+         return null; // Return null if no information is found
+     }
+ 
+-    private static String getLinuxDistroNameFromLsbReleaseFile() throws IOException {
+-        List<String> lines = Files.readAllLines(Paths.get("/etc/lsb-release"));
+-        for (String line : lines) {
+-            if (line.startsWith("DISTRIB_DESCRIPTION=")) {
+-                return line.split("=")[1].replace("\"", "").trim();
++    private static String optionalText(Path path, ReadObservation observation) throws IOException {
++        if (observation != null) return observation.optionalText(path);
++        return Files.exists(path) ? Files.readString(path) : null;
++    }
++
++    private static String distroValue(String text, String key) {
++        for (String line : text.lines().toList()) {
++            if (line.startsWith(key + "=")) {
++                return line.split("=")[1].replace("\"", "");
+             }
+         }
+         return null;
+     }
+ 
++    public static String readLinuxDistroName(ReadObservation observation) throws IOException {
++        String release = optionalText(Path.of("/etc/os-release"), observation);
++        if (release != null) {
++            String value = distroValue(release, "PRETTY_NAME");
++            if (value == null) value = distroValue(release, "NAME");
++            if (value != null) return value;
++        }
++        String lsb = optionalText(Path.of("/etc/lsb-release"), observation);
++        if (lsb != null) {
++            String value = distroValue(lsb, "DISTRIB_DESCRIPTION");
++            return value == null ? null : value.trim();
++        }
++        String debian = optionalText(Path.of("/etc/debian_version"), observation);
++        if (debian != null) return "Debian " + debian.trim();
++        String redhat = optionalText(Path.of("/etc/redhat-release"), observation);
++        return redhat == null ? null : redhat.trim();
++    }
++
+ 
+     public static String buildPath(String... parts) {
+         String path = Paths.get("", parts).toString();
+--- a/src/main/java/org/limine/entry/tool/processes/MacroReplacer.java
++++ b/src/main/java/org/limine/entry/tool/processes/MacroReplacer.java
+@@ -3,35 +3,32 @@
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+-import static org.limine.entry.tool.processes.Utility.exitWithError;
+-
+-
+ public class MacroReplacer {
+ 
+-    public static final Map<String, String> MACROS = new HashMap<>();
++    private final Map<String, String> macros = new HashMap<>();
+ 
+-    public static void parseMacro(String line) {
++    public void parseMacro(String line) {
+         String lineTrim = line.trim();
+         if (lineTrim.startsWith("${") && line.contains("}=")) {
+             int endOfKey = lineTrim.indexOf('}');
+             String key = lineTrim.substring(2, endOfKey);
+             String value = lineTrim.substring(endOfKey + 2);
+-            MACROS.put(key, value);
++            macros.put(key, value);
+         }
+     }
+ 
+-    public static String replaceMacros(String line) {
++    public String replaceMacros(String line) {
+         if (line == null || line.trim().startsWith("#") || line.contains("}=")) {
+             return line;
+         }
+         if (line.contains("${")) {
+-            for (Map.Entry<String, String> entry : MACROS.entrySet()) {
++            for (Map.Entry<String, String> entry : macros.entrySet()) {
+                 String key = "${" + entry.getKey() + "}";
+                 String value = entry.getValue();
+                 line = line.replace(key, value);
+             }
+             if (line.contains("${")) {
+-                exitWithError("Incorrect config: " + "No definition of macro found: " + line.replace("${", "\\${"));
++                throw new IllegalArgumentException("Incorrect config: No definition of macro found: " + line);
+             }
+         }
+         return line;
+--- a/src/main/java/org/limine/entry/tool/processes/LimineReader.java
++++ b/src/main/java/org/limine/entry/tool/processes/LimineReader.java
+@@ -9,6 +9,7 @@
+ import java.nio.file.Files;
+ import java.nio.file.Paths;
+ import java.util.List;
++import java.util.Map;
+ 
+ 
+ public class LimineReader {
+@@ -16,11 +17,29 @@
+     private final String limineConfigPath;
+     private final TreeNode rootNode;
+     private final TreeNode targetOsNode;
++    private final MacroReplacer macros = new MacroReplacer();
++    private final Map<String, Object> configurationObservation;
+ 
+     public LimineReader(Config config) throws IOException {
++        this(config, null);
++    }
++
++    public LimineReader(Config config, ReadObservation observation) throws IOException {
+ 
+         this.limineConfigPath = Utility.buildPath(config.espPath(), Config.LIMINE_CONFIG_FILE);
+-        this.rootNode = new TreeNode("root", 0, null);
++        this.rootNode = new TreeNode("root", 0, null, macros);
++
++        if (observation != null) {
++            String text = observation.optionalText(Paths.get(limineConfigPath));
++            this.configurationObservation = observation.lastRead(Paths.get(limineConfigPath));
++            if (text != null) {
++                List<String> lines = text.lines().toList();
++                this.parseLinesToTree(lines, rootNode, 0, lines.size());
++            }
++            this.targetOsNode = rootNode.findOsNode(config.machineID(), config.targetOs(), 1);
++            return;
++        }
++        this.configurationObservation = null;
+ 
+         if (!Utility.isFilePresent(limineConfigPath)) {
+             Utility.infoMessage(limineConfigPath + " is created.");
+@@ -32,7 +51,7 @@
+ 
+         if (osNode == null && Config.ENABLE_OS_GENERATION) {
+             // Create default OS entry
+-            this.targetOsNode = new TreeNode(Limine.ENTRY_KEY.toString().trim() + Limine.EXPAND + config.targetOs(), 1, "root");
++            this.targetOsNode = new TreeNode(Limine.ENTRY_KEY.toString().trim() + Limine.EXPAND + config.targetOs(), 1, "root", macros);
+             targetOsNode.addConfigLine("### This OS entry is auto-generated by limine-entry-tool");
+             EntryOptions osEntryOptions = new EntryOptions()
+                     .setMachineID(config.machineID())
+@@ -61,6 +80,10 @@
+         return targetOsNode;
+     }
+ 
++    public Map<String, Object> getConfigurationObservation() {
++        return configurationObservation;
++    }
++
+     private void readLimineConfig(TreeNode rootNode) throws IOException {
+         List<String> lines = Files.readAllLines(Paths.get(limineConfigPath));
+         this.parseLinesToTree(lines, rootNode, 0, lines.size());
+@@ -77,7 +100,7 @@
+             String trimLine = line.trim();
+             if (trimLine.startsWith(Limine.ENTRY_KEY.toString())) {
+                 int depth = calculateDepth(trimLine);
+-                TreeNode childNode = new TreeNode(line, depth, currentNode.getName());
++                TreeNode childNode = new TreeNode(line, depth, currentNode.getName(), macros);
+                 currentNode.addNode(childNode);
+ 
+                 // Find the range for the child node
+@@ -86,7 +109,7 @@
+ 
+             } else {
+                 // Check if the line defines a macro
+-                MacroReplacer.parseMacro(line);
++                macros.parseMacro(line);
+                 currentNode.addConfigLine(line);
+                 index++;
+ 
+--- a/src/main/java/org/limine/entry/tool/processes/LimineManager.java
++++ b/src/main/java/org/limine/entry/tool/processes/LimineManager.java
+@@ -46,7 +46,7 @@
+         }
+         TreeNode efiNode = rootNode.findNodeByCleanName(efiName, null, 1);
+         if (efiNode == null) {
+-            efiNode = new TreeNode(Limine.ENTRY_KEY + efiName, 1, rootNode.getName());
++            efiNode = new TreeNode(Limine.ENTRY_KEY + efiName, 1, rootNode.getName(), rootNode.getMacros());
+             efiNode.setEnableLineBreak(true);
+             int position = rootNode.findPositionByLowerPriority(entryOptions.getPriority());
+             rootNode.addNode(position, efiNode);
+@@ -189,14 +189,14 @@
+             throw new IOException("Kernel not found: " + vmlinuzPath);
+         }
+ 
+-        String dirPath = Utility.buildPath(config.espPath(), config.machineID(), kernelName) + File.separator;
++        String dirPath = OutputLayout.kernelDirectory(config, kernelName);
+         Utility.ensureDirectoryExists(dirPath);
+ 
+         // Copying initramfs and vmlinuz to $ESP_PATH/${machine_id}/${kernel-version}/*
+-        String initramfsFileName = Utility.extractFileNameFromPath(initramfsPath.trim());
++        String initramfsFileName = OutputLayout.inputBasename(initramfsPath);
+         String targetInitramfsPath = dirPath + initramfsFileName;
+ 
+-        String vmlinuzFileName = Utility.extractFileNameFromPath(vmlinuzPath.trim());
++        String vmlinuzFileName = OutputLayout.inputBasename(vmlinuzPath);
+         String targetVmlinuzPath = dirPath + vmlinuzFileName;
+ 
+         Utility.copyFileIfMissingOrDifferent(initramfsPath, targetInitramfsPath);
+@@ -210,7 +210,7 @@
+         for (TreeNode bootNode : this.targetOsNode.getNodes()) {
+             // Check if the kernelVersion exists in the OS node.
+             // If so, then update the config lines for the kernel.
+-            if (fullKernelName.equals(bootNode.getOrCreateOptions().getKernelID()) || (bootNode.getOrCreateOptions().getKernelID().isEmpty() && fullKernelName.equals(bootNode.getCleanName()))) {
++            if (bootNode.matchesKernelID(fullKernelName)) {
+                 // Update initramfs and vmlinuz
+                 List<String> bootConfig = this.createBootConfig(kernelName, comments, kernelCmdline, initramfsFileName, vmlinuzFileName);
+                 bootNode.getConfigLines().clear();
+@@ -223,7 +223,7 @@
+ 
+         // The matched kernel name is not found, then create a kernel entry.
+         if (!isKernelFound) {
+-            TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + fullKernelName, 2, targetOsNode.getName());
++            TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + fullKernelName, 2, targetOsNode.getName(), targetOsNode.getMacros());
+             bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+             bootNode.setOptions(kernelEntryOptions);
+             List<String> bootConfig = this.createBootConfig(kernelName, comments, kernelCmdline, initramfsFileName, vmlinuzFileName);
+@@ -245,7 +245,7 @@
+             throw new IOException("UKI not found: " + ukiFilePath);
+         }
+ 
+-        String dirPath = Utility.buildPath(config.espPath(), Config.DEFAULT_UKI_DIR_PATH) + File.separator;
++        String dirPath = OutputLayout.ukiDirectory(config);
+         Utility.ensureDirectoryExists(dirPath);
+ 
+         // Copying ukiFilePath to $ESP_PATH/EFI/Linux/${UKI_FILE_PREFIX}_${kernel_name}.efi
+@@ -259,7 +259,7 @@
+ 
+         for (TreeNode bootNode : this.targetOsNode.getNodes()) {
+             // Check if the UKI entry exists in the OS node. If so, then update the config lines for the kernel.
+-            if (kernelName.equals(bootNode.getOrCreateOptions().getKernelID()) || (bootNode.getOrCreateOptions().getKernelID().isEmpty() && kernelName.equals(bootNode.getCleanName()))) {
++            if (bootNode.matchesKernelID(kernelName)) {
+                 // Update UKI
+                 List<String> bootConfig = this.createUkiBootConfig(comments, kernelCmdline, ukiFileName);
+                 bootNode.getConfigLines().clear();
+@@ -272,7 +272,7 @@
+ 
+         // The matched kernel name is not found, then create a UKI entry.
+         if (!isKernelFound) {
+-            TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + kernelName, 2, targetOsNode.getName());
++            TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + kernelName, 2, targetOsNode.getName(), targetOsNode.getMacros());
+             bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+             bootNode.setOptions(kernelEntryOptions);
+             List<String> bootConfig = this.createUkiBootConfig(comments, kernelCmdline, ukiFileName);
+@@ -361,22 +361,7 @@
+     }
+ 
+     private String getDefaultUkiFileName(String kernelName) {
+-        // Bugfix: Avoid using toLowerCase() on ukiFileName,
+-        // as Limine expects case-sensitive paths, but FAT32 is not case-sensitive, causing mismatches.
+-        String ukiFileName = kernelName;
+-        if (!kernelName.toLowerCase().endsWith(Config.UKI_FILE_SUFFIX)) {
+-            ukiFileName = ukiFileName + Config.UKI_FILE_SUFFIX;
+-        }
+-        if (Config.UKI_FILE_PREFIX != null && !Config.UKI_FILE_PREFIX.isBlank()) {
+-            if (!kernelName.startsWith(Config.UKI_FILE_PREFIX)) {
+-                ukiFileName = Config.UKI_FILE_PREFIX + "_" + ukiFileName;
+-            }
+-        } else {
+-            if (!kernelName.startsWith(config.machineID())) {
+-                ukiFileName = config.machineID() + "_" + ukiFileName;
+-            }
+-        }
+-        return ukiFileName;
++        return OutputLayout.ukiFileName(config, Config.UKI_FILE_PREFIX, kernelName);
+     }
+ 
+     public void removeKernel(String kernelName, boolean isUKI) {
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/JsonOutput.java
+@@ -0,0 +1,70 @@
++package org.limine.entry.tool.processes;
++
++import java.util.List;
++import java.util.Map;
++
++/** Output-only JSON encoding for the fixed native description schema. */
++public final class JsonOutput {
++    private JsonOutput() {}
++
++    public static String encode(Object value) {
++        StringBuilder output = new StringBuilder();
++        append(output, value);
++        return output.toString();
++    }
++
++    private static void append(StringBuilder output, Object value) {
++        if (value == null) {
++            output.append("null");
++        } else if (value instanceof String text) {
++            output.append('"');
++            for (int i = 0; i < text.length(); i++) {
++                char c = text.charAt(i);
++                switch (c) {
++                    case '"' -> output.append("\\\"");
++                    case '\\' -> output.append("\\\\");
++                    case '\b' -> output.append("\\b");
++                    case '\f' -> output.append("\\f");
++                    case '\n' -> output.append("\\n");
++                    case '\r' -> output.append("\\r");
++                    case '\t' -> output.append("\\t");
++                    default -> {
++                        if (c < 0x20 || Character.isSurrogate(c)) {
++                            output.append(String.format("\\u%04x", (int) c));
++                        } else {
++                            output.append(c);
++                        }
++                    }
++                }
++            }
++            output.append('"');
++        } else if (value instanceof Boolean || value instanceof Integer || value instanceof Long) {
++            output.append(value);
++        } else if (value instanceof List<?> values) {
++            output.append('[');
++            boolean first = true;
++            for (Object item : values) {
++                if (!first) output.append(',');
++                append(output, item);
++                first = false;
++            }
++            output.append(']');
++        } else if (value instanceof Map<?, ?> values) {
++            output.append('{');
++            boolean first = true;
++            for (Map.Entry<?, ?> entry : values.entrySet()) {
++                if (!(entry.getKey() instanceof String)) {
++                    throw new IllegalArgumentException("JSON object keys must be strings");
++                }
++                if (!first) output.append(',');
++                append(output, entry.getKey());
++                output.append(':');
++                append(output, entry.getValue());
++                first = false;
++            }
++            output.append('}');
++        } else {
++            throw new IllegalArgumentException("Unsupported JSON value type");
++        }
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/ReadObservation.java
+@@ -0,0 +1,133 @@
++package org.limine.entry.tool.processes;
++
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.NoSuchFileException;
++import java.nio.file.Path;
++import java.nio.file.attribute.BasicFileAttributes;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.HexFormat;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/** Non-initializing reads and evidence for bytes actually parsed by a query. */
++public final class ReadObservation {
++    private final List<Map<String, Object>> inputs = new ArrayList<>();
++
++    public List<Map<String, Object>> inputs() {
++        return List.copyOf(inputs);
++    }
++
++    public Map<String, Object> lastRead(Path path) {
++        for (int i = inputs.size() - 1; i >= 0; i--) {
++            Map<String, Object> input = inputs.get(i);
++            if (path.toString().equals(input.get("path"))) return Map.copyOf(input);
++        }
++        throw new IllegalArgumentException("No captured input: " + path);
++    }
++
++    public Map<String, Object> path(Path requested) throws IOException {
++        Path absolute = requested.toAbsolutePath();
++        Path current = absolute.getRoot();
++        List<Map<String, Object>> links = new ArrayList<>();
++        for (Path part : absolute) {
++            current = current.resolve(part);
++            BasicFileAttributes attributes;
++            try {
++                attributes = Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
++            } catch (NoSuchFileException e) {
++                Map<String, Object> result = new LinkedHashMap<>();
++                result.put("path", requested.toString());
++                result.put("status", "absent");
++                result.put("missing_at", current.toString());
++                result.put("links", links);
++                return result;
++            }
++            if (attributes.isSymbolicLink()) {
++                Map<String, Object> link = new LinkedHashMap<>();
++                link.put("path", current.toString());
++                link.put("target", Files.readSymbolicLink(current).toString());
++                link.put("identity", identity(current, LinkOption.NOFOLLOW_LINKS));
++                links.add(link);
++                // A dangling or looping ancestor is not optional-file absence.
++                Files.readAttributes(current, BasicFileAttributes.class);
++            }
++        }
++        BasicFileAttributes attributes = Files.readAttributes(absolute, BasicFileAttributes.class);
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("path", requested.toString());
++        result.put("status", "present");
++        result.put("type", attributes.isRegularFile() ? "file" : attributes.isDirectory() ? "directory" : "other");
++        result.put("resolved_path", absolute.toRealPath().toString());
++        result.put("identity", identity(absolute));
++        result.put("links", links);
++        return result;
++    }
++
++    private static Map<String, String> identity(Path path, LinkOption... options) throws IOException {
++        Map<String, Object> attributes = Files.readAttributes(path, "unix:dev,ino,uid,gid,mode,size,lastModifiedTime", options);
++        Map<String, String> result = new LinkedHashMap<>();
++        for (String key : List.of("dev", "ino", "uid", "gid", "mode", "size", "lastModifiedTime")) {
++            result.put(key, attributes.get(key).toString());
++        }
++        return result;
++    }
++
++    public String optionalText(Path path) throws IOException {
++        Map<String, Object> before = path(path);
++        if (before.get("status").equals("absent")) {
++            inputs.add(before);
++            return null;
++        }
++        if (!before.get("type").equals("file") && !before.get("resolved_path").equals("/dev/null")) {
++            throw new IOException("Expected a regular input file: " + path);
++        }
++        byte[] bytes = Files.readAllBytes(path);
++        Map<String, Object> after = path(path);
++        if (!before.equals(after)) {
++            throw new IOException("Input changed while reading: " + path);
++        }
++        try {
++            before.put("sha256", HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)));
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException(e);
++        }
++        inputs.add(before);
++        return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
++    }
++
++    public List<Path> configDirectory(Path directory) throws IOException {
++        Map<String, Object> before = path(directory);
++        if (!before.get("status").equals("present") || !before.get("type").equals("directory")) {
++            inputs.add(before);
++            return List.of();
++        }
++        List<Path> candidates;
++        try (var stream = Files.list(directory)) {
++            candidates = stream.filter(p -> p.getFileName().toString().endsWith(".conf"))
++                    .sorted(Comparator.comparing(Path::getFileName)).toList();
++        }
++        List<Path> files = new ArrayList<>();
++        List<Map<String, Object>> entries = new ArrayList<>();
++        for (Path candidate : candidates) {
++            Map<String, Object> observation = path(candidate);
++            entries.add(observation);
++            if (observation.get("status").equals("present") && observation.get("type").equals("file")) {
++                files.add(candidate);
++            }
++        }
++        if (!before.equals(path(directory))) {
++            throw new IOException("Configuration directory changed while listing: " + directory);
++        }
++        before.put("entries", entries);
++        inputs.add(before);
++        return files;
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/OutputLayout.java
+@@ -0,0 +1,37 @@
++package org.limine.entry.tool.processes;
++
++import org.limine.entry.tool.objects.Config;
++
++import java.io.File;
++
++/** Pure native destination rules, shared by publication and description. */
++public final class OutputLayout {
++    private OutputLayout() {}
++
++    public static String kernelDirectory(Config config, String kernelName) {
++        return Utility.buildPath(config.espPath(), config.machineID(), kernelName) + File.separator;
++    }
++
++    public static String inputBasename(String input) {
++        return Utility.extractFileNameFromPath(input.trim());
++    }
++
++    public static String ukiFileName(Config config, String prefix, String kernelName) {
++        String ukiFileName = kernelName;
++        if (!kernelName.toLowerCase().endsWith(Config.UKI_FILE_SUFFIX)) {
++            ukiFileName = ukiFileName + Config.UKI_FILE_SUFFIX;
++        }
++        if (prefix != null && !prefix.isBlank()) {
++            if (!kernelName.startsWith(prefix)) {
++                ukiFileName = prefix + "_" + ukiFileName;
++            }
++        } else if (!kernelName.startsWith(config.machineID())) {
++            ukiFileName = config.machineID() + "_" + ukiFileName;
++        }
++        return ukiFileName;
++    }
++
++    public static String ukiDirectory(Config config) {
++        return Utility.buildPath(config.espPath(), Config.DEFAULT_UKI_DIR_PATH) + File.separator;
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/NativeDescription.java
+@@ -0,0 +1,204 @@
++package org.limine.entry.tool.processes;
++
++import org.limine.entry.tool.formats.limine8.Limine;
++import org.limine.entry.tool.objects.BootOptions;
++import org.limine.entry.tool.objects.Config;
++import org.limine.entry.tool.objects.TreeNode;
++
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++/** Native-operation facts, not package inventory, publication or boot proof. */
++public final class NativeDescription {
++    private NativeDescription() {}
++
++    private static final Set<String> CONTROL_OPERANDS = Set.of("--quiet", "--help", "--version", "--comment",
++            "--keep-files", "--priority", "--overwrite", "--no-mutex", "--mutex", "--no-hooks", "--hooks", "--get-cmdline");
++
++    private record Request(String kind, String name, String suffix, List<String> sources) {
++        String kernelID() { return name + suffix; }
++    }
++
++    private static Map<String, Object> object(Object... pairs) {
++        Map<String, Object> result = new LinkedHashMap<>();
++        for (int i = 0; i < pairs.length; i += 2) {
++            result.put((String) pairs[i], pairs[i + 1]);
++        }
++        return result;
++    }
++
++    private static Request request(String[] args) {
++        for (int i = 1; i < args.length; i++) {
++            if (CONTROL_OPERANDS.contains(args[i])) {
++                throw new IllegalArgumentException("Mutation control is not a description operand: " + args[i]);
++            }
++        }
++        if (args.length == 1 && args[0].equals("context")) {
++            return new Request("context", "", "", List.of());
++        }
++        if (args.length < 3) throw new IllegalArgumentException("Missing description operands");
++        String kind = args[0];
++        String name = args[1];
++        String suffix = "";
++        List<String> sources;
++        if (kind.equals("add-uki") && args.length == 3) {
++            sources = List.of(args[2]);
++        } else if (kind.equals("add-kernel") && (args.length == 4 || args.length == 5)) {
++            suffix = args.length == 5 ? args[4] : "";
++            sources = List.of(args[2], args[3]);
++        } else {
++            throw new IllegalArgumentException("Unsupported description operation or operand count");
++        }
++        if (!Utility.isValidFat32Name(name + suffix)) {
++            throw new IllegalArgumentException("Invalid native kernel name");
++        }
++        for (String source : sources) {
++            if (source.isBlank() || OutputLayout.inputBasename(source).isEmpty()) {
++                throw new IllegalArgumentException("Invalid prospective source operand");
++            }
++        }
++        return new Request(kind, name.trim(), suffix.trim(), sources);
++    }
++
++    public static int run(String[] args) {
++        Map<String, Object> result = object("format", "limine-native-description", "schema", 1,
++                "scope", "native-operation", "complete", false);
++        List<Map<String, Object>> errors = new ArrayList<>();
++        result.put("errors", errors);
++        Request request;
++        try {
++            request = request(args);
++        } catch (IllegalArgumentException e) {
++            errors.add(object("kind", "invalid-request", "message", e.getMessage()));
++            System.out.println(JsonOutput.encode(result));
++            return 2;
++        }
++
++        result.put("operation", object("kind", request.kind, "name", request.name,
++                "suffix", request.suffix, "sources", request.sources));
++        ReadObservation inputs = new ReadObservation();
++        try {
++            ConfigReader reader = new ConfigReader(inputs);
++            String machineID = Utility.readExistingMachineID(inputs);
++            String targetOs = reader.targetOs();
++            if (targetOs == null || targetOs.isEmpty()) {
++                throw new IOException("Native target OS could not be resolved");
++            }
++            List<Map<String, Object>> espCandidates = new ArrayList<>();
++            String esp = reader.configuredEspPath();
++            boolean explicitEsp = esp != null && !esp.isBlank();
++            if (!explicitEsp) {
++                esp = null;
++                for (String candidate : List.of("/efi", "/boot", "/boot/efi", "/limine")) {
++                    Map<String, Object> facts = filesystem(candidate, inputs);
++                    espCandidates.add(facts);
++                    if (Boolean.TRUE.equals(facts.get("vfat"))) {
++                        esp = candidate;
++                        break;
++                    }
++                }
++                if (esp == null) throw new IOException("No native ESP candidate resolved to FAT32");
++            }
++            Map<String, Object> filesystem = filesystem(esp, inputs);
++            String prefix = reader.ukiPrefix(machineID);
++            boolean verification = reader.verificationEnabled();
++            Map<String, String> cmdlines = reader.readBootOptions();
++            Config config = new Config(machineID, targetOs, esp, Limine.DEFAULT_PATH_FUNCTION.toString());
++            result.put("context", object("machine_id", machineID, "target_os", targetOs,
++                    "esp_path", esp, "esp_explicit", explicitEsp, "filesystem", filesystem,
++                    "esp_candidates", espCandidates, "config_path", Utility.buildPath(esp, Config.LIMINE_CONFIG_FILE),
++                    "uki_prefix", prefix, "verification_enabled", verification,
++                    "verification_basis", object("path_environment", System.getenv("PATH"),
++                            "hash_command", Config.HASH_COMMAND, "requires_fresh_availability_check", true),
++                    "kernel_cmdlines", new LinkedHashMap<>(cmdlines)));
++            result.put("mutation_preconditions", object("esp_vfat", filesystem.get("vfat")));
++
++            if (!request.kind.equals("context")) {
++                result.put("expected", expected(config, prefix, verification, cmdlines, request, inputs));
++            }
++            LimineReader limine = new LimineReader(config, inputs);
++            List<TreeNode> osCandidates = limine.getRootNode().findOsCandidates(machineID, targetOs, 1);
++            List<Map<String, Object>> nodes = new ArrayList<>();
++            for (TreeNode node : osCandidates) {
++                List<TreeNode> kernels = request.kind.equals("context")
++                        ? List.of() : node.findKernelCandidates(request.kernelID());
++                List<Map<String, Object>> children = new ArrayList<>();
++                for (TreeNode kernel : kernels) {
++                    children.add(object("position", node.getNodes().indexOf(kernel), "name", kernel.getName(),
++                            "clean_name", kernel.getCleanName(), "kernel_id", kernel.getOrCreateOptions().getKernelID(),
++                            "basis", kernel.getOrCreateOptions().getKernelID().isEmpty() ? "display-name" : "kernel-id",
++                            "lines", List.copyOf(kernel.getConfigLines())));
++                }
++                if (kernels.size() > 1) {
++                    errors.add(object("kind", "ambiguous-kernel", "message", "Multiple direct native kernel matches"));
++                }
++                nodes.add(object("position", limine.getRootNode().getNodes().indexOf(node), "name", node.getName(),
++                        "clean_name", node.getCleanName(), "machine_id", node.getOrCreateOptions().getMachineID(),
++                        "lines", List.copyOf(node.getConfigLines()), "kernel_candidates", children));
++            }
++            if (osCandidates.size() > 1) {
++                errors.add(object("kind", "ambiguous-os", "message", "Multiple native current-OS matches"));
++            }
++            String basis = osCandidates.isEmpty() ? "absent"
++                    : machineID.equals(osCandidates.getFirst().getOrCreateOptions().getMachineID()) ? "machine-id" : "compatible-name";
++            result.put("observed", object("interpretation", "native-association-and-raw-lines", "semantics", "as-read", "os_basis", basis,
++                    "configuration", limine.getConfigurationObservation(),
++                    "os_candidates", nodes));
++            result.put("complete", errors.isEmpty());
++        } catch (IOException | RuntimeException e) {
++            errors.add(object("kind", "incomplete-observation", "message", e.getMessage()));
++        }
++        result.put("inputs", inputs.inputs());
++        System.out.println(JsonOutput.encode(result));
++        return errors.isEmpty() ? 0 : 1;
++    }
++
++    private static Map<String, Object> filesystem(String path, ReadObservation inputs) throws IOException {
++        Map<String, Object> observation = inputs.path(Path.of(path));
++        String type = null;
++        if (observation.get("status").equals("present") && observation.get("type").equals("directory")) {
++            type = Files.getFileStore(Path.of(path)).type();
++        }
++        return object("path", observation, "type", type, "vfat", "vfat".equalsIgnoreCase(type));
++    }
++
++    private static Map<String, Object> expected(Config config, String prefix, boolean verification,
++            Map<String, String> cmdlines, Request request, ReadObservation inputs) throws IOException {
++        String cmdline = BootOptions.getKernelCmdline(cmdlines, request.kernelID());
++        List<Map<String, Object>> resources = new ArrayList<>();
++        String protocol;
++        if (request.kind.equals("add-uki")) {
++            protocol = "efi";
++            cmdline = BootOptions.cleanKernelParameters(cmdline, false).cmdline();
++            String target = OutputLayout.ukiDirectory(config) + OutputLayout.ukiFileName(config, prefix, request.name);
++            resources.add(resource("uki", request.sources.getFirst(), target, "copied", config, inputs));
++        } else {
++            protocol = "linux";
++            BootOptions.KernelParams options = BootOptions.cleanKernelParameters(cmdline, true);
++            cmdline = options.cmdline();
++            for (String module : options.initrds()) {
++                String target = Utility.buildPath(config.espPath(), module);
++                resources.add(resource("extra-initrd", target, target, "referenced", config, inputs));
++            }
++            String directory = OutputLayout.kernelDirectory(config, request.name);
++            resources.add(resource("initramfs", request.sources.get(0), directory + OutputLayout.inputBasename(request.sources.get(0)), "copied", config, inputs));
++            resources.add(resource("kernel", request.sources.get(1), directory + OutputLayout.inputBasename(request.sources.get(1)), "copied", config, inputs));
++        }
++        return object("kernel_id", request.kernelID(), "new_entry_default_name", request.kernelID(), "protocol", protocol,
++                "cmdline", cmdline, "native_hash_policy", verification ? "present" : "absent", "resources", resources);
++    }
++
++    private static Map<String, Object> resource(String role, String source, String target, String disposition,
++            Config config, ReadObservation inputs) throws IOException {
++        String esp = Utility.buildPath(config.espPath());
++        return object("role", role, "source", source, "source_observation", inputs.path(Path.of(source)),
++                "destination", target, "destination_observation", inputs.path(Path.of(target)),
++                "prospective_uri", config.pathFunction() + target.substring(esp.length()), "disposition", disposition);
++    }
++}
+--- a/install/arch-linux/limine-entry-tool/usr/bin/limine-entry-tool
++++ b/install/arch-linux/limine-entry-tool/usr/bin/limine-entry-tool
+@@ -1,5 +1,10 @@
+ #!/usr/bin/env bash
+ 
++# Observation must precede authentication, terminal setup, locks and hooks.
++if [[ ${1:-} == --describe ]]; then
++	exec /usr/lib/limine/limine-entry-tool "$@"
++fi
++
+ readonly SCRIPT_NAME="limine-entry-tool"
+ readonly BOOT_PARTITION_LOCK="/run/lock/boot-partition.lock"
+ readonly AUTH_HELPER=/usr/lib/limine/auth-helper
+--- a/README.md
++++ b/README.md
+@@ -67,6 +67,27 @@
+ </details>
+ 
+ <details>
++<summary>Describe native operation facts without changing boot state</summary>
++
++```shell
++limine-entry-tool --describe context
++limine-entry-tool --describe add-uki linux /prospective/linux.efi
++limine-entry-tool --describe add-kernel linux /prospective/initramfs /prospective/vmlinuz
++limine-entry-tool --describe add-kernel linux /prospective/initramfs-fallback /prospective/vmlinuz -fallback
++```
++
++This interface emits one JSON document with `format: limine-native-description`, `schema: 1` and `scope: native-operation`. It reports native configuration and input observations, prospective destinations and command line, and matching current-OS/direct-kernel candidates with their original configuration lines. Naming and association rules are shared with native publication.
++
++`--describe` must be first. The route bypasses authentication, terminal setup, locks and hooks. Mutation controls are not accepted as operands; use an explicit lexical path such as `./--quiet` when that is a filename. Inputs and outputs may be absent, and an absent `limine.conf` is reported without creating it. Unresolved identity, required read errors and ambiguous associations return an incomplete observation. Ordinary input/config symlinks are followed and identified; source basenames are taken from the supplied path, not its symlink target.
++
++Exit 0 with `complete: true` means the requested description was obtained. Exit 2 is an invalid request; exit 1 is incomplete observation. A complete description can include known missing resources or an explicitly configured ESP that fails the separately reported `mutation_preconditions.esp_vfat` check. It is not permission to mutate or proof of package coverage, publication, signing or bootability.
++
++Configuration/entry observations are **as read**, bound to their captured input identities and hashes. They are not a locked filesystem snapshot; consumers must revalidate them at their own transaction boundary. `expected.new_entry_default_name` is the default for creating an entry; an existing matching entry retains its observed display name. Raw lines are not a complete interpretation of Limine URIs. Hash-tool availability depends on the reported process PATH and needs a fresh check when using that policy. No producer-issued filesystem initialization, logging or mutation is performed; normal filesystem access-time behavior is not suppressed.
++
++The interface describes an explicit native operation. Package-declared kernel inventory, shell build-mode/fallback selection and actual producer completion remain with their respective owners.
++</details>
++
++<details>
+ <summary>Create or update a kernel entry under the OS</summary>
+ 
+ ```shell

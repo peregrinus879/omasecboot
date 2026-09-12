@@ -32,32 +32,9 @@ finish() {
   fi
 }
 trap finish EXIT
-verify_hash() {
-  local digest
-  digest=$(sha256sum -- "$1")
-  [[ ${digest%% *} == "$2" ]] || die "SHA-256 mismatch: $1"
-}
-jq -e '.native.schema == 1 and (.native.files | length > 0)' "$metadata" >/dev/null \
-  || die 'native source contract is missing'
-mapfile -t sources < <(jq -er '.native.files[].path' "$metadata")
-compile_sources=()
-for path in "${sources[@]}"; do
-  [[ $path == src/main/java/org/limine/entry/tool/*.java && $path != *..* ]] \
-    || die "unexpected source path: $path"
-  for revision in original patched; do
-    mkdir -p "$scratch/$revision/${path%/*}"
-    cp -- "$source_root/$path" "$scratch/$revision/$path"
-  done
-  verify_hash "$scratch/original/$path" "$(jq -er --arg path "$path" '.native.files[] | select(.path == $path) | .sha256' "$metadata")"
-  compile_sources+=("/source/$path")
-done
-patch_name=$(jq -er '.native.patch.file' "$metadata")
-[[ $patch_name == 0002-propagate-native-failures.patch ]] || die 'unexpected native patch'
-verify_hash "$integration/$patch_name" "$(jq -er '.native.patch.sha256' "$metadata")"
-patch --batch --forward --fuzz=0 -p1 -d "$scratch/patched" -i "$integration/$patch_name" >"$scratch/patch.log"
-for path in "${sources[@]}"; do
-  verify_hash "$scratch/patched/$path" "$(jq -er --arg path "$path" '.native.files[] | select(.path == $path) | .patched_sha256' "$metadata")"
-done
+# shellcheck source=tests/integration/lib/limine-sources.sh
+source "$repo/tests/integration/lib/limine-sources.sh"
+limine_prepare_sources "$source_root" "$scratch" "$metadata" "$integration"
 
 mkdir -p "$scratch/fixtures" "$scratch/fake-bin" "$scratch/compiler"
 cp "$repo/tests/integration/fixtures/NativeContract.java" \
@@ -137,6 +114,10 @@ java_options=(-Xmx256m -XX:ActiveProcessorCount=4 -Duser.home=/work/home -Djava.
 cat "$scratch/java-version"
 grep -Eq '^(openjdk|java) 25([.[:space:]]|$)' "$scratch/java-version" || die 'requires Java 25'
 for revision in original patched; do
+  compile_sources=()
+  sources=("${LIMINE_ORIGINAL_JAVA[@]}")
+  [[ $revision != patched ]] || sources=("${LIMINE_PATCHED_JAVA[@]}")
+  for path in "${sources[@]}"; do compile_sources+=("/source/$path"); done
   mkdir -p "$scratch/classes-$revision"
   extra=()
   [[ $revision != patched ]] || extra+=(/fixtures/NativeScannerContract.java)

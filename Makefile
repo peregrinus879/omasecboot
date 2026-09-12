@@ -16,7 +16,7 @@ PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
                zzz-omasecboot.hook
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) $(wildcard limine-hooks/*) \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh) \
-          $(wildcard tests/integration/*.sh)
+          $(wildcard tests/integration/*.sh) $(wildcard tests/integration/lib/*.sh)
 TEST_SUITES = checks status guards dispatcher enrollment unconfigure producers \
               lifecycle producer-repair producer-ownership recovery-publication \
               software-recovery artifacts unconfigure-tools install package \
@@ -24,9 +24,10 @@ TEST_SUITES = checks status guards dispatcher enrollment unconfigure producers \
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 LIMINE_ENTRY_TOOL_SOURCE ?=
 LIMINE_NATIVE_JAVA_HOME ?=
+LIMINE_NATIVE_EXECUTABLE ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-pacman-contract $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-pacman-contract $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -97,7 +98,8 @@ package-limine-entry-tool:
 	  mkdir -p "$$dest"; \
 	  cp integrations/limine-entry-tool/PKGBUILD \
 	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch \
-	    integrations/limine-entry-tool/0002-propagate-native-failures.patch "$$build/"; \
+	    integrations/limine-entry-tool/0002-propagate-native-failures.patch \
+	    integrations/limine-entry-tool/0003-describe-native-outputs.patch "$$build/"; \
 	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -129,6 +131,9 @@ test-integration:
 # fixtures. Source and JDK are caller-supplied; the suite performs no downloads.
 test-native:
 	bash tests/integration/limine-native.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
+
+test-description:
+	bash tests/integration/limine-description.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)" "$(LIMINE_NATIVE_EXECUTABLE)"
 
 # Real stock-pacman metadata and hook contracts, with fixture-only state in
 # unprivileged Bubblewrap namespaces. No source checkout or network is needed.
