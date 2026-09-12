@@ -12,6 +12,16 @@ The core, producer integration patches, package recipes, and cross-tool tests ar
 
 Install only `omasecboot` from the Omarchy Package Repository; its dependencies bring the rest. Removal drops only `omasecboot` and preserves the durable state under `/var/lib/omasecboot`.
 
+## Package update completion
+
+Omarchy owns the normal update workflow, including its lock, snapshots, keyring update, system packages, migrations, post-update hooks, AUR packages and restart offer. `omarchy-update-system-pkgs` also owns its conflict retry and interactive terminal behavior. The OmaSecBoot integration must preserve those interfaces and the unattended `-y` contract. Package installs/removals and standalone producers remain relevant even when the whole-update command is not used.
+
+Pacman's successful exit does not prove its PostTransaction hooks succeeded. The intended stock-pacman integration therefore needs producer-owned expectation hooks with matching triggers, a fixed runner recording actual producer exits, and core completion that requires every expected operation plus direct boot-artifact proof. A producer that fails before self-registration must leave an unmet expectation. The canonical effective hook set must be proved before and after the transaction. `make test-pacman-contract` establishes the underlying stock-tool behavior; these production interfaces remain release work in the maintenance ledger.
+
+After a successful pacman invocation, the managed Omarchy path must check OmaSecBoot completion before reporting success or proceeding to migrations/reboot. Keep this result separate from pacman's own failure: a completed package transaction with failed boot repair must not enter the file-conflict retry as though package installation failed. Both the normal and interactive-retry paths need this check. The check must also account for later package/producer operations in the overall update; an early success is not a final reboot proof.
+
+Build and verify against each target channel's actual package set. Stable/RC and edge can carry different Limine, mkinitcpio and systemd versions; the newest global Arch release is not automatically the stable Omarchy baseline. The existing OPR channel and package-signing machinery remains the delivery route.
+
 ## Setup wrapper
 
 Before any package mutation, the wrapper checks, in order: UEFI boot mode, Limine as the installed bootloader, non-Apple firmware, no stale copy of the tool (`/usr/local/bin/omasecboot`, `/usr/local/lib/omasecboot/`, same-named hooks in `/etc/pacman.d/hooks/`, an unowned `/etc/boot/hooks/post.d/zzz-omasecboot-sign`), package availability and repository provenance, dependencies, and the candidate version. It then installs `omasecboot` and runs `/usr/bin/omasecboot setup`.

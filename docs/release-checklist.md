@@ -18,6 +18,7 @@ This checklist defines what must be true before a release tag is created. It sep
 ## 3. Package evidence
 
 - [ ] `tests/package.sh` passes on the candidate.
+- [ ] `make test-pacman-contract` passes for the audited pacman/libalpm version, using unprivileged Bubblewrap and fixture-only package state. Record the reported executable/version and the target channel profile. This separate contract gate does not replace production hook/lifecycle, update or boot acceptance.
 - [ ] `tests/package-root.sh` passes in a disposable Arch container: CI's package job, or the same two steps locally with Docker: `docker run --rm -e OMASECBOOT_DISPOSABLE_ROOT=1 -v "$PWD:/src:ro" archlinux:base-devel bash -c 'pacman -Syu --noconfirm --needed git jq diffutils util-linux libarchive >/dev/null && cp -a /src /work && cd /work && useradd --create-home builder && chown -R builder . && runuser -u builder -- env HOME=/home/builder bash tests/package.sh && bash tests/package-root.sh'`. Run it before pushing a change to either script or the workflow; runner facts (the image's `NoExtract` rules, checkout ownership, efivarfs visibility) only show up inside the container.
 - [ ] The built package was inspected by hand once: `pacman -Qip`, `pacman -Qlp`, and `bsdtar -tvf` output reviewed for the payload, modes, and the dependencies declared in `PKGBUILD`.
 

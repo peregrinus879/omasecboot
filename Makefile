@@ -25,7 +25,7 @@ TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 LIMINE_ENTRY_TOOL_SOURCE ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-pacman-contract $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -122,3 +122,8 @@ $(TEST_TARGETS): test-%:
 # source; the suite verifies source and patch digests before executing them.
 test-integration:
 	bash tests/integration/limine-producer.sh "$(LIMINE_ENTRY_TOOL_SOURCE)"
+
+# Real stock-pacman metadata and hook contracts, with fixture-only state in
+# unprivileged Bubblewrap namespaces. No source checkout or network is needed.
+test-pacman-contract:
+	bash tests/integration/pacman-contract.sh
