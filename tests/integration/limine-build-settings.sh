@@ -175,8 +175,8 @@ query() {
     "${efi[@]}" "${extra_env[@]}" "${observation_tools[@]}" /usr/bin/bash /usr/bin/limine-mkinitcpio "$@" \
     >"$work/results/stdout" 2>"$work/results/stderr" || rc=$?
   [[ $rc == "$expected" ]] || die "$id: expected $expected, got $rc ($work/results)"
-  jq -es --argjson rc "$rc" 'length == 1 and .[0].format == "limine-build-description" and .[0].schema == 1
-    and .[0].scope == "shell-settings" and (.[0].complete | type == "boolean")
+  jq -es --argjson rc "$rc" 'length == 1 and .[0].format == "limine-build-description" and .[0].schema == 2
+    and .[0].scope == "shell-build" and (.[0].complete | type == "boolean")
     and .[0].complete == ($rc == 0) and (.[0].errors | type == "array")' "$work/results/stdout" >/dev/null \
     || die "$id: invalid JSON/result contract"
   [[ ! -s $work/results/stderr && ! -e $work/domain/forbidden ]] || die "$id: query invoked a helper or emitted diagnostics"
@@ -260,6 +260,21 @@ producer_parity() {
     [[ ${#actual[@]} == "${#expected[@]}" ]] || die "$id: description argv count differs"
     for arg in "${!actual[@]}"; do [[ ${actual[arg]} == "${expected[arg]}" ]] || die "$id: description argv[$arg] differs"; done
   done
+  # Compare the original producer's literal native calls with the described
+  # step operands, not just the composed runtime that shares their mapper.
+  mapfile -d '' -t expected < <(jq -jr '.kernels[0].publication_steps[] |
+    (["--" + .native_operation, .native_name, "<tmp>/" + .source_basename]
+      + (if .kernel_source == null then [] else [.kernel_source] end)
+      + (if .suffix == "" then [] else [.suffix] end)
+      + ["--comment", .comment, "--no-mutex", "--no-hooks"])[] | ., "\u0000"' "$work/results/stdout")
+  for revision in original patched; do
+    mapfile -d '' -t actual <"$work/$revision/publications"
+    for arg in "${!actual[@]}"; do
+      [[ ${actual[arg]} != /tmp/limine-mkinitcpio.*/* ]] || actual[arg]="<tmp>/${actual[arg]##*/}"
+    done
+    [[ ${#actual[@]} == "${#expected[@]}" ]] || die "$id/$revision: native publication operand count differs"
+    for arg in "${!actual[@]}"; do [[ ${actual[arg]} == "${expected[arg]}" ]] || die "$id/$revision: native publication operand[$arg] differs"; done
+  done
 }
 
 for access in writable readonly; do
@@ -269,7 +284,8 @@ for access in writable readonly; do
   query 0 "$access" --describe-build linux missing linux missing
   assert_query '.mode == "regular" and (.kernels | length == 2) and .kernels[0].version == "missing" and (.settings.ENABLE_UKI.set | not)'
 done
-new_case invalid-empty; query 2 readonly --describe-build
+new_case context-only; query 0 readonly --describe-build
+assert_query '.kernels == []'
 new_case invalid-odd; query 2 readonly --describe-build linux
 new_case invalid-path; query 2 readonly --describe-build linux ../v1
 new_case invalid-control; query 2 readonly --describe-build $'linux\n' v1

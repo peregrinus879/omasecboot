@@ -25,9 +25,10 @@ TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 LIMINE_ENTRY_TOOL_SOURCE ?=
 LIMINE_NATIVE_JAVA_HOME ?=
 LIMINE_NATIVE_EXECUTABLE ?=
+LIMINE_NATIVE_JSON_JAR ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract test-package-catalog test-output-expectations $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -100,7 +101,8 @@ package-limine-entry-tool:
 	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch \
 	    integrations/limine-entry-tool/0002-propagate-native-failures.patch \
 	    integrations/limine-entry-tool/0003-describe-native-outputs.patch \
-	    integrations/limine-entry-tool/0004-describe-build-settings.patch "$$build/"; \
+	    integrations/limine-entry-tool/0004-describe-build-settings.patch \
+	    integrations/limine-entry-tool/0005-managed-producer-protocol.patch "$$build/"; \
 	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -131,10 +133,10 @@ test-integration:
 # Compile and exercise the actual native publisher classes in isolated JDK25
 # fixtures. Source and JDK are caller-supplied; the suite performs no downloads.
 test-native:
-	bash tests/integration/limine-native.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
+	LIMINE_NATIVE_JSON_JAR="$(LIMINE_NATIVE_JSON_JAR)" bash tests/integration/limine-native.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
 
 test-description:
-	bash tests/integration/limine-description.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)" "$(LIMINE_NATIVE_EXECUTABLE)"
+	LIMINE_NATIVE_JSON_JAR="$(LIMINE_NATIVE_JSON_JAR)" bash tests/integration/limine-description.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)" "$(LIMINE_NATIVE_EXECUTABLE)"
 
 test-build-settings:
 	bash tests/integration/limine-build-settings.sh "$(LIMINE_ENTRY_TOOL_SOURCE)"
@@ -143,3 +145,9 @@ test-build-settings:
 # unprivileged Bubblewrap namespaces. No source checkout or network is needed.
 test-pacman-contract:
 	bash tests/integration/pacman-contract.sh
+
+test-package-catalog:
+	bash tests/integration/package-catalog.sh
+
+test-output-expectations:
+	LIMINE_NATIVE_JSON_JAR="$(LIMINE_NATIVE_JSON_JAR)" bash tests/integration/output-expectations.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"

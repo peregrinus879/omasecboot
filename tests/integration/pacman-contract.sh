@@ -8,7 +8,7 @@ umask 077
 
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ $# == 0 ]] || die 'this suite takes no arguments'
-for tool in bwrap pacman bsdtar bash env realpath mktemp mkdir rm cp chmod cmp \
+for tool in bwrap pacman bsdtar bash env realpath mktemp mkdir rm cp chmod cmp cc \
   cat grep sha256sum shellcheck; do
   command -v "$tool" >/dev/null || die "required command: $tool"
 done
@@ -28,65 +28,18 @@ finish() {
 trap finish EXIT
 
 mkdir -p "$scratch/fixtures/packages" "$scratch/fixtures/hooks"
-make_package() {
-  local name=$1 version=$2 module=$3 scriptlet=${4:-none}
-  local root=$scratch/package-$name-$version
-  mkdir -p "$root/usr/share/omasecboot-contract"
-  chmod 755 "$root/usr" "$root/usr/share" "$root/usr/share/omasecboot-contract"
-  printf 'fixture %s %s\n' "$name" "$version" >"$root/usr/share/omasecboot-contract/$name"
-  chmod 644 "$root/usr/share/omasecboot-contract/$name"
-  if [[ $module != none ]]; then
-    mkdir -p "$root/usr/lib/modules/$module"
-    chmod 755 "$root/usr/lib" "$root/usr/lib/modules" "$root/usr/lib/modules/$module"
-    if [[ $module != directory-only ]]; then
-      printf 'fixture builtin\n' >"$root/usr/lib/modules/$module/modules.builtin"
-      printf 'fixture kernel %s\n' "$version" >"$root/usr/lib/modules/$module/vmlinuz"
-      chmod 644 "$root/usr/lib/modules/$module/"*
-    fi
-  fi
-  cat >"$root/.PKGINFO" <<EOF
-pkgname = $name
-pkgbase = $name
-pkgver = $version
-pkgdesc = Disposable OmaSecBoot contract fixture
-url = https://example.invalid/omasecboot-contract
-builddate = 1
-packager = OmaSecBoot contract fixture
-size = 128
-arch = any
-license = MIT
-EOF
-  case $scriptlet in
-    remove-hook)
-      cat >"$root/.INSTALL" <<'EOF'
-post_install() {
-  rm /etc/pacman.d/hooks/80-contract-producer.hook
-}
-EOF
-      ;;
-    change-hook)
-      cat >"$root/.INSTALL" <<'EOF'
-post_install() {
-  printf '\n# changed after expectation\n' >>/etc/pacman.d/hooks/80-contract-producer.hook
-}
-EOF
-      ;;
-    none) ;;
-    *) die "unknown fixture scriptlet: $scriptlet" ;;
-  esac
-  local -a entries=(.PKGINFO usr)
-  [[ $scriptlet == none ]] || entries+=(.INSTALL)
-  bsdtar --uid 0 --gid 0 --uname root --gname root \
-    -cf "$scratch/fixtures/packages/$name-$version-any.pkg.tar" -C "$root" "${entries[@]}"
-}
-make_package contract-kernel 1-1 contract-a
-make_package contract-kernel 2-1 contract-a
-make_package contract-kernel 3-1 contract-b
-make_package contract-unrelated 1-1 none
-make_package contract-directory-owner 1-1 directory-only
-make_package mkinitcpio 1-1 none
-make_package contract-remove-hook 1-1 contract-a remove-hook
-make_package contract-change-hook 1-1 contract-a change-hook
+repo=$(realpath -- "${BASH_SOURCE[0]%/*}/../..")
+# shellcheck source=tests/integration/lib/pacman-fixtures.sh
+source "$repo/tests/integration/lib/pacman-fixtures.sh"
+pacman_fixture_read_error
+pacman_fixture_package contract-kernel 1-1 contract-a
+pacman_fixture_package contract-kernel 2-1 contract-a
+pacman_fixture_package contract-kernel 3-1 contract-b
+pacman_fixture_package contract-unrelated 1-1 none
+pacman_fixture_package contract-directory-owner 1-1 directory-only
+pacman_fixture_package mkinitcpio 1-1 none
+pacman_fixture_package contract-remove-hook 1-1 contract-a remove-hook
+pacman_fixture_package contract-change-hook 1-1 contract-a change-hook
 
 # Use exactly the same trigger text for an expectation and its producer. The
 # native matcher, not the fixture, decides Install/Upgrade/Remove and targets.
@@ -239,7 +192,7 @@ unchanged_output() { [[ $(</work/output) == 'old fixture output' ]]; }
 installed() { pac -Q contract-kernel >/dev/null 2>&1; }
 
 case $case_name in
-  upgrade|kernel-version-change|remove|declared-missing-file|declared-missing-directory|invalid-database|missing-file-list)
+  upgrade|kernel-version-change|remove|declared-missing-file|declared-missing-directory|invalid-database|missing-file-list|silent-read-error)
     pac -U "$pkg"
     ;;
 esac
@@ -383,6 +336,17 @@ case $case_name in
       [[ ! -s /work/declarations ]] || fail 'missing file list unexpectedly complete'
     fi
     ;;
+  silent-read-error)
+    pac -Ql contract-kernel >/work/declarations.complete
+    rc=0
+    OMASECBOOT_TEST_READ_ERROR=1 LD_PRELOAD=/fixtures/pacman-read-error.so \
+      pac -Ql contract-kernel >/work/declarations.partial 2>/work/query-errors || rc=$?
+    [[ $rc == 0 && ! -s /work/query-errors ]] || fail 'expected silent successful partial read'
+    [[ -s /work/declarations.partial ]] || fail 'read-error fixture produced no partial rows'
+    if cmp -s /work/declarations.complete /work/declarations.partial; then fail 'read-error fixture did not truncate input'; fi
+    grep -Fxq 'contract-kernel /usr/lib/modules/contract-a/modules.builtin' /work/declarations.complete || fail 'complete declaration missing'
+    if grep -q modules.builtin /work/declarations.partial; then fail 'fault did not hide kernel declaration'; fi
+    ;;
   *) fail 'unknown case' ;;
 esac
 EOF
@@ -420,7 +384,7 @@ count=0
 for name in install upgrade kernel-version-change remove unrelated directory-only-owner mixed-duplicate-targets \
   child-failure child-signal child-missing runner-missing dependency-missing finalizer-missing \
   pre-failure pre-exec-missing removed-post-hook changed-post-hook retry \
-  declared-missing-file declared-missing-directory invalid-database missing-file-list; do
+  declared-missing-file declared-missing-directory invalid-database missing-file-list silent-read-error; do
   mkdir -p "$scratch/$name"
   if ! "${sandbox[@]}" --bind "$scratch/$name" /work /usr/bin/bash /fixtures/driver "$name" \
     >"$scratch/$name/transcript" 2>&1; then

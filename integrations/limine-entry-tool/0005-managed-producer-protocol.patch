@@ -1,0 +1,1582 @@
+--- a/README.md
++++ b/README.md
+@@ -86,13 +86,17 @@
+ 
+ The interface describes an explicit native operation. Package-declared kernel inventory, shell build-mode/fallback selection and actual producer completion remain with their respective owners.
+ 
++### Managed-protocol build support
++
++The composed integration build also includes a bounded, data-only JSON decoder for producer/core protocol records. Its pinned Jackson-core 3.2.2 jar is supplied under `native-libs/` by the integration recipe. The decoder rejects duplicate keys, extra documents, unsupported numeric values, invalid Unicode and resource-limit violations; protocol schemas and mutation authority are checked separately. The recipe installs the bundled third-party license notices.
++
+ ### Shell build-settings description
+ 
+ ```sh
+ limine-mkinitcpio --describe-build linux 6.19.1-arch1-1 linux-lts 6.12.1-1-lts
+ ```
+ 
+-The first-position `--describe-build` route takes explicit package/version pairs, including declarations whose files are missing. It preserves their order and duplicates. It does not discover installed kernels, select a transaction's work or authenticate. One JSON document has `format: limine-build-description`, `schema: 1`, `scope: shell-settings`, typed `complete`/`errors`, as-read configuration digests, raw/effective settings with their origin, observed UEFI mode, cleaned kernel names, fallback choices and exact additional UKI argument tokens. Exit 0 means a complete settings observation, 1 incomplete observation, and 2 invalid operands. Optional absent configuration is described; unreadable files/directories, invalid UTF-8 and unsupported shell-control assignments make the result incomplete.
++The first-position `--describe-build` route takes explicit package/version pairs, including declarations whose files are missing. It preserves their order and duplicates. It does not discover installed kernels, select a transaction's work or authenticate. One JSON document has `format: limine-build-description`, `schema: 2`, `scope: shell-build`, typed `complete`/`errors`, as-read configuration digests, raw/effective settings with their origin, observed UEFI mode, cleaned kernel names, fallback choices and exact additional UKI argument tokens. Each kernel includes ordered `publication_steps` with the variant, native operation/name, stage basename, regular-kernel source, suffix and comment. Those operands come from the same mapper used by the actual producer; native destination naming remains with the native resource model. Exit 0 means a complete description, 1 incomplete observation, and 2 invalid operands. Optional absent configuration is described; unreadable files/directories, invalid UTF-8 and unsupported shell-control assignments make the result incomplete.
+ 
+ The query shares the shell's four-layer traversal, line parser, ASCII-space name cleaning, exact `yes`/fallback predicates and `read -ra` option splitting with production. Inherited values are retained unless assigned. Quoting is not shell evaluation: the existing parser strips a boundary double quote, preserves trailing spaces and ignores indexed/`+=` assignments; quotes within `MKINITCPIO_UKI_OPTIONS` remain literal tokens, and `read` consumes its first line. Configured IFS participates in that split. The query records other shell-control effects as incomplete instead of applying configuration as its execution environment; mutation retains its existing exports and dynamically scoped loader behavior.
+ 
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -12,6 +12,11 @@
+ 
+ repositories {
+     mavenCentral()
++}
++
++dependencies {
++    // Supplied and digest-checked by the integration recipe.
++    implementation(files("native-libs/jackson-core-3.2.2.jar"))
+ }
+ 
+ graalvmNative {
+--- a/src/main/java/org/limine/entry/tool/Main.java
++++ b/src/main/java/org/limine/entry/tool/Main.java
+@@ -278,7 +278,7 @@
+         Config config = configReader.readConfig();
+ 
+         LimineReader limine = new LimineReader(config);
+-        LimineManager manager = new LimineManager(limine.getTargetOsNode(), config);
++        LimineManager manager = new LimineManager(limine.getTargetOsNode(), config, configReader.readBootOptions());
+         manager.addKernel(kernelName, comment, kernelEntryOptions, initramfsPath, vmlinuzPath, suffixName);
+ 
+         // Save
+@@ -309,7 +309,7 @@
+         Config config = configReader.readConfig();
+ 
+         LimineReader limine = new LimineReader(config);
+-        LimineManager manager = new LimineManager(limine.getTargetOsNode(), config);
++        LimineManager manager = new LimineManager(limine.getTargetOsNode(), config, configReader.readBootOptions());
+         manager.addUki(kernelName, comment, kernelEntryOptions, ukiFilePath);
+ 
+         // Save
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/ManagedJson.java
+@@ -0,0 +1,110 @@
++package org.limine.entry.tool.processes;
++
++import tools.jackson.core.JacksonException;
++import tools.jackson.core.JsonParser;
++import tools.jackson.core.JsonToken;
++import tools.jackson.core.ObjectReadContext;
++import tools.jackson.core.StreamReadConstraints;
++import tools.jackson.core.StreamReadFeature;
++import tools.jackson.core.json.JsonFactory;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.ByteBuffer;
++import java.nio.charset.CharacterCodingException;
++import java.nio.charset.CodingErrorAction;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/** Data-only decoding for bounded, versioned producer/core protocol documents. */
++public final class ManagedJson {
++    public static final int MAX_BYTES = 2 * 1024 * 1024;
++    private static final JsonFactory FACTORY = JsonFactory.builder()
++            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
++            .streamReadConstraints(StreamReadConstraints.builder()
++                    .maxDocumentLength(MAX_BYTES)
++                    .maxNestingDepth(64)
++                    .maxTokenCount(65536)
++                    .maxNameLength(256)
++                    .maxStringLength(1024 * 1024)
++                    .maxNumberLength(20)
++                    .build())
++            .build();
++
++    private ManagedJson() {}
++
++    public static Map<String, Object> read(InputStream input) throws IOException {
++        return read(input.readNBytes(MAX_BYTES + 1));
++    }
++
++    public static Map<String, Object> read(byte[] input) throws IOException {
++        if (input.length > MAX_BYTES) throw new IOException("Managed JSON document exceeds its byte limit");
++        try {
++            StandardCharsets.UTF_8.newDecoder()
++                    .onMalformedInput(CodingErrorAction.REPORT)
++                    .onUnmappableCharacter(CodingErrorAction.REPORT)
++                    .decode(ByteBuffer.wrap(input));
++        } catch (CharacterCodingException e) {
++            throw new IOException("Managed JSON is not UTF-8", e);
++        }
++        try (JsonParser parser = FACTORY.createParser(ObjectReadContext.empty(), input)) {
++            if (parser.nextToken() != JsonToken.START_OBJECT) throw new IOException("Managed JSON must be one object");
++            Map<String, Object> result = readObject(parser);
++            if (parser.nextToken() != null) throw new IOException("Managed JSON has a trailing document");
++            return result;
++        } catch (JacksonException e) {
++            throw new IOException("Invalid managed JSON document", e);
++        }
++    }
++
++    private static Map<String, Object> readObject(JsonParser parser) throws IOException {
++        Map<String, Object> result = new LinkedHashMap<>();
++        while (parser.nextToken() != JsonToken.END_OBJECT) {
++            if (parser.currentToken() != JsonToken.PROPERTY_NAME) throw new IOException("Missing JSON property name");
++            String name = checkedText(parser.currentName());
++            if (parser.nextToken() == null) throw new IOException("Missing JSON property value");
++            result.put(name, readValue(parser));
++        }
++        return Collections.unmodifiableMap(result);
++    }
++
++    private static List<Object> readArray(JsonParser parser) throws IOException {
++        List<Object> result = new ArrayList<>();
++        while (parser.nextToken() != JsonToken.END_ARRAY) {
++            if (parser.currentToken() == null) throw new IOException("Unterminated JSON array");
++            result.add(readValue(parser));
++        }
++        return Collections.unmodifiableList(result);
++    }
++
++    private static Object readValue(JsonParser parser) throws IOException {
++        return switch (parser.currentToken()) {
++            case START_OBJECT -> readObject(parser);
++            case START_ARRAY -> readArray(parser);
++            case VALUE_STRING -> checkedText(parser.getString());
++            case VALUE_NUMBER_INT -> parser.getLongValue();
++            case VALUE_TRUE -> true;
++            case VALUE_FALSE -> false;
++            case VALUE_NULL -> null;
++            default -> throw new IOException("Unsupported managed JSON value");
++        };
++    }
++
++    private static String checkedText(String text) throws IOException {
++        for (int i = 0; i < text.length(); i++) {
++            char current = text.charAt(i);
++            if (Character.isHighSurrogate(current)) {
++                if (++i >= text.length() || !Character.isLowSurrogate(text.charAt(i))) {
++                    throw new IOException("Unpaired Unicode surrogate in managed JSON");
++                }
++            } else if (Character.isLowSurrogate(current)) {
++                throw new IOException("Unpaired Unicode surrogate in managed JSON");
++            }
++        }
++        return text;
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/ManagedChannel.java
+@@ -0,0 +1,112 @@
++package org.limine.entry.tool.processes;
++
++import java.io.BufferedInputStream;
++import java.io.BufferedOutputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.Closeable;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardOpenOption;
++import java.util.Map;
++import java.util.Set;
++
++/** Per-invocation data channel to the supervising Core, never an authority token. */
++public final class ManagedChannel implements Closeable {
++    private final String invocation;
++    private final InputStream responses;
++    private final OutputStream requests;
++    private long sequence;
++
++    public ManagedChannel(String invocation, InputStream responses, OutputStream requests) throws IOException {
++        requireInvocation(invocation);
++        this.invocation = invocation;
++        this.responses = new BufferedInputStream(responses);
++        this.requests = new BufferedOutputStream(requests);
++    }
++
++    private static void requireInvocation(String invocation) throws IOException {
++        if (invocation == null || !invocation.matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")) {
++            throw new IOException("Invalid producer invocation identifier");
++        }
++    }
++
++    public static ManagedChannel inherited(String invocation) throws IOException {
++        requireInvocation(invocation);
++        Path request = Path.of("/proc/self/fd/198");
++        Path response = Path.of("/proc/self/fd/199");
++        requirePipe(request);
++        requirePipe(response);
++        if (Files.readSymbolicLink(request).equals(Files.readSymbolicLink(response))) {
++            throw new IOException("Producer channel directions share one pipe");
++        }
++        InputStream input = Files.newInputStream(response);
++        try {
++            return new ManagedChannel(invocation, input, Files.newOutputStream(request, StandardOpenOption.WRITE));
++        } catch (IOException | RuntimeException e) {
++            input.close();
++            throw e;
++        }
++    }
++
++    private static void requirePipe(Path path) throws IOException {
++        int mode = ((Number) Files.getAttribute(path, "unix:mode")).intValue();
++        if ((mode & 0170000) != 0010000 || !Files.readSymbolicLink(path).toString().startsWith("pipe:[")) {
++            throw new IOException("Producer channel descriptor is not an anonymous pipe");
++        }
++    }
++
++    public synchronized Map<String, Object> exchange(Map<String, Object> payload) throws IOException {
++        long current = ++sequence;
++        byte[] request = JsonOutput.encode(Map.of("format", "omasecboot-producer-request", "schema", 1,
++                "invocation", invocation, "sequence", current, "payload", payload)).getBytes(StandardCharsets.UTF_8);
++        if (request.length > ManagedJson.MAX_BYTES) throw new IOException("Producer request exceeds its byte limit");
++        requests.write(request);
++        requests.write('\n');
++        requests.flush();
++        Map<String, Object> response = ManagedJson.read(readFrame());
++        if (!response.keySet().equals(Set.of("format", "schema", "invocation", "sequence", "ok", "payload"))
++                || !"omasecboot-producer-response".equals(response.get("format"))
++                || !Long.valueOf(1).equals(response.get("schema"))
++                || !invocation.equals(response.get("invocation"))
++                || !Long.valueOf(current).equals(response.get("sequence"))
++                || !(response.get("ok") instanceof Boolean)
++                || !(response.get("payload") instanceof Map<?, ?>)) {
++            throw new IOException("Producer response does not match its invocation/request");
++        }
++        if (!Boolean.TRUE.equals(response.get("ok"))) throw new IOException("Core refused the producer request");
++        // ManagedJson only constructs string-keyed maps and data values.
++        @SuppressWarnings("unchecked")
++        Map<String, Object> result = (Map<String, Object>) response.get("payload");
++        return result;
++    }
++
++    private byte[] readFrame() throws IOException {
++        ByteArrayOutputStream frame = new ByteArrayOutputStream();
++        while (frame.size() <= ManagedJson.MAX_BYTES) {
++            int value = responses.read();
++            if (value < 0) throw new IOException("Core closed an incomplete producer response");
++            if (value == '\n') return frame.toByteArray();
++            frame.write(value);
++        }
++        throw new IOException("Producer response exceeds its byte limit");
++    }
++
++    @Override public void close() throws IOException {
++        IOException failure = null;
++        try {
++            requests.close();
++        } catch (IOException e) {
++            failure = e;
++        }
++        try {
++            responses.close();
++        } catch (IOException e) {
++            if (failure == null) failure = e; else failure.addSuppressed(e);
++        }
++        if (failure != null) throw failure;
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/FileState.java
+@@ -0,0 +1,89 @@
++package org.limine.entry.tool.processes;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.NoSuchFileException;
++import java.nio.file.Path;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.HexFormat;
++import java.util.Map;
++
++/** Exact before-state for a finite publication effect; leaf links are not followed. */
++public record FileState(String kind, String identity, String sha256, String linkTarget, int mode, long uid, long gid) {
++    public FileState {
++        if (!java.util.Set.of("absent", "file", "directory", "link").contains(kind)) throw new IllegalArgumentException("Unknown file state");
++        if (kind.equals("absent")) {
++            if (identity != null || sha256 != null || linkTarget != null || mode != 0 || uid != 0 || gid != 0) {
++                throw new IllegalArgumentException("Invalid absent state");
++            }
++        } else if (identity == null || !identity.matches("[0-9]+:[0-9]+")) {
++            throw new IllegalArgumentException("Invalid file identity");
++        }
++        if (kind.equals("file") != (sha256 != null) || (sha256 != null && !sha256.matches("[0-9a-f]{64}"))) {
++            throw new IllegalArgumentException("Invalid file digest");
++        }
++        if (kind.equals("link") != (linkTarget != null)) throw new IllegalArgumentException("Invalid link state");
++        int type = switch (kind) { case "file" -> 0100000; case "directory" -> 0040000; case "link" -> 0120000; default -> 0; };
++        if ((mode & 0170000) != type || (mode & ~0177777) != 0 || uid < 0 || gid < 0) {
++            throw new IllegalArgumentException("Invalid file metadata");
++        }
++    }
++
++    private static final String ATTRIBUTES = "unix:dev,ino,mode,uid,gid,size,lastModifiedTime,ctime";
++
++    public static FileState absent() { return new FileState("absent", null, null, null, 0, 0, 0); }
++
++    public static FileState capture(Path path) throws IOException {
++        Map<String, Object> attributes;
++        try {
++            attributes = Files.readAttributes(path, ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
++        } catch (NoSuchFileException e) {
++            return absent();
++        }
++        int type = ((Number) attributes.get("mode")).intValue() & 0170000;
++        String kind = switch (type) {
++            case 0100000 -> "file";
++            case 0040000 -> "directory";
++            case 0120000 -> "link";
++            default -> throw new IOException("Unsupported publication target type: " + path);
++        };
++        String identity = Long.toUnsignedString(((Number) attributes.get("dev")).longValue()) + ":"
++                + Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
++        String hash = kind.equals("file") ? hash(path) : null;
++        String target = kind.equals("link") ? Files.readSymbolicLink(path).toString() : null;
++        if (!attributes.equals(Files.readAttributes(path, ATTRIBUTES, LinkOption.NOFOLLOW_LINKS))) {
++            throw new IOException("Publication target changed during observation: " + path);
++        }
++        return new FileState(kind, identity, hash, target, ((Number) attributes.get("mode")).intValue(),
++                Integer.toUnsignedLong(((Number) attributes.get("uid")).intValue()),
++                Integer.toUnsignedLong(((Number) attributes.get("gid")).intValue()));
++    }
++
++    public static String hash(Path path) throws IOException {
++        MessageDigest digest;
++        try {
++            digest = MessageDigest.getInstance("SHA-256");
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException(e);
++        }
++        try (InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
++            byte[] buffer = new byte[8192];
++            int count;
++            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
++        }
++        return HexFormat.of().formatHex(digest.digest());
++    }
++
++    public boolean same(FileState current) {
++        return equals(current);
++    }
++
++    /** A replay stage has a new inode, but must preserve the intended bytes and metadata. */
++    public boolean sameContent(FileState current) {
++        return current != null && kind.equals("file") && current.kind.equals("file") && sha256.equals(current.sha256)
++                && mode == current.mode && uid == current.uid && gid == current.gid;
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/DirectoryBinding.java
+@@ -0,0 +1,131 @@
++package org.limine.entry.tool.processes;
++
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.ArrayDeque;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.function.Predicate;
++
++/** Parent identity chains survive our own content changes, but not namespace rebinding. */
++public record DirectoryBinding(Path path, List<Component> components, List<Dependency> dependencies) {
++    public record Dependency(Path path, FileState entry, String parentIdentity) {
++        public Dependency {
++            if (path == null || !path.isAbsolute() || !path.equals(path.normalize()) || entry == null
++                    || !(entry.kind().equals("directory") || entry.kind().equals("link") || entry.kind().equals("file"))
++                    || (path.getParent() == null ? parentIdentity != null : parentIdentity == null || !parentIdentity.matches("[0-9]+:[0-9]+"))) {
++                throw new IllegalArgumentException("Invalid directory resolution dependency");
++            }
++        }
++    }
++    public record Component(Path path, FileState entry, FileState directory) {
++        public Component {
++            if (path == null || entry == null || directory == null || !directory.kind().equals("directory")
++                    || !(entry.kind().equals("directory") || entry.kind().equals("link"))) {
++                throw new IllegalArgumentException("Invalid directory binding component");
++            }
++        }
++    }
++
++    public DirectoryBinding {
++        if (path == null || !path.isAbsolute() || !path.equals(path.normalize())) {
++            throw new IllegalArgumentException("Invalid directory binding path");
++        }
++        components = List.copyOf(components);
++        dependencies = List.copyOf(dependencies);
++        if (dependencies.isEmpty() || dependencies.stream().map(Dependency::path).distinct().count() != dependencies.size()) {
++            throw new IllegalArgumentException("Incomplete directory resolution dependencies");
++        }
++        List<Path> chain = chain(path);
++        if (!chain.equals(components.stream().map(Component::path).toList())) {
++            throw new IllegalArgumentException("Incomplete directory binding");
++        }
++    }
++
++    private static List<Path> chain(Path path) {
++        List<Path> result = new ArrayList<>();
++        Path current = path.getRoot();
++        result.add(current);
++        for (Path part : path) { current = current.resolve(part); result.add(current); }
++        return result;
++    }
++
++    public static DirectoryBinding capture(Path path) throws IOException {
++        List<Component> components = new ArrayList<>();
++        Map<Path, Dependency> dependencies = new LinkedHashMap<>();
++        for (Path current : chain(path)) {
++            FileState entry = FileState.capture(current);
++            FileState directory = FileState.capture(current.toRealPath());
++            if (!directory.kind().equals("directory")) throw new IOException("Publication parent is not a directory: " + current);
++            components.add(new Component(current, entry, directory));
++            for (Dependency dependency : resolutionDependencies(current)) {
++                Dependency previous = dependencies.putIfAbsent(dependency.path(), dependency);
++                if (previous != null && !previous.equals(dependency)) throw new IOException("Directory resolution changed while capturing");
++            }
++        }
++        DirectoryBinding binding = new DirectoryBinding(path, components, List.copyOf(dependencies.values()));
++        binding.verify(ignored -> false);
++        return binding;
++    }
++
++    public void verify(Predicate<Path> removedAncestor) throws IOException {
++        Map<Path, Dependency> observed = new LinkedHashMap<>();
++        for (Component component : components) {
++            FileState entry = FileState.capture(component.path());
++            if (entry.kind().equals("absent") && removedAncestor.test(component.path())) return;
++            if (!component.entry().same(entry) || !component.directory().same(FileState.capture(component.path().toRealPath()))) {
++                throw new IOException("Publication directory binding changed: " + component.path());
++            }
++            for (Dependency dependency : resolutionDependencies(component.path())) {
++                if (!dependencies.contains(dependency)) throw new IOException("Directory resolution dependency changed: " + dependency.path());
++                observed.put(dependency.path(), dependency);
++            }
++        }
++        if (!List.copyOf(observed.values()).equals(dependencies)) throw new IOException("Incomplete directory resolution binding");
++    }
++
++    /** Follow every link expansion, including links hidden inside another link target. */
++    public static List<Dependency> resolutionDependencies(Path requested) throws IOException {
++        Map<Path, Dependency> result = new LinkedHashMap<>();
++        ArrayDeque<Path> remaining = new ArrayDeque<>();
++        requested.forEach(remaining::addLast);
++        Path current = requested.getRoot();
++        result.put(current, new Dependency(current, FileState.capture(current), null));
++        int links = 0;
++        while (!remaining.isEmpty()) {
++            Path part = remaining.removeFirst();
++            if (part.toString().equals(".") || part.toString().isEmpty()) continue;
++            if (part.toString().equals("..")) { if (current.getParent() != null) current = current.getParent(); continue; }
++            FileState parent = FileState.capture(current);
++            current = current.resolve(part);
++            FileState entry = FileState.capture(current);
++            if (!(entry.kind().equals("directory") || entry.kind().equals("link") || (entry.kind().equals("file") && remaining.isEmpty()))) {
++                throw new IOException("Unresolved directory dependency: " + current);
++            }
++            Dependency dependency = new Dependency(current, entry, parent.identity());
++            Dependency prior = result.putIfAbsent(current, dependency);
++            if (prior != null && !prior.equals(dependency)) throw new IOException("Directory changed while resolving: " + current);
++            if (entry.kind().equals("link")) {
++                if (++links > 40) throw new IOException("Too many directory symlink expansions");
++                Path target = Path.of(entry.linkTarget());
++                current = target.isAbsolute() ? target.getRoot() : current.getParent();
++                List<Path> parts = new ArrayList<>(); target.forEach(parts::add);
++                for (int i = parts.size() - 1; i >= 0; i--) remaining.addFirst(parts.get(i));
++            }
++        }
++        if (!Files.isSameFile(current, requested)) throw new IOException("Directory resolution disagrees with the filesystem");
++        return List.copyOf(result.values());
++    }
++
++    /** Durability for a removed descendant is established through its surviving ancestor. */
++    public Path survivingDirectory() throws IOException {
++        for (int i = components.size() - 1; i >= 0; i--) {
++            Path current = components.get(i).path();
++            if (Files.exists(current)) return current;
++        }
++        throw new IOException("Publication has no surviving directory");
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/PreparedPublication.java
+@@ -0,0 +1,366 @@
++package org.limine.entry.tool.processes;
++
++import java.io.IOException;
++import java.nio.channels.FileChannel;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.LinkOption;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
++import java.nio.file.StandardOpenOption;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++/** Finite prepared effects. Selection/rendering and Core authority precede this executor. */
++public record PreparedPublication(String invocation, List<Put> puts, Put configuration, List<Delete> deletes,
++                                  List<Reference> references) {
++    public record Put(String id, Path target, FileState before, Path retained, FileState after, DirectoryBinding parent) {
++        public Put {
++            requirePath(target); requirePath(retained); requireId(id); requireParent(target, parent);
++            if (before == null || before.kind().equals("directory") || after == null || !after.kind().equals("file")) {
++                throw new IllegalArgumentException("Invalid prepared put");
++            }
++        }
++    }
++    public record Delete(String id, Path target, FileState before, DirectoryBinding parent) {
++        public Delete {
++            requirePath(target); requireId(id); requireParent(target, parent);
++            if (before == null) throw new IllegalArgumentException("Missing before state");
++        }
++    }
++    public record Reference(Path path, Map<String, Object> observation) {
++        public Reference {
++            requirePath(path);
++            try {
++                observation = ManagedJson.read(JsonOutput.encode(observation).getBytes(StandardCharsets.UTF_8));
++            } catch (IOException e) { throw new IllegalArgumentException("Invalid retained reference observation", e); }
++            if (!path.toString().equals(observation.get("path")) || !"present".equals(observation.get("status"))
++                    || !"file".equals(observation.get("type")) || !(observation.get("sha256") instanceof String hash)
++                    || !hash.matches("[0-9a-f]{64}")) {
++                throw new IllegalArgumentException("A prepared reference must bind present file bytes");
++            }
++        }
++    }
++    public record Frontier(String phase, FileState observed) {
++        public Frontier {
++            if (!Set.of("unstarted", "pending", "applied").contains(phase)
++                    || (phase.equals("applied") && observed == null) || (phase.equals("unstarted") && observed != null)) {
++                throw new IllegalArgumentException("Invalid effect frontier");
++            }
++        }
++    }
++    public record Stage(Path path, FileState state) {
++        public Stage {
++            requirePath(path);
++            if (state == null || !state.kind().equals("file")) throw new IllegalArgumentException("Invalid prepared stage");
++        }
++    }
++    public interface Authority {
++        void validate(PreparedPublication plan) throws IOException;
++        Frontier frontier(String effect) throws IOException;
++        /** Publish the pending frontier durably before any possible canonical mutation. */
++        void before(String effect, FileState observed) throws IOException;
++        /** Supply a journal-bound, signed and durable sibling stage. Core owns its cleanup/recreation. */
++        Stage stage(Put put) throws IOException;
++        void applied(String effect, FileState state) throws IOException;
++    }
++
++    public PreparedPublication {
++        requireId(invocation);
++        puts = List.copyOf(puts); deletes = List.copyOf(deletes); references = List.copyOf(references);
++        if (configuration == null) throw new IllegalArgumentException("Missing prepared configuration");
++        Set<Path> targets = new HashSet<>();
++        Set<String> ids = new HashSet<>();
++        List<Put> allPuts = new ArrayList<>(puts); allPuts.add(configuration);
++        for (Put put : allPuts) {
++            if (!targets.add(put.target()) || !ids.add(put.id())) throw new IllegalArgumentException("Conflicting prepared effects");
++        }
++        for (Delete delete : deletes) {
++            if (!targets.add(delete.target()) || !ids.add(delete.id())) throw new IllegalArgumentException("Conflicting prepared effects");
++        }
++        for (Put put : allPuts) {
++            if (targets.stream().anyMatch(path -> !path.equals(put.target()) && (path.startsWith(put.target()) || put.target().startsWith(path)))) {
++                throw new IllegalArgumentException("Overlapping publication targets");
++            }
++            if (targets.stream().anyMatch(path -> put.retained().startsWith(path))) {
++                throw new IllegalArgumentException("Retained bytes overlap a publication effect");
++            }
++        }
++        for (Reference reference : references) {
++            if (targets.stream().anyMatch(path -> reference.path().startsWith(path))) {
++                throw new IllegalArgumentException("Referenced input overlaps a publication effect");
++            }
++        }
++    }
++
++    private static void requireId(String id) {
++        if (id == null || !id.matches("[A-Za-z0-9_-]{1,128}")) throw new IllegalArgumentException("Invalid prepared effect identifier");
++    }
++    private static void requirePath(Path path) {
++        if (path == null || !path.isAbsolute() || !path.equals(path.normalize()) || path.getParent() == null
++                || path.toString().chars().anyMatch(c -> c < 32 || c == 127)) {
++            throw new IllegalArgumentException("Invalid prepared effect path");
++        }
++    }
++    private static void requireParent(Path path, DirectoryBinding parent) {
++        if (parent == null || !path.getParent().equals(parent.path())) throw new IllegalArgumentException("Missing publication parent binding");
++    }
++
++    public void apply(Authority authority) throws IOException {
++        authority.validate(this);
++        Map<String, Frontier> frontiers = readFrontiers(authority);
++        Set<Path> removed = new HashSet<>();
++        for (Delete delete : deletes) {
++            if (!frontiers.get(delete.id()).phase().equals("unstarted") && FileState.capture(delete.target()).kind().equals("absent")) {
++                removed.add(delete.target());
++            }
++        }
++        validateReferences();
++        validateNamespaces();
++        for (Put put : puts) validatePut(put, frontiers.get(put.id()));
++        validatePut(configuration, frontiers.get(configuration.id()));
++        validateDeletes(frontiers, removed);
++        for (Put put : puts) applyPut(put, frontiers.get(put.id()), authority);
++        validateReferences();
++        applyPut(configuration, frontiers.get(configuration.id()), authority);
++        for (Delete delete : orderedDeletes()) {
++            Frontier frontier = frontiers.get(delete.id());
++            delete.parent().verify(removed::contains);
++            FileState current = FileState.capture(delete.target());
++            checkFrontier(delete.id(), delete.before(), current, current.kind().equals("absent"), frontier);
++            if (frontier.phase().equals("applied")) continue;
++            authority.before(delete.id(), current);
++            delete.parent().verify(removed::contains);
++            if (!current.same(FileState.capture(delete.target()))) throw new IOException("Deletion changed before application: " + delete.target());
++            if (!current.kind().equals("absent")) Files.delete(delete.target());
++            syncDirectory(delete.parent().survivingDirectory());
++            delete.parent().verify(removed::contains);
++            FileState after = FileState.capture(delete.target());
++            if (!after.kind().equals("absent")) throw new IOException("Deletion did not remain absent: " + delete.target());
++            authority.applied(delete.id(), after);
++            removed.add(delete.target());
++        }
++        validateReferences();
++        // Recheck the complete finite result, including targets proved before
++        // later effects. Per-effect receipts cannot substitute for this boundary.
++        Map<String, Frontier> finalFrontiers = readFrontiers(authority);
++        for (Frontier frontier : finalFrontiers.values()) {
++            if (!frontier.phase().equals("applied")) throw new IOException("Publication has an unfinished effect");
++        }
++        for (Put put : puts) validatePut(put, finalFrontiers.get(put.id()));
++        validatePut(configuration, finalFrontiers.get(configuration.id()));
++        validateDeletes(finalFrontiers, removed);
++    }
++
++    private List<Delete> orderedDeletes() {
++        return deletes.stream().sorted(Comparator.comparingLong((Delete d) -> deletes.stream()
++                        .filter(ancestor -> new Destination(d.target(), d.parent()).below(ancestor)).count()).reversed()
++                .thenComparing(d -> d.target().toString())).toList();
++    }
++
++    private Map<String, Frontier> readFrontiers(Authority authority) throws IOException {
++        List<String> order = new ArrayList<>(puts.stream().map(Put::id).toList());
++        order.add(configuration.id()); order.addAll(orderedDeletes().stream().map(Delete::id).toList());
++        Map<String, Frontier> frontiers = new HashMap<>();
++        boolean unfinished = false;
++        for (String id : order) {
++            Frontier frontier = authority.frontier(id);
++            if (frontier == null || (unfinished && !frontier.phase().equals("unstarted"))) {
++                throw new IOException("Effect frontiers are not an ordered application prefix");
++            }
++            frontiers.put(id, frontier);
++            if (!frontier.phase().equals("applied")) unfinished = true;
++        }
++        return frontiers;
++    }
++
++    private static void checkFrontier(String id, FileState before, FileState current, boolean after, Frontier frontier) throws IOException {
++        boolean valid = switch (frontier.phase()) {
++            case "unstarted" -> before.same(current);
++            case "pending" -> before.same(current) || (after && (current.kind().equals("absent")
++                    || (frontier.observed() != null && frontier.observed().same(current))));
++            case "applied" -> after && frontier.observed().same(current);
++            default -> false;
++        };
++        if (!valid) throw new IOException("Publication effect conflicts with its recorded frontier: " + id);
++    }
++
++    private void validateReferences() throws IOException {
++        for (Reference reference : references) {
++            if (!reference.observation().equals(new ReadObservation().file(reference.path()))) {
++                throw new IOException("Referenced resource changed: " + reference.path());
++            }
++        }
++    }
++
++    private static void validatePut(Put put, Frontier frontier) throws IOException {
++        put.parent().verify(ignored -> false);
++        FileState current = FileState.capture(put.target());
++        checkFrontier(put.id(), put.before(), current, put.after().sameContent(current), frontier);
++        FileState retained = FileState.capture(put.retained());
++        if (!retained.kind().equals("file") || !put.after().sha256().equals(retained.sha256())) {
++            throw new IOException("Retained prepared bytes changed: " + put.retained());
++        }
++    }
++
++    private void validateDeletes(Map<String, Frontier> frontiers, Set<Path> removed) throws IOException {
++        Set<Path> planned = new HashSet<>();
++        for (Delete delete : deletes) planned.add(delete.target());
++        for (Delete delete : deletes) {
++            delete.parent().verify(removed::contains);
++            FileState current = FileState.capture(delete.target());
++            checkFrontier(delete.id(), delete.before(), current, current.kind().equals("absent"), frontiers.get(delete.id()));
++            if (current.kind().equals("directory")) {
++                try (var entries = Files.list(delete.target())) {
++                    if (entries.anyMatch(path -> !planned.contains(path))) {
++                        throw new IOException("Deletion directory contains unplanned data: " + delete.target());
++                    }
++                }
++            }
++        }
++    }
++
++    private void applyPut(Put put, Frontier frontier, Authority authority) throws IOException {
++        validatePut(put, frontier);
++        if (frontier.phase().equals("applied")) return;
++        FileState current = FileState.capture(put.target());
++        checkFrontier(put.id(), put.before(), current, put.after().sameContent(current), frontier);
++        authority.before(put.id(), current);
++        FileState expected = current;
++        if (!put.after().sameContent(current)) {
++            Stage stage = authority.stage(put);
++            if (stage == null || !stage.path().getParent().equals(put.target().getParent()) || conflicts(stage.path())
++                    || Files.isSameFile(stage.path(), put.retained()) || !put.after().sameContent(stage.state())) {
++                throw new IOException("Core did not supply an isolated prepared sibling stage");
++            }
++            put.parent().verify(ignored -> false);
++            if (!stage.state().same(FileState.capture(stage.path()))) throw new IOException("Prepared stage changed: " + stage.path());
++            Frontier staged = authority.frontier(put.id());
++            if (!staged.phase().equals("pending") || !stage.state().same(staged.observed())) {
++                throw new IOException("Prepared stage has no durable effect identity");
++            }
++            syncFile(stage.path());
++            // Core owns the stage. Never remove an uncertain pathname on failure.
++            if (!current.same(FileState.capture(put.target())) || !stage.state().same(FileState.capture(stage.path()))) {
++                throw new IOException("Prepared publication changed before rename: " + put.target());
++            }
++            put.parent().verify(ignored -> false);
++            Files.move(stage.path(), put.target(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++            expected = stage.state();
++        }
++        // This also completes a pending rename whose earlier directory sync failed.
++        syncFile(put.target());
++        syncDirectory(put.target().getParent());
++        put.parent().verify(ignored -> false);
++        current = FileState.capture(put.target());
++        if (!expected.same(current) || !put.after().sameContent(current)) throw new IOException("Published identity or bytes differ: " + put.target());
++        authority.applied(put.id(), current);
++    }
++
++    private boolean conflicts(Path path) throws IOException {
++        List<Put> all = new ArrayList<>(puts); all.add(configuration);
++        if (all.stream().anyMatch(put -> path.equals(put.target()) || path.equals(put.retained()))
++                || deletes.stream().anyMatch(delete -> path.startsWith(delete.target()))
++                || references.stream().anyMatch(reference -> path.equals(reference.path()))) return true;
++        Destination stage = new Destination(path, DirectoryBinding.capture(path.getParent()));
++        for (Destination target : destinations()) if (stage.sameEntry(target)) return true;
++        for (Destination input : inputs()) if (stage.sameEntry(input)) return true;
++        for (Delete delete : deletes) if (stage.below(delete)) return true;
++        return false;
++    }
++
++    /** Directory-entry identity, rather than inode equality of hardlinked files. */
++    private record Destination(Path path, DirectoryBinding parent) {
++        boolean sameEntry(Destination other) throws IOException {
++            return sameEntry(other.parent.components().getLast().directory().identity(), other.path.getFileName().toString());
++        }
++        boolean sameEntry(String otherParent, String otherName) throws IOException {
++            if (!parent.components().getLast().directory().identity().equals(otherParent)) return false;
++            String name = path.getFileName().toString();
++            if (name.equals(otherName)) return true;
++            // FAT aliases names even before either file exists. Its native
++            // publisher already treats case variants as the same destination.
++            return Files.exists(parent.path()) && Files.getFileStore(parent.path()).type().equals("vfat") && name.equalsIgnoreCase(otherName);
++        }
++        boolean below(Delete delete) {
++            return delete.before().kind().equals("directory") && parent.components().stream()
++                    .anyMatch(component -> component.directory().identity().equals(delete.before().identity()));
++        }
++    }
++
++    private List<Destination> destinations() {
++        List<Destination> result = new ArrayList<>();
++        for (Put put : puts) result.add(new Destination(put.target(), put.parent()));
++        result.add(new Destination(configuration.target(), configuration.parent()));
++        for (Delete delete : deletes) result.add(new Destination(delete.target(), delete.parent()));
++        return result;
++    }
++    private List<Destination> inputs() throws IOException {
++        List<Path> paths = new ArrayList<>(puts.stream().map(Put::retained).toList());
++        paths.add(configuration.retained()); paths.addAll(references.stream().map(Reference::path).toList());
++        List<Destination> result = new ArrayList<>();
++        for (Path path : paths) {
++            result.add(new Destination(path, DirectoryBinding.capture(path.getParent())));
++            Path resolved = path.toRealPath();
++            result.add(new Destination(resolved, DirectoryBinding.capture(resolved.getParent())));
++        }
++        return result;
++    }
++    private void validateNamespaces() throws IOException {
++        List<Destination> targets = destinations();
++        for (int i = 0; i < targets.size(); i++) {
++            for (int j = i + 1; j < targets.size(); j++) {
++                if (targets.get(i).sameEntry(targets.get(j))) throw new IOException("Aliased publication targets");
++            }
++        }
++        List<Destination> inputs = inputs();
++        for (Destination input : inputs) {
++            for (Destination target : targets) if (input.sameEntry(target)) throw new IOException("Prepared input aliases a publication target");
++            for (Delete delete : deletes) if (input.below(delete)) throw new IOException("Prepared input is within a deleted directory");
++        }
++        for (int i = 0; i <= puts.size(); i++) {
++            for (Delete delete : deletes) if (targets.get(i).below(delete)) throw new IOException("Publication is within a deleted directory");
++        }
++        List<Destination> dependent = new ArrayList<>(targets); dependent.addAll(inputs);
++        for (Destination destination : dependent) {
++            boolean deleting = deletes.stream().anyMatch(delete -> delete.target().equals(destination.path()));
++            for (DirectoryBinding.Dependency dependency : destination.parent().dependencies()) {
++                if (dependency.parentIdentity() == null) continue;
++                for (Destination target : targets) {
++                    if (!target.sameEntry(dependency.parentIdentity(), dependency.path().getFileName().toString())) continue;
++                    // A finite child-before-parent deletion can remove its own
++                    // literal directory ancestors. Resolution links and indirect
++                    // ancestors must survive for the same plan to remain replayable.
++                    if (deleting && dependency.entry().kind().equals("directory") && target.path().equals(dependency.path())
++                            && destination.parent().components().stream().anyMatch(component -> component.path().equals(target.path()))
++                            && deletes.stream().anyMatch(delete -> delete.target().equals(target.path()))) continue;
++                    throw new IOException("Publication destroys a path-resolution dependency: " + dependency.path());
++                }
++            }
++        }
++        // A referenced file may itself traverse a chain of links. Its final
++        // resolved parent alone does not include those intermediate entries.
++        for (Destination input : inputs) {
++            for (DirectoryBinding.Dependency dependency : DirectoryBinding.resolutionDependencies(input.path())) {
++                if (dependency.parentIdentity() == null) continue;
++                for (Destination target : targets) {
++                    if (target.sameEntry(dependency.parentIdentity(), dependency.path().getFileName().toString())) {
++                        throw new IOException("Publication destroys an input-resolution dependency: " + dependency.path());
++                    }
++                }
++            }
++        }
++    }
++
++    private static void syncFile(Path path) throws IOException {
++        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) { channel.force(true); }
++    }
++    private static void syncDirectory(Path directory) throws IOException {
++        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) { channel.force(true); }
++    }
++}
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/PreparedPublicationCodec.java
+@@ -0,0 +1,135 @@
++package org.limine.entry.tool.processes;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.TreeMap;
++
++/** Exact data-only application records; unknown fields and semantic versions are refused. */
++public final class PreparedPublicationCodec {
++    private PreparedPublicationCodec() {}
++
++    public static byte[] encode(PreparedPublication plan) throws IOException {
++        Map<String, Object> document = Map.of("format", "limine-prepared-publication", "schema", 1,
++                "invocation", plan.invocation(), "puts", plan.puts().stream().map(PreparedPublicationCodec::put).toList(),
++                "configuration", put(plan.configuration()), "deletes", plan.deletes().stream().map(delete ->
++                        Map.of("id", delete.id(), "target", delete.target().toString(), "before", state(delete.before()),
++                                "parent", parent(delete.parent()))).toList(),
++                "references", plan.references().stream().map(reference ->
++                        Map.of("path", reference.path().toString(), "observation", reference.observation())).toList());
++        byte[] bytes = JsonOutput.encode(canonical(document)).getBytes(StandardCharsets.UTF_8);
++        // Encoder and decoder have the same resource/shape boundary.
++        ManagedJson.read(bytes);
++        return bytes;
++    }
++
++    public static PreparedPublication decode(byte[] bytes) throws IOException {
++        try {
++            Map<String, Object> document = ManagedJson.read(bytes);
++            keys(document, "format", "schema", "invocation", "puts", "configuration", "deletes", "references");
++            if (!"limine-prepared-publication".equals(document.get("format")) || !Long.valueOf(1).equals(document.get("schema"))) {
++                throw new IOException("Unsupported prepared publication schema");
++            }
++            List<PreparedPublication.Put> puts = new ArrayList<>();
++            for (Object value : array(document.get("puts"))) puts.add(readPut(object(value)));
++            List<PreparedPublication.Delete> deletes = new ArrayList<>();
++            for (Object value : array(document.get("deletes"))) {
++                Map<String, Object> delete = object(value); keys(delete, "id", "target", "before", "parent");
++                deletes.add(new PreparedPublication.Delete(text(delete.get("id")), path(delete.get("target")),
++                        readState(object(delete.get("before"))), readParent(object(delete.get("parent")))));
++            }
++            List<PreparedPublication.Reference> references = new ArrayList<>();
++            for (Object value : array(document.get("references"))) {
++                Map<String, Object> reference = object(value); keys(reference, "path", "observation");
++                references.add(new PreparedPublication.Reference(path(reference.get("path")), object(reference.get("observation"))));
++            }
++            return new PreparedPublication(text(document.get("invocation")), puts, readPut(object(document.get("configuration"))), deletes, references);
++        } catch (IllegalArgumentException | NullPointerException e) {
++            throw new IOException("Invalid prepared publication record", e);
++        }
++    }
++
++    private static Object canonical(Object value) {
++        if (value instanceof Map<?, ?> map) {
++            Map<String, Object> sorted = new TreeMap<>();
++            map.forEach((key, child) -> sorted.put((String) key, canonical(child)));
++            return sorted;
++        }
++        if (value instanceof List<?> list) return list.stream().map(PreparedPublicationCodec::canonical).toList();
++        return value;
++    }
++    private static Map<String, Object> put(PreparedPublication.Put put) {
++        return Map.of("id", put.id(), "target", put.target().toString(), "before", state(put.before()),
++                "retained", put.retained().toString(), "after", state(put.after()), "parent", parent(put.parent()));
++    }
++    private static PreparedPublication.Put readPut(Map<String, Object> put) throws IOException {
++        keys(put, "id", "target", "before", "retained", "after", "parent");
++        return new PreparedPublication.Put(text(put.get("id")), path(put.get("target")), readState(object(put.get("before"))),
++                path(put.get("retained")), readState(object(put.get("after"))), readParent(object(put.get("parent"))));
++    }
++    public static Map<String, Object> state(FileState state) {
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("kind", state.kind()); result.put("identity", state.identity()); result.put("sha256", state.sha256());
++        result.put("link_target", state.linkTarget()); result.put("mode", state.mode()); result.put("uid", state.uid()); result.put("gid", state.gid());
++        return result;
++    }
++    public static FileState readState(Map<String, Object> state) throws IOException {
++        keys(state, "kind", "identity", "sha256", "link_target", "mode", "uid", "gid");
++        long mode = number(state.get("mode"));
++        if (mode < 0 || mode > 0177777) throw new IOException("Invalid file state mode");
++        return new FileState(text(state.get("kind")), nullableText(state.get("identity")), nullableText(state.get("sha256")),
++                nullableText(state.get("link_target")), (int) mode, number(state.get("uid")), number(state.get("gid")));
++    }
++    private static Map<String, Object> parent(DirectoryBinding parent) {
++        return Map.of("path", parent.path().toString(), "components", parent.components().stream().map(component ->
++                Map.of("path", component.path().toString(), "entry", state(component.entry()), "directory", state(component.directory()))).toList(),
++                "dependencies", parent.dependencies().stream().map(dependency -> {
++                    Map<String, Object> result = new LinkedHashMap<>();
++                    result.put("path", dependency.path().toString()); result.put("entry", state(dependency.entry()));
++                    result.put("parent_identity", dependency.parentIdentity()); return result;
++                }).toList());
++    }
++    private static DirectoryBinding readParent(Map<String, Object> parent) throws IOException {
++        keys(parent, "path", "components", "dependencies");
++        List<DirectoryBinding.Component> components = new ArrayList<>();
++        for (Object value : array(parent.get("components"))) {
++            Map<String, Object> component = object(value); keys(component, "path", "entry", "directory");
++            components.add(new DirectoryBinding.Component(path(component.get("path")), readState(object(component.get("entry"))),
++                    readState(object(component.get("directory")))));
++        }
++        List<DirectoryBinding.Dependency> dependencies = new ArrayList<>();
++        for (Object value : array(parent.get("dependencies"))) {
++            Map<String, Object> dependency = object(value); keys(dependency, "path", "entry", "parent_identity");
++            dependencies.add(new DirectoryBinding.Dependency(path(dependency.get("path")), readState(object(dependency.get("entry"))),
++                    nullableText(dependency.get("parent_identity"))));
++        }
++        return new DirectoryBinding(path(parent.get("path")), components, dependencies);
++    }
++    private static void keys(Map<String, Object> object, String... keys) throws IOException {
++        if (!object.keySet().equals(Set.of(keys))) throw new IOException("Unexpected prepared publication fields");
++    }
++    @SuppressWarnings("unchecked")
++    private static Map<String, Object> object(Object value) throws IOException {
++        if (!(value instanceof Map<?, ?>)) throw new IOException("Expected prepared object");
++        return (Map<String, Object>) value;
++    }
++    private static List<?> array(Object value) throws IOException {
++        if (!(value instanceof List<?> list)) throw new IOException("Expected prepared array");
++        return list;
++    }
++    private static String text(Object value) throws IOException {
++        if (!(value instanceof String text)) throw new IOException("Expected prepared string");
++        return text;
++    }
++    private static String nullableText(Object value) throws IOException { return value == null ? null : text(value); }
++    private static Path path(Object value) throws IOException { return Path.of(text(value)); }
++    private static long number(Object value) throws IOException {
++        if (!(value instanceof Long number)) throw new IOException("Expected prepared integer");
++        return number;
++    }
++}
+--- a/src/main/java/org/limine/entry/tool/processes/ReadObservation.java
++++ b/src/main/java/org/limine/entry/tool/processes/ReadObservation.java
+@@ -1,6 +1,7 @@
+ package org.limine.entry.tool.processes;
+ 
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.nio.ByteBuffer;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+@@ -103,6 +104,31 @@
+         return StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+     }
+ 
++    /** Stream a binary input while retaining the same link/identity binding as text reads. */
++    public Map<String, Object> file(Path path) throws IOException {
++        Map<String, Object> before = path(path);
++        if (before.get("status").equals("absent")) {
++            inputs.add(before);
++            return Map.copyOf(before);
++        }
++        if (!before.get("type").equals("file")) throw new IOException("Expected a regular input file: " + path);
++        MessageDigest digest;
++        try {
++            digest = MessageDigest.getInstance("SHA-256");
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException(e);
++        }
++        try (InputStream input = Files.newInputStream(path)) {
++            byte[] buffer = new byte[8192];
++            int count;
++            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
++        }
++        if (!before.equals(path(path))) throw new IOException("Input changed while hashing: " + path);
++        before.put("sha256", HexFormat.of().formatHex(digest.digest()));
++        inputs.add(before);
++        return Map.copyOf(before);
++    }
++
+     public List<Path> configDirectory(Path directory) throws IOException {
+         Map<String, Object> before = path(directory);
+         if (!before.get("status").equals("present") || !before.get("type").equals("directory")) {
+--- /dev/null
++++ b/src/main/java/org/limine/entry/tool/processes/BootResources.java
+@@ -0,0 +1,86 @@
++package org.limine.entry.tool.processes;
++
++import org.limine.entry.tool.formats.limine8.Limine;
++import org.limine.entry.tool.objects.BootOptions;
++import org.limine.entry.tool.objects.Config;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Producer-owned addition resources and rendering, shared by query and execution. */
++public final class BootResources {
++    private BootResources() {}
++
++    public record Resource(String role, String source, String destination, boolean copied) {}
++    public record Addition(String kernelID, String protocol, String cmdline, List<Resource> resources) {
++        public Addition { resources = List.copyOf(resources); }
++    }
++
++    @FunctionalInterface
++    public interface ResourcePath {
++        String resolve(Resource resource) throws IOException;
++    }
++
++    @FunctionalInterface
++    public interface ResourceHash {
++        String suffix(Resource resource, String contentPath) throws IOException;
++    }
++
++    public static Addition uki(Config config, String prefix, String name, String source, String cmdline) {
++        String target = OutputLayout.ukiDirectory(config) + OutputLayout.ukiFileName(config, prefix, name);
++        return new Addition(name, "efi", BootOptions.cleanKernelParameters(cmdline, false).cmdline(),
++                List.of(new Resource("uki", source, target, true)));
++    }
++
++    public static Addition kernel(Config config, String name, String suffix, String initramfs, String kernel, String cmdline) {
++        BootOptions.KernelParams options = BootOptions.cleanKernelParameters(cmdline, true);
++        List<Resource> resources = new ArrayList<>();
++        for (String module : options.initrds()) {
++            String target = Utility.buildPath(config.espPath(), module);
++            resources.add(new Resource("extra-initrd", target, target, false));
++        }
++        String directory = OutputLayout.kernelDirectory(config, name);
++        resources.add(new Resource("initramfs", initramfs, directory + OutputLayout.inputBasename(initramfs), true));
++        resources.add(new Resource("kernel", kernel, directory + OutputLayout.inputBasename(kernel), true));
++        return new Addition(name + suffix, "linux", options.cmdline(), resources);
++    }
++
++    public static void requireInputs(Addition addition) throws IOException {
++        for (Resource resource : addition.resources()) {
++            String input = resource.copied() ? resource.source() : Utility.correctCaseSensitivePath(resource.source());
++            if (input == null || !Utility.isFilePresent(input)) {
++                throw new IOException("Required " + resource.role() + " input not found: " + resource.source());
++            }
++        }
++    }
++
++    public static List<String> render(Config config, Addition addition, List<String> comments, String spaces,
++            ResourcePath content, ResourceHash hash) throws IOException {
++        List<String> lines = new ArrayList<>();
++        for (String comment : comments) {
++            if (!comment.isBlank()) lines.add(spaces + Limine.COMMENT + " " + comment);
++        }
++        lines.add(spaces + Limine.PROTOCOL + " " + addition.protocol());
++        String esp = Utility.buildPath(config.espPath());
++        for (Resource resource : addition.resources()) {
++            String input = content.resolve(resource);
++            if (input == null) throw new IOException("Prepared resource could not be resolved: " + resource.destination());
++            // Reference URI spelling is retained; copied files use the actual
++            // destination spelling, as the original publisher does on FAT.
++            String target = resource.copied() ? resource.destination() : resource.source();
++            if (resource.copied()) {
++                String actual = Utility.correctCaseSensitivePath(target);
++                if (actual != null) target = actual;
++            }
++            if (!target.startsWith(esp + "/")) throw new IOException("Boot resource is outside its ESP: " + target);
++            String keyword = resource.role().equals("kernel") || resource.role().equals("uki")
++                    ? Limine.PATH.toString() : Limine.MODULE_PATH.toString();
++            lines.add(spaces + keyword + " " + config.pathFunction() + target.substring(esp.length())
++                    + hash.suffix(resource, input));
++        }
++        lines.add(spaces + Limine.CMDLINE + " " + addition.cmdline());
++        lines.add("");
++        return lines;
++    }
++}
+--- a/src/main/java/org/limine/entry/tool/processes/LimineManager.java
++++ b/src/main/java/org/limine/entry/tool/processes/LimineManager.java
+@@ -20,11 +20,17 @@
+ 
+     private final TreeNode targetOsNode;
+     private final Config config;
++    private final Map<String, String> cmdlines;
+     public boolean isUpdateNeeded;
+ 
+     public LimineManager(TreeNode targetOsNode, Config config) {
++        this(targetOsNode, config, null);
++    }
++
++    public LimineManager(TreeNode targetOsNode, Config config, Map<String, String> cmdlines) {
+         this.targetOsNode = targetOsNode;
+         this.config = config;
++        this.cmdlines = cmdlines == null ? null : Map.copyOf(cmdlines);
+         this.isUpdateNeeded = false;
+     }
+ 
+@@ -181,183 +187,60 @@
+      * Adds an initramfs and vmlinuz to the Limine boot entries.
+      */
+     public void addKernel(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String initramfsPath, String vmlinuzPath, String suffixName) throws IOException {
+-
+-        if (!Utility.isFilePresent(initramfsPath)) {
+-            throw new IOException("Initramfs not found: " + initramfsPath);
+-        }
+-        if (!Utility.isFilePresent(vmlinuzPath)) {
+-            throw new IOException("Kernel not found: " + vmlinuzPath);
+-        }
+-
+-        String dirPath = OutputLayout.kernelDirectory(config, kernelName);
+-        Utility.ensureDirectoryExists(dirPath);
+-
+-        // Copying initramfs and vmlinuz to $ESP_PATH/${machine_id}/${kernel-version}/*
+-        String initramfsFileName = OutputLayout.inputBasename(initramfsPath);
+-        String targetInitramfsPath = dirPath + initramfsFileName;
+-
+-        String vmlinuzFileName = OutputLayout.inputBasename(vmlinuzPath);
+-        String targetVmlinuzPath = dirPath + vmlinuzFileName;
+-
+-        Utility.copyFileIfMissingOrDifferent(initramfsPath, targetInitramfsPath);
+-        Utility.copyFileIfMissingOrDifferent(vmlinuzPath, targetVmlinuzPath);
+-
+-        boolean isKernelFound = false;
+         String fullKernelName = kernelName + suffixName;
+-        List<String> comments = List.of(kernelComment, new EntryOptions().setKernelID(fullKernelName).buildKernelComment());
+-        String kernelCmdline = BootOptions.getKernelCmdline(fullKernelName);
+-
+-        for (TreeNode bootNode : this.targetOsNode.getNodes()) {
+-            // Check if the kernelVersion exists in the OS node.
+-            // If so, then update the config lines for the kernel.
+-            if (bootNode.matchesKernelID(fullKernelName)) {
+-                // Update initramfs and vmlinuz
+-                List<String> bootConfig = this.createBootConfig(kernelName, comments, kernelCmdline, initramfsFileName, vmlinuzFileName);
+-                bootNode.getConfigLines().clear();
+-                bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+-                bootNode.getConfigLines().addAll(bootConfig);
+-                isKernelFound = true;
+-                break;
+-            }
+-        }
+-
+-        // The matched kernel name is not found, then create a kernel entry.
+-        if (!isKernelFound) {
+-            TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + fullKernelName, 2, targetOsNode.getName(), targetOsNode.getMacros());
+-            bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+-            bootNode.setOptions(kernelEntryOptions);
+-            List<String> bootConfig = this.createBootConfig(kernelName, comments, kernelCmdline, initramfsFileName, vmlinuzFileName);
+-            bootNode.getConfigLines().addAll(bootConfig);
+-            targetOsNode.addNode(bootNode);
+-        }
+-
+-        // Sort boot entries based on the BOOT_ORDER
+-        this.sortEntriesByBootOrder(targetOsNode.getNodes(), Config.BOOT_ORDER);
+-        this.isUpdateNeeded = true;
++        publishAddition(BootResources.kernel(config, kernelName, suffixName, initramfsPath, vmlinuzPath,
++                kernelCmdline(fullKernelName)), kernelComment, kernelEntryOptions);
+     }
+ 
+     /**
+      * Adding a UKI (Unified kernel image) to the Limine boot entries.
+      */
+     public void addUki(String kernelName, String kernelComment, EntryOptions kernelEntryOptions, String ukiFilePath) throws IOException {
+-
+-        if (!Utility.isFilePresent(ukiFilePath)) {
+-            throw new IOException("UKI not found: " + ukiFilePath);
+-        }
+-
+-        String dirPath = OutputLayout.ukiDirectory(config);
+-        Utility.ensureDirectoryExists(dirPath);
+-
+-        // Copying ukiFilePath to $ESP_PATH/EFI/Linux/${UKI_FILE_PREFIX}_${kernel_name}.efi
+-        String ukiFileName = this.getDefaultUkiFileName(kernelName);
+-        String targetUkiPath = dirPath + ukiFileName;
+-        Utility.copyFileIfMissingOrDifferent(ukiFilePath, targetUkiPath);
+-
++        publishAddition(BootResources.uki(config, Config.UKI_FILE_PREFIX, kernelName, ukiFilePath,
++                kernelCmdline(kernelName)), kernelComment, kernelEntryOptions);
++    }
++
++    private String kernelCmdline(String name) {
++        return cmdlines == null ? BootOptions.getKernelCmdline(name) : BootOptions.getKernelCmdline(cmdlines, name);
++    }
++
++    private void publishAddition(BootResources.Addition addition, String comment, EntryOptions entryOptions) throws IOException {
++        // Resolve every required input before replacing any destination.
++        BootResources.requireInputs(addition);
++        for (BootResources.Resource resource : addition.resources()) {
++            if (resource.copied()) {
++                Utility.ensureDirectoryExists(java.nio.file.Path.of(resource.destination()).getParent().toString());
++                Utility.copyFileIfMissingOrDifferent(resource.source(), resource.destination());
++            }
++        }
++        List<String> comments = List.of(comment, new EntryOptions().setKernelID(addition.kernelID()).buildKernelComment());
++        List<String> lines = BootResources.render(config, addition, comments, Config.SPACES,
++                resource -> Utility.correctCaseSensitivePath(resource.destination()),
++                (resource, path) -> Config.ENABLE_VERIFICATION ? Limine.HASH + Utility.computeBlake2(path) : "");
++        updateAddition(addition.kernelID(), lines, entryOptions);
++    }
++
++    public void updateAddition(String kernelName, List<String> lines, EntryOptions entryOptions) {
+         boolean isKernelFound = false;
+-        List<String> comments = List.of(kernelComment, new EntryOptions().setKernelID(kernelName).buildKernelComment());
+-        String kernelCmdline = BootOptions.getKernelCmdline(kernelName);
+-
+         for (TreeNode bootNode : this.targetOsNode.getNodes()) {
+-            // Check if the UKI entry exists in the OS node. If so, then update the config lines for the kernel.
+             if (bootNode.matchesKernelID(kernelName)) {
+-                // Update UKI
+-                List<String> bootConfig = this.createUkiBootConfig(comments, kernelCmdline, ukiFileName);
+                 bootNode.getConfigLines().clear();
+                 bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+-                bootNode.getConfigLines().addAll(bootConfig);
++                bootNode.getConfigLines().addAll(lines);
+                 isKernelFound = true;
+                 break;
+             }
+         }
+ 
+-        // The matched kernel name is not found, then create a UKI entry.
+         if (!isKernelFound) {
+             TreeNode bootNode = new TreeNode(Config.SPACES + Limine.SUB_ENTRY_KEY + kernelName, 2, targetOsNode.getName(), targetOsNode.getMacros());
+             bootNode.addConfigLine(Config.SPACES + "### This kernel entry is auto-generated by limine-entry-tool");
+-            bootNode.setOptions(kernelEntryOptions);
+-            List<String> bootConfig = this.createUkiBootConfig(comments, kernelCmdline, ukiFileName);
+-            bootNode.getConfigLines().addAll(bootConfig);
++            bootNode.setOptions(entryOptions);
++            bootNode.getConfigLines().addAll(lines);
+             targetOsNode.addNode(bootNode);
+         }
+         this.sortEntriesByBootOrder(targetOsNode.getNodes(), Config.BOOT_ORDER);
+         this.isUpdateNeeded = true;
+-    }
+-
+-    private List<String> createBootConfig(String kernelName, List<String> kernelComments, String kernelCmdline, String initramfsFileName, String vmlinuzFileName) throws IOException {
+-        String initramfsFullPath = Utility.buildPath(config.espPath(), config.machineID(), kernelName, initramfsFileName);
+-        initramfsFullPath = Utility.correctCaseSensitivePath(initramfsFullPath);
+-
+-        String vmlinuzFullPath = Utility.buildPath(config.espPath(), config.machineID(), kernelName, vmlinuzFileName);
+-        vmlinuzFullPath = Utility.correctCaseSensitivePath(vmlinuzFullPath);
+-
+-        String espPath = Utility.buildPath(config.espPath());
+-        if (initramfsFullPath == null || vmlinuzFullPath == null) {
+-            throw new IOException("Published kernel or initramfs could not be resolved");
+-        }
+-        String initramfsEspPath = initramfsFullPath.substring(espPath.length());
+-        String vmlinuzEspPath = vmlinuzFullPath.substring(espPath.length());
+-
+-        List<String> bootConfig = new ArrayList<>();
+-        for (String comment : kernelComments) {
+-            if (!comment.isBlank()) {
+-                bootConfig.add(Config.SPACES + Limine.COMMENT + " " + comment);
+-            }
+-        }
+-        if (Utility.isSystemAmd64()) {
+-            bootConfig.add(Config.SPACES + Limine.PROTOCOL + " " + Limine.PROTOCOL_LINUX);
+-        } else {
+-            //TODO need to test various ARM- or RISC-V-based devices
+-            //bootConfig.add(Config.SPACES + Limine.PROTOCOL + " " + Limine.PROTOCOL_LIMINE);
+-            bootConfig.add(Config.SPACES + Limine.PROTOCOL + " " + Limine.PROTOCOL_LINUX);
+-        }
+-
+-        BootOptions.KernelParams bootOptions = BootOptions.cleanKernelParameters(kernelCmdline, true);
+-        for (String modulePath : bootOptions.initrds()) {
+-            String moduleFullPath = Utility.correctCaseSensitivePath(Utility.buildPath(config.espPath(), modulePath));
+-            if (moduleFullPath == null) {
+-                throw new IOException("Extra initrd not found: " + Utility.buildPath(config.espPath(), modulePath));
+-            } else {
+-                bootConfig.add(Config.SPACES + Limine.MODULE_PATH + " " + config.pathFunction() + Utility.buildPath(modulePath) + this.b2sum(moduleFullPath));
+-            }
+-        }
+-
+-        bootConfig.add(Config.SPACES + Limine.MODULE_PATH + " " + config.pathFunction() + initramfsEspPath + this.b2sum(initramfsFullPath));
+-        bootConfig.add(Config.SPACES + Limine.PATH + " " + config.pathFunction() + vmlinuzEspPath + this.b2sum(vmlinuzFullPath));
+-        bootConfig.add(Config.SPACES + Limine.CMDLINE + " " + bootOptions.cmdline());
+-        bootConfig.add("");  // Added a break line
+-        return bootConfig;
+-    }
+-
+-    private List<String> createUkiBootConfig(List<String> kernelComments, String kernelCmdline, String ukiFileName) throws IOException {
+-        String ukiFullPath = Utility.buildPath(config.espPath(), Config.DEFAULT_UKI_DIR_PATH, ukiFileName);
+-        ukiFullPath = Utility.correctCaseSensitivePath(ukiFullPath);
+-
+-        String espPath = Utility.buildPath(config.espPath());
+-        if (ukiFullPath == null) {
+-            throw new IOException("Published UKI could not be resolved");
+-        }
+-        String ukiEspPath = ukiFullPath.substring(espPath.length());
+-
+-        List<String> bootConfig = new ArrayList<>();
+-        for (String comment : kernelComments) {
+-            if (!comment.isBlank()) {
+-                bootConfig.add(Config.SPACES + Limine.COMMENT + " " + comment);
+-            }
+-        }
+-        BootOptions.KernelParams bootOptions = BootOptions.cleanKernelParameters(kernelCmdline, false);
+-        bootConfig.add(Config.SPACES + Limine.PROTOCOL + " " + Limine.PROTOCOL_EFI);
+-        bootConfig.add(Config.SPACES + Limine.PATH + " " + config.pathFunction() + ukiEspPath + this.b2sum(ukiFullPath));
+-        bootConfig.add(Config.SPACES + Limine.CMDLINE + " " + bootOptions.cmdline());
+-        bootConfig.add("");  // Added a break line
+-        return bootConfig;
+-    }
+-
+-    private String b2sum(String absoluteFilePath) throws IOException {
+-        if (Config.ENABLE_VERIFICATION) {
+-            return Limine.HASH + Utility.computeBlake2(absoluteFilePath);
+-        } else {
+-            return "";
+-        }
+     }
+ 
+     private String getDefaultUkiFileName(String kernelName) {
+--- a/src/main/java/org/limine/entry/tool/processes/NativeDescription.java
++++ b/src/main/java/org/limine/entry/tool/processes/NativeDescription.java
+@@ -172,26 +172,17 @@
+             Map<String, String> cmdlines, Request request, ReadObservation inputs) throws IOException {
+         String cmdline = BootOptions.getKernelCmdline(cmdlines, request.kernelID());
+         List<Map<String, Object>> resources = new ArrayList<>();
+-        String protocol;
++        BootResources.Addition addition;
+         if (request.kind.equals("add-uki")) {
+-            protocol = "efi";
+-            cmdline = BootOptions.cleanKernelParameters(cmdline, false).cmdline();
+-            String target = OutputLayout.ukiDirectory(config) + OutputLayout.ukiFileName(config, prefix, request.name);
+-            resources.add(resource("uki", request.sources.getFirst(), target, "copied", config, inputs));
++            addition = BootResources.uki(config, prefix, request.name, request.sources.getFirst(), cmdline);
+         } else {
+-            protocol = "linux";
+-            BootOptions.KernelParams options = BootOptions.cleanKernelParameters(cmdline, true);
+-            cmdline = options.cmdline();
+-            for (String module : options.initrds()) {
+-                String target = Utility.buildPath(config.espPath(), module);
+-                resources.add(resource("extra-initrd", target, target, "referenced", config, inputs));
+-            }
+-            String directory = OutputLayout.kernelDirectory(config, request.name);
+-            resources.add(resource("initramfs", request.sources.get(0), directory + OutputLayout.inputBasename(request.sources.get(0)), "copied", config, inputs));
+-            resources.add(resource("kernel", request.sources.get(1), directory + OutputLayout.inputBasename(request.sources.get(1)), "copied", config, inputs));
++            addition = BootResources.kernel(config, request.name, request.suffix, request.sources.get(0), request.sources.get(1), cmdline);
+         }
+-        return object("kernel_id", request.kernelID(), "new_entry_default_name", request.kernelID(), "protocol", protocol,
+-                "cmdline", cmdline, "native_hash_policy", verification ? "present" : "absent", "resources", resources);
++        for (BootResources.Resource item : addition.resources()) {
++            resources.add(resource(item.role(), item.source(), item.destination(), item.copied() ? "copied" : "referenced", config, inputs));
++        }
++        return object("kernel_id", addition.kernelID(), "new_entry_default_name", addition.kernelID(), "protocol", addition.protocol(),
++                "cmdline", addition.cmdline(), "native_hash_policy", verification ? "present" : "absent", "resources", resources);
+     }
+ 
+     private static Map<String, Object> resource(String role, String source, String target, String disposition,
+--- a/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings
++++ b/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings
+@@ -3,6 +3,52 @@
+ limine_kernel_name() { printf '%s' "${1// /}"; }
+ limine_build_uki() { [[ $1 == yes && -d /sys/firmware/efi ]]; }
+ limine_build_fallback() { [[ $1 == yes || $1 == "$2" ]]; }
++
++# Exact native publication operands for one producer build step. The array name
++# is fixed by the caller; neither configuration nor protocol input selects it.
++# shellcheck disable=SC2154 # Fixed string keys of the caller's associative nameref.
++limine_build_step() {
++	local _step_mode=$1 _step_name=$2 _step_dir=${3%/} _step_fallback=$4
++	local -n _step_result=$5
++	[[ $_step_mode == uki || $_step_mode == regular ]] || return 1
++	[[ $_step_fallback == true || $_step_fallback == false ]] || return 1
++	_step_result=([variant]=normal [native_name]="$_step_name" [kernel_source]='' [suffix]=''
++		[comment]="Kernel version: ${_step_dir##*/}")
++	if [[ $_step_fallback == true ]]; then
++		_step_result[variant]=fallback
++		_step_result[comment]+=' fallback'
++	fi
++	if [[ $_step_mode == uki ]]; then
++		_step_result[native_operation]=add-uki
++		[[ $_step_fallback != true ]] || _step_result[native_name]+=-fallback
++		_step_result[source_basename]="${_step_result[native_name]}.efi"
++	else
++		_step_result[native_operation]=add-kernel
++		_step_result[kernel_source]="$_step_dir/vmlinuz"
++		_step_result[source_basename]=initramfs
++		if [[ $_step_fallback == true ]]; then
++			_step_result[source_basename]+=-fallback
++			_step_result[suffix]=-fallback
++		fi
++	fi
++}
++
++limine_build_step_json() {
++	local -A _lb_step=()
++	local _lb_step_key _lb_step_comma=''
++	limine_build_step "$1" "$2" "$3" "$4" _lb_step || return 1
++	printf '{'
++	for _lb_step_key in variant native_operation native_name source_basename kernel_source suffix comment; do
++		printf '%s"%s":' "$_lb_step_comma" "$_lb_step_key"
++		if [[ $_lb_step_key == kernel_source && -z ${_lb_step[$_lb_step_key]} ]]; then
++			printf null
++		else
++			limine_build_json_string "${_lb_step[$_lb_step_key]}"
++		fi
++		_lb_step_comma=,
++	done
++	printf '}'
++}
+ 
+ limine_uki_options() {
+ 	local IFS="$2"
+@@ -153,15 +199,15 @@
+ 
+ limine_describe_build() {
+ 	set -o pipefail
+-	if [[ ${1:-} != --describe-build ]] || (( $# < 3 || $# % 2 != 1 )); then
+-		printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["usage: --describe-build PACKAGE VERSION [PACKAGE VERSION ...]"]}'
++	if [[ ${1:-} != --describe-build ]] || (( $# < 1 || $# % 2 != 1 )); then
++		printf '%s\n' '{"format":"limine-build-description","schema":2,"scope":"shell-build","complete":false,"errors":["usage: --describe-build [PACKAGE VERSION ...]"]}'
+ 		return 2
+ 	fi
+ 	shift
+ 	local _lb_arg
+ 	for _lb_arg in "$@"; do
+ 		if [[ -z ${_lb_arg// /} || $_lb_arg == . || $_lb_arg == .. || $_lb_arg == */* || $_lb_arg == *[[:cntrl:]]* ]] || ! limine_build_utf8 "$_lb_arg"; then
+-			printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["invalid declaration component"]}'
++			printf '%s\n' '{"format":"limine-build-description","schema":2,"scope":"shell-build","complete":false,"errors":["invalid declaration component"]}'
+ 			return 2
+ 		fi
+ 	done
+@@ -220,7 +266,7 @@
+ 		fi
+ 	done
+ 	(( ${#_lb_errors[@]} == 0 )) || _lb_complete=false
+-	printf '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":%s,"errors":[' "$_lb_complete"
++	printf '{"format":"limine-build-description","schema":2,"scope":"shell-build","complete":%s,"errors":[' "$_lb_complete"
+ 	for _lb_arg in "${_lb_errors[@]}"; do printf '%s' "$_lb_comma"; limine_build_json_string "$_lb_arg"; _lb_comma=,; done
+ 	printf '],"inputs":['
+ 	_lb_comma=''
+@@ -256,7 +302,13 @@
+ 		printf '%s{"package":' "$_lb_comma"; limine_build_json_string "$1"
+ 		printf ',"version":'; limine_build_json_string "$2"
+ 		printf ',"name":'; limine_build_json_string "$_lb_name"
+-		printf ',"fallback":%s}' "$_lb_fallback"
++		printf ',"fallback":%s,"publication_steps":[' "$_lb_fallback"
++		limine_build_step_json "$_lb_mode" "$_lb_name" "/usr/lib/modules/$2" false
++		if [[ $_lb_fallback == true ]]; then
++			printf ','
++			limine_build_step_json "$_lb_mode" "$_lb_name" "/usr/lib/modules/$2" true
++		fi
++		printf ']}'
+ 		_lb_comma=,
+ 		shift 2
+ 	done
+@@ -268,7 +320,7 @@
+ 	# A positive inherited nesting limit can abort even the query's first nested
+ 	# helper. Report that unsupported context before entering any function.
+ 	if [[ ${FUNCNEST:-} =~ ^[[:space:]]*\+?([0-9]+)[[:space:]]*$ && ${BASH_REMATCH[1]//0/} != '' ]]; then
+-		printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["environment-FUNCNEST"]}'
++		printf '%s\n' '{"format":"limine-build-description","schema":2,"scope":"shell-build","complete":false,"errors":["environment-FUNCNEST"]}'
+ 		exit 1
+ 	fi
+ 	limine_describe_build "$@"
+--- a/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
++++ b/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
+@@ -210,14 +210,17 @@
+ }
+ 
+ process_uki_kernel() {
++	local -A step=()
++	limine_build_step uki "$KERNEL_NAME" "$KERNEL_DIR" false step || return 1
+ 	info_msg "Building UKI for ${KERNEL_NAME} (${KERNEL_VERSION})"
+-	local tmp_uki="$TMP_DIR/${KERNEL_NAME}.efi"
+-	build_install_uki "$KERNEL_NAME" "$tmp_uki" false "Kernel version: ${KERNEL_VERSION}" || return 1
++	local tmp_uki="$TMP_DIR/${step[source_basename]}"
++	build_install_uki "${step[native_name]}" "$tmp_uki" false "${step[comment]}" || return 1
+ 
+ 	if limine_build_fallback "${MKINITCPIO_FALLBACK:-}" "$KERNEL_NAME"; then
++		limine_build_step uki "$KERNEL_NAME" "$KERNEL_DIR" true step || return 1
+ 		info_msg "Building UKI fallback for ${KERNEL_NAME} (${KERNEL_VERSION})"
+-		local tmp_uki_fb="$TMP_DIR/${KERNEL_NAME}-fallback.efi"
+-		build_install_uki "${KERNEL_NAME}-fallback" "$tmp_uki_fb" true "Kernel version: ${KERNEL_VERSION} fallback" || return 1
++		local tmp_uki_fb="$TMP_DIR/${step[source_basename]}"
++		build_install_uki "${step[native_name]}" "$tmp_uki_fb" true "${step[comment]}" || return 1
+ 	else
+ 		remove_uki_if_present "${KERNEL_NAME}-fallback" "$UKI_FALLBACK_PATH"
+ 	fi
+@@ -227,8 +230,10 @@
+ }
+ 
+ process_regular_kernel() {
++	local -A step=()
++	limine_build_step regular "$KERNEL_NAME" "$KERNEL_DIR" false step || return 1
+ 	info_msg "Building initramfs for ${KERNEL_NAME} (${KERNEL_VERSION})"
+-	local tmp_initramfs="$TMP_DIR/initramfs"
++	local tmp_initramfs="$TMP_DIR/${step[source_basename]}"
+ 	if ! build_initramfs "$tmp_initramfs" false; then
+ 		error_msg "mkinitcpio failed for kernel ${KERNEL_VERSION}, skipping."
+ 		return 1
+@@ -237,16 +242,17 @@
+ 	if [[ -f "$BOOT_KERNEL_DIR/initramfs-${KERNEL_NAME}" ]]; then
+ 		rm -r "$BOOT_KERNEL_DIR"
+ 	fi
+-	install_kernel "$KERNEL_NAME" "$tmp_initramfs" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION}" || return 1
++	install_kernel "${step[native_name]}" "$tmp_initramfs" "${step[kernel_source]}" "${step[comment]}" || return 1
+ 
+ 	if limine_build_fallback "${MKINITCPIO_FALLBACK:-}" "$KERNEL_NAME"; then
++		limine_build_step regular "$KERNEL_NAME" "$KERNEL_DIR" true step || return 1
+ 		info_msg "Building fallback initramfs for ${KERNEL_NAME} (${KERNEL_VERSION})"
+-		local tmp_initramfs_fb="$TMP_DIR/initramfs-fallback"
++		local tmp_initramfs_fb="$TMP_DIR/${step[source_basename]}"
+ 		if ! build_initramfs "$tmp_initramfs_fb" true; then
+ 			error_msg "mkinitcpio failed for kernel ${KERNEL_VERSION}, skipping."
+ 			return 1
+ 		fi
+-		install_kernel "$KERNEL_NAME" "$tmp_initramfs_fb" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION} fallback" "-fallback" || return 1
++		install_kernel "${step[native_name]}" "$tmp_initramfs_fb" "${step[kernel_source]}" "${step[comment]}" "${step[suffix]}" || return 1
+ 	elif [[ -f "$INITRAMFS_FALLBACK_PATH" ]]; then
+ 		limine-entry-tool --remove-kernel "${KERNEL_NAME}-fallback" --keep-files --no-mutex --no-hooks --quiet
+ 		rm -f "$INITRAMFS_FALLBACK_PATH"

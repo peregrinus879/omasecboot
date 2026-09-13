@@ -30,6 +30,7 @@ trap finish EXIT
 # shellcheck source=tests/integration/lib/limine-sources.sh
 source "$repo/tests/integration/lib/limine-sources.sh"
 limine_prepare_sources "$source_root" "$scratch" "$metadata" "$integration"
+limine_prepare_java_dependencies "$scratch" "$metadata" "${LIMINE_NATIVE_JSON_JAR:-}"
 jq -e '.description.schema == 1' "$metadata" >/dev/null || die 'description contract required'
 
 mkdir -p "$scratch/fixtures" "$scratch/fake-bin" "$scratch/compiler"
@@ -37,7 +38,7 @@ cp "$repo/tests/integration/fixtures/DescriptionContract.java" "$repo/tests/inte
 cat >"$scratch/fixtures/entry-tool" <<'EOF'
 #!/bin/bash
 exec /jdk/bin/java -Xmx256m -XX:ActiveProcessorCount=4 -XX:-UsePerfData \
-  -Duser.home=/work/home -cp /classes org.limine.entry.tool.Main "$@"
+  -Duser.home=/work/home -cp "/classes${LIMINE_JAVA_CLASSPATH:+:$LIMINE_JAVA_CLASSPATH}" org.limine.entry.tool.Main "$@"
 EOF
 cat >"$scratch/fake-bin/forbidden" <<'EOF'
 #!/bin/bash
@@ -65,6 +66,7 @@ common=(
   --tmpfs /usr/lib/modules --tmpfs /usr/lib/limine --proc /proc --dev /dev --tmpfs /tmp --dir /sys
   --ro-bind "$java_home" /jdk --ro-bind "$scratch/fixtures" /fixtures
   --ro-bind "$scratch/fake-bin" /fake-bin --ro-bind /usr/bin/bash /usr/bin/bash
+  "${LIMINE_JAVA_MOUNTS[@]}" --setenv LIMINE_JAVA_CLASSPATH "$LIMINE_JAVA_CLASSPATH"
   --setenv PATH /fake-bin:/jdk/bin:/usr/bin --setenv HOME /work/home
   --setenv XDG_CONFIG_HOME /work/home/config --setenv XDG_DATA_HOME /work/home/data
   --setenv XDG_CACHE_HOME /work/home/cache --setenv XDG_STATE_HOME /work/home/state
@@ -79,7 +81,7 @@ compile_sources=()
 for path in "${LIMINE_PATCHED_JAVA[@]}"; do compile_sources+=("/source/$path"); done
 "${common[@]}" --dir /etc --dir /run --dir /var --dir /usr/share/limine-entry-tool.d \
   --ro-bind "$scratch/patched" /source --bind "$scratch/compiler" /work /jdk/bin/javac \
-  -J-Xmx1g -J-XX:ActiveProcessorCount=4 -J-Duser.home=/work/home -d /work/classes \
+  -J-Xmx1g -J-XX:ActiveProcessorCount=4 -J-Duser.home=/work/home -cp "${LIMINE_JAVA_CLASSPATH:-.}" -d /work/classes \
   "${compile_sources[@]}" /fixtures/DescriptionContract.java /fixtures/NativeContract.java \
   >"$scratch/compiler.log" 2>&1 || { cat "$scratch/compiler.log" >&2; die 'description compilation failed'; }
 
@@ -288,7 +290,7 @@ for name in parity-new-uki parity-custom-uki parity-new-kernel parity-custom-ker
     --bind "$work/run" /run --bind "$work/var" /var --bind "$work/share" /usr/share/limine-entry-tool.d \
     --ro-bind "$scratch/compiler/classes" /classes --ro-bind /usr/bin/b2sum /usr/bin/b2sum --ro-bind /usr/bin/sync /usr/bin/sync \
     --setenv PATH /jdk/bin:/usr/bin /jdk/bin/java -Xmx256m -XX:-UsePerfData -Duser.home=/work/home \
-    -cp /classes org.limine.entry.tool.NativeContract "$operation" /boot linux contract no \
+    -cp "/classes${LIMINE_JAVA_CLASSPATH:+:$LIMINE_JAVA_CLASSPATH}" org.limine.entry.tool.NativeContract "$operation" /boot linux contract no \
     >"$work/publication.stdout" 2>"$work/publication.stderr" || { cat "$work/publication.stderr" >&2; die "$name: actual publication failed"; }
   "${common[@]}" --bind "$work" /work --bind "$work/etc" /etc --bind "$work/boot" /boot \
     --bind "$work/run" /run --bind "$work/var" /var --bind "$work/share" /usr/share/limine-entry-tool.d \
@@ -311,7 +313,7 @@ for name in json pure-clean interleaved as-read-replace as-read-delete as-read-c
   "${common[@]}" --bind "$work" /work --bind "$work/etc" /etc --bind "$work/run" /run \
     --bind "$work/var" /var --bind "$work/share" /usr/share/limine-entry-tool.d \
     --ro-bind "$scratch/compiler/classes" /classes /jdk/bin/java -Xmx256m -XX:-UsePerfData \
-    -Duser.home=/work/home -cp /classes org.limine.entry.tool.DescriptionContract "$name" \
+    -Duser.home=/work/home -cp "/classes${LIMINE_JAVA_CLASSPATH:+:$LIMINE_JAVA_CLASSPATH}" org.limine.entry.tool.DescriptionContract "$name" \
     >"$work/stdout" 2>"$work/stderr" || { cat "$work/stderr" >&2; die "description helper: $name"; }
   [[ ! -e $work/forbidden ]] || die "$name: hidden helper side effect"
   if [[ $name == json ]]; then

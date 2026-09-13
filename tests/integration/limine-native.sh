@@ -10,7 +10,7 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ $# == 2 && -d $1 && -x $2/bin/java && -x $2/bin/javac ]] \
   || die 'usage: limine-native.sh PINNED_SOURCE_ROOT JDK25_HOME'
 for tool in bwrap jq patch sha256sum bash env realpath mktemp mkdir cp rm chmod \
-  cmp grep b2sum sync flock cat shellcheck; do
+  cmp grep b2sum sync flock cat shellcheck cc; do
   command -v "$tool" >/dev/null || die "required command: $tool"
 done
 source_root=$(realpath -- "$1")
@@ -35,10 +35,17 @@ trap finish EXIT
 # shellcheck source=tests/integration/lib/limine-sources.sh
 source "$repo/tests/integration/lib/limine-sources.sh"
 limine_prepare_sources "$source_root" "$scratch" "$metadata" "$integration"
+limine_prepare_java_dependencies "$scratch" "$metadata" "${LIMINE_NATIVE_JSON_JAR:-}"
 
 mkdir -p "$scratch/fixtures" "$scratch/fake-bin" "$scratch/compiler"
 cp "$repo/tests/integration/fixtures/NativeContract.java" \
   "$repo/tests/integration/fixtures/NativeScannerContract.java" "$scratch/fixtures/"
+if [[ -n $LIMINE_JAVA_CLASSPATH ]]; then
+  cp "$repo/tests/integration/fixtures/ManagedJsonContract.java" \
+     "$repo/tests/integration/fixtures/BootResourceContract.java" \
+     "$repo/tests/integration/fixtures/PreparedPublicationContract.java" \
+    "$repo/tests/integration/fixtures/ManagedChannelContract.java" "$scratch/fixtures/"
+fi
 cat >"$scratch/fake-bin/command" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -92,6 +99,7 @@ sandbox=(
   --dir /var --dir /sys --dir /usr/share/limine-entry-tool.d
   --ro-bind "$java_home" /jdk --ro-bind "$scratch/fixtures" /fixtures
   --ro-bind "$scratch/fake-bin" /fake-bin
+  "${LIMINE_JAVA_MOUNTS[@]}"
   --setenv JAVA_HOME /jdk --setenv PATH /fake-bin:/jdk/bin:/usr/bin
   --setenv HOME /work/home --setenv XDG_CONFIG_HOME /work/home/config
   --setenv XDG_DATA_HOME /work/home/data --setenv XDG_CACHE_HOME /work/home/cache
@@ -121,10 +129,11 @@ for revision in original patched; do
   mkdir -p "$scratch/classes-$revision"
   extra=()
   [[ $revision != patched ]] || extra+=(/fixtures/NativeScannerContract.java)
+  [[ $revision != patched || -z $LIMINE_JAVA_CLASSPATH ]] || extra+=(/fixtures/ManagedJsonContract.java /fixtures/BootResourceContract.java /fixtures/ManagedChannelContract.java /fixtures/PreparedPublicationContract.java)
   "${sandbox[@]}" --dir /etc --ro-bind "$scratch/$revision" /source \
     --bind "$scratch/classes-$revision" /work /jdk/bin/javac \
     -J-Xmx1g -J-XX:ActiveProcessorCount=4 -J-Duser.home=/work/home \
-    -d /work/classes "${compile_sources[@]}" /fixtures/NativeContract.java "${extra[@]}" \
+    -cp "${LIMINE_JAVA_CLASSPATH:-.}" -d /work/classes "${compile_sources[@]}" /fixtures/NativeContract.java "${extra[@]}" \
     >"$scratch/compile-$revision.log" 2>&1 || {
       cat "$scratch/compile-$revision.log" >&2
       die "actual source compilation: $revision"
@@ -188,7 +197,7 @@ run_case() {
   fi
   "${sandbox[@]}" --bind "$work" /work --ro-bind "$work/etc" /etc \
     --bind "$work/boot" /boot --ro-bind "$scratch/classes-$revision/classes" /classes \
-    "${mounts[@]}" /jdk/bin/java "${java_options[@]}" -cp /classes "$entry" "${arguments[@]}" \
+    "${mounts[@]}" /jdk/bin/java "${java_options[@]}" -cp "/classes${LIMINE_JAVA_CLASSPATH:+:$LIMINE_JAVA_CLASSPATH}" "$entry" "${arguments[@]}" \
     >"$work/stdout" 2>"$work/stderr" || rc=$?
   printf '%s\n' "$rc" >"$work/exit-status"
   if [[ $expected == zero && $rc != 0 || $expected == nonzero && $rc == 0 ]]; then
@@ -287,4 +296,96 @@ for name in success publication-failure cleanup-failure both-fail; do
   [[ $name != success ]] || expected=zero
   run_case patched "scanner-$name" scanner "$expected"
 done
+if [[ -n $LIMINE_JAVA_CLASSPATH ]]; then
+  mkdir -p "$scratch/managed-json/home" "$scratch/managed-json/runtime"
+  "${sandbox[@]}" --dir /etc --bind "$scratch/managed-json" /work \
+    --ro-bind "$scratch/classes-patched/classes" /classes /jdk/bin/java "${java_options[@]}" \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" ManagedJsonContract \
+    >"$scratch/managed-json/stdout" 2>"$scratch/managed-json/stderr" || {
+      cat "$scratch/managed-json/stderr" >&2
+      die 'managed JSON contracts failed'
+    }
+  cat "$scratch/managed-json/stdout"
+  mkdir -p "$scratch/boot-resources/home" "$scratch/boot-resources/runtime" "$scratch/boot-resources/boot"
+  "${sandbox[@]}" --dir /etc --bind "$scratch/boot-resources" /work \
+    --bind "$scratch/boot-resources/boot" /boot --ro-bind "$scratch/classes-patched/classes" /classes \
+    /jdk/bin/java "${java_options[@]}" -cp "/classes:$LIMINE_JAVA_CLASSPATH" BootResourceContract \
+    >"$scratch/boot-resources/stdout" 2>"$scratch/boot-resources/stderr" || {
+      cat "$scratch/boot-resources/stderr" >&2
+      die 'shared boot-resource contracts failed'
+    }
+  cat "$scratch/boot-resources/stdout"
+  cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$scratch/publication-sync-error.so" \
+    "$repo/tests/integration/fixtures/publication-sync-error.c" -ldl
+  mkdir -p "$scratch/prepared-publication/home" "$scratch/prepared-publication/runtime"
+  "${sandbox[@]}" --dir /etc --bind "$scratch/prepared-publication" /work \
+    --ro-bind "$scratch/classes-patched/classes" /classes \
+    --ro-bind "$scratch/publication-sync-error.so" /publication-sync-error.so \
+    --setenv LD_PRELOAD /publication-sync-error.so /jdk/bin/java "${java_options[@]}" \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" PreparedPublicationContract \
+    >"$scratch/prepared-publication/stdout" 2>"$scratch/prepared-publication/stderr" || {
+      cat "$scratch/prepared-publication/stdout" "$scratch/prepared-publication/stderr" >&2
+      die 'prepared publication/replay contracts failed'
+    }
+  cat "$scratch/prepared-publication/stdout"
+  mkdir -p "$scratch/managed-channel/home" "$scratch/managed-channel/runtime"
+  "${sandbox[@]}" --dir /etc --bind "$scratch/managed-channel" /work --ro-bind "$scratch/classes-patched/classes" /classes \
+    /jdk/bin/java "${java_options[@]}" -cp "/classes:$LIMINE_JAVA_CLASSPATH" ManagedChannelContract \
+    >"$scratch/managed-channel/framing.stdout" 2>"$scratch/managed-channel/framing.stderr" || {
+      cat "$scratch/managed-channel/framing.stderr" >&2
+      die 'producer channel framing contracts failed'
+    }
+  cat "$scratch/managed-channel/framing.stdout"
+  cat >"$scratch/fixtures/channel-broker" <<'EOF'
+#!/usr/bin/bash
+set -euo pipefail
+exec 200>/work/boot.lock
+flock 200
+exec 201>/work/repair.lock
+flock 201
+exec {user_input}<&0 {user_output}>&1 {user_error}>&2
+coproc WORKER {
+  IFS= read -r gate || exit 90
+  [[ $gate == go ]] || exit 90
+  exec 198>&1 199<&0
+  exec 0<&"$user_input" 1>&"$user_output" 2>&"$user_error"
+  exec /jdk/bin/java -Xmx256m -XX:ActiveProcessorCount=4 -XX:-UsePerfData -Duser.home=/work/home \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" ManagedChannelContract pipes
+}
+worker=$WORKER_PID
+read_original=${WORKER[0]}
+write_original=${WORKER[1]}
+exec {requests}<&"$read_original" {responses}>&"$write_original"
+exec {read_original}<&- {write_original}>&-
+printf 'go\n' >&"$responses"
+for sequence in 1 2; do
+  IFS= read -r request <&"$requests"
+  jq -e --argjson sequence "$sequence" --argjson worker "$worker" '
+    .format == "omasecboot-producer-request" and .schema == 1 and
+    .invocation == "11111111-1111-4111-8111-111111111111" and .sequence == $sequence and
+    (if $sequence == 1 then .payload.operation == "hello" and .payload.pid == $worker
+     else .payload.operation == "complete" end)' <<<"$request" >/dev/null
+  if (exec 202>/work/boot.lock; flock -n 202); then exit 91; fi
+  if (exec 202>/work/repair.lock; flock -n 202); then exit 92; fi
+  jq -cn --argjson sequence "$sequence" '{format:"omasecboot-producer-response",schema:1,
+    invocation:"11111111-1111-4111-8111-111111111111",sequence:$sequence,ok:true,payload:{accepted:true}}' >&"$responses"
+done
+exec {responses}>&-
+wait "$worker"
+exec {requests}<&-
+if (exec 202>/work/boot.lock; flock -n 202); then exit 93; fi
+flock --unlock 201
+flock --unlock 200
+EOF
+  shellcheck "$scratch/fixtures/channel-broker"
+  printf 'fixture interactive input\n' >"$scratch/managed-channel/input"
+  "${sandbox[@]}" --dir /etc --bind "$scratch/managed-channel" /work --ro-bind "$scratch/classes-patched/classes" /classes \
+    --ro-bind "$(realpath "$(command -v jq)")" /usr/bin/jq --setenv LIMINE_JAVA_CLASSPATH "$LIMINE_JAVA_CLASSPATH" \
+    /usr/bin/bash /fixtures/channel-broker <"$scratch/managed-channel/input" \
+    >"$scratch/managed-channel/pipes.stdout" 2>"$scratch/managed-channel/pipes.stderr" || {
+      cat "$scratch/managed-channel/pipes.stderr" >&2
+      die 'producer channel descriptor contract failed'
+    }
+  cat "$scratch/managed-channel/pipes.stdout"
+fi
 printf 'Passed %s actual-Java publication contracts.\n' "$count"

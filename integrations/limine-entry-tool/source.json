@@ -316,5 +316,128 @@
       "scope": "Actual wrapper and shell parser/policy in fixture-only unprivileged namespaces, read-only and writable domain inventories, forbidden helpers, incomplete observations and actual producer argv parity. External builders/native publication are controlled commands in the shell suite, not boot proof.",
       "logs": "LIMINE_BUILD_SETTINGS_KEEP=1 retains the printed private source/fixture/transcript path; otherwise cleanup removes it."
     }
+  },
+  "managed": {
+    "schema": 1,
+    "patch": {
+      "file": "0005-managed-producer-protocol.patch",
+      "sha256": "f9d6b8a92e4d55f1a267a754bae6e3f5fbf816fccfded91a8927b24f800a8b7d",
+      "strip": 1,
+      "purpose": "Shared shell/native resource models, bounded data transport, and finite prepared application attempts with exact recorded frontiers and namespace dependencies.",
+      "scope": "Component prerequisites only. Core authority, signed staging, retained-intent recovery after inode lifetime ends, terminal lifecycle completion and boot authority remain under development.",
+      "removal_trigger": "Recheck upstream producer/protocol and Jackson releases; remove when upstream provides the same checked protocol support."
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "9e514e5d8011a40a03674c6e0f62250a867dafc83ed93e52485101b5492c8cad",
+        "base_sha256": "12b86069ccd7ed1ac30794179869061a6bf68a42ebf64e3a932470faff09503c",
+        "patched_sha256": "9db38ee43cd4fba7c339d7b221b64f2b4f3789b0202bcebb061af7586d4e7a86"
+      },
+      {
+        "path": "build.gradle.kts",
+        "sha256": "fa22fac509bb8a60a6bce06483c2165e8af35597969e2d0dcfbd0dd4df2ed61e",
+        "base_sha256": "fa22fac509bb8a60a6bce06483c2165e8af35597969e2d0dcfbd0dd4df2ed61e",
+        "patched_sha256": "d32116705a86f09663daaacf9acd994c7efc949c81748964f2471ccea10a5413"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/Main.java",
+        "sha256": "b0f7b89375b6b13fa82b4ade1e3900cd51180002ec012704c4bafa2c67040e7f",
+        "base_sha256": "ef5dce3c47f184d86047b10889fe80fa42c556b114367668d323718473897d6e",
+        "patched_sha256": "9a8912e6ba094f4c6502b59ebf594b69e0782e2f6ed5b87413a04847a57f6807"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ManagedJson.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "dfd7f56c08f4231cf2ef1f9e67d508c8c12b3127309432fd5d16ffd4ccbb8fd1"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ManagedChannel.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "a1f9f7ad2deae2efef2c33477114ab5688d5c9c777a5e4ba16accf385a277ca5"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/FileState.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "0986dc927af20285948471cbcbd9edbcf11e38b9f260afefebad6793ad9b578d"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/DirectoryBinding.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "cc6d91cab9b05afbe50b9061bc43798c34659b4fb6754efd445489ff2f0e885a"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/PreparedPublication.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "825a20a521fb08424e802ffb80b88b02727877624256fabf3dcf3d6d16783b75"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/PreparedPublicationCodec.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "4cfb84ba382cfe6fe787e5b86a0e7e197e9d1ba44fe763f1b212e8eab2e94f42"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ReadObservation.java",
+        "sha256": null,
+        "base_sha256": "9a7cbaa35f7c2ae8ec236a7de8e559e20cc648578ef0076d90588ae3632db8d1",
+        "patched_sha256": "b19ff3c81114ee3bf909b3d1a887eb8ea552a127c0f49537a0f03d71f8f650f2"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/BootResources.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "dbf163388aee8f68b58160fe9f7fc067d7090a9f1a10cc7e4374ae177c6a3622"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineManager.java",
+        "sha256": "28c90ed866dfa327ae5589b027d6bc6eda75775181dda0bc45d283ac131cee03",
+        "base_sha256": "4add0b7c8f99478a63aa3e5b3c65c9c43c70f266fba990eeea232a92619426a2",
+        "patched_sha256": "72314835d9a629f119ff44a11d1155d008f4ffa094cf1a736bb5aeb53c1a34f4"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/NativeDescription.java",
+        "sha256": null,
+        "base_sha256": "583a2c30bfd0b21655484c2eb60e0da0346cb0452398ba47eff7289f383d0943",
+        "patched_sha256": "ddefd7fff5379b7c1958800244509d5cb910a96704f86b9b905dffa328a501f0"
+      },
+      {
+        "path": "install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings",
+        "sha256": null,
+        "base_sha256": "7024a75feb0ae987809c4c2a53fd97c9ec98b4fc5e593a49402bfa5d49ee7b14",
+        "patched_sha256": "2afddf439ee72c6ff0aab8c40fd7de0306289cb9214b7b4a7afb9dbdb7b62c47"
+      },
+      {
+        "path": "install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install",
+        "sha256": "e7ee93664395a1ee8c187ff4a6e5c304ad7a798101d7b983a4dfa78368983d58",
+        "base_sha256": "9eb77f6075c7104382628d421576b9ac4220d50d4321298331120a53ef8c6d87",
+        "patched_sha256": "f9cea3910f51a55e14dd6e79b08517a39379fdc428be2acc3b5cd2fb2aeb8792"
+      }
+    ],
+    "dependencies": [
+      {
+        "file": "jackson-core-3.2.2.jar",
+        "url": "https://repo.maven.apache.org/maven2/tools/jackson/core/jackson-core/3.2.2/jackson-core-3.2.2.jar",
+        "sha256": "93d9090b8c505b2f942ad85dd5821e8c401bfbafafff11708a3fbe2ef9da18ca",
+        "sha512": "90ded06490bf1b92a183ec74db64bfb2be3147ce3acf3edacf671e0e9a37eaba2e24aeb115bdb9758f3770abc5853599d237b2362f87703f38a17ca2fb0a6bfb",
+        "source_commit": "c817133922faa9751bf7e038b6f4054206562127",
+        "license_files": [
+          "META-INF/LICENSE",
+          "META-INF/NOTICE",
+          "META-INF/FastDoubleParser-LICENSE",
+          "META-INF/FastDoubleParser-ThirdParty-LICENSE",
+          "META-INF/Schubfach-LICENSE"
+        ]
+      }
+    ],
+    "test": {
+      "input": "Java suites require LIMINE_NATIVE_JSON_JAR pointing to the hash-bound caller-supplied jar; no suite downloads it.",
+      "scope": "Actual Java decoder/resource/channel and prepared-attempt contracts include real sync faults and process restart. This is not FAT/remount/reboot or production authority evidence; original publisher/query contracts use the full composed source."
+    }
   }
 }
