@@ -6,7 +6,7 @@
   "tag_object": "fbde7d4fc100a1fbb5196b7e5f0062da49dd0798",
   "commit": "57092d98ba9d355f180b883dea0e9cfefeace8b1",
   "release_url": "https://gitlab.com/Zesko/limine-entry-tool/-/releases/1.38.0",
-  "verified_on": "2026-09-12",
+  "verified_on": "2026-09-13",
   "archive": {
     "url": "https://gitlab.com/Zesko/limine-entry-tool/-/archive/57092d98ba9d355f180b883dea0e9cfefeace8b1/limine-entry-tool-57092d98ba9d355f180b883dea0e9cfefeace8b1.tar.gz",
     "sha256": "ad9c88c506114de4da7b47ec4839093f86b5e912822fc84b52ba71b0fc2b1e72",
@@ -250,16 +250,71 @@
     ],
     "test": {
       "command": "bash tests/integration/limine-description.sh /absolute/path/to/unpatched-source-root /absolute/path/to/jdk25 [native-executable]",
-      "composition": "Apply the native failure patch and then the description patch, validating intermediate/final file bindings. The original source remains unchanged. The shell build/install patch is independently tested and applied by the package recipe.",
+      "composition": "The shared helper applies and verifies all ordered shell/native/description/build-settings patches and all intermediate/final source bindings. The supplied original source remains unchanged.",
       "scope": "Real wrapper and native query at unprivileged namespace UID, with writable/read-only fixture domains, side-effect sentinels, configuration/association/error cases, as-read generation and macro interleaving, JSON round trips and actual publication parity. The optional executable runs queries through the built ELF; deterministic helpers and publication parity still use actual Java classes. Mutation/FAT admission, shell build selection, package inventory and lifecycle/boot proof remain separate.",
       "logs": "LIMINE_DESCRIPTION_KEEP=1 retains the printed private source/class/fixture/transcript directory; otherwise the suite removes it."
     }
   },
   "test": {
     "command": "bash tests/integration/limine-producer.sh /absolute/path/to/unpatched-source-root",
-    "input": "No network access by the test. Supply the extracted pinned archive or an equivalent tree containing the three files above. The test copies and verifies each input SHA-256 before execution, verifies the patch and patched bytes, and leaves the caller's source unchanged. The archive digest binds the fetched archive; per-file digests are the executable input contract.",
+    "input": "No network access by the test. Supply the extracted pinned archive or an equivalent tree containing all source.json input files. The shared helper copies/verifies every original, ordered patch and resulting file, leaving the caller source unchanged. The complete composed shell producer is tested against the original.",
     "requires": "Linux with unprivileged Bubblewrap user namespaces, merged-/usr runtime libraries, Bash, GNU coreutils, awk, util-linux flock, jq, patch, and ShellCheck.",
     "isolation": "Execute the complete real producer, common functions, and CLI wrapper in a private mount/PID/network/user namespace. Only runtime libraries and an explicit utility list are exposed read-only; /etc, /usr/lib/modules, /sys, /var, /boot, HOME and XDG paths are fixtures. mkinitcpio, entry-tool, pacman and host probes are fake commands. No OmaSecBoot core is sourced.",
     "logs": "Set TMPDIR to an owned private scratch parent. LIMINE_PRODUCER_KEEP=1 retains the printed per-run directory with source copies, fixtures and logs; otherwise the test removes it on exit."
+  },
+  "build_settings": {
+    "schema": 1,
+    "patch": {
+      "file": "0004-describe-build-settings.patch",
+      "sha256": "0a1854c52bb9de872c0d8b24aaf2430645d57dee867705b84b9db671abe98b03",
+      "strip": 1,
+      "purpose": "Describe explicit declaration-derived shell build settings without initialization or probes, sharing literal layer parsing, name cleaning, mode/fallback decisions and option tokenization with production.",
+      "removal_trigger": "Recheck upstream releases; remove when an upstream interface passes the same read-only settings, unknown-state and actual producer parity contracts.",
+      "scope": "Shell settings only. Additional builder-option effects and current sbctl/Snapper predicate results remain unresolved; no package inventory, native operation mapping, output coverage, lifecycle or boot authority."
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "9e514e5d8011a40a03674c6e0f62250a867dafc83ed93e52485101b5492c8cad",
+        "base_sha256": "f65870ae95fa0c2945d9e8c8610739bad018aea9515af548899c676c9bfc0642",
+        "patched_sha256": "12b86069ccd7ed1ac30794179869061a6bf68a42ebf64e3a932470faff09503c"
+      },
+      {
+        "path": "install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions",
+        "sha256": "7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31",
+        "base_sha256": "7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31",
+        "patched_sha256": "1937b6b0949f1cd14226b4c745ec91e22ed1280abf7cd78c5b15141b24790dbf"
+      },
+      {
+        "path": "install/arch-linux/limine-entry-tool/usr/lib/limine/limine-config-functions",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "82fef5acb358d71abc29905a6a21ac91fa555c96a12b5f5f5efeb8c5a79a8e64"
+      },
+      {
+        "path": "install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "7024a75feb0ae987809c4c2a53fd97c9ec98b4fc5e593a49402bfa5d49ee7b14"
+      },
+      {
+        "path": "install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio",
+        "sha256": "90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99",
+        "base_sha256": "90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99",
+        "patched_sha256": "35955f4b753e09bd61fc0ef372c133871ee6d20849d146b0f7edf71f964f4ab8"
+      },
+      {
+        "path": "install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install",
+        "sha256": "e7ee93664395a1ee8c187ff4a6e5c304ad7a798101d7b983a4dfa78368983d58",
+        "base_sha256": "3fe2631ba4f5ac8fc380fe9d63557c4f235ecfad5d4c5e123269bdeb27e97f01",
+        "patched_sha256": "9eb77f6075c7104382628d421576b9ac4220d50d4321298331120a53ef8c6d87"
+      }
+    ],
+    "test": {
+      "command": "bash tests/integration/limine-build-settings.sh /absolute/path/to/unpatched-source-root",
+      "composition": "Apply and verify all four ordered patches, their original/intermediate/final source bindings and the unchanged final Java tree.",
+      "scope": "Actual wrapper and shell parser/policy in fixture-only unprivileged namespaces, read-only and writable domain inventories, forbidden helpers, incomplete observations and actual producer argv parity. External builders/native publication are controlled commands in the shell suite, not boot proof.",
+      "logs": "LIMINE_BUILD_SETTINGS_KEEP=1 retains the printed private source/fixture/transcript path; otherwise cleanup removes it."
+    }
   }
 }

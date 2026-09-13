@@ -1,0 +1,508 @@
+--- a/README.md
++++ b/README.md
+@@ -85,6 +85,20 @@
+ Configuration/entry observations are **as read**, bound to their captured input identities and hashes. They are not a locked filesystem snapshot; consumers must revalidate them at their own transaction boundary. `expected.new_entry_default_name` is the default for creating an entry; an existing matching entry retains its observed display name. Raw lines are not a complete interpretation of Limine URIs. Hash-tool availability depends on the reported process PATH and needs a fresh check when using that policy. No producer-issued filesystem initialization, logging or mutation is performed; normal filesystem access-time behavior is not suppressed.
+ 
+ The interface describes an explicit native operation. Package-declared kernel inventory, shell build-mode/fallback selection and actual producer completion remain with their respective owners.
++
++### Shell build-settings description
++
++```sh
++limine-mkinitcpio --describe-build linux 6.19.1-arch1-1 linux-lts 6.12.1-1-lts
++```
++
++The first-position `--describe-build` route takes explicit package/version pairs, including declarations whose files are missing. It preserves their order and duplicates. It does not discover installed kernels, select a transaction's work or authenticate. One JSON document has `format: limine-build-description`, `schema: 1`, `scope: shell-settings`, typed `complete`/`errors`, as-read configuration digests, raw/effective settings with their origin, observed UEFI mode, cleaned kernel names, fallback choices and exact additional UKI argument tokens. Exit 0 means a complete settings observation, 1 incomplete observation, and 2 invalid operands. Optional absent configuration is described; unreadable files/directories, invalid UTF-8 and unsupported shell-control assignments make the result incomplete.
++
++The query shares the shell's four-layer traversal, line parser, ASCII-space name cleaning, exact `yes`/fallback predicates and `read -ra` option splitting with production. Inherited values are retained unless assigned. Quoting is not shell evaluation: the existing parser strips a boundary double quote, preserves trailing spaces and ignores indexed/`+=` assignments; quotes within `MKINITCPIO_UKI_OPTIONS` remain literal tokens, and `read` consumes its first line. Configured IFS participates in that split. The query records other shell-control effects as incomplete instead of applying configuration as its execution environment; mutation retains its existing exports and dynamically scoped loader behavior.
++
++No machine ID, ESP, command-line file or state is initialized. No authentication, terminal probe, lock, hook, logger, sbctl/Snapper query, native publication or builder runs. Inputs are as-read observations, not an atomic filesystem snapshot. Consumers must repeat their observation before relying on it.
++
++Additional UKI arguments follow the generated builder arguments and may override them; their effects on mkinitcpio are explicitly unresolved. UKI command-line omission is conditional on the current `is_sb_installed` and `is_snapper_installed` helper predicates. Those predicates inspect output text without validating the producing commands' results; this query neither runs them nor upgrades that contract. Regular builds use `--no-cmdline` and do not consume the additional UKI arguments. Native destination rules, source-basename/operation mapping, actual publication, signing and boot proof remain separate producer/consumer responsibilities.
+ </details>
+ 
+ <details>
+--- a/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions
++++ b/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions
+@@ -73,23 +73,8 @@
+ 	limine_efi_arch >/dev/null 2>&1
+ }
+ 
+-### Load key=value config
+-load_key_value_config() {
+-	local file="$1"
+-	while IFS= read -r line || [[ -n "$line" ]]; do
+-		# Skip blank lines and comments
+-		[[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+-
+-		# Match VAR = value
+-		if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+-			local var="${BASH_REMATCH[1]}"
+-			local val="${BASH_REMATCH[2]}"
+-			val="${val%\"}"
+-			val="${val#\"}"
+-			export "$var"="$val"
+-		fi
+-	done <"$file"
+-}
++# shellcheck disable=SC1091
++source /usr/lib/limine/limine-config-functions || return 1
+ 
+ find_boot_partition() {
+ 	local boot_paths=(
+@@ -113,40 +98,7 @@
+ 
+ ### Load configuration
+ load_config() {
+-	local usr_d_dir="/usr/share/limine-entry-tool.d"
+-	local etc_conf="/etc/limine-entry-tool.conf"
+-	local etc_d_dir="/etc/limine-entry-tool.d"
+-	# /etc/default/limine is the central config read by all Limine-based packages
+-	local default_conf="/etc/default/limine"
+-
+-	# 1. Load all /usr/share/limine-entry-tool.d/*.conf (lowest priority)
+-	if [[ -d "$usr_d_dir" ]]; then
+-		for file in "$usr_d_dir"/*.conf; do
+-			[[ -f "$file" ]] || continue
+-			load_key_value_config "$file"
+-		done
+-	fi
+-
+-	# 2. Load /etc/limine-entry-tool.conf
+-	if [[ -f "$etc_conf" ]]; then
+-		load_key_value_config "$etc_conf"
+-	fi
+-
+-	# 3. Load all /etc/limine-entry-tool.d/*.conf
+-	if [[ -d "$etc_d_dir" ]]; then
+-		for file in "$etc_d_dir"/*.conf; do
+-			[[ -f "$file" ]] || continue
+-			load_key_value_config "$file"
+-		done
+-	fi
+-
+-	# Do not use ENABLE_ENROLL_LIMINE_CONFIG in any random configs
+-	ENABLE_ENROLL_LIMINE_CONFIG=""
+-
+-	# 4. Load /etc/default/limine (highest priority)
+-	if [[ -f "$default_conf" ]]; then
+-		load_key_value_config "$default_conf"
+-	fi
++	load_config_values
+ 
+ 	# Detect ESP_PATH if not set
+ 	if [[ -z "${ESP_PATH:-}" || -z "${ESP_PATH// /}" ]]; then
+--- /dev/null
++++ b/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-config-functions
+@@ -0,0 +1,66 @@
++# Pure shell configuration parsing and layer traversal. No initialization here.
++# Keep the original dynamically scoped loader names and literal export semantics.
++limine_config_assignment() {
++	export "$1"="$2"
++}
++
++# Observation callbacks are inert in mutation. The read-only interface supplies
++# fixed implementations; configuration never chooses an executable callback.
++limine_config_directory() { :; }
++limine_config_file() { :; }
++
++limine_parse_key_values() {
++	while IFS= read -r line || [[ -n "$line" ]]; do
++		[[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
++		if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
++			local var="${BASH_REMATCH[1]}"
++			local val="${BASH_REMATCH[2]}"
++			val="${val%\"}"
++			val="${val#\"}"
++			limine_config_assignment "$var" "$val"
++		fi
++	done
++}
++
++load_key_value_config() {
++	local file="$1"
++	limine_parse_key_values <"$file"
++}
++
++load_config_values() {
++	local usr_d_dir="/usr/share/limine-entry-tool.d"
++	local etc_conf="/etc/limine-entry-tool.conf"
++	local etc_d_dir="/etc/limine-entry-tool.d"
++	local default_conf="/etc/default/limine"
++
++	limine_config_directory "$usr_d_dir"
++	if [[ -d "$usr_d_dir" ]]; then
++		for file in "$usr_d_dir"/*.conf; do
++			limine_config_file "$file"
++			[[ -f "$file" ]] || continue
++			load_key_value_config "$file"
++		done
++	fi
++
++	limine_config_file "$etc_conf"
++	if [[ -f "$etc_conf" ]]; then
++		load_key_value_config "$etc_conf"
++	fi
++
++	limine_config_directory "$etc_d_dir"
++	if [[ -d "$etc_d_dir" ]]; then
++		for file in "$etc_d_dir"/*.conf; do
++			limine_config_file "$file"
++			[[ -f "$file" ]] || continue
++			load_key_value_config "$file"
++		done
++	fi
++
++	# shellcheck disable=SC2034 # Consumed by common-functions after loading.
++	ENABLE_ENROLL_LIMINE_CONFIG=""
++	limine_config_file "$default_conf"
++	if [[ -f "$default_conf" ]]; then
++		load_key_value_config "$default_conf"
++	fi
++	return 0
++}
+--- /dev/null
++++ b/install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings
+@@ -0,0 +1,276 @@
++#!/usr/bin/env bash
++# Shared shell build policy. Sourcing defines functions only.
++limine_kernel_name() { printf '%s' "${1// /}"; }
++limine_build_uki() { [[ $1 == yes && -d /sys/firmware/efi ]]; }
++limine_build_fallback() { [[ $1 == yes || $1 == "$2" ]]; }
++
++limine_uki_options() {
++	local IFS="$2"
++	local _lb_read_result=0 _lb_read_pid
++	# The destination is a fixed caller-owned array name, never configuration.
++	# Feed only the line read would consume. A pipe avoids Bash's large here-string
++	# temporary file, including on a read-only filesystem.
++	read -ra "$3" < <(printf '%s\n' "${1%%$'\n'*}") || _lb_read_result=$?
++	_lb_read_pid=$!
++	wait "$_lb_read_pid" || return 1
++	return "$_lb_read_result"
++}
++
++limine_build_json_string() {
++	local _lb_text=$1 _lb_char _lb_escape _lb_i
++	_lb_text=${_lb_text//\\/\\\\}
++	_lb_text=${_lb_text//\"/\\\"}
++	for ((_lb_i = 1; _lb_i < 32; _lb_i++)); do
++		printf -v _lb_escape '\\%03o' "$_lb_i"
++		printf -v _lb_char '%b' "$_lb_escape"
++		printf -v _lb_escape '\\u%04x' "$_lb_i"
++		_lb_text=${_lb_text//"$_lb_char"/"$_lb_escape"}
++	done
++	printf '"%s"' "$_lb_text"
++}
++
++limine_build_utf8() {
++	printf '%s' "$1" | /usr/bin/iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
++}
++
++limine_build_error() { _lb_errors+=("$1"); }
++
++# Successful enumeration, not a negative shell test, establishes absence.
++# Use -H for directory listings: only the directory itself is followed, not
++# unrelated child symlinks. Capture and check the entire result before using it.
++limine_build_list() {
++	_lb_listing=$(/usr/bin/find -H "$1" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null | /usr/bin/base64 --wrap=0)
++}
++
++limine_build_type() {
++	local _lb_remaining=${1#/} _lb_component _lb_parent=/ _lb_child _lb_found _lb_pid
++	_lb_type=$(/usr/bin/find -L / -maxdepth 0 -printf '%y' 2>/dev/null) || return 1
++	[[ $_lb_type == d ]] || return 1
++	while [[ -n $_lb_remaining ]]; do
++		_lb_component=${_lb_remaining%%/*}
++		if [[ $_lb_remaining == */* ]]; then _lb_remaining=${_lb_remaining#*/}; else _lb_remaining=''; fi
++		[[ -n $_lb_component ]] || continue
++		limine_build_list "$_lb_parent" || return 1
++		_lb_found=false
++		while IFS= read -r -d '' _lb_child; do
++			[[ $_lb_child != "$_lb_component" ]] || _lb_found=true
++		done < <(set -o pipefail; printf '%s' "$_lb_listing" | /usr/bin/base64 --decode)
++		_lb_pid=$!
++		wait "$_lb_pid" || return 1
++		if [[ $_lb_found == false ]]; then _lb_type=absent; return 0; fi
++		_lb_parent=${_lb_parent%/}/$_lb_component
++		_lb_type=$(/usr/bin/find -L "$_lb_parent" -maxdepth 0 -printf '%y' 2>/dev/null) || return 1
++		[[ $_lb_type == [fdcbpls] ]] || return 1
++		if [[ -n $_lb_remaining && $_lb_type != d ]]; then _lb_type=absent; return 0; fi
++	done
++}
++
++limine_build_observe_file() {
++	local _lb_state
++	limine_build_utf8 "$1" || { limine_build_error configuration-path-encoding; return; }
++	_lb_candidates[$1]=seen
++	if ! limine_build_type "$1"; then
++		limine_build_error "configuration-metadata:$1"
++	elif [[ $_lb_type == f ]]; then
++		_lb_pending[$1]=true
++	elif [[ $1 != */\*.conf || $_lb_type != absent ]]; then
++		_lb_state=skipped-nonregular
++		[[ $_lb_type != absent ]] || _lb_state=absent
++		_lb_inputs+=("$(printf '{"path":'; limine_build_json_string "$1"; printf ',"state":"%s","sha256":null}' "$_lb_state")")
++	fi
++}
++
++limine_build_observe_directory() {
++	local _lb_state=absent _lb_child _lb_pid _lb_match _lb_suffix
++	limine_build_utf8 "$1" || { limine_build_error configuration-path-encoding; return; }
++	if ! limine_build_type "$1"; then
++		limine_build_error "configuration-directory:$1"
++	else
++		if [[ $_lb_type == d ]]; then
++			_lb_state=directory
++			if ! limine_build_list "$1"; then limine_build_error "configuration-enumeration:$1"; return; fi
++			while IFS= read -r -d '' _lb_child; do
++				# Match the fixed glob under the current Bash dotglob/nocaseglob
++				# settings. GLOBIGNORE is explicitly unsupported by the query.
++				if [[ $_lb_child == .* ]] && ! shopt -q dotglob; then continue; fi
++				_lb_match=false
++				_lb_suffix=${_lb_child: -5}
++				if shopt -q nocaseglob; then
++					[ "${_lb_suffix,,}" != .conf ] || _lb_match=true
++				else
++					[ "$_lb_suffix" != .conf ] || _lb_match=true
++				fi
++				[[ $_lb_match != true ]] || _lb_candidates[$1/$_lb_child]=pending
++			done < <(set -o pipefail; printf '%s' "$_lb_listing" | /usr/bin/base64 --decode)
++			_lb_pid=$!
++			wait "$_lb_pid" || limine_build_error "configuration-enumeration-decode:$1"
++		elif [[ $_lb_type != absent ]]; then
++			_lb_state=skipped-nondirectory
++		fi
++		_lb_inputs+=("$(printf '{"path":'; limine_build_json_string "$1"; printf ',"state":"%s","sha256":null}' "$_lb_state")")
++	fi
++}
++
++limine_build_read_config() {
++	local _lb_bytes _lb_hash _lb_reader
++	limine_build_utf8 "$1" || return 0
++	_lb_bytes=$(/usr/bin/base64 --wrap=0 -- "$1" 2>/dev/null) || {
++		limine_build_error "configuration-read:$1"
++		return 0
++	}
++	if ! printf '%s' "$_lb_bytes" | /usr/bin/base64 --decode | /usr/bin/iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
++		limine_build_error "configuration-encoding:$1"
++		return 0
++	fi
++	_lb_hash=$(printf '%s' "$_lb_bytes" | /usr/bin/base64 --decode | /usr/bin/sha256sum) || {
++		limine_build_error "configuration-digest:$1"
++		return 0
++	}
++	[[ $_lb_hash =~ ^[0-9a-f]{64}\ \ -$ ]] || { limine_build_error configuration-digest-shape; return 0; }
++	_lb_inputs+=("$(printf '{"path":'; limine_build_json_string "$1"; printf ',"state":"read","sha256":"%s"}' "${_lb_hash%% *}")")
++	_lb_pending[$1]=false
++	_lb_origin=$1
++	# Parse exactly the captured generation, and wait for the decoding pipe.
++	limine_parse_key_values < <(set -o pipefail; printf '%s' "$_lb_bytes" | /usr/bin/base64 --decode)
++	_lb_reader=$!
++	wait "$_lb_reader" || limine_build_error "configuration-decode:$1"
++	return 0
++}
++
++limine_build_assignment() {
++	case $1 in
++		ENABLE_UKI | MKINITCPIO_FALLBACK | MKINITCPIO_UKI_OPTIONS | CUSTOM_UKI_NAME | ESP_PATH | IFS)
++			_lb_values[$1]=$2
++			_lb_origins[$1]=$_lb_origin
++			;;
++		usr_d_dir | etc_conf | etc_d_dir | default_conf | file | line | var | val | _lb_* | _limine_* | \
++		PATH | LANG | LC_* | GLOBIGNORE | GLOBSORT | BASH* | ENV | SHELLOPTS | LD_* | \
++		POSIXLY_CORRECT | EXECIGNORE | TMOUT | FUNCNEST | CDPATH | SCRIPT_NAME | LIMINE_FUNCTIONS_PATH)
++			limine_build_error "configuration-shell-effect:$1"
++			;;
++	esac
++}
++
++limine_describe_build() {
++	set -o pipefail
++	if [[ ${1:-} != --describe-build ]] || (( $# < 3 || $# % 2 != 1 )); then
++		printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["usage: --describe-build PACKAGE VERSION [PACKAGE VERSION ...]"]}'
++		return 2
++	fi
++	shift
++	local _lb_arg
++	for _lb_arg in "$@"; do
++		if [[ -z ${_lb_arg// /} || $_lb_arg == . || $_lb_arg == .. || $_lb_arg == */* || $_lb_arg == *[[:cntrl:]]* ]] || ! limine_build_utf8 "$_lb_arg"; then
++			printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["invalid declaration component"]}'
++			return 2
++		fi
++	done
++	local -a _lb_errors=() _lb_inputs=() _lb_options=()
++	local -A _lb_values=() _lb_origins=() _lb_pending=() _lb_candidates=()
++	local _lb_key _lb_origin=environment _lb_comma='' _lb_mode=regular _lb_uefi=false _lb_name _lb_fallback _lb_complete=true _lb_options_known=true
++	local _lb_listing _lb_type
++	[[ -z ${GLOBIGNORE:-} ]] || limine_build_error environment-GLOBIGNORE
++	if shopt -q failglob; then
++		limine_build_error environment-failglob
++		shopt -u failglob
++	fi
++	for _lb_key in ENABLE_UKI MKINITCPIO_FALLBACK MKINITCPIO_UKI_OPTIONS CUSTOM_UKI_NAME ESP_PATH IFS; do
++		if [[ -v $_lb_key ]]; then
++			if limine_build_utf8 "${!_lb_key}"; then
++				_lb_values[$_lb_key]=${!_lb_key}
++				_lb_origins[$_lb_key]=environment
++			else
++				limine_build_error "environment-encoding:$_lb_key"
++			fi
++		fi
++	done
++	# shellcheck disable=SC1091
++	source /usr/lib/limine/limine-config-functions || return 1
++	# shellcheck disable=SC2329 # Fixed callbacks in the shared layer walker/parser.
++	limine_config_assignment() { limine_build_assignment "$@"; }
++	# shellcheck disable=SC2329
++	limine_config_directory() { limine_build_observe_directory "$@"; }
++	# shellcheck disable=SC2329
++	limine_config_file() { limine_build_observe_file "$@"; }
++	# shellcheck disable=SC2329
++	load_key_value_config() { limine_build_read_config "$@"; }
++	load_config_values
++	for _lb_key in "${!_lb_candidates[@]}"; do
++		if [[ ${_lb_candidates[$_lb_key]} == pending ]]; then
++			limine_build_error configuration-enumeration-incomplete
++		fi
++	done
++	for _lb_key in "${!_lb_pending[@]}"; do
++		[[ ${_lb_pending[$_lb_key]} != true ]] || limine_build_error "configuration-not-read:$_lb_key"
++	done
++	limine_build_type /sys/firmware/efi || limine_build_error uefi-observation
++	[[ $_lb_type != d ]] || _lb_uefi=true
++	limine_build_uki "${_lb_values[ENABLE_UKI]:-}" && _lb_mode=uki
++	if [[ ${_lb_values[ENABLE_UKI]:-} == yes ]]; then
++		if [[ $_lb_mode == uki && $_lb_uefi == false || $_lb_mode == regular && $_lb_uefi == true ]]; then
++			limine_build_error uefi-observation-changed
++		fi
++	fi
++	limine_uki_options "${_lb_values[MKINITCPIO_UKI_OPTIONS]:-}" "${_lb_values[IFS]-$' \t\n'}" _lb_options || limine_build_error option-tokenization
++	for _lb_arg in "${_lb_options[@]}"; do
++		if ! limine_build_utf8 "$_lb_arg"; then
++			_lb_options_known=false
++			limine_build_error option-token-encoding
++			break
++		fi
++	done
++	(( ${#_lb_errors[@]} == 0 )) || _lb_complete=false
++	printf '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":%s,"errors":[' "$_lb_complete"
++	for _lb_arg in "${_lb_errors[@]}"; do printf '%s' "$_lb_comma"; limine_build_json_string "$_lb_arg"; _lb_comma=,; done
++	printf '],"inputs":['
++	_lb_comma=''
++	for _lb_arg in "${_lb_inputs[@]}"; do printf '%s%s' "$_lb_comma" "$_lb_arg"; _lb_comma=,; done
++	printf '],"settings":{'
++	_lb_comma=''
++	for _lb_key in ENABLE_UKI MKINITCPIO_FALLBACK MKINITCPIO_UKI_OPTIONS CUSTOM_UKI_NAME ESP_PATH IFS; do
++		printf '%s"%s":{' "$_lb_comma" "$_lb_key"
++		if [[ -v _lb_values[$_lb_key] ]]; then
++			printf '"set":true,"value":'; limine_build_json_string "${_lb_values[$_lb_key]}"
++			printf ',"source":'; limine_build_json_string "${_lb_origins[$_lb_key]}"
++		else
++			printf '"set":false,"value":null,"source":null'
++		fi
++		printf '}'
++		_lb_comma=,
++	done
++	printf '},"uefi":%s,"mode":"%s","extra_uki_argv":' "$_lb_uefi" "$_lb_mode"
++	if [[ $_lb_options_known == true ]]; then
++		printf '['
++		_lb_comma=''
++		for _lb_arg in "${_lb_options[@]}"; do printf '%s' "$_lb_comma"; limine_build_json_string "$_lb_arg"; _lb_comma=,; done
++		printf ']'
++	else
++		printf null
++	fi
++	printf ',"extra_uki_argv_position":"after-generated-arguments","builder_option_effects":"unresolved","cmdline_policy":{"uki":"omit-if-is_sb_installed-and-is_snapper_installed-else-native-get-cmdline","regular":"no-cmdline","observation":"not-performed","probe_results_validated":false},"kernels":['
++	_lb_comma=''
++	while (( $# )); do
++		_lb_name=$(limine_kernel_name "$1")
++		_lb_fallback=false
++		limine_build_fallback "${_lb_values[MKINITCPIO_FALLBACK]:-}" "$_lb_name" && _lb_fallback=true
++		printf '%s{"package":' "$_lb_comma"; limine_build_json_string "$1"
++		printf ',"version":'; limine_build_json_string "$2"
++		printf ',"name":'; limine_build_json_string "$_lb_name"
++		printf ',"fallback":%s}' "$_lb_fallback"
++		_lb_comma=,
++		shift 2
++	done
++	printf ']}\n'
++	(( ${#_lb_errors[@]} == 0 ))
++}
++
++if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
++	# A positive inherited nesting limit can abort even the query's first nested
++	# helper. Report that unsupported context before entering any function.
++	if [[ ${FUNCNEST:-} =~ ^[[:space:]]*\+?([0-9]+)[[:space:]]*$ && ${BASH_REMATCH[1]//0/} != '' ]]; then
++		printf '%s\n' '{"format":"limine-build-description","schema":1,"scope":"shell-settings","complete":false,"errors":["environment-FUNCNEST"]}'
++		exit 1
++	fi
++	limine_describe_build "$@"
++	exit $?
++fi
+--- a/install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio
++++ b/install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio
+@@ -1,4 +1,8 @@
+ #!/usr/bin/env bash
++
++if [[ ${1:-} == --describe-build ]]; then
++	exec /usr/bin/bash /usr/lib/limine/limine-build-settings "$@"
++fi
+ 
+ readonly SCRIPT_NAME="limine-mkinitcpio"
+ readonly AUTH_HELPER=/usr/lib/limine/auth-helper
+--- a/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
++++ b/install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
+@@ -8,6 +8,8 @@
+ 	echo "ERROR: Failed to source '${LIMINE_FUNCTIONS_PATH}'" >&2
+ 	exit 1
+ }
++# shellcheck disable=SC1091
++source /usr/lib/limine/limine-build-settings || exit 1
+ 
+ export HOOK_CALLER="$SCRIPT_NAME"
+ export HOOK_CMDLINE="$*"
+@@ -26,7 +28,7 @@
+ CMDLINE_FILE=""
+ BOOT_PATH="$ESP_PATH"
+ UKI_PREFIX="$MACHINE_ID"
+-read -ra UKI_OPTIONS <<<"${MKINITCPIO_UKI_OPTIONS:-}"
++limine_uki_options "${MKINITCPIO_UKI_OPTIONS:-}" "$IFS" UKI_OPTIONS
+ TMP_DIR=$(mktemp -d /tmp/limine-mkinitcpio.XXXXXX) || {
+ 	error_msg "Failed to create temporary directory"
+ 	exit 1
+@@ -99,7 +101,7 @@
+ set_kernel_context() {
+ 	local kernel_dir="$1" kernel_name="${2:-}"
+ 	# Remove all spaces that are invalid in FAT32 names to create kernel file or directory
+-	KERNEL_NAME="${kernel_name// /}"
++	KERNEL_NAME=$(limine_kernel_name "$kernel_name")
+ 	if [[ -z "${KERNEL_NAME}" ]]; then
+ 		error_msg "kernel name of '${kernel_dir}' is empty, skipping."
+ 		return 1
+@@ -212,7 +214,7 @@
+ 	local tmp_uki="$TMP_DIR/${KERNEL_NAME}.efi"
+ 	build_install_uki "$KERNEL_NAME" "$tmp_uki" false "Kernel version: ${KERNEL_VERSION}" || return 1
+ 
+-	if [[ "${MKINITCPIO_FALLBACK:-}" == "yes" || "${MKINITCPIO_FALLBACK:-}" == "$KERNEL_NAME" ]]; then
++	if limine_build_fallback "${MKINITCPIO_FALLBACK:-}" "$KERNEL_NAME"; then
+ 		info_msg "Building UKI fallback for ${KERNEL_NAME} (${KERNEL_VERSION})"
+ 		local tmp_uki_fb="$TMP_DIR/${KERNEL_NAME}-fallback.efi"
+ 		build_install_uki "${KERNEL_NAME}-fallback" "$tmp_uki_fb" true "Kernel version: ${KERNEL_VERSION} fallback" || return 1
+@@ -237,7 +239,7 @@
+ 	fi
+ 	install_kernel "$KERNEL_NAME" "$tmp_initramfs" "${KERNEL_DIR}/vmlinuz" "Kernel version: ${KERNEL_VERSION}" || return 1
+ 
+-	if [[ "${MKINITCPIO_FALLBACK:-}" == "yes" || "${MKINITCPIO_FALLBACK:-}" == "$KERNEL_NAME" ]]; then
++	if limine_build_fallback "${MKINITCPIO_FALLBACK:-}" "$KERNEL_NAME"; then
+ 		info_msg "Building fallback initramfs for ${KERNEL_NAME} (${KERNEL_VERSION})"
+ 		local tmp_initramfs_fb="$TMP_DIR/initramfs-fallback"
+ 		if ! build_initramfs "$tmp_initramfs_fb" true; then
+@@ -265,7 +267,7 @@
+ 
+ 	set_kernel_context "$kernel_dir" "$kernel_name" || return 0
+ 
+-	if [[ "${ENABLE_UKI:-}" == "yes" ]] && is_uefi; then
++	if limine_build_uki "${ENABLE_UKI:-}"; then
+ 		process_uki_kernel || return 1
+ 	else
+ 		process_regular_kernel || return 1

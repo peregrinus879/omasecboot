@@ -35,25 +35,13 @@ finish() {
 }
 trap finish EXIT
 
-verify_hash() {
-  local actual
-  actual=$(sha256sum -- "$1")
-  [[ ${actual%% *} == "$2" ]] || die "SHA-256 mismatch: $1"
-}
 producer=install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install
 common=install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions
 wrapper=install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio
+# shellcheck source=tests/integration/lib/limine-sources.sh
+source "$repo/tests/integration/lib/limine-sources.sh"
+limine_prepare_sources "$source_root" "$scratch" "$metadata" "$integration"
 for path in "$producer" "$common" "$wrapper"; do
-  mkdir -p "$scratch/original/${path%/*}" "$scratch/patched/${path%/*}"
-  cp -- "$source_root/$path" "$scratch/original/$path"
-  verify_hash "$scratch/original/$path" "$(jq -er --arg p "$path" '.files[] | select(.path == $p) | .sha256' "$metadata")"
-  cp -- "$scratch/original/$path" "$scratch/patched/$path"
-done
-cp -- "$integration/$(jq -er '.patch.file' "$metadata")" "$scratch/producer.patch"
-verify_hash "$scratch/producer.patch" "$(jq -er '.patch.sha256' "$metadata")"
-patch --batch --forward --fuzz=0 -p1 -d "$scratch/patched" -i "$scratch/producer.patch" > "$scratch/patch.log"
-for path in "$producer" "$common" "$wrapper"; do
-  verify_hash "$scratch/patched/$path" "$(jq -er --arg p "$path" '.files[] | select(.path == $p) | .patched_sha256' "$metadata")"
   bash -n "$scratch/patched/$path"
 done
 shellcheck -x "$scratch/patched/$producer"
@@ -245,7 +233,11 @@ run_case() {
   ln -s /fake-bin/post "$work/etc/boot/hooks/post.d/post"
   : > "$work/events"
   : > "$work/commands"
-  local removal=()
+  local removal=() helpers=()
+  if [[ $revision == patched ]]; then
+    helpers=(--ro-bind "$scratch/patched/${common%/*}/limine-config-functions" /usr/lib/limine/limine-config-functions
+      --ro-bind "$scratch/patched/${common%/*}/limine-build-settings" /usr/lib/limine/limine-build-settings)
+  fi
   if [[ $remove_rc != absent ]]; then
     : > "$work/removed_kernels.list"
     removal=(--ro-bind "$work/removed_kernels.list" /var/lib/limine/removed_kernels.list)
@@ -266,7 +258,7 @@ run_case() {
     --ro-bind "$scratch/$revision/$producer" /usr/share/libalpm/scripts/limine-mkinitcpio-install \
     --ro-bind "$scratch/$revision/$common" /usr/lib/limine/limine-common-functions \
     --ro-bind "$scratch/$revision/$wrapper" /usr/bin/limine-mkinitcpio \
-    "${removal[@]}" \
+    "${removal[@]}" "${helpers[@]}" \
     --setenv TEST_FAIL "$failure" --setenv TEST_HOOK_FAIL "$hook_fail" \
     --setenv TEST_REMOVE_RC "$remove_rc" --setenv TEST_SNAPSHOT "$snapshot" \
     "${launch[@]}" < "$work/input" > "$work/stdout" 2> "$work/stderr" || rc=$?

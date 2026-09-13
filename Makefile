@@ -27,7 +27,7 @@ LIMINE_NATIVE_JAVA_HOME ?=
 LIMINE_NATIVE_EXECUTABLE ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-pacman-contract $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -99,7 +99,8 @@ package-limine-entry-tool:
 	  cp integrations/limine-entry-tool/PKGBUILD \
 	    integrations/limine-entry-tool/0001-propagate-mkinitcpio-failures.patch \
 	    integrations/limine-entry-tool/0002-propagate-native-failures.patch \
-	    integrations/limine-entry-tool/0003-describe-native-outputs.patch "$$build/"; \
+	    integrations/limine-entry-tool/0003-describe-native-outputs.patch \
+	    integrations/limine-entry-tool/0004-describe-build-settings.patch "$$build/"; \
 	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -134,6 +135,9 @@ test-native:
 
 test-description:
 	bash tests/integration/limine-description.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)" "$(LIMINE_NATIVE_EXECUTABLE)"
+
+test-build-settings:
+	bash tests/integration/limine-build-settings.sh "$(LIMINE_ENTRY_TOOL_SOURCE)"
 
 # Real stock-pacman metadata and hook contracts, with fixture-only state in
 # unprivileged Bubblewrap namespaces. No source checkout or network is needed.

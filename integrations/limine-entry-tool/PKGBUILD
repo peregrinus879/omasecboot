@@ -9,7 +9,7 @@ _commit=57092d98ba9d355f180b883dea0e9cfefeace8b1
 _source_dir="${_pkgname}-${_commit}"
 _gradle_version=9.7.1
 pkgver="${_pkgver}${_extver}"
-pkgrel=1.4
+pkgrel=1.5
 pkgdesc="Install kernels for the Limine bootloader."
 arch=('x86_64' 'aarch64')
 url="https://gitlab.com/Zesko/limine-entry-tool"
@@ -18,6 +18,7 @@ source=(
   '0001-propagate-mkinitcpio-failures.patch'
   '0002-propagate-native-failures.patch'
   '0003-describe-native-outputs.patch'
+  '0004-describe-build-settings.patch'
 )
 source_x86_64=("https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.2.4/graalvm-community-jdk-25i2-25.0.4_linux-x64_bin.tar.gz")
 source_aarch64=(
@@ -50,6 +51,7 @@ sha256sums=(
   'ec5394d01ea403cd10dd7680ded3a45de45b779c6a009e4396fa913f77f4b317'
   'bd9f4a9cc54b4ba5623b55a79e09f0c9b34381f1a98b199b503a66f2cdcafc72'
   'e5403a5bb8c2053a6de66068954d9f404d614f460d8f25c5b65a8a749db666db'
+  '0a1854c52bb9de872c0d8b24aaf2430645d57dee867705b84b9db671abe98b03'
 )
 sha256sums_x86_64=('3f4a89de8eaa96f2ed677f09957c7e872cd8467aad3537f8b5394c1b8c4b942e')
 sha256sums_aarch64=(
@@ -122,6 +124,22 @@ prepare() {
     'README.md' |
     sha256sum --check --strict || return 1
 
+  patch -Np1 --fuzz=0 --batch --forward -i "$srcdir/0004-describe-build-settings.patch" || return 1
+  printf '%s  %s\n' \
+    '12b86069ccd7ed1ac30794179869061a6bf68a42ebf64e3a932470faff09503c' \
+    'README.md' \
+    '1937b6b0949f1cd14226b4c745ec91e22ed1280abf7cd78c5b15141b24790dbf' \
+    'install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions' \
+    '82fef5acb358d71abc29905a6a21ac91fa555c96a12b5f5f5efeb8c5a79a8e64' \
+    'install/arch-linux/limine-entry-tool/usr/lib/limine/limine-config-functions' \
+    '7024a75feb0ae987809c4c2a53fd97c9ec98b4fc5e593a49402bfa5d49ee7b14' \
+    'install/arch-linux/limine-entry-tool/usr/lib/limine/limine-build-settings' \
+    '35955f4b753e09bd61fc0ef372c133871ee6d20849d146b0f7edf71f964f4ab8' \
+    'install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio' \
+    '9eb77f6075c7104382628d421576b9ac4220d50d4321298331120a53ef8c6d87' \
+    'install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install' |
+    sha256sum --check --strict || return 1
+
   cd "$srcdir" || return 1
   [[ -d "${_graalvm_version}" ]] && rm -rf "${_graalvm_version}"
   mv graalvm-community-*/ "${_graalvm_version}"
@@ -166,15 +184,19 @@ package() {
 
   cd "$pkgdir" || return 1
   printf '%s  %s\n' \
-    '3fe2631ba4f5ac8fc380fe9d63557c4f235ecfad5d4c5e123269bdeb27e97f01' \
+    '9eb77f6075c7104382628d421576b9ac4220d50d4321298331120a53ef8c6d87' \
     'usr/share/libalpm/scripts/limine-mkinitcpio-install' \
-    '7e369e43dfc66c0cfe479792f6d6079d665b1d42a6e2ae1a173030909ed26e31' \
+    '1937b6b0949f1cd14226b4c745ec91e22ed1280abf7cd78c5b15141b24790dbf' \
     'usr/lib/limine/limine-common-functions' \
-    '90d05f47ae2ecb4a9996c7ea70c8645b4514eef912d6e3759f9f9b3c4fed2e99' \
+    '35955f4b753e09bd61fc0ef372c133871ee6d20849d146b0f7edf71f964f4ab8' \
     'usr/bin/limine-mkinitcpio' \
     '7402fb5df3ea6422a79b7b9b7550c8c842b161fd1fa0f4b378f7b624973cf6e2' \
     'usr/bin/limine-entry-tool' \
-    'f65870ae95fa0c2945d9e8c8610739bad018aea9515af548899c676c9bfc0642' \
-    'usr/share/doc/limine-entry-tool/README.md' |
+    '12b86069ccd7ed1ac30794179869061a6bf68a42ebf64e3a932470faff09503c' \
+    'usr/share/doc/limine-entry-tool/README.md' \
+    '82fef5acb358d71abc29905a6a21ac91fa555c96a12b5f5f5efeb8c5a79a8e64' \
+    'usr/lib/limine/limine-config-functions' \
+    '7024a75feb0ae987809c4c2a53fd97c9ec98b4fc5e593a49402bfa5d49ee7b14' \
+    'usr/lib/limine/limine-build-settings' |
     sha256sum --check --strict
 }
