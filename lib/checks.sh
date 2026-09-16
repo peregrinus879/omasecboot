@@ -20,6 +20,20 @@ check_recovery_deps() {
   done
 }
 
+# Command availability for the developing publication-context consumer,
+# separate from existing public activation. Extension/API proof belongs to
+# the paired runtime gate.
+check_publication_context_deps() {
+  command -v python >/dev/null 2>&1 \
+    || die "python not installed. Run: ${BOLD}sudo pacman -S python${NC}"
+  command -v btrfs >/dev/null 2>&1 \
+    || die "btrfs not installed. Run: ${BOLD}sudo pacman -S btrfs-progs${NC}"
+  command -v blkid >/dev/null 2>&1 \
+    || die "blkid not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
+  command -v openssl >/dev/null 2>&1 \
+    || die "openssl not installed. Run: ${BOLD}sudo pacman -S openssl${NC}"
+}
+
 # The Limine hook tools are proved by exact package version at activation;
 # here only the executables this code runs itself are required.
 check_deps() {
@@ -87,7 +101,7 @@ validate_activation_hook() {
   case "$key" in
     removal)
       expected="Exec = ${command} --quiet guard removal"
-      expected_hash=f70bc5a660776e2a5dd4ea5e8184a61b1adc547db4c3286a69b355383f1eb56d
+      expected_hash=ab9090d05f3d4b5ca62e0220cddf791eb1e09b219a789863edcca319e0f32bdc
       ;;
     transaction)
       expected="Exec = ${command} --quiet guard transaction"

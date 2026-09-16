@@ -5,6 +5,7 @@
 readonly SOFTWARE_RECOVERY_PROOF_SCHEMA_VERSION=1
 
 software_recovery_root_is_supported() {
+  manifest_has_no_publication_authority "$1" || return 1
   local document="$1"
   jq -e --argjson final_schema "$FINAL_PROOF_SCHEMA_VERSION" \
     --argjson phases "$OMASECBOOT_OPERATION_PHASES" "$OMASECBOOT_JQ_DEFS"'

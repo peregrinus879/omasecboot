@@ -2,6 +2,9 @@
 # OmaSecBoot: durable lifecycle, transaction, and hook ownership protocol
 
 readonly LIFECYCLE_SCHEMA_VERSION=2
+readonly TRANSACTION_SCHEMA_VERSION=3
+readonly TRANSACTION_READ_SCHEMAS='[2,3]'
+readonly MAX_PUBLICATION_RECORDS=4096
 # Phase sequence of every operation whose phases run in one fixed order; the
 # validators and the executors agree through this table.
 readonly OMASECBOOT_OPERATION_PHASES='{
@@ -47,6 +50,10 @@ readonly MAX_SETUP_LINEAGE_MANIFESTS=4096
 # predicates the rule functions share; appended to OMASECBOOT_JQ_DEFS.
 # shellcheck disable=SC2016 # jq variables, not shell expansions.
 readonly MANIFEST_JQ_DEFS='
+   def publication_root_operation:
+     .kind == "root" and (.operation == "sign" or .operation == "activate-secure-boot-plan" or
+       .operation == "windows-setup" or .operation == "windows-suppress" or
+       .operation == "producer-package" or .operation == "producer-limine" or .operation == "producer-snapshot");
   def no_firmware_evidence:
     .firmware_backup == null and .enrollment_plan == null and .firmware_writes == [];
   def ownership_records_paired:
@@ -620,9 +627,15 @@ validate_lifecycle_json() {
 
 # The manifest schema: identity, kind-specific lineage, phases, backups,
 # firmware evidence, domain-record references, and the status envelope.
+manifest_has_no_publication_authority() {
+  json_is 'if .schema_version == 2 then has("publication_records") | not
+    elif .schema_version == 3 then .publication_records == [] else false end' "$1"
+}
+
 validate_manifest_schema() {
   local transaction_id="$1" document="$2" transaction_dir="$3"
-  jq -e --arg id "$transaction_id" --argjson schema "$LIFECYCLE_SCHEMA_VERSION" \
+  jq -e --arg id "$transaction_id" --argjson schemas "$TRANSACTION_READ_SCHEMAS" \
+    --argjson max_publications "$MAX_PUBLICATION_RECORDS" \
     --argjson owner_uid "$(control_owner_uid)" \
     --arg transaction_dir "$transaction_dir" \
     --argjson max_attempts "$MAX_RECOVERY_ATTEMPT_SEALS" \
@@ -632,12 +645,19 @@ validate_manifest_schema() {
     --argjson phases "$OMASECBOOT_OPERATION_PHASES" \
     "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'
     type == "object" and
-    keys == ["backups","boot_id","completed_at","completed_phases","created_at",
+    (keys == (["backups","boot_id","completed_at","completed_phases","created_at",
       "current_phase","domain_records","enrollment_plan","failure","file_rollback_policy",
       "firmware_backup","firmware_writes","id","kind","operation","owner","prior_state",
       "recovery","rollback","schema_version","status","target_state",
-      "token_sha256","writer_version"] and
-    .schema_version == $schema and
+      "token_sha256","writer_version"] +
+        (if .schema_version == 3 then ["publication_records"] else [] end) | sort)) and
+    (.schema_version as $schema | $schemas | index($schema) != null) and
+    (if .schema_version == 3 then
+      (.publication_records | type == "array" and length <= $max_publications and all(.[]; artifact_reference)) and
+      (if (.publication_records | length) > 0 then
+        publication_root_operation and .file_rollback_policy == "preserve" and .status != "completed"
+       else true end)
+     else true end) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
     .id == $id and (.operation | operation) and
     (.status == "transition" or .status == "completed" or
@@ -774,6 +794,7 @@ validate_transaction_manifest_json() {
   validate_manifest_lifecycle_backup "$document" "$transaction_dir" || return 1
   validate_manifest_file_backups "$document" "$transaction_dir" || return 1
   validate_manifest_firmware_paths "$document" || return 1
+  validate_publication_records "$transaction_id" "$document" || return 1
   while IFS= read -r reference; do
     [[ -z "$reference" ]] || validate_artifact_reference_file "$reference" "$transaction_dir" \
       || return 1
@@ -1152,6 +1173,7 @@ validate_transaction_domain_records() {
 
 recovery_operation_for_root_manifest() {
   local document="$1" operation producer policy
+  json_is '(.publication_records // []) == []' "$document" || return 1
   jq -e '.kind == "root"' <<< "$document" >/dev/null || return 1
   operation=$(jq -r '.operation' <<< "$document") || return 1
   producer=$(jq -c '.domain_records.producer' <<< "$document") || return 1
@@ -1181,6 +1203,8 @@ recovery_operation_for_root_manifest() {
 
 validate_recovery_manifest_evolution() {
   local previous="$1" current="$2" operation="$3"
+  json_is '(.publication_records // []) == []' "$previous" || return 1
+  json_is '(.publication_records // []) == []' "$current" || return 1
   jq -en --arg operation "$operation" --argjson previous "$previous" \
     --argjson current "$current" "$OMASECBOOT_JQ_DEFS"'
     def writes_forward($old; $new):
@@ -1254,7 +1278,7 @@ read_transaction_manifest() {
   _manifest_sha256=""
   document=$(read_control_document "$manifest") || return 1
   schema=$(document_schema_version "$document") || return 1
-  [[ "$schema" == "$LIFECYCLE_SCHEMA_VERSION" ]] || return 1
+  [[ "$schema" == 2 || "$schema" == "$TRANSACTION_SCHEMA_VERSION" ]] || return 1
   validate_transaction_manifest_json "$transaction_id" "$document" || return 1
   _manifest_json="$document"
   _manifest_id="$transaction_id"
@@ -1981,7 +2005,7 @@ manifest_owner_json() {
 # Builds a new transaction manifest from the schema defaults deep-merged with
 # the caller's fields.
 new_transaction_manifest() {
-  jq -cn --argjson schema "$LIFECYCLE_SCHEMA_VERSION" --arg version "$OMASECBOOT_VERSION" \
+  jq -cn --argjson schema "$TRANSACTION_SCHEMA_VERSION" --arg version "$OMASECBOOT_VERSION" \
     --argjson overrides "$1" '{
       schema_version: $schema,
       writer_version: $version,
@@ -2004,6 +2028,7 @@ new_transaction_manifest() {
       firmware_backup: null,
       enrollment_plan: null,
       firmware_writes: [],
+      publication_records: [],
       domain_records: {
         bootnext: null,
         final_proof: null,
@@ -2286,6 +2311,7 @@ write_transaction_manifest_json() {
     || return 1
   current="$_manifest_json"
   candidate=$(jq -c . <<< "$document") || return 1
+  (( $(LC_ALL=C printf '%s\n' "$candidate" | wc -c) <= MAX_CONTROL_DOCUMENT_BYTES )) || return 1
   validate_transaction_manifest_json "$_transaction_id" "$candidate" || return 1
   current_status=$(jq -r '.status' <<< "$current") || return 1
   next_status=$(jq -r '.status' <<< "$candidate") || return 1
@@ -2313,7 +2339,7 @@ write_transaction_manifest_json() {
       def envelope:
         del(.backups, .completed_phases, .current_phase, .domain_records,
           .enrollment_plan, .file_rollback_policy, .firmware_backup, .firmware_writes,
-          .rollback);
+          .rollback, .publication_records);
       ($current | envelope) == ($candidate | envelope) and
       (($candidate.completed_phases == $current.completed_phases and
         ($candidate.current_phase == $current.current_phase or
@@ -2333,6 +2359,10 @@ write_transaction_manifest_json() {
       ($current.enrollment_plan == null or
         $current.enrollment_plan == $candidate.enrollment_plan) and
       firmware_writes_forward($current.firmware_writes; $candidate.firmware_writes) and
+      (($candidate.publication_records // []) == ($current.publication_records // []) or
+        ($candidate.schema_version == 3 and
+         ($candidate.publication_records | length) == (($current.publication_records | length) + 1) and
+         $candidate.publication_records[0:($current.publication_records | length)] == $current.publication_records)) and
       ($current.rollback == null or $current.rollback == $candidate.rollback) and
       all($current.domain_records | to_entries[];
         .value == null or .value == $candidate.domain_records[.key])
@@ -2672,6 +2702,13 @@ abandon_failed_begin() {
 # commit; prints nothing and returns the final status.
 finish_armed_transaction() {
   local commit="$1" callback_rc="$2" label="$3" commit_rc=0 reason
+  if declare -F producer_session_abort >/dev/null && [[ ${_producer_session_active:-false} == true ]]; then
+    callback_rc=1
+    if ! producer_session_abort; then
+      abandon_boot_repair_descriptors
+      return 1
+    fi
+  fi
   if (( callback_rc == 0 )); then
     "$commit" || commit_rc=$?
     if (( commit_rc != 0 )); then
@@ -3412,6 +3449,11 @@ transaction_exit_handler() {
   local exit_code=$?
   trap - EXIT
   trap '' INT TERM HUP
+  if declare -F producer_session_abort >/dev/null && [[ ${_producer_session_active:-false} == true ]] && ! producer_session_abort; then
+    abandon_boot_repair_descriptors
+    run_previous_exit_trap 1
+    return 1
+  fi
   if [[ "$_transaction_active" == true ]]; then
     [[ $exit_code -ne 0 ]] || exit_code=1
     if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false \
@@ -3430,6 +3472,12 @@ transaction_signal_handler() {
   local signal="$1" exit_code="$2"
   trap - EXIT
   trap '' INT TERM HUP
+  if declare -F producer_session_abort >/dev/null && [[ ${_producer_session_active:-false} == true ]] && ! producer_session_abort; then
+    abandon_boot_repair_descriptors
+    restore_transaction_traps
+    kill -s "$signal" "$BASHPID"
+    exit "$exit_code"
+  fi
   if [[ "$_transaction_active" == true ]]; then
     if [[ "$_OMASECBOOT_LIMINE_LOCK_OWNED" == false \
       || "$_OMASECBOOT_REPAIR_LOCK_OWNED" != true ]]; then

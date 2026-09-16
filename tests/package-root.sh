@@ -61,8 +61,8 @@ sed -i '/^NoExtract/d' /etc/pacman.conf
 
 # Runtime dependencies that Arch provides; the two Omarchy producer packages are
 # assumed so the container does not depend on the Omarchy repository.
-pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep \
-  util-linux systemd pacman jq openssl gum efibootmgr sbctl limine \
+pacman -S --noconfirm --needed bash btrfs-progs coreutils diffutils findutils gawk grep \
+  util-linux systemd pacman python jq openssl gum efibootmgr sbctl limine \
   > "${BUILD_DIR}/deps.log" 2>&1 || { cat "${BUILD_DIR}/deps.log" >&2; fail_test "dependency install failed"; }
 assume=(--assume-installed limine-mkinitcpio-hook=1.38.0-1.1
         --assume-installed limine-snapper-sync=1.31.0-1.1)
@@ -73,6 +73,7 @@ hooks=/usr/share/libalpm/hooks
 installed_paths=(
   /usr/bin/omasecboot
   /usr/lib/omasecboot/lifecycle.sh
+  /usr/lib/omasecboot/publication-context.py
   "${hooks}/00-omasecboot-removal-guard.hook"
   "${hooks}/00-omasecboot-transition-guard.hook"
   "${hooks}/zzz-omasecboot.hook"
@@ -82,7 +83,7 @@ installed_paths=(
   /usr/share/licenses/omasecboot/LICENSE
 )
 assert_installed() {
-  local path
+  local path helper=/usr/lib/omasecboot/publication-context.py
   for path in "${installed_paths[@]}"; do
     [[ -f "$path" ]] || fail_test "installed file is missing: ${path}"
   done
@@ -91,6 +92,10 @@ assert_installed() {
   pacman -Qkk "$pkgname" >/dev/null || fail_test "installed package failed its integrity check"
   [[ $(/usr/bin/omasecboot version) == "omasecboot ${pkgver}" ]] \
     || fail_test "installed command reports the wrong version"
+  [[ $(stat -c '%u:%g:%a' "$helper") == 0:0:644 ]] \
+    || fail_test "installed context helper is not root-owned mode 0644"
+  cmp -s "$helper" "${ROOT_DIR}/lib/publication-context.py" \
+    || fail_test "installed context helper differs from the source"
 }
 
 # 1. Install with hooks executing for real. pacman's systemd tmpfiles hook must
@@ -99,6 +104,23 @@ assert_installed() {
 pacman -U --noconfirm "${assume[@]}" "$package" > "${BUILD_DIR}/install.log" 2>&1 \
   || { cat "${BUILD_DIR}/install.log" >&2; fail_test "package install failed"; }
 assert_installed 1
+# Import/API evidence only, inside the declared disposable root. No root/ESP
+# descriptors are supplied and --probe-api performs no filesystem/device query.
+mkdir -m 700 "${BUILD_DIR}/probe-home" "${BUILD_DIR}/probe-tmp"
+timeout --signal=TERM --kill-after=5s 75s env -i PATH=/usr/bin LC_ALL=C \
+  HOME="${BUILD_DIR}/probe-home" XDG_CONFIG_HOME="${BUILD_DIR}/probe-home" \
+  XDG_CACHE_HOME="${BUILD_DIR}/probe-home" TMPDIR="${BUILD_DIR}/probe-tmp" \
+  HISTFILE=/dev/null /usr/bin/python -I -S -B \
+  /usr/lib/omasecboot/publication-context.py --probe-api \
+  > "${BUILD_DIR}/context-api.json" 2> "${BUILD_DIR}/context-api.err" \
+  || fail_test "installed context helper API probe failed"
+[[ ! -s "${BUILD_DIR}/context-api.err" ]] \
+  || fail_test "installed context helper API probe emitted diagnostics"
+jq -e -s '. == [{format:"omasecboot-publication-context-api", schema:1,
+  complete:true, api:"btrfsutil-fd-explicit-id-v1"}]' "${BUILD_DIR}/context-api.json" >/dev/null \
+  || fail_test "installed context helper API probe returned an unexpected frame"
+pacman -Q python btrfs-progs
+printf 'installed publication context API probe passed\n'
 [[ -d "$state" && $(stat -c '%u:%a' "$state") == 0:755 ]] \
   || fail_test "tmpfiles did not create the state directory as root 0755"
 [[ -f "${state}/repair.lock" && $(stat -c '%u:%a' "${state}/repair.lock") == 0:644 ]] \

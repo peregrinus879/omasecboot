@@ -9,7 +9,7 @@ _commit=57092d98ba9d355f180b883dea0e9cfefeace8b1
 _source_dir="${_pkgname}-${_commit}"
 _gradle_version=9.7.1
 pkgver="${_pkgver}${_extver}"
-pkgrel=1.6
+pkgrel=1.7
 pkgdesc="Install kernels for the Limine bootloader."
 arch=('x86_64' 'aarch64')
 url="https://gitlab.com/Zesko/limine-entry-tool"
@@ -20,6 +20,7 @@ source=(
   '0003-describe-native-outputs.patch'
   '0004-describe-build-settings.patch'
   '0005-managed-producer-protocol.patch'
+  '0006-managed-producer-runtime.patch'
   'https://repo.maven.apache.org/maven2/tools/jackson/core/jackson-core/3.2.2/jackson-core-3.2.2.jar'
 )
 source_x86_64=("https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-25.2.4/graalvm-community-jdk-25i2-25.0.4_linux-x64_bin.tar.gz")
@@ -56,6 +57,7 @@ sha256sums=(
   'e5403a5bb8c2053a6de66068954d9f404d614f460d8f25c5b65a8a749db666db'
   '0a1854c52bb9de872c0d8b24aaf2430645d57dee867705b84b9db671abe98b03'
   'f9d6b8a92e4d55f1a267a754bae6e3f5fbf816fccfded91a8927b24f800a8b7d'
+  '393a3abac96213626642c55e600efdab3c761f1b743b8d4d97f7ccc9d47ebaa1'
   '93d9090b8c505b2f942ad85dd5821e8c401bfbafafff11708a3fbe2ef9da18ca'
 )
 sha256sums_x86_64=('3f4a89de8eaa96f2ed677f09957c7e872cd8467aad3537f8b5394c1b8c4b942e')
@@ -182,6 +184,38 @@ prepare() {
   mkdir -p "$srcdir/json-licenses" || return 1
   bsdtar -xf "$srcdir/jackson-core-3.2.2.jar" -C "$srcdir/json-licenses" \
     META-INF/LICENSE META-INF/NOTICE META-INF/FastDoubleParser-LICENSE META-INF/FastDoubleParser-ThirdParty-LICENSE META-INF/Schubfach-LICENSE || return 1
+
+  patch -Np1 --fuzz=0 --batch --forward -i "$srcdir/0006-managed-producer-runtime.patch" || return 1
+  printf '%s  %s\n' \
+    'e5cc6ccbb70a827ce1fbe6bfd60c4a25fe2e2eb8da3124fb9df06d85cba68a7b' \
+    'src/main/java/org/limine/entry/tool/Main.java' \
+    'eb6a97641448922e579b5cab500ed6472d21dbf597cf1584e569fa0bf9f8f2f7' \
+    'src/main/java/org/limine/entry/tool/processes/ManagedJson.java' \
+    '6a70b3ee00e73a31e50f9e0c8720c111cd5cd08912ac5a7debac0ff142bd9a5a' \
+    'src/main/java/org/limine/entry/tool/processes/ManagedAddition.java' \
+    '09480f3afc6a9467d1f8ded2da2c71c40c49a85a9ed706c4882c832f2b5b987b' \
+    'src/main/java/org/limine/entry/tool/processes/CorePublicationAuthority.java' \
+    '9d385b2ef7d8a7f8c423db971dd59154e9f0f94c44bcff5602eed13527a0e02f' \
+    'src/main/java/org/limine/entry/tool/processes/FileState.java' \
+    '8777c71ba463b5009824e2b8d68e5ea32e7666a4ec906e2d911465664649f519' \
+    'src/main/java/org/limine/entry/tool/processes/PreparedPublication.java' \
+    '5eefad0177c698543ca161fdc8aebe489943faaaf05c61bfd8fbcda5271889b8' \
+    'src/main/java/org/limine/entry/tool/processes/PreparedPublicationCodec.java' \
+    '2fe942ed1b2c3553304aa2482e3e9ef55ea38b5a649d041d8ff8dcaecf3e835a' \
+    'src/main/java/org/limine/entry/tool/processes/LimineReader.java' \
+    '4b8e2402117eeb52681ea34cedffca9cb7b4454c9406b3c0c66dce13a161895c' \
+    'src/main/java/org/limine/entry/tool/processes/LimineWriter.java' \
+    '7071fbdbe28e64dc167f79980afaf6e0307fc45dd8c5333d7c7e3b765cdac1e4' \
+    'src/main/java/org/limine/entry/tool/processes/LimineManager.java' \
+    '385b5392fd235bb97a5b13eb3e52ed35c4915e3c372a2227837b91c5d938e5ab' \
+    'src/main/java/org/limine/entry/tool/processes/NativeMutations.java' \
+    '993e1f9dc399b62169c8c2c7b960aa6bce6e7ebfb2aa6b9cdd904fe3711ebb1b' \
+    'src/main/java/org/limine/entry/tool/processes/LiveMountCustody.java' \
+    'c9adb7c83ad15ec47c849e3e0f7050ea7e0fb385ea4a57fc3119be1b535c267a' \
+    'src/main/java/org/limine/entry/tool/processes/PublicationTargets.java' \
+    '73d68814fc8c03a0ee6e17c82215762f088ec2fe4491ff37a0ba9585905b9956' \
+    'src/main/java/org/limine/entry/tool/formats/limine8/LimineEntry.java' |
+    sha256sum --check --strict || return 1
 
   cd "$srcdir" || return 1
   [[ -d "${_graalvm_version}" ]] && rm -rf "${_graalvm_version}"

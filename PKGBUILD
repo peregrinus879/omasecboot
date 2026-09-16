@@ -11,8 +11,11 @@ license=('MIT')
 # Runtime admission enforces the audited producer versions documented in
 # README.md. The package guard blocks changes to those three producer packages
 # while the lifecycle is active. efibootmgr only needs release 18 or newer.
+# The read-only context helper uses the stock Python btrfsutil extension;
+# its descriptor/explicit-subvolume-ID API is audited at btrfs-progs 7.1.
 depends=(
   'bash'
+  'btrfs-progs>=7.1'
   'coreutils>=9.5'
   'diffutils'
   'findutils'
@@ -21,6 +24,7 @@ depends=(
   'util-linux'
   'systemd'
   'pacman'
+  'python'
   'jq'
   'openssl'
   'gum'

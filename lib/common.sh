@@ -539,8 +539,20 @@ release_limine_lock() {
 }
 
 release_boot_repair_lock() {
+  if [[ ${_transaction_active:-false} != true ]] && declare -F release_publication_pins >/dev/null; then
+    release_publication_pins
+  fi
   release_repair_lock
   release_limine_lock
+}
+
+# An unquiesced owned child may still hold these open file descriptions. Close
+# this process's descriptors without unlocking the child's serialization.
+abandon_boot_repair_descriptors() {
+  exec 201>&- 200>&-
+  _OMASECBOOT_REPAIR_LOCK_OWNED=false
+  _OMASECBOOT_REPAIR_LOCK_MODE=false
+  _OMASECBOOT_LIMINE_LOCK_OWNED=false
 }
 
 durable_sync() {

@@ -870,8 +870,8 @@ validate_no_limine_shadow_configs() {
 }
 
 sbctl_file_signature_state() {
-  local file="$1" output state
-  output=$(sbctl verify --json "$file" 2>/dev/null) || return 2
+  local file="$1" runner=${2:-sbctl} output state
+  output=$("$runner" verify --json "$file" 2>/dev/null) || return 2
   state=$(jq -er --arg file "$file" '
     if type == "array" and length == 1 and
       .[0].file_name == $file and
@@ -880,6 +880,199 @@ sbctl_file_signature_state() {
   ' <<< "$output") || return 2
   [[ "$state" == 1 ]] && return 0
   return 1
+}
+
+# Inspect PE headers independently of the resource filename. Non-PE input is
+# retained byte-for-byte; EFI application/driver/ROM images require local signing.
+publication_input_is_efi() {
+  local path=$1 size magic offset signature optional_size optional_magic subsystem
+  size=$(stat -Lc %s "$path") || return 2
+  (( size >= 64 )) || return 1
+  magic=$(od -An -tx1 -N2 "$path" | tr -d ' \n') || return 2
+  [[ $magic == 4d5a ]] || return 1
+  offset=$(od -An --endian=little -tu4 -j60 -N4 "$path" | tr -d ' \n') || return 2
+  [[ $offset =~ ^[0-9]+$ ]] || return 2
+  (( offset >= 64 && offset + 94 <= size )) || return 1
+  signature=$(od -An -tx1 -j"$offset" -N4 "$path" | tr -d ' \n') || return 2
+  [[ $signature == 50450000 ]] || return 1
+  optional_size=$(od -An --endian=little -tu2 -j"$((offset+20))" -N2 "$path" | tr -d ' \n') || return 2
+  optional_magic=$(od -An --endian=little -tu2 -j"$((offset+24))" -N2 "$path" | tr -d ' \n') || return 2
+  [[ $optional_size =~ ^[0-9]+$ && $optional_magic =~ ^[0-9]+$ ]] || return 2
+  (( optional_size >= 70 && offset + 24 + optional_size <= size )) || return 1
+  [[ $optional_magic == 267 || $optional_magic == 523 ]] || return 1
+  subsystem=$(od -An --endian=little -tu2 -j"$((offset+92))" -N2 "$path" | tr -d ' \n') || return 2
+  [[ $subsystem =~ ^[0-9]+$ ]] || return 2
+  (( subsystem >= 10 && subsystem <= 13 ))
+}
+
+verify_publication_input() {
+  local directory
+  directory=$(dirname "$1") || return 2
+  # sbctl0.18 grants verify access through GetESP even with an explicit file.
+  # Scope that invocation to the private input directory, retaining Landlock.
+  SYSTEMD_ESP_PATH="$directory" ESP_PATH="$directory" sbctl_file_signature_state "$1" publication_run_sbctl
+}
+
+publication_run_sbctl() {
+  local before after executable config temporary fd config_fd owner=$BASHPID rc=0
+  case ${1:-} in
+    verify) [[ $# == 3 && $2 == --json ]] || return 1 ;;
+    sign) [[ $# == 4 && $2 == --output && $3 == "$4" ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  # The context-free retention prerequisite has no canonical publication path.
+  if [[ -z ${_publication_intent:-} ]]; then sbctl "$@"; return; fi
+  json_is 'type == "object"' "$_publication_intent" || return 1
+  if json_is 'has("publication") | not' "$_publication_intent"; then sbctl "$@"; return; fi
+  before=$(publication_observe_signer) || return 1
+  executable=$(jq -r '.policy.executable' <<<"$before") || return 1
+  config=$(jq -r '.policy.configuration' <<<"$before") || return 1
+  temporary=$(mktemp "$(dirname "$(lifecycle_manifest_path "$_transaction_id")")/.publication-sbctl-config.XXXXXX") || return 1
+  if json_is '.policy.configuration_state == "present"' "$before"; then
+    copy_publication_input "$config" "$temporary" && \
+      [[ $(sha256_file "$temporary") == "$(jq -r '.policy.configuration_sha256' <<<"$before")" ]] || rc=1
+  else
+    printf '{}\n' >"$temporary" || rc=1
+  fi
+  if (( rc == 0 )); then
+    chmod 400 "$temporary" || rc=1
+    after=$(publication_observe_signer) || rc=1
+    json_is '.[0] == .[1]' "[$before,${after:-null}]" || rc=1
+  fi
+  if (( rc != 0 )); then rm -f -- "$temporary"; return 1; fi
+  if ! exec {fd}<"$executable"; then rm -f -- "$temporary"; return 1; fi
+  if ! exec {config_fd}<"$temporary"; then exec {fd}<&-; rm -f -- "$temporary"; return 1; fi
+  if ! fd_matches_path "$fd" "$executable" || \
+    [[ $(sha256_file "/proc/$owner/fd/$fd") != "$(jq -r '.policy.executable_sha256' <<<"$before")" ]]; then rc=1; fi
+  if (( rc == 0 )); then
+    # Copying the checked literal configuration and executing its open inode
+    # prevents an external config edit from redirecting this tool invocation.
+    /usr/bin/env -i PATH=/usr/bin LC_ALL=C HOME=/nonexistent \
+      SYSTEMD_ESP_PATH="${SYSTEMD_ESP_PATH:-}" ESP_PATH="${ESP_PATH:-}" \
+      "/proc/$owner/fd/$fd" --config "/proc/$owner/fd/$config_fd" "$@" || rc=$?
+    after=$(publication_observe_signer) || rc=1
+    json_is '.[0] == .[1]' "[$before,${after:-null}]" || rc=1
+  fi
+  exec {fd}<&- {config_fd}<&-
+  rm -f -- "$temporary" || rc=1
+  return "$rc"
+}
+
+copy_publication_input() {
+  # The deadline includes path lookup/open: a regular source replaced by a FIFO
+  # cannot wedge Core before fstat. The checked opened length bounds the copy.
+  # shellcheck disable=SC2016 # Fixed child program; paths are positional arguments.
+  /usr/bin/timeout --kill-after=1 "$_producer_session_io_timeout" /usr/bin/bash -p -c '
+    set -euo pipefail
+    exec 3<"$1"
+    [[ -f /proc/self/fd/3 ]]
+    before=$(/usr/bin/stat -Lc "%d:%i:%f:%s:%Y:%Z" /proc/self/fd/3)
+    size=$(/usr/bin/stat -Lc %s /proc/self/fd/3)
+    [[ $size =~ ^[0-9]+$ ]]
+    /usr/bin/dd iflag=noatime,count_bytes count="$size" status=none of="$2" <&3
+    after=$(/usr/bin/stat -Lc "%d:%i:%f:%s:%Y:%Z" /proc/self/fd/3)
+    [[ $before == "$after" && $(/usr/bin/stat -Lc %s "$2") == "$size" ]]
+  ' publication-input-copy "$1" "$2"
+}
+
+retain_publication_input() {
+  local invocation=$1 resource=$2 id source expected role target directory retained temporary fd kind_rc=0 signing=bytes body reference signature_rc=0 admitted find_rc self=$BASHPID ready='' hash bytes
+  producer_session_context_is_owned || return 1
+  id=$(jq -er '.id' <<<"$resource") || return 1
+  source=$(jq -er '.source' <<<"$resource") || return 1
+  expected=$(jq -er '.sha256' <<<"$resource") || return 1
+  role=$(jq -er '.role' <<<"$resource") || return 1
+  target=$(jq -er '.target' <<<"$resource") || return 1
+  [[ $invocation =~ ^[0-9a-f-]{36}$ && $id =~ ^[A-Za-z0-9_-]{1,64}$ && $expected =~ ^[0-9a-f]{64}$ \
+    && $source == /* && $source != *[[:cntrl:]]* && ${target,,} != */microsoft/* ]] || return 1
+  find_publication_authority_part "$invocation" intent || return 1
+  admitted=$(jq -ce --arg id "$id" '.resources[] | select(.id == $id)' <<<"$_publication_found_body") || return 1
+  json_is '.[0] == .[1]' "[$resource,$admitted]" || return 1
+  find_publication_record "$invocation" session || return 1
+  [[ $(jq -r '.supervisor.pid' <<<"$_publication_found_body") == "$self" \
+    && $(jq -r '.supervisor.start_time' <<<"$_publication_found_body") == "$(process_start_time "$self")" \
+    && $(jq -r '.boot_id' <<<"$_publication_found_body") == "$(boot_id_value)" ]] || return 1
+  if find_publication_record "$invocation" terminal; then return 1; else (( $? == 1 )) || return 1; fi
+  if find_publication_record "$invocation" retained "$id"; then
+    body=$_publication_found_body
+    sync_publication_reference "$_publication_found_reference" || return 1
+    retained=$(jq -r '.file.path' <<<"$body") || return 1
+    if json_is '.signing == "local-efi"' "$body"; then verify_publication_input "$retained" || return 1; fi
+    durable_sync "$retained" && durable_sync "$(lifecycle_manifest_path "$_transaction_id")" && durable_sync "$(dirname "$retained")" || return 1
+    exec {fd}<"$retained" || return 1
+    _publication_pins+=("$fd")
+    _publication_pin_owner=$BASHPID
+    _publication_pin_transaction=$_transaction_id
+    _publication_input_record=$body
+    return 0
+  else
+    find_rc=$?
+    (( find_rc == 1 )) || return 1
+  fi
+  directory=$(dirname "$(lifecycle_manifest_path "$_transaction_id")") || return 1
+  retained="$directory/publication-data-$invocation-$id"
+  if find_publication_record "$invocation" input-ready "$id"; then
+    ready=$_publication_found_body
+    sync_publication_reference "$_publication_found_reference" || return 1
+  else
+    (( $? == 1 )) || return 1
+    if find_pending_publication_record "$invocation" input-ready "$id"; then
+      ready=$_publication_found_body
+      append_publication_record "$invocation" input-ready "$ready" || return 1
+    else
+      (( $? == 1 )) || return 1
+    fi
+  fi
+  if [[ -z $ready ]]; then
+    [[ ! -e $retained && ! -L $retained ]] || return 1
+    temporary=$(mktemp "$directory/.publication-input.XXXXXX") || return 1
+    if ! copy_publication_input "$source" "$temporary" || [[ $(sha256_file "$temporary") != "$expected" ]]; then
+      rm -f "$temporary"; return 1
+    fi
+    publication_input_is_efi "$temporary" || kind_rc=$?
+    if (( kind_rc > 1 )) || { [[ $role == uki ]] && (( kind_rc != 0 )); }; then rm -f "$temporary"; return 1; fi
+    if (( kind_rc == 0 )); then
+      signing=local-efi
+      verify_publication_input "$temporary" || signature_rc=$?
+      if (( signature_rc > 1 )); then
+        fail 'Could not verify the signature state of the retained EFI input'
+        rm -f "$temporary"; return 1
+      fi
+      if (( signature_rc != 0 )); then
+        if ! run_visible publication_run_sbctl sign --output "$temporary" "$temporary" || ! verify_publication_input "$temporary"; then
+          rm -f "$temporary"; return 1
+        fi
+      fi
+    fi
+    if ! chmod 400 "$temporary" || ! durable_sync "$temporary" || ! durable_sync "$directory"; then rm -f "$temporary"; return 1; fi
+    hash=$(sha256_file "$temporary") || return 1
+    bytes=$(stat -Lc %s "$temporary") || return 1
+    reference=$(jq -cn --arg path "$retained" --arg sha256 "$hash" --argjson bytes "$bytes" '{path:$path,sha256:$sha256,bytes:$bytes}') || return 1
+    ready=$(jq -cn --arg id "$id" --arg sha256 "$expected" --arg signing "$signing" --arg temporary "$temporary" --argjson file "$reference" \
+      '{id:$id,source_sha256:$sha256,signing:$signing,temporary:$temporary,file:$file}') || return 1
+    append_publication_record "$invocation" input-ready "$ready" || return 1
+  fi
+  temporary=$(jq -r '.temporary' <<<"$ready") || return 1
+  reference=$(jq -c '.file' <<<"$ready") || return 1
+  [[ $(jq -r '.source_sha256' <<<"$ready") == "$expected" && $(jq -r '.file.path' <<<"$ready") == "$retained" ]] || return 1
+  if [[ ! -e $retained && ! -L $retained ]]; then
+    validate_private_control_file "$temporary" || return 1
+    hash=$(sha256_file "$temporary") || return 1
+    bytes=$(stat -Lc %s "$temporary") || return 1
+    [[ $hash == "$(jq -r '.sha256' <<<"$reference")" && $bytes == "$(jq -r '.bytes' <<<"$reference")" ]] || return 1
+    producer_session_context_is_owned || return 1
+    mv --update=none-fail --no-copy "$temporary" "$retained" || return 1
+  fi
+  validate_publication_retained_file "$_transaction_id" "$reference" || return 1
+  if json_is '.signing == "local-efi"' "$ready"; then verify_publication_input "$retained" || return 1; fi
+  durable_sync "$directory" || return 1
+  exec {fd}<"$retained" || return 1
+  _publication_pin_owner=$BASHPID
+  _publication_pin_transaction=$_transaction_id
+  _publication_pins+=("$fd")
+  body=$(jq -c 'del(.temporary)' <<<"$ready") || return 1
+  append_publication_record "$invocation" retained "$body" || return 1
+  _publication_input_record=$body
 }
 
 sbctl_tracking_preflight() {

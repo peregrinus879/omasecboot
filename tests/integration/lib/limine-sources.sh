@@ -13,9 +13,10 @@ limine_prepare_sources() {
   local input=$1 destination=$2 metadata=$3 integration=$4 path expected patch_name revision relative_parent contract
   local -a source_paths contracts=(. .native .description .build_settings)
   jq -e '.schema == 1 and .native.schema == 1 and .description.schema == 1 and .build_settings.schema == 1
-    and ((.managed // null) == null or .managed.schema == 1)' \
+    and ((.managed // null) == null or .managed.schema == 1)
+    and ((.runtime // null) == null or .runtime.schema == 1)' \
     "$metadata" >/dev/null || die 'unsupported source contract'
-  mapfile -t source_paths < <(jq -er '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[]]
+  mapfile -t source_paths < <(jq -er '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[], (.runtime.files // [])[]]
     | unique_by(.path)[] | select(.sha256 != null) | .path' "$metadata")
   for path in "${source_paths[@]}"; do
     [[ ( $path == README.md || $path == build.gradle.kts || $path == src/main/java/org/limine/entry/tool/*.java \
@@ -24,7 +25,7 @@ limine_prepare_sources() {
       || $path == install/arch-linux/limine-mkinitcpio-hook/usr/bin/limine-mkinitcpio \
       || $path == install/arch-linux/limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install ) && $path != *..* ]] \
       || die "unexpected source path: $path"
-    expected=$(jq -er --arg path "$path" '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[]]
+    expected=$(jq -er --arg path "$path" '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[], (.runtime.files // [])[]]
       | map(select(.path == $path)) | .[0].sha256' "$metadata")
     relative_parent=${path%/*}
     [[ $relative_parent != "$path" ]] || relative_parent=.
@@ -36,6 +37,7 @@ limine_prepare_sources() {
   done
   : >"$destination/patch.log"
   if jq -e '.managed != null' "$metadata" >/dev/null; then contracts+=(.managed); fi
+  if jq -e '.runtime != null' "$metadata" >/dev/null; then contracts+=(.runtime); fi
   for contract in "${contracts[@]}"; do
     while IFS=$'\t' read -r path expected; do
       limine_source_hash "$destination/patched/$path" "$expected"
@@ -44,7 +46,7 @@ limine_prepare_sources() {
     case $contract:$patch_name in
       .:0001-propagate-mkinitcpio-failures.patch | .native:0002-propagate-native-failures.patch | \
         .description:0003-describe-native-outputs.patch | .build_settings:0004-describe-build-settings.patch | \
-        .managed:0005-managed-producer-protocol.patch) ;;
+        .managed:0005-managed-producer-protocol.patch | .runtime:0006-managed-producer-runtime.patch) ;;
       *) die 'unexpected ordered patch' ;;
     esac
     limine_source_hash "$integration/$patch_name" "$(jq -er "$contract | .patch.sha256" "$metadata")"
@@ -55,10 +57,10 @@ limine_prepare_sources() {
   done
   while IFS=$'\t' read -r path expected; do
     limine_source_hash "$destination/patched/$path" "$expected"
-  done < <(jq -er '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[]]
+  done < <(jq -er '[.files[], .native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[], (.runtime.files // [])[]]
     | reduce .[] as $row ({}; .[$row.path] = $row) | to_entries[] | [.key, .value.patched_sha256] | @tsv' "$metadata")
   mapfile -t LIMINE_ORIGINAL_JAVA < <(jq -er '.native.files[].path | select(endswith(".java"))' "$metadata")
-  mapfile -t LIMINE_PATCHED_JAVA < <(jq -er '[.native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[]]
+  mapfile -t LIMINE_PATCHED_JAVA < <(jq -er '[.native.files[], .description.files[], .build_settings.files[], (.managed.files // [])[], (.runtime.files // [])[]]
     | map(.path) | unique[] | select(endswith(".java"))' "$metadata")
 }
 

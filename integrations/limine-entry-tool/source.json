@@ -439,5 +439,102 @@
       "input": "Java suites require LIMINE_NATIVE_JSON_JAR pointing to the hash-bound caller-supplied jar; no suite downloads it.",
       "scope": "Actual Java decoder/resource/channel and prepared-attempt contracts include real sync faults and process restart. This is not FAT/remount/reboot or production authority evidence; original publisher/query contracts use the full composed source."
     }
+  },
+  "runtime": {
+    "schema": 1,
+    "patch": {
+      "file": "0006-managed-producer-runtime.patch",
+      "sha256": "393a3abac96213626642c55e600efdab3c761f1b743b8d4d97f7ccc9d47ebaa1",
+      "strip": 1,
+      "purpose": "Captured native selection, target validation, inherited mount/object custody and Core-journal publication through the native executor.",
+      "scope": "Developing managed addition join. Full operation coverage, complete-active proof, cross-lifetime recovery and admission remain incomplete.",
+      "removal_trigger": "Recheck on producer updates; remove when upstream supplies equivalent session interfaces."
+    },
+    "files": [
+      {
+        "path": "src/main/java/org/limine/entry/tool/Main.java",
+        "sha256": "b0f7b89375b6b13fa82b4ade1e3900cd51180002ec012704c4bafa2c67040e7f",
+        "base_sha256": "9a8912e6ba094f4c6502b59ebf594b69e0782e2f6ed5b87413a04847a57f6807",
+        "patched_sha256": "e5cc6ccbb70a827ce1fbe6bfd60c4a25fe2e2eb8da3124fb9df06d85cba68a7b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ManagedJson.java",
+        "sha256": null,
+        "base_sha256": "dfd7f56c08f4231cf2ef1f9e67d508c8c12b3127309432fd5d16ffd4ccbb8fd1",
+        "patched_sha256": "eb6a97641448922e579b5cab500ed6472d21dbf597cf1584e569fa0bf9f8f2f7"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/ManagedAddition.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "6a70b3ee00e73a31e50f9e0c8720c111cd5cd08912ac5a7debac0ff142bd9a5a"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/CorePublicationAuthority.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "09480f3afc6a9467d1f8ded2da2c71c40c49a85a9ed706c4882c832f2b5b987b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/FileState.java",
+        "sha256": null,
+        "base_sha256": "0986dc927af20285948471cbcbd9edbcf11e38b9f260afefebad6793ad9b578d",
+        "patched_sha256": "9d385b2ef7d8a7f8c423db971dd59154e9f0f94c44bcff5602eed13527a0e02f"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/PreparedPublication.java",
+        "sha256": null,
+        "base_sha256": "825a20a521fb08424e802ffb80b88b02727877624256fabf3dcf3d6d16783b75",
+        "patched_sha256": "8777c71ba463b5009824e2b8d68e5ea32e7666a4ec906e2d911465664649f519"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/PreparedPublicationCodec.java",
+        "sha256": null,
+        "base_sha256": "4cfb84ba382cfe6fe787e5b86a0e7e197e9d1ba44fe763f1b212e8eab2e94f42",
+        "patched_sha256": "5eefad0177c698543ca161fdc8aebe489943faaaf05c61bfd8fbcda5271889b8"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineReader.java",
+        "sha256": "9ee51f51648e30b5ca341eaaa1dc8ffdcfe217624d7491f8acb9c0969053420e",
+        "base_sha256": "33bd9a660c3b53546d2fd4b2f712f8c2d269c27d4460d4155dd956cf173646ad",
+        "patched_sha256": "2fe942ed1b2c3553304aa2482e3e9ef55ea38b5a649d041d8ff8dcaecf3e835a"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineWriter.java",
+        "sha256": "7b16e7c7db0a2097d4effbfcc302fd2eeed4df90c5730588f2930ba107617953",
+        "base_sha256": "f69fcbe29ba19f91a8e6c43f46fb21303d84bc7548cfd8dd53ca99815d84ef7c",
+        "patched_sha256": "4b8e2402117eeb52681ea34cedffca9cb7b4454c9406b3c0c66dce13a161895c"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LimineManager.java",
+        "sha256": "28c90ed866dfa327ae5589b027d6bc6eda75775181dda0bc45d283ac131cee03",
+        "base_sha256": "72314835d9a629f119ff44a11d1155d008f4ffa094cf1a736bb5aeb53c1a34f4",
+        "patched_sha256": "7071fbdbe28e64dc167f79980afaf6e0307fc45dd8c5333d7c7e3b765cdac1e4"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/NativeMutations.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "385b5392fd235bb97a5b13eb3e52ed35c4915e3c372a2227837b91c5d938e5ab"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/LiveMountCustody.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "993e1f9dc399b62169c8c2c7b960aa6bce6e7ebfb2aa6b9cdd904fe3711ebb1b"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/processes/PublicationTargets.java",
+        "sha256": null,
+        "base_sha256": null,
+        "patched_sha256": "c9adb7c83ad15ec47c849e3e0f7050ea7e0fb385ea4a57fc3119be1b535c267a"
+      },
+      {
+        "path": "src/main/java/org/limine/entry/tool/formats/limine8/LimineEntry.java",
+        "sha256": "0eb30de9641863fdf43926577ddcee470aa7f2f8024f2a6a723a36c6cc9db36a",
+        "base_sha256": "0eb30de9641863fdf43926577ddcee470aa7f2f8024f2a6a723a36c6cc9db36a",
+        "patched_sha256": "73d68814fc8c03a0ee6e17c82215762f088ec2fe4491ff37a0ba9585905b9956"
+      }
+    ]
   }
 }

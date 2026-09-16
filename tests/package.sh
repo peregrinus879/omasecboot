@@ -32,7 +32,7 @@ pkgurl=$(sed -n "s/^url='\(.*\)'$/\1/p" "$pkgbuild")
   || fail_test "PKGBUILD pkgver and the command version contract disagree"
 [[ -n "$pkgurl" ]] || fail_test "PKGBUILD does not declare the repository url"
 grep -Fxq "pkgname=${pkgname}" "$pkgbuild" || fail_test "PKGBUILD names the wrong package"
-grep -Fxq "arch=('any')" "$pkgbuild" || fail_test "shell-only package must be architecture any"
+grep -Fxq "arch=('any')" "$pkgbuild" || fail_test "interpreted-code package must be architecture any"
 grep -Fxq "license=('MIT')" "$pkgbuild" || fail_test "PKGBUILD license drifted"
 grep -Eq '^install=' "$pkgbuild" \
   && fail_test "package declares an install scriptlet; tmpfiles and the removal guard own lifecycle"
@@ -63,6 +63,7 @@ floor_admits_pin() {
 }
 expected_depends=$(sort <<'EOF'
 bash
+btrfs-progs>=7.1
 coreutils>=9.5
 diffutils
 efibootmgr>=18
@@ -76,6 +77,7 @@ limine-mkinitcpio-hook>=1.38.0
 limine-snapper-sync>=1.31.0
 openssl
 pacman
+python
 sbctl>=0.18
 systemd
 util-linux
@@ -150,7 +152,10 @@ usr/lib/omasecboot/discover.sh
 usr/lib/omasecboot/enroll.sh
 usr/lib/omasecboot/lifecycle.sh
 usr/lib/omasecboot/outputs.sh
+usr/lib/omasecboot/producer-session.sh
 usr/lib/omasecboot/producers.sh
+usr/lib/omasecboot/publication-context.py
+usr/lib/omasecboot/publication.sh
 usr/lib/omasecboot/records.sh
 usr/lib/omasecboot/sign.sh
 usr/lib/omasecboot/software.sh
@@ -202,7 +207,7 @@ while read -r mode owner group path; do
       [[ "$mode" == drwxr-xr-x ]] || fail_test "wrong directory mode: ${path} ${mode}" ;;
     usr/bin/omasecboot|etc/boot/hooks/pre.d/000-omasecboot-guard|etc/boot/hooks/post.d/zzz-omasecboot-sign)
       [[ "$mode" == -rwxr-xr-x ]] || fail_test "wrong executable mode: ${path} ${mode}" ;;
-    usr/lib/omasecboot/*.sh|usr/share/libalpm/hooks/*.hook|usr/lib/tmpfiles.d/omasecboot.conf|usr/share/licenses/omasecboot/LICENSE|usr/share/doc/omasecboot/*.md)
+    usr/lib/omasecboot/*.sh|usr/lib/omasecboot/*.py|usr/share/libalpm/hooks/*.hook|usr/lib/tmpfiles.d/omasecboot.conf|usr/share/licenses/omasecboot/LICENSE|usr/share/doc/omasecboot/*.md)
       [[ "$mode" == -rw-r--r-- ]] || fail_test "wrong file mode: ${path} ${mode}" ;;
     .PKGINFO|.MTREE|.BUILDINFO) ;;
     *) fail_test "unexpected package entry: ${path}" ;;
@@ -221,10 +226,12 @@ grep -rFq "$BUILD_DIR" "${extract}/usr" "${extract}/etc" \
   && fail_test "the build directory leaked into an installed file"
 cmp -s "${extract}/usr/bin/omasecboot" "${ROOT_DIR}/bin/omasecboot" \
   || fail_test "packaged command differs from the source command"
-for lib in common lifecycle records software checks discover outputs sign producers enroll windows status; do
+for lib in common lifecycle records software checks discover outputs sign producer-session producers publication enroll windows status; do
   cmp -s "${extract}/usr/lib/omasecboot/${lib}.sh" "${ROOT_DIR}/lib/${lib}.sh" \
     || fail_test "packaged library differs from the source: ${lib}.sh"
 done
+cmp -s "${extract}/usr/lib/omasecboot/publication-context.py" "${ROOT_DIR}/lib/publication-context.py" \
+  || fail_test "packaged context helper differs from the source"
 cmp -s "${extract}/usr/lib/tmpfiles.d/omasecboot.conf" "${ROOT_DIR}/omasecboot.tmpfiles" \
   || fail_test "packaged tmpfiles declaration differs from the source"
 cmp -s "${extract}/usr/share/licenses/omasecboot/LICENSE" "${ROOT_DIR}/LICENSE" \
@@ -291,6 +298,7 @@ durable_snapshot() {
 installed_paths=(
   "${root}/usr/bin/omasecboot"
   "${root}/usr/lib/omasecboot/lifecycle.sh"
+  "${root}/usr/lib/omasecboot/publication-context.py"
   "${root}/usr/share/libalpm/hooks/00-omasecboot-removal-guard.hook"
   "${root}/usr/share/libalpm/hooks/00-omasecboot-transition-guard.hook"
   "${root}/usr/share/libalpm/hooks/zzz-omasecboot.hook"

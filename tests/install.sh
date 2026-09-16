@@ -118,6 +118,11 @@ for lib in common lifecycle records software checks discover sign producers enro
     && $(stat -Lc '%a' "${canonical_lib}/${lib}.sh") == 644 ]] \
     || fail_test "library module missing or wrong mode: ${lib}.sh"
 done
+context_helper="${canonical_lib}/publication-context.py"
+[[ -f "$context_helper" && $(stat -Lc '%a' "$context_helper") == 644 ]] \
+  || fail_test "context helper missing or wrong mode"
+cmp -s "$context_helper" "${ROOT_DIR}/lib/publication-context.py" \
+  || fail_test "installed context helper differs from the source"
 [[ ! -e "$canonical_state" ]] \
   || fail_test "install created the durable state directory as package content"
 [[ -f "$tmpfiles_conf" && $(stat -Lc '%a' "$tmpfiles_conf") == 644 ]] \

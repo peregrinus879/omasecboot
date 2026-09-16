@@ -17,6 +17,7 @@ PACMAN_HOOKS = 00-omasecboot-removal-guard.hook \
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) $(wildcard limine-hooks/*) \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh) \
           $(wildcard tests/integration/*.sh) $(wildcard tests/integration/lib/*.sh)
+PYTHON_SCRIPTS = $(wildcard lib/*.py) $(wildcard tests/integration/fixtures/*.py)
 TEST_SUITES = checks status guards dispatcher enrollment unconfigure producers \
               lifecycle producer-repair producer-ownership recovery-publication \
               software-recovery artifacts unconfigure-tools install package \
@@ -28,7 +29,7 @@ LIMINE_NATIVE_EXECUTABLE ?=
 LIMINE_NATIVE_JSON_JAR ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract test-package-catalog test-output-expectations $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract test-package-catalog test-output-expectations test-producer-session test-publication-records test-publication-context $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -36,7 +37,7 @@ PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 # through tmpfiles and is never package content.
 install:
 	@case "$(DESTDIR)" in /*) test "$$(realpath -m -- "$(DESTDIR)")" != / ;; *) false ;; esac || { echo "Refusing live source install; use a package build with an absolute non-root DESTDIR" >&2; exit 1; }
-	install -Dm644 -t "$(DESTDIR)$(LIBDIR)/" lib/*.sh
+	install -Dm644 -t "$(DESTDIR)$(LIBDIR)/" lib/*.sh lib/*.py
 	install -Dm755 bin/omasecboot "$(DESTDIR)$(BINDIR)/omasecboot"
 	install -d "$(DESTDIR)$(HOOKDIR)"
 	@for hook in $(PACMAN_HOOKS); do \
@@ -102,7 +103,8 @@ package-limine-entry-tool:
 	    integrations/limine-entry-tool/0002-propagate-native-failures.patch \
 	    integrations/limine-entry-tool/0003-describe-native-outputs.patch \
 	    integrations/limine-entry-tool/0004-describe-build-settings.patch \
-	    integrations/limine-entry-tool/0005-managed-producer-protocol.patch "$$build/"; \
+	    integrations/limine-entry-tool/0005-managed-producer-protocol.patch \
+	    integrations/limine-entry-tool/0006-managed-producer-runtime.patch "$$build/"; \
 	  cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	  printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	  cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -116,6 +118,7 @@ lint:
 	# makepkg consumes package metadata and supplies srcdir/pkgdir at execution.
 	shellcheck --shell=bash --exclude=SC2034,SC2154 $(PACKAGE_RECIPES)
 	jq empty omarchy/omarchy-menu.jsonc $(wildcard integrations/*/source.json)
+	python -I -S -B -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(p).read_bytes(), filename=p) for p in sys.argv[1:]]' $(PYTHON_SCRIPTS)
 
 # Independent targets preserve the complete suite set and allow bounded local
 # parallelism through make -jN --output-sync=target test. Enrollment also has
@@ -151,3 +154,13 @@ test-package-catalog:
 
 test-output-expectations:
 	LIMINE_NATIVE_JSON_JAR="$(LIMINE_NATIVE_JSON_JAR)" bash tests/integration/output-expectations.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
+
+test-producer-session:
+	LIMINE_NATIVE_JSON_JAR="$(LIMINE_NATIVE_JSON_JAR)" bash tests/integration/producer-session.sh "$(LIMINE_ENTRY_TOOL_SOURCE)" "$(LIMINE_NATIVE_JAVA_HOME)"
+
+test-publication-records:
+	bash tests/integration/publication-records.sh
+
+# Read-only context contracts replace hardware acquisition only in test code.
+test-publication-context:
+	bash tests/integration/publication-context.sh

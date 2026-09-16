@@ -1,12 +1,14 @@
 # Omarchy Integration - OmaSecBoot
 
-What remains outside this repository before OmaSecBoot reaches Omarchy users, and the rules those changes follow. Everything about the tool itself is in `README.md` and `AGENTS.md`; compatibility facts are in `docs/maintenance.md`; release gates are in `docs/release-checklist.md`.
+What remains outside this repository before OmaSecBoot reaches Omarchy users, and the rules those changes follow. Everything about the tool itself is in `README.md` and `AGENTS.md`; the release-critical roadmap, decisions and later enhancements are in `docs/maintenance.md`; acceptance gates are in `docs/release-checklist.md`. This is published delivery guidance. Private session/model handoff stays in the ignored workstream defined by `AGENTS.md`.
 
 ## Order of delivery
 
-1. Tag `v1.0.0` in this repository once `docs/release-checklist.md` is complete.
-2. omarchy-pkgs: a recipe for `omasecboot` with `source: local` metadata against the tagged archive and its recorded SHA-256. The recipe declares the same resolver floors as `PKGBUILD`; the exact producer versions are enforced by the tool at runtime, not by the recipe.
-3. omacom/omarchy, based on `upstream/quattro`: a setup wrapper, a removal wrapper, three menu entries, and a manual page, each with focused tests. Tags, pushes, pull requests, and branch deletion stay maintainer-owned.
+1. Review development checkpoints with the Omarchy maintainers and prepare the paired integration against their agreed target branch and package profile. R1–R6 supply the supported runtime; R7 owns these delivery artifacts and R8 owns acceptance.
+2. Implement and verify the setup/removal/update wrappers, menu entries, manual and candidate package recipes before release. Revalidate the target branch rather than assuming the earlier Quattro development branch remains the integration base.
+3. Tag `v1.0.0` in this repository once `docs/release-checklist.md`'s pre-tag gates are complete.
+4. omarchy-pkgs: publish the reviewed `omasecboot` recipe with `source: local` metadata against the tagged archive and its recorded SHA-256. The recipe declares the same resolver floors as `PKGBUILD`; exact producer versions are enforced by the tool at runtime. Deliver the reviewed producer builds with their matching Core support.
+5. Land the reviewed omacom/omarchy wrappers, menu entries and manual through the maintainers' normal process. Tags, pushes, pull requests and branch deletion retain their applicable approval boundaries.
 
 The core, producer integration patches, package recipes, and cross-tool tests are maintained together in OmaSecBoot. Producer patches apply to pinned upstream sources in disposable build trees and preserve the owning package's files and data model. omarchy-pkgs carries the resulting reviewed build recipes; each integration records its compatibility contract and upstream removal trigger. Missing migration, transaction-admission, or restore interfaces must be resolved before the corresponding release claim is made.
 

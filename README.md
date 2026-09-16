@@ -5,7 +5,7 @@
 OmaSecBoot provisions signing keys, signs every EFI artifact Omarchy boots, enrolls the current Limine configuration checksum into both Limine executables, backs up and replaces firmware trust under explicit confirmation, and adds a validated Windows firmware handoff for dual-boot systems. Every mutation runs as a durable transaction that can be resumed or rolled back, and every firmware instruction is printed only after a direct read-back proof.
 
 > [!CAUTION]
-> **Development status, 2026-09-10:** pre-release. Hermetic and container checks and partial dedicated-hardware acceptance exist, but the complete release acceptance has not passed. Producer output completeness, snapshot migration, supported updates, and restore continuity remain open in the [maintenance ledger](docs/maintenance.md). No tagged release or published package exists. Do not install this over an existing Secure Boot setup or treat hermetic tests as firmware evidence. The release gates are in the [release checklist](docs/release-checklist.md).
+> **Development status, 2026-09-16:** pre-release development checkpoint. Package, hermetic, internal publication and filesystem-observation tests exist; supported end-to-end publication/recovery and release acceptance remain incomplete. The [release-critical roadmap](docs/maintenance.md#release-critical-work) identifies the work required for Omarchy delivery; [later enhancements](docs/maintenance.md#post-release-enhancements) are tracked separately. No tagged release or published package exists. Do not install this over an existing Secure Boot setup or treat hermetic tests as firmware evidence. The release gates are in the [release checklist](docs/release-checklist.md).
 
 ## Why This Tool
 
@@ -66,7 +66,7 @@ OmaSecBoot drives three boot-artifact producers whose hook protocol it audits pe
 | `sbctl` | 0.18-2 | Arch `extra` |
 | `efibootmgr` | 18 or newer | Arch `core` |
 
-The package also depends on bash, coreutils, util-linux, diffutils, findutils, gawk, grep, jq, OpenSSL, gum, limine, pacman, and systemd.
+The package also depends on bash, coreutils, util-linux, diffutils, findutils, gawk, grep, jq, OpenSSL, gum, limine, pacman, systemd, Python, and btrfs-progs 7.1 or newer. The developing recovery-context inspector uses the distro-provided `btrfsutil` Python binding; the package protects both dependencies against removal while managed.
 
 ## Installation
 
@@ -342,7 +342,15 @@ The shell counterpart is `limine-mkinitcpio --describe-build [PACKAGE VERSION ..
 
 `make test-output-expectations` with the same source/JDK/jar variables joins that real catalog with the actual shell and native descriptions. It checks potential publication slots, shared fallback resources, context/operation agreement and drift, with no real build or boot mutation. `OUTPUT_EXPECTATIONS_KEEP=1` retains the fixture evidence. Required-set policy, producer completion and active-state proof remain the paired runtime's responsibility.
 
-`make package-limine-entry-tool PKGDEST=/absolute/output/directory` builds development `limine-mkinitcpio-hook` 1.38.0-1.6 with the ordered integration patches. Its recipe preserves upstream file ownership, supplies the shared shell helpers, and embeds the pinned Jackson-core decoder with its license notices; it checks source, patch, jar and GraalVM inputs. The build requires the recipe's declared tools, including Gradle on x86_64. This build is for integration development and is not yet in the activation set above. Complete producer/core protocol support and the active-update path remain release-blocking work; the guard still refuses replacement of an active producer.
+`make test-producer-session` with those variables exercises the internal Core supervisor with real lifecycle records, process identities, locks and Java protocol handling in disposable namespaces. It covers terminal failure after acknowledged completion, malformed or extra frames, response backpressure, deadlines, interruption, startup failure and loss of lock ownership. `PRODUCER_SESSION_KEEP=1` retains evidence. The fixture binds its JVM/main class in place of a packaged worker; supervision cases supply a fixture handler, while input-retention cases use the Core handler. Canonical publication authority, mutation routing and activation remain coupled runtime work. The development recipe targets 1.38.0-1.7 with the sixth runtime patch; its completed package/FAT/boot verification follows that integration.
+
+The same suite exercises manifest-bound input retention and native addition publication with real `sbctl`, fixture-only keys and package-supplied EFI input. It checks signing by PE type, immutable retries, absence of temporary-path registration, producer-renderer parity, final path hashes and Core-authorized writes. Preparation and execution use separate workers so the executor inherits file/directory/stage handles; local mount, namespace and exact target-state checks continue through the last authorized write after Core death. Missing target ancestors have journaled creation intent and synchronized, descriptor-bound results before staging. Tests cover uncertain creation, directory replacement, mount rebinding and child-exit races. `make test-publication-records` checks schema-2/3 compatibility, immutable chains, ancestor authority, durability and recovery exclusions. This internal addition join still requires production routing, other mutation kinds, complete-active proof and new recovery authority; nonempty journals remain blocked from lifecycle completion and legacy recovery. Actual FAT/remount recovery and packaged-command admission remain separate gates.
+
+`make test-publication-context` exercises the read-only Python inspector, with hardware observations supplied by fixtures and real OpenSSL public-certificate checks. Stable context binds the selected root filesystem/subvolume, ESP partition, machine identity and local public-certificate fingerprint. Core records it before worker launch and repeats it before execution and after worker completion. Publication signing uses a frozen attempt-local policy, a checked command-configuration copy and open sbctl executable, with control-file consistency checks around each call. Retained and staged EFI signatures are reverified before execution. These are sampled consistency checks, not exclusion of arbitrary concurrent root writers. Disposable guest tests additionally exercise actual Btrfs/FAT acquisition, duplicate ESP identities, root replacement, remount and reboot; fresh recovery and production activation remain separate obligations.
+
+New managed additions atomically record their original intent, context, configuration bytes and narrowly scoped missing-file recreation permission together with preservation policy. Historical records retain their original limits. The journal tests also exercise sealed original-effect resolution and content classification: known prior bytes, desired retained bytes, explicitly permitted absence, or conflict. Those classifications do not by themselves authorize a recovery write; the paired fresh-attempt and complete-active paths remain under development.
+
+`make package-limine-entry-tool PKGDEST=/absolute/output/directory` builds development `limine-mkinitcpio-hook` 1.38.0-1.7 with the ordered integration patches. Its recipe preserves upstream file ownership, supplies the shared shell helpers, and embeds the pinned Jackson-core decoder with its license notices; it checks source, patch, jar and GraalVM inputs. The build requires the recipe's declared tools, including Gradle on x86_64. This build is for integration development and is not yet in the activation set above. Complete producer/core protocol support and the active-update path remain release-blocking work; the guard still refuses replacement of an active producer.
 
 ### Design philosophy
 
@@ -350,7 +358,7 @@ Handle the parts of Secure Boot that Omarchy does not automate for this dual-boo
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/peregrinus879/omasecboot/blob/main/LICENSE). The package installs a local copy at `/usr/share/licenses/omasecboot/LICENSE`.
 
 ## Credits
 

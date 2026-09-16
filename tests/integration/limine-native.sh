@@ -9,7 +9,7 @@ umask 077
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ $# == 2 && -d $1 && -x $2/bin/java && -x $2/bin/javac ]] \
   || die 'usage: limine-native.sh PINNED_SOURCE_ROOT JDK25_HOME'
-for tool in bwrap jq patch sha256sum bash env realpath mktemp mkdir cp rm chmod \
+for tool in bwrap jq patch sha256sum bash env realpath mktemp mkdir mkfifo cp rm chmod \
   cmp grep b2sum sync flock cat shellcheck cc; do
   command -v "$tool" >/dev/null || die "required command: $tool"
 done
@@ -43,7 +43,9 @@ cp "$repo/tests/integration/fixtures/NativeContract.java" \
 if [[ -n $LIMINE_JAVA_CLASSPATH ]]; then
   cp "$repo/tests/integration/fixtures/ManagedJsonContract.java" \
      "$repo/tests/integration/fixtures/BootResourceContract.java" \
-     "$repo/tests/integration/fixtures/PreparedPublicationContract.java" \
+      "$repo/tests/integration/fixtures/NativeMutationContract.java" \
+      "$repo/tests/integration/fixtures/PublicationTargetContract.java" \
+      "$repo/tests/integration/fixtures/PreparedPublicationContract.java" \
     "$repo/tests/integration/fixtures/ManagedChannelContract.java" "$scratch/fixtures/"
 fi
 cat >"$scratch/fake-bin/command" <<'EOF'
@@ -91,11 +93,11 @@ done
 bash -n "$scratch/fake-bin/command"
 shellcheck "$scratch/fake-bin/command"
 
-sandbox=(
+sandbox_base=(
   bwrap --unshare-all --die-with-parent --new-session --uid 0 --gid 0 --clearenv
   --ro-bind /usr/lib /usr/lib --dir /usr/bin
   --symlink usr/bin /bin --symlink usr/lib /lib
-  --tmpfs /usr/lib/modules --proc /proc --dev /dev --tmpfs /tmp --dir /run
+  --tmpfs /usr/lib/modules --dev /dev --tmpfs /tmp --dir /run
   --dir /var --dir /sys --dir /usr/share/limine-entry-tool.d
   --ro-bind "$java_home" /jdk --ro-bind "$scratch/fixtures" /fixtures
   --ro-bind "$scratch/fake-bin" /fake-bin
@@ -109,14 +111,15 @@ sandbox=(
 )
 if [[ -d /usr/lib64 ]]; then
   [[ $(realpath /usr/lib64) == "$(realpath /usr/lib)" ]] || die 'requires the merged-/usr lib64 alias'
-  sandbox+=(--symlink lib /usr/lib64 --symlink usr/lib64 /lib64)
+  sandbox_base+=(--symlink lib /usr/lib64 --symlink usr/lib64 /lib64)
 fi
 for tool in bash flock cat; do
-  sandbox+=(--ro-bind "$(realpath -- "$(command -v "$tool")")" "/usr/bin/$tool")
+  sandbox_base+=(--ro-bind "$(realpath -- "$(command -v "$tool")")" "/usr/bin/$tool")
 done
 for tool in b2sum sync; do
-  sandbox+=(--ro-bind "$(realpath -- "$(command -v "$tool")")" "/real-bin/$tool")
+  sandbox_base+=(--ro-bind "$(realpath -- "$(command -v "$tool")")" "/real-bin/$tool")
 done
+sandbox=("${sandbox_base[@]}" --proc /proc)
 java_options=(-Xmx256m -XX:ActiveProcessorCount=4 -Duser.home=/work/home -Djava.io.tmpdir=/tmp)
 "${sandbox[@]}" --dir /etc --bind "$scratch/compiler" /work /jdk/bin/java "${java_options[@]}" --version >"$scratch/java-version"
 cat "$scratch/java-version"
@@ -129,7 +132,7 @@ for revision in original patched; do
   mkdir -p "$scratch/classes-$revision"
   extra=()
   [[ $revision != patched ]] || extra+=(/fixtures/NativeScannerContract.java)
-  [[ $revision != patched || -z $LIMINE_JAVA_CLASSPATH ]] || extra+=(/fixtures/ManagedJsonContract.java /fixtures/BootResourceContract.java /fixtures/ManagedChannelContract.java /fixtures/PreparedPublicationContract.java)
+  [[ $revision != patched || -z $LIMINE_JAVA_CLASSPATH ]] || extra+=(/fixtures/ManagedJsonContract.java /fixtures/BootResourceContract.java /fixtures/NativeMutationContract.java /fixtures/PublicationTargetContract.java /fixtures/ManagedChannelContract.java /fixtures/PreparedPublicationContract.java)
   "${sandbox[@]}" --dir /etc --ro-bind "$scratch/$revision" /source \
     --bind "$scratch/classes-$revision" /work /jdk/bin/javac \
     -J-Xmx1g -J-XX:ActiveProcessorCount=4 -J-Duser.home=/work/home \
@@ -315,6 +318,52 @@ if [[ -n $LIMINE_JAVA_CLASSPATH ]]; then
       die 'shared boot-resource contracts failed'
     }
   cat "$scratch/boot-resources/stdout"
+  target_work=$scratch/publication-targets
+  mkdir -p "$target_work/home" "$target_work/runtime" "$target_work/evidence" \
+    "$target_work/tree/esp/physical" "$target_work/tree/esp/view"
+  mkfifo "$target_work/tree/esp/fifo"
+  printf 'fixture file bind source\n' >"$target_work/tree/esp/bound-file"
+  printf 'preserved covered mountpoint\n' >"$target_work/tree/esp/bound-file-view"
+  # Actual same-directory and same-inode/different-entry views in the disposable
+  # namespace, not a FAT mount-table emulation. Every query runs the bound Main.
+  "${sandbox[@]}" --dir /etc --bind "$target_work" /work \
+    --bind "$target_work/tree/esp/physical" /work/tree/esp/view \
+    --bind "$target_work/tree/esp/bound-file" /work/tree/esp/bound-file-view \
+    --ro-bind "$scratch/classes-patched/classes" /classes \
+    /jdk/bin/java "${java_options[@]}" -XX:-UsePerfData \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" PublicationTargetContract \
+    >"$target_work/stdout" 2>"$target_work/stderr" || {
+      cat "$target_work/stdout" "$target_work/stderr" >&2
+      die 'publication target namespace contracts failed'
+    }
+  cat "$target_work/stdout"
+  mutation_work=$scratch/native-mutations
+  mkdir -p "$mutation_work/home" "$mutation_work/runtime" "$mutation_work/tmp"
+  # Compile only with LIMINE_PATCHED_JAVA above, then use those same bound
+  # classes for preparation and assertions. The EFI wrappers see a fixture
+  # mount table alongside real per-process procfs observations for the JVM.
+  "${sandbox[@]}" --dir /etc --bind "$mutation_work" /work \
+    --ro-bind "$scratch/classes-patched/classes" /classes \
+    /jdk/bin/java "${java_options[@]}" -Djava.io.tmpdir=/work/tmp \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" NativeMutationContract prepare \
+    >"$mutation_work/prepare.stdout" 2>"$mutation_work/prepare.stderr" || {
+      cat "$mutation_work/prepare.stdout" "$mutation_work/prepare.stderr" >&2
+      die 'native mutation fixture preparation failed'
+    }
+  bash -n "$mutation_work/bin/findmnt"
+  shellcheck "$mutation_work/bin/findmnt"
+  "${sandbox_base[@]}" --proc /real-proc --dir /proc --symlink /real-proc/self /proc/self \
+    --ro-bind "$mutation_work/native-mutation-mounts" /proc/mounts \
+    --dir /etc --bind "$mutation_work" /work --ro-bind "$scratch/classes-patched/classes" /classes \
+    --ro-bind "$(realpath -- "$(command -v rm)")" /usr/bin/rm \
+    --setenv PATH /work/bin:/fake-bin:/jdk/bin:/usr/bin --setenv TMPDIR /work/tmp \
+    /jdk/bin/java "${java_options[@]}" -Djava.io.tmpdir=/work/tmp \
+    -cp "/classes:$LIMINE_JAVA_CLASSPATH" NativeMutationContract \
+    >"$mutation_work/stdout" 2>"$mutation_work/stderr" || {
+      cat "$mutation_work/stdout" "$mutation_work/stderr" >&2
+      die 'native mutation contracts failed'
+    }
+  cat "$mutation_work/stdout"
   cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$scratch/publication-sync-error.so" \
     "$repo/tests/integration/fixtures/publication-sync-error.c" -ldl
   mkdir -p "$scratch/prepared-publication/home" "$scratch/prepared-publication/runtime"
