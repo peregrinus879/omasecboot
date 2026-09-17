@@ -98,6 +98,74 @@ publication_load_selected_original_basis() {
   _publication_selected_original_basis=$result
 }
 
+# Internal preparation constructor only. The manifest's first record binds the
+# selected original basis before transition publication. It permits neither boot
+# effects nor completed state; public recovery continues to refuse journals.
+# Like the other begin_* primitives, its caller owns traps/failure finalization.
+begin_publication_recovery_attempt() {
+  local root invocation selected basis lifecycle transaction_id token boot_id owner timestamp self
+  local directory backups document record reference path
+  local _publication_member_record=''
+  [[ $# == 2 && ${_transaction_active:-false} == false ]] || return 1
+  root=$1 invocation=$2
+  publication_load_selected_original_basis "$root" "$invocation" || return 1
+  selected=$_publication_selected_original_basis
+  basis=$(jq -c '.basis' <<<"$selected") || return 1
+  load_recovery_context || return 1
+  lifecycle=$_lifecycle_json
+  json_is '.[0].lifecycle == (.[1] | {generation,transaction})' "[$selected,$lifecycle]" || return 1
+  recovery_operation_for_lineage "$_recovery_root_manifest_json" publication-recovery >/dev/null || return 1
+  if (( _recovery_attempt_count > 0 )); then
+    publication_read_manifest_member "$(jq -r '.id' <<<"$_recovery_previous_manifest_json")" \
+      "$_recovery_previous_manifest_json" "$(jq -c '.publication_records[0]' <<<"$_recovery_previous_manifest_json")" || return 1
+    json_is '.[0].body.basis == .[1]' "[$_publication_member_record,$basis]" || return 1
+  fi
+  lifecycle_package_boundary_is_clear || return 1
+  transaction_id=$(new_transaction_id) || return 1
+  token=$(new_transaction_token) || return 1
+  boot_id=$(boot_id_value) || return 1
+  self=$BASHPID
+  owner=$(manifest_owner_json "$self") || return 1
+  timestamp=$(utc_timestamp) || return 1
+  directory=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  [[ ! -e $directory && ! -L $directory ]] || return 1
+  directory=$(create_transaction_dir "$transaction_id") || return 1
+  backups=$(prior_lifecycle_backups "$directory") || return 1
+  record=$(jq -cse --arg id "$transaction_id" --arg invocation "$invocation" \
+    --argjson schema "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION" --arg timestamp "$timestamp" \
+    --arg version "$OMASECBOOT_VERSION" 'if length == 1 then
+      {schema_version:$schema,transaction_id:$id,invocation:$invocation,ordinal:1,previous:null,
+       kind:"recovery-basis",body:{basis:.[0]},recorded_at:$timestamp,writer_version:$version}
+      else error("expected one original basis") end' <<<"$basis") || return 1
+  validate_publication_record_json "$transaction_id" 1 null "$record" || return 1
+  (( $(LC_ALL=C printf '%s\n' "$record" | wc -c) <= MAX_CONTROL_DOCUMENT_BYTES )) || return 1
+  path="$directory/publication-1.json"
+  printf '%s\n' "$record" | atomic_create_control_file "$path" 600 || return 1
+  durable_sync "$path" && durable_sync "$directory" || return 1
+  reference=$(transaction_artifact_reference "$path" "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION") || return 1
+  document=$(publication_capture_hashed_document "$path" "$(jq -r '.sha256' <<<"$reference")") || return 1
+  json_is '.[0] == .[1]' "[$record,$document]" || return 1
+  lifecycle_failpoint after-publication-recovery-basis || return 1
+  document=$(new_transaction_manifest "$(jq -cn \
+    --arg id "$transaction_id" --arg timestamp "$timestamp" --arg boot "$boot_id" \
+    --arg token_hash "$(sha256_text "$token")" --argjson owner "$owner" --argjson backups "$backups" \
+    --argjson root "$_recovery_root_reference" --argjson previous "$_recovery_previous_reference" \
+    --argjson attempt "$((_recovery_attempt_count+1))" --argjson reference "$reference" '{
+      id:$id,kind:"recovery-attempt",operation:"publication-recovery",target_state:"active",
+      created_at:$timestamp,boot_id:$boot,token_sha256:$token_hash,owner:$owner,
+      prior_state:"recovery-required",file_rollback_policy:"preserve",backups:$backups,
+      recovery:{attempt_number:$attempt,previous_attempt:$previous,root_incident:$root},
+      publication_records:[$reference]}')") || return 1
+  publish_new_transaction_manifest "$transaction_id" "$document" after-attempt-manifest-write || return 1
+  publication_recovery_selection_is_locked && lifecycle_package_boundary_is_clear || return 1
+  read_lifecycle || return 1
+  json_is '.[0] == .[1]' "[$lifecycle,$_lifecycle_json]" || return 1
+  activate_transaction_context "$transaction_id" "$token" publication-recovery active
+  write_recovery_attempt_transition_lifecycle "$transaction_id" \
+    "$(lifecycle_manifest_path "$transaction_id")" "$timestamp" || return 1
+  lifecycle_failpoint after-attempt-transition-write
+}
+
 publication_retain_original_configuration() {
   local invocation=$1 intent=$2 source expected directory destination temporary hash bytes reference
   _publication_original_configuration=''

@@ -655,10 +655,18 @@ validate_manifest_schema() {
     (if .schema_version == 3 then
       (.publication_records | type == "array" and length <= $max_publications and all(.[]; artifact_reference)) and
       (if (.publication_records | length) > 0 then
-        publication_root_operation and .file_rollback_policy == "preserve" and .status != "completed"
+        (publication_root_operation or (.kind == "recovery-attempt" and .operation == "publication-recovery")) and
+        .file_rollback_policy == "preserve" and .status != "completed"
        else true end)
      else true end) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
+    (if .operation == "publication-recovery" then
+      .schema_version == 3 and .kind == "recovery-attempt" and
+      (.publication_records | length) == 1 and .target_state == "active" and
+      .file_rollback_policy == "preserve" and .status != "completed" and
+      .current_phase == null and .completed_phases == [] and (.backups | length) == 1 and
+      no_firmware_evidence and all(.domain_records[]; . == null)
+     else true end) and
     .id == $id and (.operation | operation) and
     (.status == "transition" or .status == "completed" or
       .status == "failed" or .status == "stale") and
@@ -1076,6 +1084,13 @@ validate_recovery_attempt_manifest_rules() {
     windows-recovery) validate_windows_recovery_manifest_rules "$document" ;;
     software-recovery) validate_software_recovery_manifest_rules "$document" ;;
     unconfigure-recovery) validate_unconfigure_recovery_manifest_rules "$document" ;;
+    publication-recovery)
+      # This internal constructor records original authority only. Effects and
+      # completion need their own paired attempt schemas before being admitted.
+      json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
+        .schema_version == 3 and (.publication_records | length) == 1 and
+        .status != "completed" and all(.domain_records[]; . == null)' "$document"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1201,8 +1216,28 @@ recovery_operation_for_root_manifest() {
   fi
 }
 
+# Historical lineage may contain this internally constructed preparation attempt.
+# Public recovery still selects through recovery_operation_for_root_manifest and
+# refuses journals until the effect/completion engine is integrated.
+recovery_operation_for_lineage() {
+  local root="$1" requested="$2"
+  if [[ "$requested" == publication-recovery ]]; then
+    json_is "${OMASECBOOT_JQ_DEFS}${MANIFEST_JQ_DEFS}"'publication_root_operation and
+      .schema_version == 3 and (.publication_records | length) > 0 and
+      .file_rollback_policy == "preserve" and .target_state == "active" and
+      .firmware_writes == []' "$root" || return 1
+    printf 'publication-recovery\n'
+  else
+    recovery_operation_for_root_manifest "$root"
+  fi
+}
+
 validate_recovery_manifest_evolution() {
   local previous="$1" current="$2" operation="$3"
+  if [[ "$operation" == publication-recovery ]]; then
+    validate_publication_recovery_evolution "$previous" "$current"
+    return "$?"
+  fi
   json_is '(.publication_records // []) == []' "$previous" || return 1
   json_is '(.publication_records // []) == []' "$current" || return 1
   jq -en --arg operation "$operation" --argjson previous "$previous" \
@@ -1475,7 +1510,8 @@ validate_incident_chain() {
     return 0
   fi
   [[ "$current" != null ]] || return 1
-  recovery_operation=$(recovery_operation_for_root_manifest "$root_manifest") || return 1
+  recovery_operation=$(recovery_operation_for_lineage "$root_manifest" \
+    "$(jq -er '.operation' <<< "$latest_reference")") || return 1
 
   expected=$attempt_count
   while (( expected > 0 )); do
@@ -1563,11 +1599,17 @@ validate_lifecycle_document_references() {
       validate_incident_chain "$root" "$latest" "$((attempt_number - 1))" false \
         || return $?
       validate_incident_reference "$root" || return 1
-      recovery_operation=$(recovery_operation_for_root_manifest "$_manifest_json") || return 1
+      recovery_operation=$(recovery_operation_for_lineage "$_manifest_json" \
+        "$(jq -er '.operation' <<< "$saved_manifest")") || return 1
       [[ $(jq -r '.operation' <<< "$saved_manifest") == "$recovery_operation" ]] \
         || return 1
       validate_recovery_manifest_evolution "$_manifest_json" "$saved_manifest" \
         "$recovery_operation" || return 1
+      if [[ "$recovery_operation" == publication-recovery && "$attempt_number" -gt 1 ]]; then
+        validate_incident_reference "$(jq -c '.recovery.previous_attempt' <<< "$saved_manifest")" || return 1
+        validate_recovery_manifest_evolution "$_manifest_json" "$saved_manifest" \
+          "$recovery_operation" || return 1
+      fi
       _manifest_json="$saved_manifest"
       _manifest_id="$saved_manifest_id"
       _manifest_sha256="$saved_manifest_hash"
@@ -2152,7 +2194,7 @@ begin_producer_lifecycle_transaction() {
 
 write_recovery_attempt_transition_lifecycle() {
   local transaction_id="$1" manifest="$2" timestamp="$3" attempt_number
-  local generation document
+  local generation document observed selected_lifecycle="$_lifecycle_json"
   [[ "$_lifecycle_state" == recovery-required ]] || return 1
   attempt_number=$((_recovery_attempt_count + 1))
   (( attempt_number <= MAX_RECOVERY_ATTEMPT_SEALS )) || return 2
@@ -2183,6 +2225,13 @@ write_recovery_attempt_transition_lifecycle() {
     ' <<< "$_lifecycle_json") || return 1
   validate_lifecycle_json "$document" || return 1
   validate_lifecycle_document_references "$document" || return 1
+  if [[ "$_transaction_operation" == publication-recovery ]]; then
+    # Recheck after the potentially long historical closure validation, at the
+    # last local boundary before publishing the new attempt's transition.
+    observed=$(read_control_document "$(lifecycle_file_path)") || return 1
+    json_is '.[0] == .[1]' "[$observed,$selected_lifecycle]" || return 1
+    publication_recovery_selection_is_locked && lifecycle_package_boundary_is_clear || return 1
+  fi
   printf '%s\n' "$document" | atomic_write_control_file "$(lifecycle_file_path)" 644
 }
 

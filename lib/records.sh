@@ -21,6 +21,7 @@ readonly UNCONFIGURE_READ_SCHEMAS='[1,2]'
 readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 readonly PUBLICATION_RECORD_SCHEMA_VERSION=1
 readonly PUBLICATION_INVOCATION_START_SCHEMA_VERSION=2
+readonly PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION=2
 # This is stable identity, separate from boot-stage mount/inode observations.
 # shellcheck disable=SC2016 # jq schema definitions, not shell expressions.
 readonly PUBLICATION_CONTEXT_JQ_DEFS='
@@ -73,7 +74,8 @@ validate_publication_record_json() {
   directory=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
   jq -e --arg id "$transaction_id" --argjson ordinal "$ordinal" --argjson previous "$previous" \
     --arg directory "$directory" --argjson uid "$(control_owner_uid)" --argjson schema "$PUBLICATION_RECORD_SCHEMA_VERSION" \
-    --argjson start_schema "$PUBLICATION_INVOCATION_START_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
+    --argjson start_schema "$PUBLICATION_INVOCATION_START_SCHEMA_VERSION" \
+    --argjson recovery_schema "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
     def resource_id: type == "string" and test("^[A-Za-z0-9_-]{1,64}$");
     def strict_resource_id: type == "string" and test("\\A[A-Za-z0-9_-]{1,64}\\z");
     def strict_digest: type == "string" and test("\\A[0-9a-f]{64}\\z");
@@ -113,11 +115,17 @@ validate_publication_record_json() {
         (.parent_identity == null or (.parent_identity | identity))));
     type == "object" and keys == ["body","invocation","kind","ordinal","previous","recorded_at",
       "schema_version","transaction_id","writer_version"] and
-    .schema_version == (if .kind == "invocation-start" then $start_schema else $schema end) and
+    .schema_version == (if .kind == "invocation-start" then $start_schema
+      elif .kind == "recovery-basis" then $recovery_schema else $schema end) and
     .transaction_id == $id and (.invocation | uuid) and
     .ordinal == $ordinal and .previous == $previous and (.recorded_at | timestamp) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
-    (if .kind == "intent" then
+     (if .kind == "recovery-basis" then
+        .ordinal == 1 and .previous == null and (.invocation | length == 36) and
+        (.body | type == "object" and keys == ["basis"] and
+          (.basis | type == "object" and .scope == "original-invocation-basis")) and
+        .body.basis.invocation == .invocation
+      elif .kind == "intent" then
        (.body | type == "object" and keys == (["configuration","esp_path","operation","resources"] +
          (if has("publication") then ["publication"] else [] end) | sort) and
         (if has("publication") then (.publication | type == "object" and keys == ["kind","model"] and
@@ -210,6 +218,10 @@ validate_publication_records() {
   directory=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
   references=$(jq -c '.publication_records // []' <<<"$manifest") || return 1
   total=$(jq -r 'length' <<<"$references") || return 1
+  if json_is '.kind == "recovery-attempt" and .operation == "publication-recovery"' "$manifest"; then
+    validate_publication_recovery_records "$transaction_id" "$manifest" "$pending"
+    return "$?"
+  fi
   (( total > 0 )) || return 0
   cache_key="$transaction_id:$(control_owner_uid):$(sha256_text "$references")"
   if [[ -z $pending && -n ${_publication_validation_cache[$cache_key]:-} ]]; then
@@ -249,6 +261,7 @@ validate_publication_records() {
     kind=$(jq -r '.kind' <<<"$document") || return 1
     [[ -z ${terminals[$invocation]:-} ]] || return 1
     case $kind in
+      recovery-basis) return 1 ;;
       invocation-start)
         [[ -z ${intents[$invocation]:-} && -z ${contexts[$invocation]:-} ]] || return 1
         intents[$invocation]=$(jq -c '.body.intent' <<<"$document") || return 1
@@ -448,6 +461,72 @@ validate_publication_records() {
   [[ -n $pending ]] || _publication_validation_cache[$cache_key]=$cached_files
 }
 
+# The first record of a preparatory recovery attempt binds its actual original
+# basis. Do not use the root journal's local-file-only cache for cross-root data.
+# This validates historical data only, including a hash-bound prior selection;
+# the constructor separately proves that selection is current under both locks.
+validate_publication_recovery_records() {
+  local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior
+  local _publication_original_basis='' _publication_member_record=''
+  json_is '.publication_records | length == 1' "$manifest" || return 1
+  reference=$(jq -c '.publication_records[0]' <<<"$manifest") || return 1
+  if [[ -n $pending ]]; then
+    document=$pending
+    json_is '.[0].schema_version == .[1].schema_version' "[$reference,$document]" || return 1
+    [[ $(jq -r '.path' <<<"$reference") == "$(dirname "$(lifecycle_manifest_path "$transaction_id")")/publication-1.json" &&
+      $(jq -r '.sha256' <<<"$reference") == "$(sha256_text "$document"$'\n')" ]] || return 1
+    validate_publication_record_json "$transaction_id" 1 null "$document" || return 1
+  else
+    publication_read_manifest_member "$transaction_id" "$manifest" "$reference" || return 1
+    document=$_publication_member_record
+  fi
+  json_is '.kind == "recovery-basis" and .schema_version == 2' "$document" || return 1
+  basis=$(jq -c '.body.basis' <<<"$document") || return 1
+  publication_load_complete_original_basis "$(jq -c '.recovery.root_incident' <<<"$manifest")" \
+    "$(jq -r '.invocation' <<<"$document")" || return 1
+  json_is '.[0] == .[1]' "[$basis,$_publication_original_basis]" || return 1
+  prior=$(publication_capture_hashed_document "$(jq -r '.backups[0].path' <<<"$manifest")" \
+    "$(jq -r '.backups[0].sha256' <<<"$manifest")") || return 1
+  validate_lifecycle_json "$prior" || return 1
+  # Do not recursively validate the prior backup's entire chain here. The chain
+  # reader validates every seal/evolution once; recursion would grow with retries.
+  # shellcheck disable=SC2016 # jq-local prior/attempt/basis values.
+  json_is '.[0] as $prior | .[1] as $attempt | .[2] as $basis |
+    $prior.state == "recovery-required" and
+    $prior.transaction.root_incident == $attempt.recovery.root_incident and
+    $prior.transaction.last_recovery_attempt == $attempt.recovery.previous_attempt and
+    $prior.transaction.attempt_count + 1 == $attempt.recovery.attempt_number and
+    $prior.transaction.id == $basis.root.id and $prior.transaction.operation == $basis.root_operation and
+    $prior.transaction.manifest == ($basis.root.path | sub("/incident.json$"; "/manifest.json"))' \
+    "[$prior,$manifest,$basis]"
+}
+
+validate_publication_recovery_evolution() {
+  local previous=$1 current=$2 previous_record current_record root
+  local _publication_member_record=''
+  json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
+    .prior_state == "recovery-required" and .target_state == "active" and
+    .file_rollback_policy == "preserve" and .status != "completed" and
+    .firmware_backup == null and .enrollment_plan == null and .firmware_writes == []' "$current" || return 1
+  validate_publication_recovery_records "$(jq -r '.id' <<<"$current")" "$current" || return 1
+  root=$(jq -c '.recovery.root_incident' <<<"$current") || return 1
+  if json_is '.kind == "root"' "$previous"; then
+    recovery_operation_for_lineage "$previous" publication-recovery >/dev/null || return 1
+    json_is '.[0].id == .[1].id and .[0].operation == .[1].operation' "[$previous,$root]"
+  else
+    json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
+      .file_rollback_policy == "preserve"' "$previous" || return 1
+    json_is '.[0].recovery.root_incident == .[1].recovery.root_incident' "[$previous,$current]" || return 1
+    publication_read_manifest_member "$(jq -r '.id' <<<"$previous")" "$previous" \
+      "$(jq -c '.publication_records[0]' <<<"$previous")" || return 1
+    previous_record=$_publication_member_record
+    publication_read_manifest_member "$(jq -r '.id' <<<"$current")" "$current" \
+      "$(jq -c '.publication_records[0]' <<<"$current")" || return 1
+    current_record=$_publication_member_record
+    json_is '.[0].body == .[1].body and .[0].invocation == .[1].invocation' "[$previous_record,$current_record]"
+  fi
+}
+
 validate_publication_retained_file() {
   local transaction_id=$1 reference=$2 directory path
   directory=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
@@ -479,6 +558,7 @@ append_publication_record() {
   _publication_record_reference=''
   schema=$PUBLICATION_RECORD_SCHEMA_VERSION
   [[ $kind != invocation-start ]] || schema=$PUBLICATION_INVOCATION_START_SCHEMA_VERSION
+  [[ $kind != recovery-basis ]] || schema=$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION
   producer_session_context_is_owned || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   json_is '.schema_version == 3 and .status == "transition"' "$_manifest_json" || return 1

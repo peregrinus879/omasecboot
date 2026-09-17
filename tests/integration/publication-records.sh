@@ -1166,6 +1166,375 @@ expect_basis_status() {
   if (( expected == 0 )); then [[ -n $_publication_original_basis && $_publication_original_basis != stale-output ]]
   else [[ -z $_publication_original_basis ]] || fail_test 'failed basis retained stale output'; fi
 }
+recovery_basis_constructor() {
+  local root_manifest root_seal root_journal first_attempt first_seal first_manifest original
+  basis_complete_fixture
+  basis_seal_fixture
+  publication_load_complete_original_basis "$BASIS_ROOT_REF" "$INVOCATION"
+  original=$_publication_original_basis
+  root_manifest=$(sha256_file "$TXDIR/manifest.json")
+  root_seal=$(sha256_file "$TXDIR/incident.json")
+  root_journal=$(journal_fingerprint)
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  first_attempt=$_transaction_id
+  current_transition_is_owned
+  read_transaction_manifest "$first_attempt"
+  json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
+    .file_rollback_policy == "preserve" and .recovery.attempt_number == 1 and
+    (.publication_records | length) == 1 and all(.domain_records[]; . == null)' "$_manifest_json"
+  find_publication_record "$INVOCATION" recovery-basis
+  json_is '.[0].basis == .[1]' "[$_publication_found_body,$original]"
+  if commit_lifecycle_recovery_attempt; then fail_test 'preparatory attempt completed'; fi
+  read_lifecycle
+  [[ $_lifecycle_state == transition ]]
+  rollback_and_mark_recovery 24 'fixture publication preparation interrupted'
+  load_recovery_context
+  [[ $_recovery_attempt_count == 1 ]]
+  first_seal=$(sha256_file "$(lifecycle_incident_path "$first_attempt")")
+  first_manifest=$(sha256_file "$(lifecycle_manifest_path "$first_attempt")")
+  if run_registered_recovery_locked; then fail_test 'preparatory attempt enabled public execution'; fi
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  current_transition_is_owned
+  read_transaction_manifest "$_transaction_id"
+  json_is '.recovery.attempt_number == 2 and .recovery.previous_attempt.ordinal == 1' "$_manifest_json"
+  rollback_and_mark_recovery 25 'fixture second publication preparation interrupted'
+  load_recovery_context
+  [[ $_recovery_attempt_count == 2 ]]
+  expect_selection_status 0 "$BASIS_ROOT_REF" "$INVOCATION"
+  [[ $(sha256_file "$TXDIR/manifest.json") == "$root_manifest" &&
+    $(sha256_file "$TXDIR/incident.json") == "$root_seal" && $(journal_fingerprint) == "$root_journal" &&
+    $(sha256_file "$(lifecycle_incident_path "$first_attempt")") == "$first_seal" &&
+    $(sha256_file "$(lifecycle_manifest_path "$first_attempt")") == "$first_manifest" ]]
+}
+recovery_basis_refusals() {
+  local before flags
+  basis_complete_fixture
+  basis_seal_fixture
+  before=$(basis_fixture_fingerprint)
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" 88888888-8888-4888-8888-888888888888; then return 1; fi
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION" extra; then return 1; fi
+  _transaction_active=true
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  _transaction_active=false
+  ln -s "$CASE_DIR/no-marker-target" "$(snapshot_restore_lock_path)"
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  rm -- "$(snapshot_restore_lock_path)"
+  touch "$(pacman_database_lock_path)"
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  rm -- "$(pacman_database_lock_path)"
+  flags=$_OMASECBOOT_LIMINE_LOCK_OWNED
+  _OMASECBOOT_LIMINE_LOCK_OWNED=false
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  _OMASECBOOT_LIMINE_LOCK_OWNED=$flags
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+}
+recovery_basis_incomplete() {
+  local before
+  basis_complete_fixture
+  basis_seal_fixture
+  before=$(basis_fixture_fingerprint)
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+}
+recovery_basis_schema_fences() {
+  local manifest altered filter before body
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  read_transaction_manifest "$_transaction_id"
+  manifest=$_manifest_json
+  before=$(sha256_file "$(lifecycle_manifest_path "$_transaction_id")")
+  for filter in '.publication_records=[]' '.schema_version=2 | del(.publication_records)' \
+    '.kind="root" | .recovery=null | .prior_state="active"' '.operation="software-recovery"' \
+    '.operation="producer-recovery"' '.target_state="disabled"' '.file_rollback_policy="restore"' \
+    '.current_phase="retain-originals"' '.completed_phases=["retain-originals"]' \
+    '.publication_records += .publication_records' \
+    '.status="completed" | .completed_at=.created_at' \
+    '.domain_records.final_proof=.publication_records[0]' \
+    '.backups += [{kind:"absent-file",path:null,sha256:null,target:"/boot/foreign",uid:null,gid:null,mode:null}]'; do
+    altered=$(jq -c "$filter" <<<"$manifest")
+    if validate_transaction_manifest_json "$_transaction_id" "$altered" false; then
+      fail_test "preparatory attempt admitted $filter"
+    fi
+  done
+  find_publication_record "$INVOCATION" recovery-basis
+  body=$_publication_found_body
+  append_publication_record "$INVOCATION" recovery-basis "$body"
+  if append_publication_record "$INVOCATION" intent "$INTENT"; then return 1; fi
+  [[ $(sha256_file "$(lifecycle_manifest_path "$_transaction_id")") == "$before" ]]
+}
+recovery_basis_root_refused() {
+  local original record before
+  basis_complete_fixture
+  basis_seal_fixture
+  publication_load_complete_original_basis "$BASIS_ROOT_REF" "$INVOCATION"
+  original=$_publication_original_basis
+  rm -- "$(lifecycle_file_path)"
+  detach_transaction_context
+  begin_lifecycle_transaction sign active
+  preserve_transaction_files_on_failure
+  before=$(sha256_file "$(lifecycle_manifest_path "$_transaction_id")")
+  record=$(jq -cn --argjson basis "$original" '{basis:$basis}')
+  if append_publication_record "$INVOCATION" recovery-basis "$record"; then return 1; fi
+  [[ $(sha256_file "$(lifecycle_manifest_path "$_transaction_id")") == "$before" &&
+    ! -e $(dirname "$(lifecycle_manifest_path "$_transaction_id")")/publication-1.json ]]
+}
+recovery_basis_contradictions() {
+  local manifest record path altered filter candidate prior prior_path
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  read_transaction_manifest "$_transaction_id"
+  manifest=$_manifest_json
+  path=$(jq -r '.publication_records[0].path' <<<"$manifest")
+  record=$(read_control_document "$path")
+  for filter in '.schema_version=1' '.kind="invocation-start"' '.ordinal=2' \
+    '.body.basis.extra=true' '.body.basis.root.sha256=("0"*64)' \
+    '.body.basis.configuration=.body.basis.plan' '.body.basis.resources=[]' \
+    '.invocation="88888888-8888-4888-8888-888888888888" | .body.basis.invocation=.invocation'; do
+    altered=$(jq -c "$filter" <<<"$record")
+    printf '%s\n' "$altered" >"$path"
+    candidate=$(jq -c --arg hash "$(sha256_file "$path")" '.publication_records[0].sha256=$hash' <<<"$manifest")
+    if validate_transaction_manifest_json "$_transaction_id" "$candidate"; then
+      fail_test "hash-valid recovery basis admitted $filter"
+    fi
+  done
+  printf '%s\n' "$record" >"$path"
+  prior_path=$(jq -r '.backups[0].path' <<<"$manifest")
+  prior=$(read_control_document "$prior_path")
+  for filter in '.transaction.attempt_count=1' \
+    '.transaction.root_incident.sha256=("0"*64)' \
+    '.transaction.id="88888888-8888-4888-8888-888888888888"'; do
+    jq -c "$filter" <<<"$prior" >"$prior_path"
+    candidate=$(jq -c --arg hash "$(sha256_file "$prior_path")" '.backups[0].sha256=$hash' <<<"$manifest")
+    if validate_transaction_manifest_json "$_transaction_id" "$candidate"; then
+      fail_test "hash-valid prior lifecycle admitted $filter"
+    fi
+  done
+  printf '%s\n' "$prior" >"$prior_path"
+  read_transaction_manifest "$_transaction_id"
+}
+recovery_basis_original_closure() {
+  local path
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  read_transaction_manifest "$_transaction_id"
+  if [[ $RECOVERY_TAMPER == record ]]; then path=$TXDIR/publication-1.json
+  else path=$(jq -r '.retained.path' <<<"$STAGE"); fi
+  printf 'changed original closure\n' >>"$path"
+  if read_transaction_manifest "$_transaction_id"; then fail_test 'new attempt trusted cached original authority'; fi
+}
+recovery_basis_stale() {
+  local attempt
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  attempt=$_transaction_id
+  detach_transaction_context
+  # A different boot invalidates the real old owner without changing its seal
+  # or inventing a prepared/executor result. Only the fixture boot observation is replaced.
+  # shellcheck disable=SC2329
+  boot_id_value() { printf '99999999-9999-4999-8999-999999999999\n'; }
+  reconcile_stale_lifecycle
+  load_recovery_context
+  [[ $_recovery_attempt_count == 1 ]]
+  read_incident_seal "$attempt"
+  json_is '.incident_status == "stale" and .kind == "attempt"' "$_incident_json"
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  current_transition_is_owned
+  rollback_and_mark_recovery 26 'fixture post-boot retry failed'
+  load_recovery_context
+  [[ $_recovery_attempt_count == 2 ]]
+}
+recovery_basis_begin_window() {
+  local before rc=0
+  basis_complete_fixture
+  basis_seal_fixture
+  before=$(read_control_document "$(lifecycle_file_path)")
+  # shellcheck disable=SC2329
+  lifecycle_failpoint() { [[ $1 != "$RECOVERY_WINDOW" ]]; }
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION" || rc=$?
+  (( rc != 0 )) || fail_test 'recovery begin failpoint did not fire'
+  abandon_failed_begin "$rc" 'fixture recovery constructor'
+  read_lifecycle
+  [[ $_lifecycle_state == recovery-required && $_transaction_active == false ]]
+  if [[ $RECOVERY_WINDOW == after-attempt-transition-write ]]; then
+    json_is '.transaction.attempt_count == 1' "$_lifecycle_json"
+  else json_is '.[0] == .[1]' "[$before,$_lifecycle_json]"; fi
+}
+recovery_basis_selection_drift() {
+  basis_complete_fixture
+  basis_seal_fixture
+  # shellcheck disable=SC2329
+  lifecycle_failpoint() {
+    [[ $1 == after-attempt-manifest-write ]] || return 0
+    jq "$RECOVERY_DRIFT" "$(lifecycle_file_path)" >"$CASE_DIR/drifted-lifecycle"
+    mv -- "$CASE_DIR/drifted-lifecycle" "$(lifecycle_file_path)"
+    read_lifecycle || return 1
+    printf '%s\n' "$_lifecycle_json" >"$CASE_DIR/expected-drift"
+  }
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then return 1; fi
+  read_lifecycle
+  [[ $_transaction_active == false && $_lifecycle_state == recovery-required ]]
+  json_is '.[0] == .[1]' "[$_lifecycle_json,$(read_control_document "$CASE_DIR/expected-drift")]"
+  json_is '.transaction.attempt_count == 0' "$_lifecycle_json"
+}
+recovery_basis_no_invocation_switch() {
+  local first=$INVOCATION other=66666666-6666-4666-8666-666666666666 other_basis before path record manifest
+  basis_complete_fixture
+  INVOCATION=$other basis_complete_fixture
+  basis_seal_fixture
+  publication_load_complete_original_basis "$BASIS_ROOT_REF" "$other"
+  other_basis=$_publication_original_basis
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$first"
+  rollback_and_mark_recovery 27 'fixture selected original interrupted'
+  before=$(basis_fixture_fingerprint)
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$other"; then return 1; fi
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$first"
+  read_transaction_manifest "$_transaction_id"
+  manifest=$_manifest_json
+  path=$(jq -r '.publication_records[0].path' <<<"$manifest")
+  record=$(jq -c --arg other "$other" --argjson basis "$other_basis" \
+    '.invocation=$other | .body.basis=$basis' "$path")
+  printf '%s\n' "$record" >"$path"
+  manifest=$(jq -c --arg hash "$(sha256_file "$path")" '.publication_records[0].sha256=$hash' <<<"$manifest")
+  printf '%s\n' "$manifest" >"$(lifecycle_manifest_path "$_transaction_id")"
+  # Individually valid root-selected data must still join the immediately prior
+  # attempt, including while transition is live rather than already sealed.
+  validate_transaction_manifest_json "$_transaction_id" "$manifest"
+  if read_lifecycle; then fail_test 'live retry changed selected original invocation'; fi
+}
+recovery_basis_late_boundary() {
+  local rc=0 expected
+  basis_complete_fixture
+  basis_seal_fixture
+  eval "$(declare -f validate_lifecycle_document_references | \
+    sed '1s/validate_lifecycle_document_references/fixture_recovery_validate_references/')"
+  # shellcheck disable=SC2329
+  validate_lifecycle_document_references() {
+    fixture_recovery_validate_references "$@" || return "$?"
+    if [[ ! -e $CASE_DIR/late-injected ]] && json_is \
+      '.state == "transition" and .transaction.operation == "publication-recovery"' "$1"; then
+      case $RECOVERY_LATE in
+        marker) touch "$(snapshot_restore_lock_path)" ;;
+        pacman) touch "$(pacman_database_lock_path)" ;;
+        boot|repair)
+          local path
+          if [[ $RECOVERY_LATE == boot ]]; then path=$(limine_lock_path)
+          else path="$(state_dir_path)/repair.lock"; fi
+          mv -- "$path" "$path.old"
+          touch "$path" ;;
+        selection|refreshed-selection)
+          jq '.updated_at="2000-01-01T00:00:00Z"' "$(lifecycle_file_path)" >"$CASE_DIR/late-lifecycle"
+          mv -- "$CASE_DIR/late-lifecycle" "$(lifecycle_file_path)"
+          [[ $RECOVERY_LATE != refreshed-selection ]] || read_lifecycle || return 1 ;;
+      esac
+      sha256_file "$(lifecycle_file_path)" >"$CASE_DIR/late-expected-hash"
+      touch "$CASE_DIR/late-injected"
+    fi
+  }
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION" || rc=$?
+  (( rc != 0 )) && [[ -e $CASE_DIR/late-injected ]] || fail_test 'late boundary was not refused'
+  abandon_failed_begin "$rc" 'fixture late recovery refusal'
+  read -r expected <"$CASE_DIR/late-expected-hash"
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$expected" && $_transaction_active == false ]]
+  read_lifecycle
+  json_is '.state == "recovery-required" and .transaction.attempt_count == 0' "$_lifecycle_json"
+  if [[ $RECOVERY_LATE == boot ]]; then [[ $_OMASECBOOT_LIMINE_LOCK_OWNED == false ]]; fi
+  if [[ $RECOVERY_LATE == repair ]]; then [[ $_OMASECBOOT_REPAIR_LOCK_OWNED == false ]]; fi
+}
+recovery_basis_sync_window() {
+  local rc=0 before attempt_directory
+  basis_complete_fixture
+  basis_seal_fixture
+  before=$(read_control_document "$(lifecycle_file_path)")
+  attempt_directory=$(dirname "$(lifecycle_manifest_path 77777777-7777-4777-8777-777777777777)")
+  # shellcheck disable=SC2329
+  new_transaction_id() { printf '77777777-7777-4777-8777-777777777777\n'; }
+  eval "$(declare -f durable_sync | sed '1s/durable_sync/fixture_recovery_sync/')"
+  # shellcheck disable=SC2329
+  durable_sync() {
+    local inject=false
+    if [[ ! -e $CASE_DIR/recovery-sync-injected ]]; then
+      case $RECOVERY_SYNC in
+        prior-file) [[ $1 != "$attempt_directory/prior-lifecycle.json" ]] || inject=true ;;
+        basis-file|basis-substitution) [[ $1 != "$attempt_directory/publication-1.json" ]] || inject=true ;;
+        basis-directory)
+          [[ $1 != "$attempt_directory" || ! -e $attempt_directory/publication-1.json ||
+            -e $attempt_directory/manifest.json ]] || inject=true ;;
+        manifest-directory)
+          [[ $1 != "$attempt_directory" || ! -e $attempt_directory/manifest.json ]] || inject=true ;;
+        lifecycle-directory)
+          if [[ $1 == "$(state_dir_path)" ]] && json_is '.state == "transition" and
+            .transaction.operation == "publication-recovery"' "$(read_control_document "$(lifecycle_file_path)")"; then inject=true; fi ;;
+      esac
+    fi
+    if [[ $inject == true ]]; then
+      touch "$CASE_DIR/recovery-sync-injected"
+      if [[ $RECOVERY_SYNC == basis-substitution ]]; then
+        fixture_recovery_sync "$@" || return "$?"
+        jq '.body.basis.root_operation="windows-bootnext"' "$1" >"$CASE_DIR/substitute-basis"
+        mv -- "$CASE_DIR/substitute-basis" "$1"
+        return 0
+      fi
+      return 1
+    fi
+    fixture_recovery_sync "$@"
+  }
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION" || rc=$?
+  (( rc != 0 )) && [[ -e $CASE_DIR/recovery-sync-injected ]] || fail_test 'recovery sync fault did not fire'
+  abandon_failed_begin "$rc" 'fixture recovery sync failure'
+  read_lifecycle
+  [[ $_lifecycle_state == recovery-required && $_transaction_active == false ]]
+  if [[ $RECOVERY_SYNC == lifecycle-directory ]]; then
+    json_is '.transaction.attempt_count == 1' "$_lifecycle_json"
+    validate_incident_chain "$BASIS_ROOT_REF" "$(jq -c '.transaction.last_recovery_attempt' <<<"$_lifecycle_json")" 1 false
+  else json_is '.[0] == .[1]' "[$before,$_lifecycle_json]"; fi
+}
+recovery_basis_capacity() {
+  local template record_template seal_template previous ordinal id directory backups record reference manifest seal lifecycle before
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  rollback_and_mark_recovery 28 'fixture first bounded attempt'
+  read_transaction_manifest "$_transaction_id"
+  template=$_manifest_json
+  record_template=$(read_control_document "$(jq -r '.publication_records[0].path' <<<"$template")")
+  seal_template=$(read_control_document "$(lifecycle_incident_path "$_transaction_id")")
+  read_lifecycle
+  previous=$(jq -c '.transaction.last_recovery_attempt' <<<"$_lifecycle_json")
+  # Synthesize immutable data from the real first failure, with each prior
+  # lifecycle binding its own actual predecessor/count. Final validation uses
+  # the real readers; this avoids quadratic repeated constructor work in setup.
+  for ((ordinal=2; ordinal<=MAX_RECOVERY_ATTEMPT_SEALS; ordinal++)); do
+    id=$(new_transaction_id)
+    directory=$(create_transaction_dir "$id")
+    backups=$(prior_lifecycle_backups "$directory")
+    record=$(jq -c --arg id "$id" '.transaction_id=$id' <<<"$record_template")
+    printf '%s\n' "$record" | atomic_create_control_file "$directory/publication-1.json" 600
+    reference=$(transaction_artifact_reference "$directory/publication-1.json" 2)
+    manifest=$(jq -c --arg id "$id" --argjson ordinal "$ordinal" --argjson previous "$previous" \
+      --argjson backups "$backups" --argjson reference "$reference" '
+      .id=$id | .recovery.attempt_number=$ordinal | .recovery.previous_attempt=$previous |
+      .backups=$backups | .publication_records=[$reference]' <<<"$template")
+    printf '%s\n' "$manifest" | atomic_create_control_file "$directory/manifest.json" 600
+    seal=$(jq -c --arg id "$id" --arg manifest "$directory/manifest.json" \
+      --arg hash "$(sha256_file "$directory/manifest.json")" --argjson ordinal "$ordinal" --argjson previous "$previous" '
+      .id=$id | .manifest=$manifest | .manifest_sha256=$hash | .ordinal=$ordinal | .previous_attempt=$previous' <<<"$seal_template")
+    printf '%s\n' "$seal" | atomic_create_control_file "$directory/incident.json" 600
+    previous=$(incident_reference_from_json "$seal" "$directory/incident.json")
+    lifecycle=$(jq -c --argjson previous "$previous" --argjson ordinal "$ordinal" '
+      .generation+=1 | .transaction.last_recovery_attempt=$previous | .transaction.attempt_count=$ordinal' "$(lifecycle_file_path)")
+    printf '%s\n' "$lifecycle" | atomic_write_control_file "$(lifecycle_file_path)" 644
+  done
+  read_lifecycle
+  json_is '.transaction.attempt_count == 32' "$_lifecycle_json"
+  before=$(basis_fixture_fingerprint)
+  if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then fail_test 'publication attempt33 admitted'; fi
+  [[ $(basis_fixture_fingerprint) == "$before" && $_transaction_active == false ]]
+}
 expect_resolver_status() {
   local expected=$1 actual=0
   shift
@@ -2770,5 +3139,30 @@ done
 for SELECTION_FAULT in boot-closed repair-closed boot-flag repair-flag boot-path repair-path contention marker; do
   run_case "selected-basis-lock-$SELECTION_FAULT" selection_lock
 done
+run_case recovery-basis-v1-constructor-and-repeat recovery_basis_constructor
+BASIS_CONTEXT=start run_case recovery-basis-v2-constructor-and-repeat recovery_basis_constructor
+run_case recovery-basis-constructor-precondition-refusals recovery_basis_refusals
+BASIS_PLAN=partial run_case recovery-basis-partial-plan-refused recovery_basis_incomplete
+BASIS_CONTEXT=absent run_case recovery-basis-context-free-refused recovery_basis_incomplete
+run_case recovery-basis-schema-and-completion-fences recovery_basis_schema_fences
+run_case recovery-basis-original-root-refused recovery_basis_root_refused
+run_case recovery-basis-hash-valid-reference-and-prior-contradictions recovery_basis_contradictions
+for RECOVERY_TAMPER in record retained; do
+  run_case "recovery-basis-original-$RECOVERY_TAMPER-rechecked" recovery_basis_original_closure
+done
+run_case recovery-basis-stale-attempt-and-new-boot-retry recovery_basis_stale
+for RECOVERY_WINDOW in after-publication-recovery-basis after-attempt-manifest-write after-attempt-transition-write; do
+  run_case "recovery-basis-begin-$RECOVERY_WINDOW" recovery_basis_begin_window
+done
+RECOVERY_DRIFT='.generation+=1' run_case recovery-basis-generation-drift-before-transition recovery_basis_selection_drift
+RECOVERY_DRIFT='.updated_at="2000-01-01T00:00:00Z"' run_case recovery-basis-whole-lifecycle-drift-before-transition recovery_basis_selection_drift
+run_case recovery-basis-retry-cannot-switch-original-invocation recovery_basis_no_invocation_switch
+for RECOVERY_LATE in marker pacman boot repair selection refreshed-selection; do
+  run_case "recovery-basis-late-$RECOVERY_LATE" recovery_basis_late_boundary
+done
+for RECOVERY_SYNC in prior-file basis-file basis-directory manifest-directory lifecycle-directory basis-substitution; do
+  run_case "recovery-basis-sync-$RECOVERY_SYNC" recovery_basis_sync_window
+done
+run_case recovery-basis-capacity32-preserved-refuse33 recovery_basis_capacity
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"
