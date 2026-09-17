@@ -991,6 +991,172 @@ basis_seal_fixture() {
   validate_incident_reference "$BASIS_ROOT_REF"
   BASIS_MANIFEST=$_manifest_json
 }
+expect_selection_status() {
+  local expected=$1 actual=0
+  shift
+  _publication_selected_original_basis=stale-output
+  publication_load_selected_original_basis "$@" || actual=$?
+  [[ $actual == "$expected" ]] || fail_test "selected basis returned $actual, expected $expected"
+  if (( expected == 0 )); then
+    [[ -n $_publication_selected_original_basis && $_publication_selected_original_basis != stale-output ]]
+  else [[ -z $_publication_selected_original_basis ]] || fail_test 'failed selection retained stale output'; fi
+}
+selection_valid() {
+  local before saved original lifecycle
+  basis_complete_fixture
+  basis_seal_fixture
+  publication_load_complete_original_basis "$BASIS_ROOT_REF" "$INVOCATION"
+  original=$_publication_original_basis lifecycle=$_lifecycle_json
+  # No current source, target or old stage is needed for selected historical data.
+  rm -rf -- "$CASE_DIR/esp"
+  rm -- "$CASE_DIR/source" "$TXDIR"/.publication-input.*
+  before=$(basis_fixture_fingerprint)
+  _lifecycle_state=caller-state _lifecycle_json=caller-lifecycle _lifecycle_generation=999
+  _lifecycle_transaction_id=caller-id _lifecycle_read_status=caller-status
+  _recovery_root_reference=caller-root _recovery_root_manifest_json=caller-root-manifest
+  _recovery_previous_reference=caller-previous _recovery_previous_manifest_json=caller-previous-manifest
+  _recovery_attempt_count=999 _recovery_target_state=caller-target _recovery_terminal_state=caller-terminal
+  _recovery_producer_reference=caller-producer
+  _manifest_json=caller-manifest _manifest_id=caller-manifest-id _manifest_sha256=caller-hash
+  _incident_json=caller-incident _incident_read_status=caller-incident-status
+  _publication_validation_cache=([sentinel]=caller-cache)
+  saved=$(declare -p _lifecycle_state _lifecycle_json _lifecycle_generation _lifecycle_transaction_id _lifecycle_read_status \
+    _recovery_root_reference _recovery_root_manifest_json _recovery_previous_reference _recovery_previous_manifest_json \
+    _recovery_attempt_count _recovery_target_state _recovery_terminal_state _recovery_producer_reference \
+    _manifest_json _manifest_id _manifest_sha256 _incident_json _incident_read_status _publication_validation_cache \
+    _publication_original_basis _transaction_id _transaction_active)
+  basis_reader_tripwires
+  expect_selection_status 0 "$BASIS_ROOT_REF" "$INVOCATION"
+  json_is 'keys == ["basis","lifecycle","schema","scope"] and .schema == 1 and .scope == "selected-original-basis"' \
+    "$_publication_selected_original_basis"
+  json_is '.[0].basis == .[1] and .[0].lifecycle == (.[2] | {generation,transaction})' \
+    "[$_publication_selected_original_basis,$original,$lifecycle]"
+  expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION" extra
+  expect_selection_status 1 "$BASIS_ROOT_REF" 88888888-8888-4888-8888-888888888888
+  [[ $(declare -p _lifecycle_state _lifecycle_json _lifecycle_generation _lifecycle_transaction_id _lifecycle_read_status \
+    _recovery_root_reference _recovery_root_manifest_json _recovery_previous_reference _recovery_previous_manifest_json \
+    _recovery_attempt_count _recovery_target_state _recovery_terminal_state _recovery_producer_reference \
+    _manifest_json _manifest_id _manifest_sha256 _incident_json _incident_read_status _publication_validation_cache \
+    _publication_original_basis _transaction_id _transaction_active) == "$saved" ]]
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+}
+selection_sibling() {
+  local first_root
+  basis_complete_fixture
+  basis_seal_fixture
+  first_root=$BASIS_ROOT_REF
+  rm -- "$(lifecycle_file_path)"
+  detach_transaction_context
+  begin_lifecycle_transaction sign active
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  preserve_transaction_files_on_failure
+  append_publication_record "$INVOCATION" intent "$INTENT"
+  basis_seal_fixture
+  # Same store and invocation, two valid sealed roots. Only today's selection
+  # may be consumed, regardless of cached caller recovery/basis globals.
+  expect_basis_status 0 "$first_root" "$INVOCATION"
+  _recovery_root_reference=$first_root
+  expect_selection_status 2 "$first_root" "$INVOCATION"
+  expect_selection_status 1 "$BASIS_ROOT_REF" "$INVOCATION"
+}
+selection_state() {
+  local root before
+  basis_complete_fixture
+  basis_seal_fixture
+  root=$BASIS_ROOT_REF
+  rm -- "$(lifecycle_file_path)"
+  if [[ $SELECTION_STATE != absent ]]; then
+    detach_transaction_context
+    begin_lifecycle_transaction sign active
+    if [[ $SELECTION_STATE == stable ]]; then commit_lifecycle_transaction; fi
+    detach_transaction_context
+  fi
+  before=$(basis_fixture_fingerprint)
+  expect_selection_status 2 "$root" "$INVOCATION"
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+}
+selection_incomplete() {
+  basis_complete_fixture
+  basis_seal_fixture
+  expect_selection_status 1 "$BASIS_ROOT_REF" "$INVOCATION"
+  if run_registered_recovery_locked; then fail_test 'selection admitted legacy recovery'; fi
+  [[ $(jq -r '.transaction.attempt_count' "$(lifecycle_file_path)") == 0 ]]
+}
+selection_invalid() {
+  local lifecycle invalid before
+  basis_complete_fixture
+  basis_seal_fixture
+  lifecycle=$(read_control_document "$(lifecycle_file_path)")
+  for invalid in '.transaction.attempt_count=33' '.transaction.attempt_count=1' \
+    '.transaction.root_incident.sha256=("0"*64)' '.transaction.id="77777777-7777-4777-8777-777777777777"' \
+    '.schema_version=999'; do
+    jq -c "$invalid" <<<"$lifecycle" >"$(lifecycle_file_path)"
+    before=$(basis_fixture_fingerprint)
+    expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION"
+    [[ $(basis_fixture_fingerprint) == "$before" ]]
+  done
+  printf '%s\n' "$lifecycle" >"$(lifecycle_file_path)"
+  expect_selection_status 2 "$BASIS_ROOT_REF $BASIS_ROOT_REF" "$INVOCATION"
+  expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION"$'\n'
+  printf ' ' >>"$TXDIR/incident.json"
+  expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION"
+}
+selection_fault() {
+  local path
+  case $SELECTION_FAULT in
+    generation)
+      jq '.generation += 1' "$(lifecycle_file_path)" >"$CASE_DIR/new-lifecycle"
+      mv -- "$CASE_DIR/new-lifecycle" "$(lifecycle_file_path)" ;;
+    closure) printf 'changed retained bytes\n' >>"$(jq -r '.retained.path' <<<"$STAGE")" ;;
+    marker) ln -s "$CASE_DIR/absent-marker-target" "$(snapshot_restore_lock_path)" ;;
+    boot-path|repair-path)
+      if [[ $SELECTION_FAULT == boot-path ]]; then path=$(limine_lock_path)
+      else path="$(state_dir_path)/repair.lock"; fi
+      mv -- "$path" "$path.old"
+      touch "$path" ;;
+  esac
+}
+selection_drift() {
+  basis_complete_fixture
+  basis_seal_fixture
+  # Inject after real complete-basis validation, before final lifecycle/lock
+  # rechecks. Filesystem effects cross the reader subshell; no production seam.
+  eval "$(declare -f publication_load_complete_original_basis | \
+    sed '1s/publication_load_complete_original_basis/fixture_selection_original_basis/')"
+  # shellcheck disable=SC2329
+  publication_load_complete_original_basis() {
+    fixture_selection_original_basis "$@" || return "$?"
+    selection_fault
+  }
+  expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION"
+  if [[ $SELECTION_FAULT == boot-path ]]; then [[ $_OMASECBOOT_LIMINE_LOCK_OWNED == false ]]; fi
+  if [[ $SELECTION_FAULT == repair-path ]]; then [[ $_OMASECBOOT_REPAIR_LOCK_OWNED == false ]]; fi
+}
+selection_lock() {
+  local contender
+  basis_complete_fixture
+  basis_seal_fixture
+  case $SELECTION_FAULT in
+    boot-closed) exec 200>&- ;;
+    repair-closed) exec 201>&- ;;
+    boot-flag) _OMASECBOOT_LIMINE_LOCK_OWNED=false ;;
+    repair-flag) _OMASECBOOT_REPAIR_LOCK_OWNED=false ;;
+    contention)
+      # A separate open-file description really holds the current boot lock;
+      # unchanged path identity and stale true flags must not pass selection.
+      exec {contender}>>"$(limine_lock_path)"
+      flock -u 200
+      flock -n "$contender" ;;
+    *) selection_fault ;;
+  esac
+  expect_selection_status 2 "$BASIS_ROOT_REF" "$INVOCATION"
+  case $SELECTION_FAULT in
+    boot-*|contention) [[ $_OMASECBOOT_LIMINE_LOCK_OWNED == false ]] ;;
+    repair-*) [[ $_OMASECBOOT_REPAIR_LOCK_OWNED == false ]] ;;
+    marker) [[ -L $(snapshot_restore_lock_path) ]] ;;
+  esac
+  if [[ $SELECTION_FAULT == contention ]]; then exec {contender}>&-; fi
+}
 expect_basis_status() {
   local expected=$1 actual=0
   shift
@@ -2589,5 +2755,20 @@ BASIS_CONTEXT=start ORIGINAL_RAW=permission run_case original-content-v2-exact-o
 run_case original-content-raw-byte-count-precision original_content_raw_precision
 BASIS_PLAN=partial run_case original-content-incomplete-basis original_content_ineligible_or_corrupt
 run_case original-content-corrupt-retained-closure original_content_ineligible_or_corrupt
+run_case selected-basis-v1-current-read-only selection_valid
+BASIS_CONTEXT=start run_case selected-basis-v2-current-read-only selection_valid
+run_case selected-basis-sibling-current-root selection_sibling
+for SELECTION_STATE in absent stable transition; do
+  run_case "selected-basis-state-$SELECTION_STATE" selection_state
+done
+BASIS_PLAN=partial run_case selected-basis-incomplete-plan selection_incomplete
+BASIS_CONTEXT=absent run_case selected-basis-missing-context selection_incomplete
+run_case selected-basis-invalid-lifecycle-and-evidence selection_invalid
+for SELECTION_FAULT in generation closure marker boot-path repair-path; do
+  run_case "selected-basis-drift-$SELECTION_FAULT" selection_drift
+done
+for SELECTION_FAULT in boot-closed repair-closed boot-flag repair-flag boot-path repair-path contention marker; do
+  run_case "selected-basis-lock-$SELECTION_FAULT" selection_lock
+done
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

@@ -45,6 +45,59 @@ publication_reset_attempt() {
   _publication_original_configuration=''
 }
 
+# Selection runs before a new transaction owns a transition. Reassert the actual
+# locks without acquiring replacement paths or relying on bookkeeping alone.
+# Keep invalidation in the caller's shell so later recovery cannot trust lost FDs.
+publication_recovery_selection_is_locked() {
+  producer_session_validate_lock_bindings || return 1
+  boot_locks_are_held && producer_runtime_is_clear || return 1
+  flock -n 200 || { _OMASECBOOT_LIMINE_LOCK_OWNED=false; return 1; }
+  flock -n 201 || { _OMASECBOOT_REPAIR_LOCK_OWNED=false; return 1; }
+  producer_session_validate_lock_bindings
+}
+
+# publication_load_selected_original_basis EXPECTED_ROOT_REFERENCE INVOCATION
+# Status 0 publishes _publication_selected_original_basis: transient selection
+# plus the existing ref-only original basis. Status 1 is a selected but incomplete
+# invocation; 2 is invalid/unselected evidence, unavailable locks or unsafe state.
+# All failures clear output. Reader/recovery/cache globals remain caller-owned.
+# This samples the full current lifecycle before and after resolution under both
+# locks. It does not create an attempt, classify live targets or permit any write.
+# Consumers must revalidate selection when constructing a new attempt; this value
+# is neither a durable record nor permission that survives release of the locks.
+publication_load_selected_original_basis() {
+  local result rc=0 LC_ALL=C
+  _publication_selected_original_basis=''
+  [[ $# == 2 && ${_transaction_active:-false} == false ]] || return 2
+  publication_recovery_selection_is_locked || return 2
+  # Isolate the existing lifecycle/incident readers and semantic cache, but keep
+  # lock validation/invalidation on both sides in this shell.
+  result=$(
+    local expected=$1 invocation=$2 lifecycle basis status=0 LC_ALL=C
+    (( ${#expected} <= MAX_CONTROL_DOCUMENT_BYTES )) || exit 2
+    expected=$(jq -cse 'if length == 1 then .[0] else error("expected one root reference") end' <<<"$expected") || exit 2
+    load_recovery_context || exit 2
+    lifecycle=$_lifecycle_json
+    json_is '.[0] == .[1]' "[$expected,$_recovery_root_reference]" || exit 2
+    publication_load_complete_original_basis "$_recovery_root_reference" "$invocation" || status=$?
+    (( status == 0 || status == 1 )) || exit 2
+    basis=$_publication_original_basis
+    # Reading again validates the full chain and its external record closure,
+    # not just generation or a cached in-memory recovery root.
+    read_lifecycle || exit 2
+    json_is '.[0] == .[1]' "[$lifecycle,$_lifecycle_json]" || exit 2
+    (( status == 0 )) || exit 1
+    jq -ce '.[0] as $lifecycle | .[1] as $basis |
+      {schema:1,scope:"selected-original-basis",
+       lifecycle:($lifecycle | {generation,transaction}),basis:$basis}' \
+      <<<"[$lifecycle,$basis]" || exit 2
+  ) || rc=$?
+  publication_recovery_selection_is_locked || return 2
+  (( rc != 1 )) || return 1
+  (( rc == 0 && ${#result} + 1 <= MAX_CONTROL_DOCUMENT_BYTES )) || return 2
+  _publication_selected_original_basis=$result
+}
+
 publication_retain_original_configuration() {
   local invocation=$1 intent=$2 source expected directory destination temporary hash bytes reference
   _publication_original_configuration=''
