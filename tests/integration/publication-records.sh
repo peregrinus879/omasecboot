@@ -15,6 +15,8 @@ source "$ROOT_DIR/lib/records.sh"
 # shellcheck source=/dev/null
 source "$ROOT_DIR/lib/software.sh"
 # shellcheck source=/dev/null
+source "$ROOT_DIR/lib/sign.sh"
+# shellcheck source=/dev/null
 source "$ROOT_DIR/lib/producer-session.sh"
 # Sourcing supplies the pure comparator; context acquisition is fixture-only.
 # shellcheck source=/dev/null
@@ -705,10 +707,8 @@ context_historical() {
 }
 context_runtime_fixture() {
   local definition
-  # Load the actual bounded copier only in these runtime cases. Sourcing this
-  # module performs no key, signer or host-platform acquisition.
-  # shellcheck source=/dev/null
-  source "$ROOT_DIR/lib/sign.sh"
+  # The suite sources sign.sh once above. Use its actual bounded copier; a
+  # second source would redefine readonly constants before these assertions run.
   _producer_session_io_timeout=2
   RUNTIME_COLLECTED=0 RUNTIME_COPY_CALLS=0 RUNTIME_LIVE_OBSERVATIONS=0
   RUNTIME_ORIGINAL_PATH=$TXDIR/publication-data-$INVOCATION-original-configuration
@@ -1534,6 +1534,579 @@ recovery_basis_capacity() {
   before=$(basis_fixture_fingerprint)
   if begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"; then fail_test 'publication attempt33 admitted'; fi
   [[ $(basis_fixture_fingerprint) == "$before" && $_transaction_active == false ]]
+}
+recovery_copy_valid() {
+  local original_manifest original_seal original_journal id before body reference source destination first
+  basis_complete_fixture
+  basis_seal_fixture
+  original_manifest=$(sha256_file "$TXDIR/manifest.json")
+  original_seal=$(sha256_file "$TXDIR/incident.json")
+  original_journal=$(journal_fingerprint)
+  if [[ ${COPY_EXPIRED:-false} == true ]]; then
+    rm -rf -- "$CASE_DIR/esp"
+    rm -- "$CASE_DIR/source" "$TXDIR"/.publication-input.*
+  fi
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  # Fresh signature/platform/target authority belongs to the later engine. A
+  # data copy must not sign, render or read expired producer/boot objects.
+  # shellcheck disable=SC2329
+  publication_run_sbctl() { fail_test 'recovery copy invoked signing/verification'; }
+  for id in kernel configuration; do
+    retain_publication_recovery_input "$id"
+    body=$_publication_recovery_copy_record reference=$_publication_recovery_copy_reference
+    source=$(jq -r '.original_retained.path' <<<"$body")
+    destination=$(jq -r '.file.path' <<<"$body")
+    cmp -- "$source" "$destination"
+    [[ $(stat -c %a "$destination") == 400 && $source != "$destination" ]]
+    json_is '.[0].file.sha256 == .[0].original_retained.sha256 and
+      .[0].file.bytes == .[0].original_retained.bytes and .[1].schema_version == 2' "[$body,$reference]"
+    if [[ $id == kernel && ${BASIS_SIGNING:-bytes} == local-efi ]]; then
+      json_is '.original_source.sha256 != .file.sha256 and .signing == "local-efi"' "$body"
+    fi
+    publication_resolve_sealed_record "$BASIS_ROOT_REF" "$(jq -c '.original_record' <<<"$body")" \
+      "$INVOCATION" "$(if [[ $id == configuration ]]; then printf configuration; else printf retained; fi)"
+    first=$reference
+    before=$(basis_fixture_fingerprint)
+    retain_publication_recovery_input "$id"
+    [[ $_publication_recovery_copy_reference == "$first" && $(basis_fixture_fingerprint) == "$before" ]]
+  done
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 5' "$_manifest_json"
+  if commit_lifecycle_recovery_attempt; then fail_test 'private copies enabled completion'; fi
+  rollback_and_mark_recovery 29 'fixture complete private copies interrupted'
+  load_recovery_context
+  [[ $_recovery_attempt_count == 1 ]]
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  retain_publication_recovery_input kernel
+  [[ $(sha256_file "$TXDIR/manifest.json") == "$original_manifest" &&
+    $(sha256_file "$TXDIR/incident.json") == "$original_seal" && $(journal_fingerprint) == "$original_journal" ]]
+}
+recovery_copy_historical_root_name() {
+  local legacy current
+  legacy=$(jq -c '.operation="publication-recovery" | .schema_version=2 | del(.publication_records)' <<<"$_manifest_json")
+  validate_transaction_manifest_json "$_transaction_id" "$legacy"
+  current=$(jq -c '.schema_version=3 | .publication_records=[]' <<<"$legacy")
+  validate_transaction_manifest_json "$_transaction_id" "$current"
+  if recovery_operation_for_lineage "$legacy" publication-recovery; then return 1; fi
+  if recovery_operation_for_root_manifest "$legacy"; then return 1; fi
+  commit_lifecycle_transaction
+  begin_lifecycle_transaction publication-recovery active
+  if retain_publication_recovery_input kernel; then return 1; fi
+  [[ -z $_publication_recovery_copy_record && -z $_publication_recovery_copy_reference ]]
+}
+recovery_copy_cache_fixture() {
+  basis_complete_fixture
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  retain_publication_recovery_input kernel
+  COPY_BODY=$_publication_recovery_copy_record
+  COPY_REF=$_publication_recovery_copy_reference
+  read_transaction_manifest "$_transaction_id"
+  COPY_MANIFEST=$_manifest_json
+  COPY_CACHE_SLOT="$_transaction_id:$(control_owner_uid)"
+  [[ -n ${_publication_recovery_validation_cache[$COPY_CACHE_SLOT]:-} ]]
+  eval "$(declare -f publication_load_complete_original_basis | \
+    sed '1s/publication_load_complete_original_basis/fixture_copy_load_basis/')"
+  # Count expensive reconstruction without logging arguments or control data.
+  # shellcheck disable=SC2329
+  publication_load_complete_original_basis() {
+    printf 'cold\n' >>"$CASE_DIR/cold-basis-calls"
+    fixture_copy_load_basis "$@"
+  }
+}
+recovery_copy_cache_reuse() {
+  local before
+  recovery_copy_cache_fixture
+  before=$(basis_fixture_fingerprint)
+  read_transaction_manifest "$_transaction_id"
+  validate_publication_recovery_records "$_transaction_id" "$COPY_MANIFEST"
+  [[ ! -e $CASE_DIR/cold-basis-calls ]] || fail_test 'warm copy validation reconstructed original semantics'
+  [[ $(basis_fixture_fingerprint) == "$before" ]]
+}
+recovery_copy_cache_tamper() {
+  local path
+  recovery_copy_cache_fixture
+  case $COPY_CACHE_FAULT in
+    original-record) path=$TXDIR/publication-1.json ;;
+    original-retained) path=$(jq -r '.original_retained.path' <<<"$COPY_BODY") ;;
+    copied|copied-mode) path=$(jq -r '.file.path' <<<"$COPY_BODY") ;;
+    record) path=$(jq -r '.path' <<<"$COPY_REF") ;;
+    prior) path=$(jq -r '.backups[0].path' <<<"$COPY_MANIFEST") ;;
+  esac
+  if [[ $COPY_CACHE_FAULT == copied-mode ]]; then chmod 644 "$path"
+  else chmod u+w "$path"; printf 'changed cached dependency\n' >>"$path"; fi
+  if validate_publication_recovery_records "$_transaction_id" "$COPY_MANIFEST"; then
+    fail_test "warm cache ignored $COPY_CACHE_FAULT"
+  fi
+  [[ -z ${_publication_recovery_validation_cache[$COPY_CACHE_SLOT]:-} ]] || fail_test 'failed cache entry was retained'
+}
+recovery_copy_cache_key_and_pending() {
+  local altered pending saved
+  recovery_copy_cache_fixture
+  altered=$(jq -c '.recovery.attempt_number+=1' <<<"$COPY_MANIFEST")
+  if validate_publication_recovery_records "$_transaction_id" "$altered"; then fail_test 'cache ignored changed lineage'; fi
+  [[ -s $CASE_DIR/cold-basis-calls ]]
+  read_transaction_manifest "$_transaction_id"
+  saved=${_publication_recovery_validation_cache[$COPY_CACHE_SLOT]}
+  pending=$(jq -c '.body.original_source.sha256=("0"*64)' "$(jq -r '.path' <<<"$COPY_REF")")
+  if validate_publication_recovery_records "$_transaction_id" "$COPY_MANIFEST" "$pending"; then
+    fail_test 'warm cache rescued a conflicting pending record'
+  fi
+  [[ ${_publication_recovery_validation_cache[$COPY_CACHE_SLOT]} == "$saved" ]] || fail_test 'pending validation changed cache'
+}
+# A2 groups reuse one real sealed root/owned attempt per failure family. Seams
+# inject I/O failures only; the ownership, closure and journal readers stay real.
+recovery_copy_a2_fixture() {
+  local definition name
+  basis_complete_fixture
+  basis_seal_fixture
+  COPY_ROOT_DIR=$TXDIR
+  COPY_ROOT_BEFORE=$(journal_fingerprint)
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  COPY_SOURCE=$(jq -r '.retained.path' <<<"$STAGE")
+  COPY_DEST=$TXDIR/publication-data-$INVOCATION-kernel
+  COPY_EXPECTED=$(jq -cn --argjson record "$BASIS_RETAINED_REF" --argjson retained "$RETAINED_REFERENCE" \
+    --argjson resource "$(jq -c '.resources[0]' <<<"$INTENT")" --arg destination "$COPY_DEST" \
+    --arg signing "${BASIS_SIGNING:-bytes}" '
+    {id:"kernel",original_record:$record,original_source:{path:$resource.source,sha256:$resource.sha256},
+      original_retained:$retained,signing:$signing,file:($retained | .path=$destination)}')
+  COPY_FAULT='' COPY_CALLS=0 COPY_TEMP='' COPY_OWNER_PATH=''
+  for name in publication_run_sbctl verify_publication_input publication_input_is_efi \
+    publication_verify_stable_context publication_collect_stable_context publication_validate_plan; do
+    eval "$name() { fail_test 'private recovery copy reached $name'; }"
+  done
+  definition=$(declare -f copy_publication_input)
+  eval "${definition/copy_publication_input/recovery_copy_a2_actual_copy}"
+  # shellcheck disable=SC2329
+  copy_publication_input() {
+    local rc=0
+    [[ $# == 2 && $1 == "$COPY_SOURCE" && $2 == "$TXDIR/.publication-copy."* ]] || return 1
+    COPY_CALLS=$((COPY_CALLS+1)) COPY_TEMP=$2
+    case $COPY_FAULT in
+      copy-error)
+        recovery_copy_a2_actual_copy "$1" "$CASE_DIR/absent-parent/output" || rc=$?
+        (( rc != 0 )) || fail_test 'actual copier accepted missing destination parent' ;;
+      copy-growth|copy-fifo)
+        # Substitute only at the checked copier's open boundary. Original sealed
+        # bytes are restored by inode before returning to the journal reader.
+        command mv -- "$1" "$CASE_DIR/saved-copy-source"
+        if [[ $COPY_FAULT == copy-growth ]]; then
+          cp -- "$CASE_DIR/saved-copy-source" "$1"
+          chmod u+w "$1"
+          printf 'growth after validation, before bounded open\n' >>"$1"
+          recovery_copy_a2_actual_copy "$@" || rc=$?
+          (( rc == 0 )) && [[ $(stat -c %s "$2") -gt $(stat -c %s "$CASE_DIR/saved-copy-source") ]] ||
+            fail_test 'growth seam did not exercise the actual successful bounded copy'
+        else
+          mkfifo -- "$1"
+          # Only the deliberately blocking FIFO uses a local short deadline.
+          local _producer_session_io_timeout=1
+          recovery_copy_a2_actual_copy "$@" || rc=$?
+          [[ $rc == 124 ]] || fail_test "FIFO copy returned $rc instead of deadline status"
+        fi
+        rm -- "$1"
+        command mv -- "$CASE_DIR/saved-copy-source" "$1" ;;
+      *) recovery_copy_a2_actual_copy "$@" || rc=$? ;;
+    esac
+    return "$rc"
+  }
+  definition=$(declare -f durable_sync)
+  eval "${definition/durable_sync/recovery_copy_a2_actual_sync}"
+  # shellcheck disable=SC2329
+  durable_sync() {
+    local n inject=false
+    case $COPY_FAULT:$1 in
+      temporary-sync:"$TXDIR/.publication-copy."*|ready-record-temp:"$TXDIR/.publication-2.json."*|\
+      copied-record-temp:"$TXDIR/.publication-3.json."*|destination-sync:"$COPY_DEST") inject=true ;;
+      ready-record-file:"$TXDIR/publication-2.json"|copied-record-file:"$TXDIR/publication-3.json") inject=true ;;
+      ready-manifest-temp:"$TXDIR/.manifest.json."*|copied-manifest-temp:"$TXDIR/.manifest.json."*) inject=true ;;
+      ready-manifest-file:"$TXDIR/manifest.json"|copied-manifest-file:"$TXDIR/manifest.json")
+        n=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+        if [[ $COPY_FAULT == ready-manifest-file && $n == 2 || $COPY_FAULT == copied-manifest-file && $n == 3 ]]; then inject=true; fi ;;
+      *:"$TXDIR")
+        n=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+        case $COPY_FAULT in
+          temporary-directory) [[ -e $TXDIR/publication-2.json ]] || inject=true ;;
+          ready-record-directory) [[ ! -e $TXDIR/publication-2.json || $n != 1 ]] || inject=true ;;
+          ready-manifest-directory) [[ $n != 2 ]] || inject=true ;;
+          renamed-directory) [[ ! -e $COPY_DEST || -e $TXDIR/publication-3.json ]] || inject=true ;;
+          copied-record-directory) [[ ! -e $TXDIR/publication-3.json || $n != 2 ]] || inject=true ;;
+          copied-manifest-directory) [[ $n != 3 ]] || inject=true ;;
+        esac ;;
+    esac
+    if [[ $inject == true ]]; then
+      printf '%s\n' "$COPY_FAULT" >>"$CASE_DIR/copy-faults"
+      return 1
+    fi
+    recovery_copy_a2_actual_sync "$@"
+  }
+  # shellcheck disable=SC2329
+  mv() {
+    if [[ ${*: -2:1} == "$TXDIR/.publication-copy."* && ${*: -1} == "$COPY_DEST" ]]; then
+      case $COPY_FAULT in
+        rename-before) printf '%s\n' "$COPY_FAULT" >>"$CASE_DIR/copy-faults"; return 1 ;;
+        rename-after)
+          command mv "$@" || return 1
+          printf '%s\n' "$COPY_FAULT" >>"$CASE_DIR/copy-faults"
+          return 1 ;;
+      esac
+    fi
+    command mv "$@"
+  }
+  # A narrowly scoped owner-observation fault requires no privileged chown.
+  # shellcheck disable=SC2329
+  stat() {
+    if [[ -n $COPY_OWNER_PATH && ${*: -1} == "$COPY_OWNER_PATH" && $* == *%u* ]]; then printf '999999\n'
+    else command stat "$@"; fi
+  }
+}
+recovery_copy_a2_refused() {
+  _publication_recovery_copy_record=stale _publication_recovery_copy_reference=stale
+  if retain_publication_recovery_input "${1:-kernel}"; then fail_test "copy accepted ${COPY_FAULT:-invalid authority}"; fi
+  [[ -z $_publication_recovery_copy_record && -z $_publication_recovery_copy_reference ]] ||
+    fail_test 'failed recovery copy retained outputs'
+}
+recovery_copy_a2_original_unchanged() {
+  local TXDIR=$COPY_ROOT_DIR
+  [[ $(journal_fingerprint) == "$COPY_ROOT_BEFORE" ]] || fail_test 'copy modified original journal or retained bytes'
+  read_incident_seal "$(basename "$TXDIR")"
+}
+recovery_copy_a2_success() {
+  local before reference identity calls=$COPY_CALLS
+  COPY_FAULT=''
+  retain_publication_recovery_input kernel
+  json_is '.[0] == .[1]' "[$_publication_recovery_copy_record,$COPY_EXPECTED]"
+  reference=$_publication_recovery_copy_reference
+  cmp -- "$COPY_SOURCE" "$COPY_DEST"
+  [[ $(stat -c %a "$COPY_DEST") == 400 ]]
+  before=$(journal_fingerprint) identity=$(control_file_identity "$COPY_DEST")
+  calls=$COPY_CALLS
+  retain_publication_recovery_input kernel
+  [[ $_publication_recovery_copy_reference == "$reference" && $COPY_CALLS == "$calls" &&
+    $(control_file_identity "$COPY_DEST") == "$identity" && $(journal_fingerprint) == "$before" ]]
+  recovery_copy_a2_original_unchanged
+}
+recovery_copy_a2_candidate() {
+  # Create only the unbound next record, with its actual hash and predecessor.
+  # The pending path is checked too, against the same hash-valid candidate.
+  local document=$1 ordinal path reference candidate before cache
+  before=$(journal_fingerprint)
+  ordinal=$(jq -r '(.publication_records | length)+1' "$TXDIR/manifest.json")
+  path=$TXDIR/publication-$ordinal.json
+  [[ ! -e $path && ! -L $path ]]
+  printf '%s\n' "$document" >"$path"
+  reference=$(transaction_artifact_reference "$path" 2)
+  validate_artifact_reference_file "$reference" "$TXDIR"
+  candidate=$(jq -c --argjson ref "$reference" '.publication_records += [$ref]' "$TXDIR/manifest.json")
+  validate_transaction_manifest_json "$_transaction_id" "$candidate" false
+  cache=$(declare -p _publication_recovery_validation_cache)
+  if validate_publication_recovery_records "$_transaction_id" "$candidate" "$document"; then
+    fail_test "pending copy accepted $COPY_MUTATION"
+  fi
+  [[ $(declare -p _publication_recovery_validation_cache) == "$cache" ]] || fail_test 'pending candidate changed recovery cache'
+  if validate_publication_recovery_records "$_transaction_id" "$candidate"; then
+    fail_test "historical copy accepted $COPY_MUTATION"
+  fi
+  rm -- "$path"
+  [[ $(journal_fingerprint) == "$before" ]]
+  printf 'CHECK: copy candidate/%s\n' "$COPY_MUTATION"
+}
+recovery_copy_a2_document() {
+  jq -cn --arg id "$_transaction_id" --arg invocation "$INVOCATION" --arg kind "$1" --argjson body "$2" \
+    --argjson ordinal "$(jq -r '(.publication_records | length)+1' "$TXDIR/manifest.json")" \
+    --argjson previous "$(jq -c '.publication_records[-1]' "$TXDIR/manifest.json")" \
+    --arg timestamp "$(utc_timestamp)" --arg version "$OMASECBOOT_VERSION" '
+    {schema_version:2,transaction_id:$id,invocation:$invocation,ordinal:$ordinal,previous:$previous,
+      kind:$kind,body:$body,recorded_at:$timestamp,writer_version:$version}'
+}
+recovery_copy_a2_provenance() {
+  local ready document altered filter COPY_MUTATION
+  recovery_copy_a2_fixture
+  ready=$(jq -c --arg temporary "$TXDIR/.publication-copy.ABC123" '. + {temporary:$temporary}' <<<"$COPY_EXPECTED")
+  document=$(recovery_copy_a2_document retained-copy-ready "$ready")
+  for filter in '.schema_version=1' '.body.id="kernel\n"' '.body.original_record.schema_version=2' \
+    '.body.original_source.path+="/../source"' '.body.temporary+="x"' '.body.original_retained.bytes=9007199254740992' \
+    '.body.file.bytes+=1' '.body.original_retained.sha256=("0"*64)' '.body.fresh_signature=true'; do
+    altered=$(jq -c "$filter" <<<"$document")
+    if validate_publication_record_json "$_transaction_id" 2 "$(jq -c '.previous' <<<"$document")" "$altered"; then
+      fail_test "copy schema admitted $filter"
+    fi
+  done
+  # shellcheck disable=SC2016 # jq-bound peer/plan references.
+  for COPY_MUTATION in '.body.original_source.path+=".other"' '.body.original_source.sha256=("0"*64)' \
+    '.body.original_record=$peer' '.body.original_record=$plan' '.body.original_record.path+=".foreign"' \
+    '.body.id="configuration"' '.body.id="unknown"' '.body.signing="bytes"' \
+    '.body.file.path+="-foreign"' '.body.original_retained.path+="-foreign"' \
+    '.body.file.sha256=.body.original_source.sha256 | .body.original_retained.sha256=.body.file.sha256'; do
+    altered=$(jq -c --argjson peer "$BASIS_CONFIGURATION_REF" --argjson plan "$BASIS_PLAN_REF" "$COPY_MUTATION" <<<"$document")
+    validate_publication_record_json "$_transaction_id" 2 "$(jq -c '.previous' <<<"$document")" "$altered"
+    recovery_copy_a2_candidate "$altered"
+  done
+  COPY_MUTATION=copied-before-ready
+  recovery_copy_a2_candidate "$(recovery_copy_a2_document retained-copy "$COPY_EXPECTED")"
+  COPY_FAULT=rename-before recovery_copy_a2_refused
+  ready=$(jq -c '.body' "$TXDIR/publication-2.json")
+  COPY_MUTATION=duplicate-ready
+  recovery_copy_a2_candidate "$(recovery_copy_a2_document retained-copy-ready "$ready")"
+  recovery_copy_a2_success
+  COPY_MUTATION=duplicate-copy
+  recovery_copy_a2_candidate "$(recovery_copy_a2_document retained-copy "$COPY_EXPECTED")"
+  read_transaction_manifest "$_transaction_id"
+  for filter in '.current_phase="copy"' '.completed_phases=["copy"]' \
+    '.domain_records.final_proof=.publication_records[-1]' '.status="completed" | .completed_at=.created_at'; do
+    if validate_transaction_manifest_json "$_transaction_id" "$(jq -c "$filter" <<<"$_manifest_json")" false; then
+      fail_test "copied data removed preparatory fence: $filter"
+    fi
+  done
+  if commit_lifecycle_recovery_attempt; then fail_test 'copied data enabled completion'; fi
+}
+recovery_copy_a2_raw() {
+  local document altered COPY_MUTATION
+  recovery_copy_a2_fixture
+  document=$(recovery_copy_a2_document retained-copy-ready \
+    "$(jq -c --arg temporary "$TXDIR/.publication-copy.ABC123" '. + {temporary:$temporary}' <<<"$COPY_EXPECTED")")
+  for COPY_MUTATION in duplicate-id duplicate-source fractional-schema fractional-bytes; do
+    case $COPY_MUTATION in
+      duplicate-id) altered=${document/\"id\":\"kernel\"/\"id\":\"foreign\",\"id\":\"kernel\"} ;;
+      duplicate-source) altered=${document/\"original_source\":/\"original_source\":null,\"original_source\":} ;;
+      fractional-schema) altered=${document/\"schema_version\":2/\"schema_version\":2.00000000000000000001} ;;
+      fractional-bytes)
+        local bytes
+        bytes=$(jq -r '.file.bytes' <<<"$COPY_EXPECTED")
+        altered=${document//\"bytes\":$bytes/\"bytes\":$bytes.00000000000000000001} ;;
+    esac
+    [[ $altered != "$document" ]]
+    # jq builds with decimal preservation can compare the untouched literals
+    # exactly; numeric normalization still rounds away these fractions. Keep
+    # the bytes raw for BOTH readers, never feed them that normalized document.
+    json_is 'def rounded: walk(if type == "number" then . + 0 else . end);
+      (.[0] | rounded) == .[1]' "[$altered,$document]"
+    if [[ $COPY_MUTATION == fractional-bytes ]]; then
+      validate_publication_record_json "$_transaction_id" 2 "$(jq -c '.previous' <<<"$document")" "$altered"
+    fi
+    recovery_copy_a2_candidate "$altered"
+  done
+  recovery_copy_a2_success
+}
+recovery_copy_a2_copy_faults() {
+  local before identity hash fault calls
+  local -a temporaries
+  recovery_copy_a2_fixture
+  before=$(journal_fingerprint)
+  for fault in equal different; do
+    cp -- "$COPY_SOURCE" "$COPY_DEST"
+    [[ $fault != different ]] || printf 'unowned canonical bytes\n' >>"$COPY_DEST"
+    chmod 400 "$COPY_DEST"
+    identity=$(control_file_identity "$COPY_DEST") hash=$(sha256_file "$COPY_DEST")
+    recovery_copy_a2_refused
+    [[ $(control_file_identity "$COPY_DEST") == "$identity" && $(sha256_file "$COPY_DEST") == "$hash" &&
+      $(stat -c %a "$COPY_DEST") == 400 && $COPY_CALLS == 0 ]]
+    rm -- "$COPY_DEST"
+    [[ $(journal_fingerprint) == "$before" ]]
+  done
+  for COPY_FAULT in copy-error copy-growth copy-fifo; do
+    calls=$COPY_CALLS
+    recovery_copy_a2_refused
+    [[ $COPY_CALLS == "$((calls+1))" && ! -e $COPY_DEST && $(journal_fingerprint) == "$before" ]]
+    shopt -s nullglob
+    temporaries=("$TXDIR"/.publication-copy.*)
+    [[ ${#temporaries[@]} == 0 ]]
+    recovery_copy_a2_original_unchanged
+    printf 'CHECK: actual copy/%s\n' "$COPY_FAULT"
+  done
+  recovery_copy_a2_success
+}
+recovery_copy_a2_sync_windows() {
+  local fault count_before count_after before identity='' ready_hash='' copied_hash='' calls temp
+  local -a temporaries
+  recovery_copy_a2_fixture
+  for fault in $COPY_WINDOWS; do
+    COPY_FAULT=$fault
+    count_before=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+    calls=$COPY_CALLS
+    recovery_copy_a2_refused
+    [[ -s $CASE_DIR/copy-faults ]] && [[ $(<"$CASE_DIR/copy-faults") == *"$fault" ]] || fail_test "sync seam missed $fault"
+    count_after=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+    (( count_after >= count_before && count_after <= 3 ))
+    case $fault in
+      temporary-*|ready-record-*|ready-manifest-temp) [[ $count_after == 1 ]] ;;
+      ready-manifest-*|rename-*|destination-sync|renamed-directory|copied-record-*|copied-manifest-temp) [[ $count_after == 2 ]] ;;
+      copied-manifest-*) [[ $count_after == 3 ]] ;;
+    esac
+    if [[ -n $ready_hash ]]; then
+      [[ $(sha256_file "$TXDIR/publication-2.json") == "$ready_hash" && $COPY_CALLS == "$calls" ]] ||
+        fail_test 'bound or pending ready retry replaced evidence or recopied input'
+    fi
+    if [[ -n $copied_hash ]]; then [[ $(sha256_file "$TXDIR/publication-3.json") == "$copied_hash" ]]; fi
+    if [[ -e $TXDIR/publication-2.json ]]; then
+      ready_hash=$(sha256_file "$TXDIR/publication-2.json")
+      temp=$(jq -r '.body.temporary' "$TXDIR/publication-2.json")
+      [[ -e $temp || -e $COPY_DEST ]] || fail_test 'ready failure discarded both private candidates'
+      [[ $count_before == 1 || $COPY_CALLS == "$calls" ]] || fail_test 'ready retry recopied input'
+    fi
+    if [[ -e $TXDIR/publication-3.json ]]; then copied_hash=$(sha256_file "$TXDIR/publication-3.json"); fi
+    if [[ -n $identity ]]; then [[ $(control_file_identity "$COPY_DEST") == "$identity" ]]; fi
+    if [[ -e $COPY_DEST ]]; then identity=$(control_file_identity "$COPY_DEST"); cmp -- "$COPY_SOURCE" "$COPY_DEST"; fi
+    case $fault in
+      temporary-sync|temporary-directory)
+        shopt -s nullglob
+        temporaries=("$TXDIR"/.publication-copy.*)
+        [[ ${#temporaries[@]} == 0 && $count_after == 1 ]] ;;
+      ready-record-temp)
+        [[ -f $COPY_TEMP && ! -e $TXDIR/publication-2.json && $count_after == 1 ]]
+        # No canonical record exists yet. Preserve the uncertain orphan itself,
+        # but the next invocation must copy anew rather than invent authority.
+        before=$(sha256_file "$COPY_TEMP") ;;
+    esac
+    printf 'CHECK: copy sync/%s (%s -> %s records)\n' "$fault" "$count_before" "$count_after"
+  done
+  recovery_copy_a2_success
+  if [[ -n $ready_hash ]]; then [[ $(sha256_file "$TXDIR/publication-2.json") == "$ready_hash" ]]; fi
+  if [[ -n $copied_hash ]]; then [[ $(sha256_file "$TXDIR/publication-3.json") == "$copied_hash" ]]; fi
+  # Keep the pre-record uncertain temporary, if that window was exercised.
+  if [[ -n ${before:-} ]]; then
+    shopt -s nullglob
+    temporaries=("$TXDIR"/.publication-copy.*)
+    [[ ${#temporaries[@]} == 1 && $(sha256_file "${temporaries[0]}") == "$before" ]]
+  fi
+}
+recovery_copy_a2_control_fingerprint() {
+  # Inspect substituted controls without following links or opening special files.
+  command stat -c '%F:%f:%u:%g:%d:%i:%s' -- "$1"
+  if [[ -L $1 ]]; then readlink -- "$1"
+  elif [[ -f $1 ]]; then sha256_file "$1"; fi
+}
+recovery_copy_a2_unsafe_ready() {
+  local temporary location path fault before identity
+  recovery_copy_a2_fixture
+  COPY_FAULT=rename-before recovery_copy_a2_refused
+  COPY_FAULT=''
+  temporary=$(jq -r '.body.temporary' "$TXDIR/publication-2.json")
+  for location in temporary destination; do
+    if [[ $location == temporary ]]; then path=$temporary
+    else command mv -- "$temporary" "$COPY_DEST"; path=$COPY_DEST; fi
+    for fault in mode owner symlink directory fifo content; do
+      command mv -- "$path" "$CASE_DIR/safe-ready-copy"
+      case $fault in
+        symlink) ln -s -- "$CASE_DIR/safe-ready-copy" "$path" ;;
+        directory) mkdir -- "$path" ;;
+        fifo) mkfifo -- "$path" ;;
+        *) cp -- "$CASE_DIR/safe-ready-copy" "$path"
+          case $fault in
+            mode) chmod 644 "$path" ;;
+            owner) COPY_OWNER_PATH=$path ;;
+            content) chmod u+w "$path"; printf 'conflict\n' >>"$path"; chmod 400 "$path" ;;
+          esac ;;
+      esac
+      # Never hash a deliberately substituted FIFO, including through a glob.
+      before=$(sha256sum -- "$TXDIR/manifest.json" "$TXDIR"/publication-*.json)
+      identity=$(recovery_copy_a2_control_fingerprint "$path")
+      recovery_copy_a2_refused
+      [[ $(sha256sum -- "$TXDIR/manifest.json" "$TXDIR"/publication-*.json) == "$before" &&
+        $(recovery_copy_a2_control_fingerprint "$path") == "$identity" && $COPY_CALLS == 1 ]]
+      COPY_OWNER_PATH=''
+      if [[ $fault == directory ]]; then rmdir -- "$path"; else rm -- "$path"; fi
+      command mv -- "$CASE_DIR/safe-ready-copy" "$path"
+      printf 'CHECK: unsafe ready/%s/%s\n' "$location" "$fault"
+    done
+  done
+  recovery_copy_a2_success
+}
+recovery_copy_a2_missing_ready() {
+  local temporary manifest slot saved previous previous_hash seal_hash lifecycle_hash
+  recovery_copy_a2_fixture
+  COPY_FAULT=rename-before recovery_copy_a2_refused
+  COPY_FAULT=''
+  temporary=$(jq -r '.body.temporary' "$TXDIR/publication-2.json")
+  read_transaction_manifest "$_transaction_id"
+  manifest=$_manifest_json slot="$_transaction_id:$(control_owner_uid)"
+  saved=${_publication_recovery_validation_cache[$slot]}
+  json_is '.copies == []' "$saved"
+  rm -- "$temporary"
+  # Ready records bind provenance, not historical existence of an uncommitted
+  # temporary or canonical file. Both cold and warm readers must retain that.
+  validate_publication_recovery_records "$_transaction_id" "$manifest"
+  [[ ${_publication_recovery_validation_cache[$slot]} == "$saved" ]]
+  _publication_recovery_validation_cache=()
+  validate_publication_recovery_records "$_transaction_id" "$manifest"
+  recovery_copy_a2_refused
+  [[ $COPY_CALLS == 1 && ! -e $COPY_DEST && ! -e $temporary && ! -e $TXDIR/publication-3.json ]]
+  rollback_and_mark_recovery 30 'fixture ready copy lost before private rename'
+  previous=$TXDIR
+  previous_hash=$(sha256_file "$previous/manifest.json") seal_hash=$(sha256_file "$previous/incident.json")
+  lifecycle_hash=$(sha256_file "$(lifecycle_file_path)")
+  load_recovery_context
+  if run_registered_recovery_locked; then fail_test 'incomplete private copy enabled public recovery'; fi
+  [[ $(sha256_file "$(lifecycle_file_path)") == "$lifecycle_hash" ]]
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  COPY_DEST=$TXDIR/publication-data-$INVOCATION-kernel
+  COPY_EXPECTED=$(jq -c --arg path "$COPY_DEST" '.file.path=$path' <<<"$COPY_EXPECTED")
+  recovery_copy_a2_success
+  [[ $COPY_CALLS == 2 && $(sha256_file "$previous/manifest.json") == "$previous_hash" &&
+    $(sha256_file "$previous/incident.json") == "$seal_hash" && ! -e $temporary ]]
+}
+recovery_copy_a2_owner_loss() {
+  local fault token=$OMASECBOOT_TRANSACTION_TOKEN path before
+  recovery_copy_a2_fixture
+  token=$OMASECBOOT_TRANSACTION_TOKEN
+  before=$(journal_fingerprint)
+  for fault in owner boot repair marker; do
+    path=''
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN='invalid-token' ;;
+      boot|repair)
+        if [[ $fault == boot ]]; then path=$(limine_lock_path); else path=$(state_dir_path)/repair.lock; fi
+        command mv -- "$path" "$path.saved"; touch "$path" ;;
+      marker) touch "$(snapshot_restore_lock_path)" ;;
+    esac
+    recovery_copy_a2_refused
+    [[ $COPY_CALLS == 0 && $(journal_fingerprint) == "$before" ]]
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN=$token ;;
+      boot|repair)
+        if [[ $fault == boot ]]; then [[ $_OMASECBOOT_LIMINE_LOCK_OWNED == false ]]
+        else [[ $_OMASECBOOT_REPAIR_LOCK_OWNED == false ]]; fi
+        rm -- "$path"; command mv -- "$path.saved" "$path"
+        with_boot_repair_lock ;;
+      marker) [[ -e $(snapshot_restore_lock_path) ]]; rm -- "$(snapshot_restore_lock_path)" ;;
+    esac
+  done
+  # A marker appearing during actual copy must be seen before ready publication.
+  # shellcheck disable=SC2329
+  copy_publication_input() {
+    COPY_CALLS=$((COPY_CALLS+1)) COPY_TEMP=$2
+    recovery_copy_a2_actual_copy "$@" || return 1
+    touch "$(snapshot_restore_lock_path)"
+  }
+  recovery_copy_a2_refused
+  [[ $COPY_CALLS == 1 && -e $(snapshot_restore_lock_path) && -f $COPY_TEMP &&
+    ! -e $COPY_DEST && $(journal_fingerprint) == "$before" ]]
+  recovery_copy_a2_original_unchanged
+}
+recovery_copy_a2_peer_cache() {
+  local peer=66666666-6666-4666-8666-666666666666 peer_file peer_record path manifest slot saved mode
+  basis_complete_fixture
+  INVOCATION=$peer basis_complete_fixture
+  peer_file=$(jq -r '.retained.path' <<<"$STAGE")
+  peer_record=$(jq -r '.path' <<<"$BASIS_CONFIGURATION_REF")
+  basis_seal_fixture
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  retain_publication_recovery_input kernel
+  read_transaction_manifest "$_transaction_id"
+  manifest=$_manifest_json slot="$_transaction_id:$(control_owner_uid)"
+  for path in "$peer_file" "$peer_record"; do
+    saved=${_publication_recovery_validation_cache[$slot]}
+    [[ -n $saved ]]
+    mode=$(stat -c %a "$path")
+    cp -- "$path" "$CASE_DIR/saved-peer"
+    chmod u+w "$path"; printf 'unused peer changed\n' >>"$path"
+    if validate_publication_recovery_records "$_transaction_id" "$manifest"; then fail_test 'warm copy cache ignored unused original invocation'; fi
+    [[ -z ${_publication_recovery_validation_cache[$slot]:-} ]]
+    cp -- "$CASE_DIR/saved-peer" "$path"; chmod "$mode" "$path"
+    validate_publication_recovery_records "$_transaction_id" "$manifest"
+  done
 }
 expect_resolver_status() {
   local expected=$1 actual=0
@@ -3164,5 +3737,24 @@ for RECOVERY_SYNC in prior-file basis-file basis-directory manifest-directory li
   run_case "recovery-basis-sync-$RECOVERY_SYNC" recovery_basis_sync_window
 done
 run_case recovery-basis-capacity32-preserved-refuse33 recovery_basis_capacity
+run_case recovery-copy-v1-bytes-configuration-and-fresh-retry recovery_copy_valid
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi COPY_EXPIRED=true run_case recovery-copy-v2-signed-hash-and-expired-objects recovery_copy_valid
+run_case recovery-copy-historical-root-operation-name recovery_copy_historical_root_name
+run_case recovery-copy-cache-reuses-semantics recovery_copy_cache_reuse
+for COPY_CACHE_FAULT in original-record original-retained copied copied-mode record prior; do
+  run_case "recovery-copy-cache-$COPY_CACHE_FAULT-rechecked" recovery_copy_cache_tamper
+done
+run_case recovery-copy-cache-lineage-and-pending-key recovery_copy_cache_key_and_pending
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-copy-a2-provenance-and-order recovery_copy_a2_provenance
+run_case recovery-copy-a2-raw-json recovery_copy_a2_raw
+run_case recovery-copy-a2-copy-faults-and-conflicts recovery_copy_a2_copy_faults
+COPY_WINDOWS='temporary-sync temporary-directory ready-record-temp ready-record-directory ready-record-file ready-manifest-temp ready-manifest-directory ready-manifest-file' \
+  run_case recovery-copy-a2-sync-ready-retries recovery_copy_a2_sync_windows
+COPY_WINDOWS='rename-before rename-after destination-sync renamed-directory copied-record-temp copied-record-directory copied-record-file copied-manifest-temp copied-manifest-directory copied-manifest-file' \
+  run_case recovery-copy-a2-sync-copied-retries recovery_copy_a2_sync_windows
+run_case recovery-copy-a2-unsafe-ready-controls recovery_copy_a2_unsafe_ready
+run_case recovery-copy-a2-missing-ready-fresh-attempt recovery_copy_a2_missing_ready
+run_case recovery-copy-a2-owner-lock-marker-loss recovery_copy_a2_owner_loss
+run_case recovery-copy-a2-cache-unused-peer-closure recovery_copy_a2_peer_cache
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

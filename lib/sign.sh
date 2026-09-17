@@ -1075,6 +1075,93 @@ retain_publication_input() {
   _publication_input_record=$body
 }
 
+# Retain exact original-plan bytes inside the current preparation attempt. This
+# is data provenance only: the signing label is historical, not a fresh signer
+# proof. No producer, renderer, signer, target observation or boot effect runs.
+retain_publication_recovery_input() {
+  local id invocation basis directory expected reference body ready='' temporary retained source rc
+  local _publication_member_record='' _publication_recovery_copy_expected=''
+  _publication_recovery_copy_record=''
+  _publication_recovery_copy_reference=''
+  [[ $# == 1 ]] || return 1
+  id=$1
+  [[ $id =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
+  producer_session_context_is_owned || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
+    .status == "transition"' "$_manifest_json" || return 1
+  publication_read_manifest_member "$_transaction_id" "$_manifest_json" \
+    "$(jq -c '.publication_records[0]' <<<"$_manifest_json")" || return 1
+  invocation=$(jq -r '.invocation' <<<"$_publication_member_record") || return 1
+  basis=$(jq -c '.body.basis' <<<"$_publication_member_record") || return 1
+  publication_recovery_copy_projection "$_transaction_id" "$basis" "$id" || return 1
+  expected=$_publication_recovery_copy_expected
+  reference=$(jq -c '.file' <<<"$expected") || return 1
+  retained=$(jq -r '.path' <<<"$reference") || return 1
+  directory=$(dirname "$retained") || return 1
+  if find_publication_record "$invocation" retained-copy "$id"; then
+    body=$_publication_found_body
+    json_is '.[0] == .[1]' "[$body,$expected]" || return 1
+    validate_publication_retained_file "$_transaction_id" "$reference" || return 1
+    durable_sync "$retained" && durable_sync "$directory" || return 1
+    sync_publication_reference "$_publication_found_reference" || return 1
+    _publication_recovery_copy_record=$body
+    _publication_recovery_copy_reference=$_publication_found_reference
+    return 0
+  else
+    rc=$?
+    (( rc == 1 )) || return 1
+  fi
+  if find_publication_record "$invocation" retained-copy-ready "$id"; then
+    ready=$_publication_found_body
+    sync_publication_reference "$_publication_found_reference" || return 1
+  else
+    (( $? == 1 )) || return 1
+    if find_pending_publication_record "$invocation" retained-copy-ready "$id"; then
+      ready=$_publication_found_body
+      json_is '(.[0] | del(.temporary)) == .[1]' "[$ready,$expected]" || return 1
+      append_publication_record "$invocation" retained-copy-ready "$ready" || return 1
+    else
+      (( $? == 1 )) || return 1
+    fi
+  fi
+  if [[ -z $ready ]]; then
+    # No unrecorded canonical object, even with equal bytes, becomes our copy.
+    [[ ! -e $retained && ! -L $retained ]] || return 1
+    source=$(jq -r '.original_retained.path' <<<"$expected") || return 1
+    temporary=$(mktemp "$directory/.publication-copy.XXXXXX") || return 1
+    if ! copy_publication_input "$source" "$temporary" ||
+      [[ $(sha256_file "$temporary") != "$(jq -r '.sha256' <<<"$reference")" ||
+        $(stat -Lc %s "$temporary") != "$(jq -r '.bytes' <<<"$reference")" ]]; then
+      rm -f -- "$temporary"
+      return 1
+    fi
+    if ! chmod 400 "$temporary" || ! durable_sync "$temporary" || ! durable_sync "$directory"; then
+      rm -f -- "$temporary"
+      return 1
+    fi
+    ready=$(jq -c --arg temporary "$temporary" '. + {temporary:$temporary}' <<<"$expected") || return 1
+    # Once publication is attempted, preserve this temporary on uncertainty:
+    # either the bound head or a valid pending record may already name it.
+    append_publication_record "$invocation" retained-copy-ready "$ready" || return 1
+  fi
+  json_is '(.[0] | del(.temporary)) == .[1]' "[$ready,$expected]" || return 1
+  temporary=$(jq -r '.temporary' <<<"$ready") || return 1
+  if [[ ! -e $retained && ! -L $retained ]]; then
+    validate_private_control_file "$temporary" || return 1
+    [[ $(sha256_file "$temporary") == "$(jq -r '.sha256' <<<"$reference")" &&
+      $(stat -Lc %s "$temporary") == "$(jq -r '.bytes' <<<"$reference")" ]] || return 1
+    producer_session_context_is_owned || return 1
+    mv -T --update=none-fail --no-copy "$temporary" "$retained" || return 1
+  fi
+  validate_publication_retained_file "$_transaction_id" "$reference" || return 1
+  durable_sync "$retained" && durable_sync "$directory" || return 1
+  producer_session_context_is_owned || return 1
+  append_publication_record "$invocation" retained-copy "$expected" || return 1
+  _publication_recovery_copy_record=$expected
+  _publication_recovery_copy_reference=$_publication_record_reference
+}
+
 sbctl_tracking_preflight() {
   command -v sbctl >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1

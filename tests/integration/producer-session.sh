@@ -24,6 +24,10 @@ cp "$repo/tests/integration/fixtures/ProducerSessionContract.java" "$scratch/fix
 cat >"$scratch/fixtures/native" <<'SCRIPT'
 #!/usr/bin/bash
 set -euo pipefail
+if [[ -e /work/recovery-copy-active ]]; then
+  printf 'unexpected producer/render invocation during retained copy\n' >/work/recovery-copy-forbidden
+  exit 90
+fi
 entry=ProducerSessionContract
 [[ ${1:-} != --decode-managed-stream && ${1:-} != --validate-managed-plan && ${1:-} != --validate-managed-targets ]] || entry=org.limine.entry.tool.Main
 if [[ ${1:-} == publish-prepare || ${1:-} == publish-apply ]]; then printf 'worker executable entered\n' >"/work/context-worker-${1#publish-}"; fi
@@ -1328,6 +1332,26 @@ body() {
     if [[ $CASE == publish-config-drift ]]; then printf '# changed configuration\n' >/boot/limine.conf; fi
     run_bound_producer_session "$fd" "$fd" 11111111-1111-4111-8111-111111111111 publication_fixture_handler 30 publish-prepare "$CASE" || rc=$?
     printf '%s\n' "$rc" >/work/preparation-result
+    if [[ $CASE == publish-recovery-copy-signed ]]; then
+      # The actual managed addition has signed, staged and rendered its complete
+      # plan. Interrupt before executor admission, after both children are reaped.
+      [[ $rc == 0 && -n $_publication_plan && $_publication_apply_phase == false &&
+        -z $_producer_session_worker_pid && -z $_producer_session_decoder_pid &&
+        ! -e /proc/$fixture_context_worker_pid && ! -e /proc/$fixture_context_decoder_pid ]] || return 1
+      local kind id
+      for kind in retained configuration; do
+        id=''; [[ $kind != retained ]] || id=resource-0
+        find_publication_record "$_publication_invocation" "$kind" "$id" || return 1
+        jq -cn --argjson reference "$_publication_found_reference" --argjson body "$_publication_found_body" \
+          '{reference:$reference,body:$body}' >"/work/recovery-original-$kind.json" || return 1
+      done
+      fixture_directory_journal >/work/recovery-original-journal.json || return 1
+      [[ $(sha256_file /work/input) == "$(sha256_file /efi-input)" ]] || return 1
+      /fixtures/namespace-id capture /work/recovery-original-namespace || return 1
+      printf 'actual preparation worker and decoder reaped before root interruption\n' >/work/recovery-original-workers-exited
+      printf '19\n' >/work/publication-result
+      return 19
+    fi
     if [[ $CASE == publish-intent-* ]]; then
       fixture_intent_snapshot after-session || return 1
       if (( rc != 0 )); then printf '%s\n' "$rc" >/work/publication-result; fi
@@ -1540,8 +1564,172 @@ if [[ $CASE == late-lock-rebind || $CASE == post-lock-rebind ]]; then
   kill -TERM "$competitor"
   wait "$competitor" || true
 fi
+if [[ $CASE == publish-recovery-copy-signed ]]; then
+  [[ $rc == 19 && $_lifecycle_state == recovery-required && ! -e /work/context-worker-apply ]]
+  root=$(jq -r '.transaction.root_incident.id' <<<"$_lifecycle_json")
+  directory=$(dirname "$(lifecycle_manifest_path "$root")")
+  sha256sum "$directory/manifest.json" "$directory/incident.json" "$directory"/publication-*.json \
+    "$directory"/publication-data-* >/work/recovery-original-sha256
+  sha256sum /work/signer-commands.jsonl /work/context-wrapper.jsonl /work/publication-requests.jsonl >/work/recovery-activity-before
+fi
 SCRIPT
-shellcheck "$scratch/fixtures/native" "$scratch/fixtures/case" "$scratch/fixtures/session-child" "$scratch/fixtures/dd" "$scratch/fixtures/mount-custody" "$scratch/fixtures/context-python" "$scratch/fixtures/no-platform-query" "$scratch/fixtures/sbctl-call"
+cat >"$scratch/fixtures/namespace-id" <<'SCRIPT'
+#!/usr/bin/bash
+set -euo pipefail
+# NS_GET_MNTNS_ID, Linux UAPI nsfs.h: _IOR(0xb7, 5, __u64). Unlike the nsfs
+# inode shown by readlink, this identity is not recycled during one kernel boot.
+# Linux v6.12 fs/nsfs.c returns mnt_namespace.seq, assigned from mnt_ns_seq.
+# This fixture compares lifetimes in one boot, never stable recovery identity.
+valid_observation() {
+  jq -se '
+    def identifier: type == "string" and test("\\A[1-9][0-9]{0,19}\\z") and
+      (length < 20 or . <= "18446744073709551615");
+    length == 1 and (.[0] | type == "object" and
+      keys == ["mount_namespace_id","nsfs_inode"] and all(.[]; identifier))' "$1" >/dev/null
+}
+case ${1:-} in
+  capture)
+    [[ $# == 2 ]] || exit 64
+    "$0" observe >"$2" || exit 1
+    valid_observation "$2"
+    exit "$?"
+    ;;
+  compare)
+    [[ $# == 3 ]] || exit 64
+    valid_observation "$2" && valid_observation "$3" || exit 1
+    jq -se 'length == 2 and .[0].mount_namespace_id != .[1].mount_namespace_id' "$2" "$3" >/dev/null
+    exit "$?"
+    ;;
+  observe)
+    [[ $# == 1 ]] || exit 64
+    # Deliberate oracle faults, used only by this test helper's negative checks.
+    case ${NAMESPACE_TEST_FAULT:-} in
+      failure) exit 73 ;;
+      empty) exit 0 ;;
+      multiple) printf '%s\n' '{"nsfs_inode":"1","mount_namespace_id":"1"}' '{"nsfs_inode":"2","mount_namespace_id":"2"}'; exit 0 ;;
+      malformed) printf '%s\n' '{"nsfs_inode":"1","mount_namespace_id":2}'; exit 0 ;;
+      '') ;;
+      *) exit 64 ;;
+    esac
+    ;;
+  *) exit 64 ;;
+esac
+exec /usr/bin/env -i PATH=/usr/bin LC_ALL=C HOME=/nonexistent /real/namespace-python -I -S -B -c '
+import array, fcntl, json, os
+fd = os.open("/proc/self/ns/mnt", os.O_RDONLY | os.O_CLOEXEC)
+try:
+    value = array.array("Q", [0])
+    assert value.itemsize == 8
+    assert fcntl.ioctl(fd, (2 << 30) | (8 << 16) | (0xb7 << 8) | 5, value, True) == 0
+    assert value[0] > 0
+    print(json.dumps({"nsfs_inode": str(os.fstat(fd).st_ino), "mount_namespace_id": str(value[0])}))
+finally:
+    os.close(fd)
+'
+SCRIPT
+chmod 755 "$scratch/fixtures/namespace-id"
+cat >"$scratch/fixtures/recovery-copy" <<'SCRIPT'
+#!/usr/bin/bash
+# shellcheck disable=SC1090,SC1091,SC2154,SC2329
+# A fresh shell/namespace consumes the actual sealed tree, with no producer or
+# platform acquisition. Only the final independent oracle invokes real sbctl.
+set -euo pipefail
+trap 'status=$?; printf "recovery-copy failed at line %s (status %s)\n" "$LINENO" "$status" >&2' ERR
+for module in common lifecycle records sign producer-session publication; do source "/core/lib/$module.sh"; done
+state_dir_path() { printf '/work/state\n'; }
+pacman_database_lock_path() { printf '/work/pacman-db.lck\n'; }
+for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
+  publication_run_sbctl verify_publication_input publication_input_is_efi publication_authority_begin \
+  publication_authority_handler publication_stage_file publication_start_executor run_bound_producer_session sbctl; do
+  eval "$helper() { printf 'unexpected $helper during retained copy\n' >/work/recovery-copy-forbidden; return 90; }"
+done
+touch /work/recovery-copy-active
+/fixtures/namespace-id capture /work/recovery-fresh-namespace
+/fixtures/namespace-id compare /work/recovery-original-namespace /work/recovery-fresh-namespace
+# Neither failed/empty capture nor two values in one file may stand in for the
+# missing other observation. Exercise the same capture/comparison helper.
+for fault in failure empty multiple malformed; do
+  if NAMESPACE_TEST_FAULT=$fault /fixtures/namespace-id capture /work/invalid-namespace 2>/work/namespace-negative.stderr; then exit 90; fi
+  if /fixtures/namespace-id compare /work/invalid-namespace /work/recovery-fresh-namespace 2>>/work/namespace-negative.stderr; then exit 90; fi
+  if /fixtures/namespace-id compare /work/recovery-original-namespace /work/invalid-namespace 2>>/work/namespace-negative.stderr; then exit 90; fi
+done
+if /fixtures/namespace-id compare /work/recovery-original-namespace /work/recovery-original-namespace; then exit 90; fi
+# Recycled inode numbers do not invalidate distinct namespace lifetimes. Keep
+# the real observations untouched; this separate synthetic pair tests the oracle.
+jq --arg inode "$(jq -r .nsfs_inode /work/recovery-original-namespace)" '.nsfs_inode=$inode' \
+  /work/recovery-fresh-namespace >/work/recycled-inode-observation
+/fixtures/namespace-id compare /work/recovery-original-namespace /work/recycled-inode-observation
+printf 'failed/empty/multiple/malformed and equal identities refused; recycled inode accepted with distinct namespace ID\n' >/work/namespace-oracle-verified
+[[ -z $_publication_invocation && -z $_publication_signing_policy && ${#_publication_pins[@]} == 0 ]]
+[[ ! -e /boot/limine.conf && ! -e /boot/EFI && -e /work/recovery-original-workers-exited ]]
+rm -- /work/input
+with_boot_repair_lock
+read_lifecycle
+root=$(jq -c '.transaction.root_incident' <<<"$_lifecycle_json")
+directory=$(dirname "$(lifecycle_manifest_path "$(jq -r '.id' <<<"$root")")")
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-before
+printf 'begin original-basis attempt\n'
+begin_publication_recovery_attempt "$root" 11111111-1111-4111-8111-111111111111
+manifest=$(lifecycle_manifest_path "$_transaction_id")
+for id in resource-0 configuration; do
+  printf 'retain %s\n' "$id"
+  retain_publication_recovery_input "$id"
+  body=$_publication_recovery_copy_record reference=$_publication_recovery_copy_reference
+  if [[ $id == resource-0 ]]; then
+    original=$(</work/recovery-original-retained.json)
+    source=$(jq -c '.resources[0] | {path:.source,sha256}' /work/admitted-intent.json)
+    signing=local-efi
+  else
+    original=$(</work/recovery-original-configuration.json)
+    source=$(jq -c '.configuration' /work/admitted-intent.json)
+    signing=bytes
+  fi
+  expected=$(jq -cn --arg id "$id" --arg signing "$signing" --argjson source "$source" --argjson original "$original" \
+    --arg path "${manifest%/*}/publication-data-11111111-1111-4111-8111-111111111111-$id" '
+    {id:$id,original_record:$original.reference,original_source:$source,original_retained:$original.body.file,
+      signing:$signing,file:($original.body.file | .path=$path)}')
+  json_is '.[0] == .[1]' "[$body,$expected]"
+  # Both references name their REAL containing records, with direct hash proof.
+  original_reference=$(jq -c '.reference' <<<"$original")
+  validate_artifact_reference_file "$original_reference" "$directory"
+  jq -e --argjson reference "$original_reference" '.publication_records | index($reference) != null' "$directory/manifest.json" >/dev/null
+  validate_artifact_reference_file "$reference" "${manifest%/*}"
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$manifest" >/dev/null
+  record=$(jq -r '.path' <<<"$reference")
+  jq -e --argjson body "$body" '.schema_version == 2 and .kind == "retained-copy" and .body == $body' "$record" >/dev/null
+  original_file=$(jq -r '.original_retained.path' <<<"$body")
+  file=$(jq -r '.file.path' <<<"$body")
+  cmp -- "$original_file" "$file"
+  [[ ! $original_file -ef $file && $(stat -Lc '%a:%u:%g' "$file") == 400:0:0 ]]
+  [[ $(sha256_file "$file") == "$(jq -r '.file.sha256' <<<"$body")" &&
+    $(stat -Lc %s "$file") == "$(jq -r '.file.bytes' <<<"$body")" ]]
+  json_is '.original_source.sha256 != .file.sha256 and .file.sha256 == .original_retained.sha256' "$body"
+  jq -cn --argjson body "$body" --argjson reference "$reference" \
+    '{body:$body,reference:$reference}' >>/work/recovery-copies.jsonl
+done
+read_transaction_manifest "$_transaction_id"
+json_is '.kind == "recovery-attempt" and .status == "transition" and .file_rollback_policy == "preserve" and
+  .current_phase == null and .completed_phases == [] and (.domain_records | all(. == null)) and
+  (.publication_records | length == 5 and all(.schema_version == 2))' "$_manifest_json"
+[[ -z $_publication_invocation && -z $_publication_signing_policy && ${#_publication_pins[@]} == 0 &&
+  ! -e /work/recovery-copy-forbidden && ! -e /work/context-worker-apply && ! -e /boot/limine.conf ]]
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-after
+sha256sum /work/signer-commands.jsonl /work/context-wrapper.jsonl /work/publication-requests.jsonl >/work/recovery-activity-after
+cmp /work/recovery-activity-before /work/recovery-activity-after
+# An independent cryptographic oracle checks the retained PE after the writer has
+# finished. It uses the unchanged fixture certificate through real sbctl, without
+# constructing fresh Core signer policy or granting boot execution authority.
+certificate=$(openssl x509 -in /var/lib/sbctl/keys/db/db.pem -outform DER | sha256sum)
+[[ ${certificate%% *} == "$(</work/context-cert-before)" ]]
+file=$(jq -r 'select(.body.id == "resource-0") | .body.file.path' /work/recovery-copies.jsonl)
+# Match verify_publication_input's sbctl0.18 Landlock scope for a private file.
+SYSTEMD_ESP_PATH="${file%/*}" ESP_PATH="${file%/*}" /real/sbctl verify --json "$file" >/work/recovery-copy-sbctl-verify.json
+jq -e --arg file "$file" 'length == 1 and .[0].file_name == $file and .[0].is_signed == 1' /work/recovery-copy-sbctl-verify.json >/dev/null
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-verified
+release_boot_repair_lock
+printf 'PASS: exact signed PE and literal configuration retained in fresh namespace\n'
+SCRIPT
+shellcheck "$scratch/fixtures/native" "$scratch/fixtures/case" "$scratch/fixtures/session-child" "$scratch/fixtures/dd" "$scratch/fixtures/mount-custody" "$scratch/fixtures/context-python" "$scratch/fixtures/no-platform-query" "$scratch/fixtures/sbctl-call" "$scratch/fixtures/namespace-id" "$scratch/fixtures/recovery-copy"
 sandbox=(bwrap --unshare-all --die-with-parent --new-session --uid 0 --gid 0 --clearenv
   --ro-bind /usr/lib /usr/lib --dir /usr/bin --symlink usr/bin /bin --symlink usr/lib /lib
   --tmpfs /usr/lib/modules --proc /proc --dev /dev --tmpfs /tmp --dir /etc --dir /var --dir /sys --dir /run/lock
@@ -1594,7 +1782,7 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
    publish-original-copy-failure publish-original-temp-sync publish-original-data-sync publish-original-directory-sync \
    publish-original-candidate-collision publish-original-source-drift \
    publish-intent-retry-model publish-intent-retry-model-head publish-intent-retry-same publish-intent-retry-same-head \
-   publish-intent-match-model; do
+   publish-intent-match-model publish-recovery-copy-signed; do
   # Space-separated exact case names permit targeted runs with one compilation.
   [[ -z ${PRODUCER_SESSION_CASE:-} || " $PRODUCER_SESSION_CASE " == *" $name "* ]] || continue
   work=$scratch/$name
@@ -1609,6 +1797,9 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
     publish-core-directory-bind|publish-native-namespace|publish-native-directory-bind|publish-native-stage-bind|publish-core-death-directory-bind|publish-core-config-bind) mount_case=true ;;
   esac
   extra=()
+  if [[ $name == publish-recovery-copy-signed ]]; then
+    extra+=(--ro-bind "$(realpath "$(type -P python)")" /real/namespace-python)
+  fi
   if [[ $name == publish-signer-executable-before ]]; then
     cp "$scratch/fixtures/sbctl-call" "$work/sbctl-call-writable"
     chmod 755 "$work/sbctl-call-writable"
@@ -2265,6 +2456,7 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
       [[ -s $work/publication-result ]] || die 'publication result missing'
     fi
     case $name in
+      publish-recovery-copy-signed) [[ $(<"$work/preparation-result") == 0 && $(<"$work/publication-result") == 19 && -s $work/recovery-original-workers-exited ]] || die 'signed-copy fixture missed deliberate post-preparation interruption' ;;
       publish-plan-omit|publish-config-drift) [[ $(<"$work/preparation-result") != 0 ]] || die 'invalid plan preparation succeeded' ;;
       publish-mkdir-efi|publish-mkdir-linux|publish-mkdir-retry-*) [[ $(<"$work/publication-result") == 0 ]] || die 'directory publication failed' ;;
       publish-mkdir-*) [[ $(<"$work/publication-result") != 0 ]] || die 'invalid directory publication succeeded' ;;
@@ -2272,6 +2464,7 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
       *) [[ $(<"$work/publication-result") == 0 ]] || { cat "$work/stderr" >&2; die 'valid publication failed'; } ;;
     esac
     case $name in
+      publish-recovery-copy-signed) [[ ! -e $work/parity-verified && ! -e $work/context-worker-apply ]] || die 'signed-copy fixture ran another publisher' ;;
       publish-mkdir-efi|publish-mkdir-linux|publish-mkdir-retry-*) [[ -s $work/parity-verified ]] || die 'directory ordinary parity missing' ;;
       publish-mkdir-*) ;;
       publish-plan-omit|publish-config-drift|publish-late-failure|publish-third-state|publish-unstarted-after|publish-core-*-bind|publish-native-*) ;;
@@ -2302,6 +2495,28 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
       [[ -e $work/publication-sync-failed && -s $work/publication-sync-witness.json ]] || die 'publication sync fault not exercised'
       jq -e --arg fault "${name#publish-retry-}" '.fault == $fault and (.kind | length > 0) and (.source | startswith("/work/state/transactions/"))' "$work/publication-sync-witness.json" >/dev/null
     fi
+  fi
+  if [[ $name == publish-recovery-copy-signed ]]; then
+    # Reuse the actual owned tree after the original Core/JVM namespace exits.
+    # /boot is now empty; strict data decoding uses real isolated Python rather
+    # than the platform-acquisition seam. Each phase keeps the existing watchdog.
+    rc=0
+    timeout --kill-after=5 "$watchdog" "${sandbox[@]}" --bind "$work" /work --tmpfs /boot \
+      --bind "$work/sbctl" /var/lib/sbctl --ro-bind "$(realpath "$(type -P python)")" /usr/bin/python \
+      --ro-bind "$(realpath "$(type -P python)")" /real/namespace-python \
+      /usr/bin/bash /fixtures/recovery-copy >"$work/recovery-copy.stdout" 2>"$work/recovery-copy.stderr" || rc=$?
+    printf '%s\n' "$rc" >"$work/recovery-copy.status"
+    if [[ $rc != 0 || -e $work/recovery-copy-forbidden ]]; then
+      cat "$work/recovery-copy.stdout" "$work/recovery-copy.stderr" >&2
+      die "$name recovery-copy namespace expected status 0, got $rc"
+    fi
+    jq -se '[.[].body.id] == ["resource-0","configuration"] and all(.[]; .reference.schema_version == 2)' \
+      "$work/recovery-copies.jsonl" >/dev/null || die 'signed-copy evidence incomplete'
+    jq -se 'any(.[]; .event == "result" and .phase == "prepare" and .operation == "sign" and .status == 0 and
+      .tool_result == "real") and any(.[]; .event == "result" and .phase == "prepare" and .operation == "verify" and
+      .status == 0 and (.verification | any(.is_signed == 1)))' "$work/signer-commands.jsonl" >/dev/null || die 'original managed path did not really sign and verify'
+    cmp "$work/recovery-activity-before" "$work/recovery-activity-after" || die 'copy invoked signing, context acquisition or the producer'
+    cat "$work/recovery-copy.stdout"
   fi
   printf 'PASS: Core producer session/%s\n' "$name"
   count=$((count+1))

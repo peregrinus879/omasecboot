@@ -660,9 +660,11 @@ validate_manifest_schema() {
        else true end)
      else true end) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
-    (if .operation == "publication-recovery" then
+    (if .kind == "recovery-attempt" and .operation == "publication-recovery" then
       .schema_version == 3 and .kind == "recovery-attempt" and
-      (.publication_records | length) == 1 and .target_state == "active" and
+      (.publication_records | length) >= 1 and
+      (.publication_records | map(.path) | length == (unique | length)) and
+      all(.publication_records[]; .schema_version == 2) and .target_state == "active" and
       .file_rollback_policy == "preserve" and .status != "completed" and
       .current_phase == null and .completed_phases == [] and (.backups | length) == 1 and
       no_firmware_evidence and all(.domain_records[]; . == null)
@@ -1088,7 +1090,7 @@ validate_recovery_attempt_manifest_rules() {
       # This internal constructor records original authority only. Effects and
       # completion need their own paired attempt schemas before being admitted.
       json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and
-        .schema_version == 3 and (.publication_records | length) == 1 and
+        .schema_version == 3 and (.publication_records | length) >= 1 and
         .status != "completed" and all(.domain_records[]; . == null)' "$document"
       ;;
     *) return 1 ;;

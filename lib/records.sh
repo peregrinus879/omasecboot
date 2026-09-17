@@ -22,6 +22,7 @@ readonly MAX_EXPECTED_EFI_ARTIFACTS=4096
 readonly PUBLICATION_RECORD_SCHEMA_VERSION=1
 readonly PUBLICATION_INVOCATION_START_SCHEMA_VERSION=2
 readonly PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION=2
+readonly PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION=2
 # This is stable identity, separate from boot-stage mount/inode observations.
 # shellcheck disable=SC2016 # jq schema definitions, not shell expressions.
 readonly PUBLICATION_CONTEXT_JQ_DEFS='
@@ -66,6 +67,9 @@ publication_context_matches_intent() {
 # Semantic memoization only. Every hit rechecks all referenced control files and
 # immutable retained bytes; neither pathname metadata nor visibility is proof.
 declare -Ag _publication_validation_cache=()
+# One current semantic view per recovery transaction/owner, bounded below.
+# Every reuse proves the complete cross-root dependency closure again.
+declare -Ag _publication_recovery_validation_cache=()
 
 # Publication records are an append-only transaction-local chain. These readers
 # prove immutable data, never the continued existence of a historical FAT inode.
@@ -75,7 +79,8 @@ validate_publication_record_json() {
   jq -e --arg id "$transaction_id" --argjson ordinal "$ordinal" --argjson previous "$previous" \
     --arg directory "$directory" --argjson uid "$(control_owner_uid)" --argjson schema "$PUBLICATION_RECORD_SCHEMA_VERSION" \
     --argjson start_schema "$PUBLICATION_INVOCATION_START_SCHEMA_VERSION" \
-    --argjson recovery_schema "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
+    --argjson recovery_schema "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION" \
+    --argjson copy_schema "$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
     def resource_id: type == "string" and test("^[A-Za-z0-9_-]{1,64}$");
     def strict_resource_id: type == "string" and test("\\A[A-Za-z0-9_-]{1,64}\\z");
     def strict_digest: type == "string" and test("\\A[0-9a-f]{64}\\z");
@@ -116,7 +121,8 @@ validate_publication_record_json() {
     type == "object" and keys == ["body","invocation","kind","ordinal","previous","recorded_at",
       "schema_version","transaction_id","writer_version"] and
     .schema_version == (if .kind == "invocation-start" then $start_schema
-      elif .kind == "recovery-basis" then $recovery_schema else $schema end) and
+      elif .kind == "recovery-basis" then $recovery_schema
+      elif .kind == "retained-copy-ready" or .kind == "retained-copy" then $copy_schema else $schema end) and
     .transaction_id == $id and (.invocation | uuid) and
     .ordinal == $ordinal and .previous == $previous and (.recorded_at | timestamp) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
@@ -125,6 +131,23 @@ validate_publication_record_json() {
         (.body | type == "object" and keys == ["basis"] and
           (.basis | type == "object" and .scope == "original-invocation-basis")) and
         .body.basis.invocation == .invocation
+      elif .kind == "retained-copy-ready" or .kind == "retained-copy" then
+        .kind as $kind | (.body | type == "object" and
+          keys == (["file","id","original_record","original_retained","original_source","signing"] +
+            (if $kind == "retained-copy-ready" then ["temporary"] else [] end) | sort) and
+          (.id | strict_resource_id) and
+          (.original_record | artifact_reference and .schema_version == 1 and (.sha256 | strict_digest)) and
+          (.original_source | type == "object" and keys == ["path","sha256"] and
+            (.path | canonical_path) and (.sha256 | strict_digest)) and
+          (.original_retained | type == "object" and keys == ["bytes","path","sha256"] and
+            (.path | canonical_path) and (.sha256 | strict_digest) and
+            (.bytes | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .)) and
+          (.signing == "bytes" or .signing == "local-efi") and (.file | file_ref) and
+          .file.sha256 == .original_retained.sha256 and .file.bytes == .original_retained.bytes and
+          (if $kind == "retained-copy-ready" then
+            (.temporary | canonical_path and startswith($directory + "/") and
+              (ltrimstr($directory + "/") | test("\\A\\.publication-copy\\.[A-Za-z0-9]{6}\\z")))
+           else true end))
       elif .kind == "intent" then
        (.body | type == "object" and keys == (["configuration","esp_path","operation","resources"] +
          (if has("publication") then ["publication"] else [] end) | sort) and
@@ -261,7 +284,7 @@ validate_publication_records() {
     kind=$(jq -r '.kind' <<<"$document") || return 1
     [[ -z ${terminals[$invocation]:-} ]] || return 1
     case $kind in
-      recovery-basis) return 1 ;;
+      recovery-basis|retained-copy-ready|retained-copy) return 1 ;;
       invocation-start)
         [[ -z ${intents[$invocation]:-} && -z ${contexts[$invocation]:-} ]] || return 1
         intents[$invocation]=$(jq -c '.body.intent' <<<"$document") || return 1
@@ -462,15 +485,57 @@ validate_publication_records() {
 }
 
 # The first record of a preparatory recovery attempt binds its actual original
-# basis. Do not use the root journal's local-file-only cache for cross-root data.
+# basis. Recovery has a separate cache with complete cross-root dependencies.
 # This validates historical data only, including a hash-bound prior selection;
 # the constructor separately proves that selection is current under both locks.
+publication_recovery_cache_recheck() {
+  local transaction_id=$1 manifest=$2 cached=$3 directory references reference
+  local _manifest_json='' _manifest_id='' _manifest_sha256='' _incident_json='' _incident_read_status=''
+  json_is 'keys == ["copies","key"] and (.copies | type == "array")' "$cached" || return 1
+  directory=$(dirname "$(lifecycle_manifest_path "$transaction_id")") || return 1
+  validate_private_control_directory "$directory" || return 1
+  validate_artifact_reference_file "$(jq -c '.backups[0] | {path,sha256}' <<<"$manifest")" "$directory" || return 1
+  references=$(jq -c '.publication_records[]' <<<"$manifest") || return 1
+  while IFS= read -r reference; do
+    validate_artifact_reference_file "$reference" "$directory" || return 1
+  done <<<"$references"
+  references=$(jq -c '.copies[]' <<<"$cached") || return 1
+  while IFS= read -r reference; do
+    [[ -z $reference ]] || validate_publication_retained_file "$transaction_id" "$reference" || return 1
+  done <<<"$references"
+  # This proves the actual seal, manifest and all original journal/payload and
+  # domain dependencies, including other invocations. It may reuse only the
+  # original root's own checked semantics, never skip its file/hash checks.
+  publication_read_sealed_root "$(jq -c '.recovery.root_incident' <<<"$manifest")"
+}
+
 validate_publication_recovery_records() {
-  local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior
+  local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior references invocation id kind strict ordinal=0 total
   local _publication_original_basis='' _publication_member_record=''
-  json_is '.publication_records | length == 1' "$manifest" || return 1
+  local _publication_recovery_copy_expected=''
+  local _manifest_json='' _manifest_id='' _manifest_sha256='' _incident_json='' _incident_read_status=''
+  local owner slot cache_key canonical cached='' copied_files='[]'
+  local -A expected_copies=() prepared_copies=() copied=()
+  lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
+  owner=$(control_owner_uid) || return 1
+  [[ $owner =~ ^[0-9]+$ ]] || return 1
+  slot="$transaction_id:$owner"
+  if [[ -z $pending ]]; then
+    canonical=$(jq -cSse 'if length == 1 and (.[0] | type == "object") then .[0]
+      else error("expected one recovery manifest") end' <<<"$manifest") || return 1
+    cache_key=$(sha256_text "$canonical") || return 1
+    cached=${_publication_recovery_validation_cache[$slot]:-}
+    if [[ -n $cached ]] && json_is ".key == \"$cache_key\"" "$cached"; then
+      if publication_recovery_cache_recheck "$transaction_id" "$manifest" "$cached"; then return 0; fi
+      unset "_publication_recovery_validation_cache[$slot]"
+      return 1
+    fi
+    unset "_publication_recovery_validation_cache[$slot]"
+  fi
+  total=$(jq -r '.publication_records | length' <<<"$manifest") || return 1
+  (( total >= 1 )) || return 1
   reference=$(jq -c '.publication_records[0]' <<<"$manifest") || return 1
-  if [[ -n $pending ]]; then
+  if [[ -n $pending && $total == 1 ]]; then
     document=$pending
     json_is '.[0].schema_version == .[1].schema_version' "[$reference,$document]" || return 1
     [[ $(jq -r '.path' <<<"$reference") == "$(dirname "$(lifecycle_manifest_path "$transaction_id")")/publication-1.json" &&
@@ -481,9 +546,10 @@ validate_publication_recovery_records() {
     document=$_publication_member_record
   fi
   json_is '.kind == "recovery-basis" and .schema_version == 2' "$document" || return 1
+  invocation=$(jq -r '.invocation' <<<"$document") || return 1
   basis=$(jq -c '.body.basis' <<<"$document") || return 1
   publication_load_complete_original_basis "$(jq -c '.recovery.root_incident' <<<"$manifest")" \
-    "$(jq -r '.invocation' <<<"$document")" || return 1
+    "$invocation" || return 1
   json_is '.[0] == .[1]' "[$basis,$_publication_original_basis]" || return 1
   prior=$(publication_capture_hashed_document "$(jq -r '.backups[0].path' <<<"$manifest")" \
     "$(jq -r '.backups[0].sha256' <<<"$manifest")") || return 1
@@ -498,7 +564,74 @@ validate_publication_recovery_records() {
     $prior.transaction.attempt_count + 1 == $attempt.recovery.attempt_number and
     $prior.transaction.id == $basis.root.id and $prior.transaction.operation == $basis.root_operation and
     $prior.transaction.manifest == ($basis.root.path | sub("/incident.json$"; "/manifest.json"))' \
-    "[$prior,$manifest,$basis]"
+    "[$prior,$manifest,$basis]" || return 1
+  references=$(jq -c '.publication_records[]' <<<"$manifest") || return 1
+  while IFS= read -r reference; do
+    ordinal=$((ordinal+1))
+    (( ordinal > 1 )) || continue
+    if [[ -n $pending && $ordinal == "$total" ]]; then
+      document=$pending
+      [[ $(jq -r '.path' <<<"$reference") == "$(dirname "$(lifecycle_manifest_path "$transaction_id")")/publication-$ordinal.json" &&
+        $(jq -r '.sha256' <<<"$reference") == "$(sha256_text "$document"$'\n')" ]] || return 1
+      validate_publication_record_json "$transaction_id" "$ordinal" \
+        "$(jq -c --argjson n "$ordinal" '.publication_records[$n-2]' <<<"$manifest")" "$document" || return 1
+      json_is '.[0].schema_version == .[1].schema_version' "[$reference,$document]" || return 1
+      strict=$(publication_original_data_decode normalize <<<"[$document,null]") || return 1
+    else
+      publication_read_manifest_member "$transaction_id" "$manifest" "$reference" || return 1
+      document=$_publication_member_record
+      strict=$(publication_original_data_decode capture <<<"$(jq -c '[.path,.sha256]' <<<"$reference")") || return 1
+    fi
+    json_is '.[0] == .[1]' "[$strict,$document]" || return 1
+    json_is ".invocation == \"$invocation\" and .schema_version == 2 and
+      (.kind == \"retained-copy-ready\" or .kind == \"retained-copy\")" "$strict" || return 1
+    id=$(jq -r '.body.id' <<<"$strict") || return 1
+    kind=$(jq -r '.kind' <<<"$strict") || return 1
+    if [[ -z ${expected_copies[$id]:-} ]]; then
+      publication_recovery_copy_projection "$transaction_id" "$basis" "$id" || return 1
+      expected_copies[$id]=$_publication_recovery_copy_expected
+    fi
+    # Both variants carry the same exact source/provenance/file projection.
+    json_is '(.[0].body | del(.temporary)) == .[1]' "[$strict,${expected_copies[$id]}]" || return 1
+    [[ -z ${copied[$id]:-} ]] || return 1
+    if [[ $kind == retained-copy-ready ]]; then
+      [[ -z ${prepared_copies[$id]:-} ]] || return 1
+      prepared_copies[$id]=true
+    else
+      [[ -n ${prepared_copies[$id]:-} ]] || return 1
+      validate_publication_retained_file "$transaction_id" "$(jq -c '.body.file' <<<"$strict")" || return 1
+      copied_files=$(jq -c --argjson file "$(jq -c '.body.file' <<<"$strict")" '. + [$file]' <<<"$copied_files") || return 1
+      copied[$id]=true
+    fi
+  done <<<"$references"
+  # Projections read strict members between complete original closure checks.
+  # Unchanged hash-bound originals need no second projection reconstruction.
+  publication_read_sealed_root "$(jq -c '.root' <<<"$basis")" || return 1
+  if [[ -z $pending ]]; then
+    if [[ -z ${_publication_recovery_validation_cache[$slot]:-} ]] &&
+      (( ${#_publication_recovery_validation_cache[@]} >= 2 * MAX_RECOVERY_ATTEMPT_SEALS )); then
+      _publication_recovery_validation_cache=()
+    fi
+    _publication_recovery_validation_cache[$slot]=$(jq -cn --arg key "$cache_key" \
+      --argjson copies "$copied_files" '{key:$key,copies:$copies}') || return 1
+  fi
+  return 0
+}
+
+# Data projection only. Caller validates this basis against its actual attempt.
+# The strict original decoder checks real sealed members and preserves original
+# source identity separately from the already-retained (possibly signed) bytes.
+publication_recovery_copy_projection() {
+  local transaction_id=$1 basis=$2 id=$3 directory effect
+  _publication_recovery_copy_expected=''
+  directory=$(lifecycle_manifest_path "$transaction_id") || return 1
+  directory=${directory%/*}
+  [[ $id =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
+  effect=$(publication_original_data_decode resolve <<<"[$basis,\"$id\"]") || return 1
+  _publication_recovery_copy_expected=$(jq -ce --arg directory "$directory" '
+    {id,original_record:.authority.retained.reference,original_source,original_retained:.retained,signing,
+     file:{path:($directory+"/publication-data-"+.basis.invocation+"-"+.id),
+       sha256:.desired.sha256,bytes:.desired.bytes}}' <<<"$effect") || return 1
 }
 
 validate_publication_recovery_evolution() {
@@ -559,6 +692,7 @@ append_publication_record() {
   schema=$PUBLICATION_RECORD_SCHEMA_VERSION
   [[ $kind != invocation-start ]] || schema=$PUBLICATION_INVOCATION_START_SCHEMA_VERSION
   [[ $kind != recovery-basis ]] || schema=$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION
+  if [[ $kind == retained-copy-ready || $kind == retained-copy ]]; then schema=$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION; fi
   producer_session_context_is_owned || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   json_is '.schema_version == 3 and .status == "transition"' "$_manifest_json" || return 1
@@ -572,7 +706,7 @@ append_publication_record() {
   previous=$(jq -c '.publication_records[-1] // null' <<<"$_manifest_json") || return 1
   if [[ $previous != null ]]; then
     path=$(jq -r '.path' <<<"$previous") || return 1
-    if [[ $kind == invocation-start ]]; then
+    if [[ $schema == 2 ]]; then
       existing=$(publication_capture_hashed_document "$path" "$(jq -r '.sha256' <<<"$previous")") || return 1
     else existing=$(read_control_document "$path") || return 1; fi
     if [[ $(jq -r '.invocation' <<<"$existing") == "$invocation" && $(jq -r '.kind' <<<"$existing") == "$kind" ]] &&
@@ -597,7 +731,7 @@ append_publication_record() {
   (( $(LC_ALL=C printf '%s\n' "$document" | wc -c) <= MAX_CONTROL_DOCUMENT_BYTES )) || return 1
   path="$directory/publication-$ordinal.json"
   if [[ -e $path || -L $path ]]; then
-    if [[ $kind == invocation-start ]]; then
+    if [[ $schema == 2 ]]; then
       existing=$(publication_capture_hashed_document "$path" "$(sha256_file "$path")") || return 1
     else existing=$(read_control_document "$path") || return 1; fi
     validate_publication_record_json "$_transaction_id" "$ordinal" "$previous" "$existing" || return 1
@@ -621,7 +755,7 @@ append_publication_record() {
   fi
   durable_sync "$path" && durable_sync "$directory" || return 1
   reference=$(transaction_artifact_reference "$path" "$schema") || return 1
-  if [[ $kind == invocation-start ]]; then
+  if [[ $schema == 2 ]]; then
     existing=$(publication_capture_hashed_document "$path" "$(jq -r '.sha256' <<<"$reference")") || return 1
     json_is '.[0] == .[1]' "[$existing,$document]" || return 1
   fi
@@ -1608,10 +1742,10 @@ publication_load_complete_original_basis() {
   _publication_original_basis=$basis
 }
 
-# Private pure-data decoder for the two public readers below. Raw control JSON
+# Private pure-data decoder for original readers and strict control capture. Raw JSON
 # is decoded again without jq/binary64 or shell string normalization: the old
 # schema readers deliberately retain their historical acceptance rules. Only
-# sealed control documents and retained-file metadata are read here, never an
+# hash-bound control documents and retained-file metadata are read here, never an
 # intent source, historical stage, configuration target or observed target.
 publication_original_data_decode() {
   /usr/bin/timeout --kill-after=1 30 /usr/bin/env -i PATH=/usr/bin LC_ALL=C HOME=/nonexistent \
@@ -1869,7 +2003,17 @@ try:
     require(len(raw) <= 2 * LIMIT + 4096)
     data = decode(raw)
     require(type(data) is list and len(data) == 2)
-    result = resolve(*data) if sys.argv[1] == "resolve" else classify(*data)
+    if sys.argv[1] == "resolve":
+        result = resolve(*data)
+    elif sys.argv[1] == "classify":
+        result = classify(*data)
+    elif sys.argv[1] == "capture":
+        result = capture(*data)
+    elif sys.argv[1] == "normalize":
+        require(data[1] is None)
+        result = data[0]
+    else:
+        raise ValueError("unknown original data operation")
     output = json.dumps(result, ensure_ascii=True, separators=(",", ":"))
     require(len(output) + 1 <= LIMIT)
     print(output)
