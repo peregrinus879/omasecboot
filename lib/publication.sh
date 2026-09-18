@@ -166,6 +166,186 @@ begin_publication_recovery_attempt() {
   lifecycle_failpoint after-attempt-transition-write
 }
 
+# Original authority parts of the owned preparatory attempt: the basis bound by
+# its first record, the sealed original intent and context with their real
+# references, and the plan effect ids. Data only; ownership and locks are
+# reasserted here and by every writer, never inferred from these values.
+publication_recovery_attempt_parts() {
+  local basis root invocation
+  local _publication_member_record=''
+  _publication_recovery_attempt_basis='' _publication_recovery_attempt_parts=''
+  producer_session_context_is_owned || return 1
+  read_transaction_manifest "$_transaction_id" || return 1
+  json_is '.kind == "recovery-attempt" and .operation == "publication-recovery" and .status == "transition"' "$_manifest_json" || return 1
+  publication_read_manifest_member "$_transaction_id" "$_manifest_json" \
+    "$(jq -c '.publication_records[0]' <<<"$_manifest_json")" || return 1
+  json_is '.kind == "recovery-basis" and .schema_version == 2' "$_publication_member_record" || return 1
+  basis=$(jq -c '.body.basis' <<<"$_publication_member_record") || return 1
+  root=$(jq -c '.root' <<<"$basis") || return 1
+  invocation=$(jq -r '.invocation' <<<"$basis") || return 1
+  publication_resolve_original_parts "$root" "$invocation" || return 1
+  json_is '.[0] == .[1].basis' "[$basis,$_publication_original_parts]" || return 1
+  _publication_recovery_attempt_basis=$basis
+  _publication_recovery_attempt_parts=$_publication_original_parts
+}
+
+# Fresh acquisition for the owned attempt: a clean per-attempt view (existing
+# pins must be this owner's and this transaction's), pinned ancestors of the
+# configuration, the real collector, and equality with the sealed original.
+publication_recovery_acquire_context() {
+  local invocation=$1 intent=$2 config=$3 original=$4
+  if (( ${#_publication_pins[@]} > 0 )); then
+    [[ $_publication_pin_owner == "$BASHPID" && $_publication_pin_transaction == "$_transaction_id" ]] || return 1
+  fi
+  publication_reset_attempt
+  _publication_invocation=$invocation
+  _publication_intent=$intent
+  _publication_retained=()
+  _publication_mount_namespace=$(publication_namespace_value) || return 1
+  publication_parent_binding "$(dirname "$config")" || return 1
+  publication_collect_stable_context || return 1
+  publication_compare_stable_context "$original" "$_publication_collected_context"
+}
+
+# prepare_publication_recovery_context
+# Acquire the fresh stable context and attempt-local signing policy for the
+# owned preparatory attempt through the real collector, require equality with
+# the sealed original context, and bind both as the attempt's typed context
+# authority (recovery-context). A replay reacquires and compares. No target is
+# observed, nothing outside the private transaction directory is written, and
+# the result permits neither a stage nor a canonical write.
+prepare_publication_recovery_context() {
+  local parts intent invocation config body original reference lookup_rc
+  _publication_recovery_context_record='' _publication_recovery_context_reference=''
+  [[ $# == 0 ]] || return 1
+  publication_recovery_attempt_parts || return 1
+  parts=$_publication_recovery_attempt_parts
+  invocation=$(jq -r '.basis.invocation' <<<"$parts") || return 1
+  intent=$(jq -c '.intent' <<<"$parts") || return 1
+  original=$(jq -c '.context' <<<"$parts") || return 1
+  config=$(jq -r '.configuration.path' <<<"$intent") || return 1
+  if find_publication_record "$invocation" recovery-context; then
+    body=$_publication_found_body reference=$_publication_found_reference
+    if [[ $_publication_invocation == "$invocation" && -n $_publication_stable_context && -n $_publication_signing_policy ]]; then
+      # Replay with live memory: the record, memory and a fresh acquisition of
+      # both context and signing policy must agree, or memory authority ends.
+      if ! json_is '.[0].context == .[1] and .[0].signing_policy == .[2] and .[3] == .[4]' \
+          "[$body,$_publication_stable_context,$_publication_signing_policy,$_publication_intent,$intent]" ||
+        ! publication_verify_stable_context ||
+        ! json_is '.[0] == .[1]' "[$_publication_collected_signing_policy,$_publication_signing_policy]"; then
+        _publication_stable_context='' _publication_signing_policy=''
+        return 1
+      fi
+    else
+      # A bound record without live memory (a durability retry after binding,
+      # or another process view of this attempt) acquires afresh and must equal it.
+      publication_recovery_acquire_context "$invocation" "$intent" "$config" "$original" || return 1
+      json_is '.[0].context == .[1] and .[0].signing_policy == .[2]' \
+        "[$body,$_publication_collected_context,$_publication_collected_signing_policy]" || return 1
+      _publication_stable_context=$_publication_collected_context
+      _publication_signing_policy=$_publication_collected_signing_policy
+    fi
+    sync_publication_reference "$reference" || return 1
+    _publication_recovery_context_record=$body
+    _publication_recovery_context_reference=$reference
+    return 0
+  else
+    lookup_rc=$?
+    (( lookup_rc == 1 )) || return 1
+  fi
+  publication_recovery_acquire_context "$invocation" "$intent" "$config" "$original" || return 1
+  body=$(jq -cn --argjson context "$_publication_collected_context" --argjson policy "$_publication_collected_signing_policy" \
+    --argjson original "$(jq -c '.authority.context' <<<"$parts")" \
+    '{context:$context,original_context:$original,signing_policy:$policy}') || return 1
+  append_publication_record "$invocation" recovery-context "$body" || return 1
+  _publication_stable_context=$_publication_collected_context
+  _publication_signing_policy=$_publication_collected_signing_policy
+  _publication_recovery_context_record=$body
+  _publication_recovery_context_reference=$_publication_record_reference
+}
+
+# authorize_publication_recovery_target EFFECT_ID
+# One fresh conflict-classified observation of an original effect target under
+# this attempt's live custody, joined to the bound retained copy and, for a
+# locally signed EFI copy, a fresh signature verification under the attempt's
+# policy. Only prior, desired or explicitly permitted absence is recorded;
+# conflicts, missing or unsafe ancestors, lost custody and changed observations
+# are refused without a record. Observed identities are live custody evidence
+# for this attempt only. Data only: no stage, no canonical write.
+authorize_publication_recovery_target() {
+  local id basis parts invocation root context target parent state observation classification effect copy signature=null body existing lookup_rc
+  local _publication_original_effect=''
+  _publication_recovery_authorization_record='' _publication_recovery_authorization_reference=''
+  [[ $# == 1 && $1 =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
+  id=$1
+  publication_recovery_attempt_parts || return 1
+  basis=$_publication_recovery_attempt_basis parts=$_publication_recovery_attempt_parts
+  invocation=$(jq -r '.basis.invocation' <<<"$parts") || return 1
+  root=$(jq -c '.basis.root' <<<"$parts") || return 1
+  [[ $_publication_invocation == "$invocation" && -n $_publication_stable_context && -n $_publication_signing_policy ]] || return 1
+  find_publication_record "$invocation" recovery-context || return 1
+  context=$_publication_found_body
+  json_is '.[0].context == .[1] and .[0].signing_policy == .[2] and .[0].original_context == .[3].authority.context' \
+    "[$context,$_publication_stable_context,$_publication_signing_policy,$parts]" || return 1
+  find_publication_record "$invocation" retained-copy "$id" || return 1
+  copy=$(jq -cn --argjson reference "$_publication_found_reference" --argjson file "$(jq -c '.file' <<<"$_publication_found_body")" \
+    '{reference:$reference,file:$file}') || return 1
+  validate_publication_retained_file "$_transaction_id" "$(jq -c '.file' <<<"$copy")" || return 1
+  publication_resolve_original_effect "$root" "$invocation" "$id" || return 1
+  effect=$_publication_original_effect
+  json_is '.[0].basis == .[1] and .[0].desired.sha256 == .[2].file.sha256 and .[0].desired.bytes == .[2].file.bytes' \
+    "[$effect,$basis,$copy]" || return 1
+  target=$(jq -r '.target' <<<"$effect") || return 1
+  parent=$(dirname "$target") || return 1
+  publication_verify_live || return 1
+  # Existing control-safe ancestors only. A missing ancestor is refused here;
+  # target-derived creation belongs to the later readiness step.
+  publication_parent_binding "$parent" || return 1
+  state='{"kind":"absent","identity":null,"sha256":null,"link_target":null,"mode":0,"uid":0,"gid":0}'
+  if [[ -e $target || -L $target ]]; then
+    publication_verify_path_mount "$target" file "${_publication_directory_mount_ids[$parent]}" || return 1
+    if [[ -n ${_publication_target_fds[$id]:-} ]] && fd_matches_path "${_publication_target_fds[$id]}" "$target"; then
+      state=$(publication_fd_state "${_publication_target_fds[$id]}") || return 1
+    else
+      publication_pin_path "$target" file || return 1
+      _publication_target_fds[$id]=$_publication_new_fd
+      state=$(publication_fd_state "$_publication_new_fd") || return 1
+    fi
+    publication_verify_path_mount "$target" file "${_publication_directory_mount_ids[$parent]}" \
+      "$(jq -r '.identity' <<<"$state")" || return 1
+  fi
+  observation=$(jq -cn --arg path "$target" --argjson state "$state" '{path:$path,state:$state}') || return 1
+  classification=$(publication_original_data_decode classify <<<"[$effect,$observation]") || return 1
+  json_is '.outcome == "prior" or .outcome == "desired" or .outcome == "allowed-absence"' "$classification" || return 1
+  classification=$(jq -r '.outcome' <<<"$classification") || return 1
+  if json_is '.signing == "local-efi"' "$effect"; then
+    verify_publication_input "$(jq -r '.file.path' <<<"$copy")" || return 1
+    signature=$(jq -cn --arg der "$(jq -r '.context.local_db_certificate_der_sha256' <<<"$context")" \
+      '{verified:true,certificate_der_sha256:$der}') || return 1
+  fi
+  publication_verify_live || return 1
+  body=$(jq -cn --arg id "$id" --arg target "$target" --argjson effect "$(jq -c 'del(.basis)' <<<"$effect")" \
+    --argjson copy "$copy" --argjson observation "$observation" --argjson view "$_publication_parent_view" \
+    --argjson parent "$_publication_parent" --arg classification "$classification" --argjson signature "$signature" \
+    '{id:$id,target:$target,original_effect:$effect,copy:$copy,observation:$observation,mount_view:$view,
+      parent:$parent,classification:$classification,signature:$signature}') || return 1
+  if find_publication_record "$invocation" target-authorization "$id"; then
+    existing=$_publication_found_body
+    json_is '.[0] == .[1]' "[$body,$existing]" || return 1
+    sync_publication_reference "$_publication_found_reference" || return 1
+    _publication_recovery_authorization_record=$existing
+    _publication_recovery_authorization_reference=$_publication_found_reference
+    return 0
+  else
+    lookup_rc=$?
+    (( lookup_rc == 1 )) || return 1
+  fi
+  producer_session_context_is_owned || return 1
+  append_publication_record "$invocation" target-authorization "$body" || return 1
+  _publication_recovery_authorization_record=$body
+  _publication_recovery_authorization_reference=$_publication_record_reference
+}
+
 publication_retain_original_configuration() {
   local invocation=$1 intent=$2 source expected directory destination temporary hash bytes reference
   _publication_original_configuration=''

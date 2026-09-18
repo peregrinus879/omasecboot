@@ -23,6 +23,7 @@ readonly PUBLICATION_RECORD_SCHEMA_VERSION=1
 readonly PUBLICATION_INVOCATION_START_SCHEMA_VERSION=2
 readonly PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION=2
 readonly PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION=2
+readonly PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION=2
 # This is stable identity, separate from boot-stage mount/inode observations.
 # shellcheck disable=SC2016 # jq schema definitions, not shell expressions.
 readonly PUBLICATION_CONTEXT_JQ_DEFS='
@@ -80,7 +81,8 @@ validate_publication_record_json() {
     --arg directory "$directory" --argjson uid "$(control_owner_uid)" --argjson schema "$PUBLICATION_RECORD_SCHEMA_VERSION" \
     --argjson start_schema "$PUBLICATION_INVOCATION_START_SCHEMA_VERSION" \
     --argjson recovery_schema "$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION" \
-    --argjson copy_schema "$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
+    --argjson copy_schema "$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION" \
+    --argjson authority_schema "$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION" "${OMASECBOOT_JQ_DEFS}${PUBLICATION_CONTEXT_JQ_DEFS}"'
     def resource_id: type == "string" and test("^[A-Za-z0-9_-]{1,64}$");
     def strict_resource_id: type == "string" and test("\\A[A-Za-z0-9_-]{1,64}\\z");
     def strict_digest: type == "string" and test("\\A[0-9a-f]{64}\\z");
@@ -122,7 +124,8 @@ validate_publication_record_json() {
       "schema_version","transaction_id","writer_version"] and
     .schema_version == (if .kind == "invocation-start" then $start_schema
       elif .kind == "recovery-basis" then $recovery_schema
-      elif .kind == "retained-copy-ready" or .kind == "retained-copy" then $copy_schema else $schema end) and
+      elif .kind == "retained-copy-ready" or .kind == "retained-copy" then $copy_schema
+      elif .kind == "recovery-context" or .kind == "target-authorization" then $authority_schema else $schema end) and
     .transaction_id == $id and (.invocation | uuid) and
     .ordinal == $ordinal and .previous == $previous and (.recorded_at | timestamp) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
@@ -148,6 +151,44 @@ validate_publication_record_json() {
             (.temporary | canonical_path and startswith($directory + "/") and
               (ltrimstr($directory + "/") | test("\\A\\.publication-copy\\.[A-Za-z0-9]{6}\\z")))
            else true end))
+      elif .kind == "recovery-context" then
+        (.body | type == "object" and keys == ["context","original_context","signing_policy"] and
+          (.context | publication_context) and
+          (.original_context | type == "object" and keys == ["projection","reference"] and
+            (.reference | artifact_reference and (.sha256 | strict_digest)) and
+            (.projection == ".body.context" or .projection == ".body")) and
+          (.signing_policy | type == "object" and keys == ["certificate","certificate_sha256","configuration",
+              "configuration_sha256","configuration_state","executable","executable_sha256"] and
+            (.certificate | canonical_path) and (.certificate_sha256 | strict_digest) and
+            (.configuration | canonical_path) and (.executable | canonical_path) and (.executable_sha256 | strict_digest) and
+            (if .configuration_state == "present" then (.configuration_sha256 | strict_digest)
+             elif .configuration_state == "absent" then .configuration_sha256 == "" else false end)))
+      elif .kind == "target-authorization" then
+        (.body | . as $body | type == "object" and keys == ["classification","copy","id","mount_view","observation",
+            "original_effect","parent","signature","target"] and
+          (.id | strict_resource_id) and (.target | canonical_path) and
+          (.classification == "prior" or .classification == "desired" or .classification == "allowed-absence") and
+          (.copy | type == "object" and keys == ["file","reference"] and
+            (.reference | artifact_reference and .schema_version == 2 and (.sha256 | strict_digest)) and
+            (.file | file_ref) and (.file.sha256 | strict_digest)) and
+          (.observation | type == "object" and keys == ["path","state"] and (.state | state) and
+            (.state.kind == "absent" or (.state.kind == "file" and .state.uid == $uid))) and
+          .observation.path == $body.target and
+          (.original_effect | type == "object" and .schema == 1 and .scope == "original-effect-data" and
+            (has("basis") | not) and .id == $body.id and .target == $body.target and
+            (.signing == "bytes" or .signing == "local-efi")) and
+          (if .original_effect.signing == "local-efi" then
+             (.signature | type == "object" and keys == ["certificate_der_sha256","verified"] and
+               .verified == true and (.certificate_der_sha256 | strict_digest))
+           else .signature == null end) and
+          (.mount_view | type == "object" and keys == ["directories","namespace"] and
+            (.namespace | type == "string" and test("^mnt:\\[[1-9][0-9]*\\]$")) and
+            (.directories | type == "array" and length > 0 and
+              all(.[]; keys == ["identity","mount_id","path"] and (.identity | identity) and
+                (.mount_id | type == "string" and test("^[1-9][0-9]*$")) and (.path == "/" or (.path | canonical_path))) and
+              (map({path,identity}) == ($body.parent.components | map({path,identity:.directory.identity}))))) and
+          (.parent | parent) and
+          .parent.path == ($body.target | split("/")[:-1] | join("/") | if . == "" then "/" else . end))
       elif .kind == "intent" then
        (.body | type == "object" and keys == (["configuration","esp_path","operation","resources"] +
          (if has("publication") then ["publication"] else [] end) | sort) and
@@ -284,7 +325,7 @@ validate_publication_records() {
     kind=$(jq -r '.kind' <<<"$document") || return 1
     [[ -z ${terminals[$invocation]:-} ]] || return 1
     case $kind in
-      recovery-basis|retained-copy-ready|retained-copy) return 1 ;;
+      recovery-basis|retained-copy-ready|retained-copy|recovery-context|target-authorization) return 1 ;;
       invocation-start)
         [[ -z ${intents[$invocation]:-} && -z ${contexts[$invocation]:-} ]] || return 1
         intents[$invocation]=$(jq -c '.body.intent' <<<"$document") || return 1
@@ -511,11 +552,12 @@ publication_recovery_cache_recheck() {
 
 validate_publication_recovery_records() {
   local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior references invocation id kind strict ordinal=0 total
+  local context_body='' authorization_views='[]'
   local _publication_original_basis='' _publication_member_record=''
   local _publication_recovery_copy_expected=''
   local _manifest_json='' _manifest_id='' _manifest_sha256='' _incident_json='' _incident_read_status=''
   local owner slot cache_key canonical cached='' copied_files='[]'
-  local -A expected_copies=() prepared_copies=() copied=()
+  local -A expected_copies=() prepared_copies=() copied=() copy_references=() authorized=() effects=()
   lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
   owner=$(control_owner_uid) || return 1
   [[ $owner =~ ^[0-9]+$ ]] || return 1
@@ -583,27 +625,57 @@ validate_publication_recovery_records() {
       strict=$(publication_original_data_decode capture <<<"$(jq -c '[.path,.sha256]' <<<"$reference")") || return 1
     fi
     json_is '.[0] == .[1]' "[$strict,$document]" || return 1
-    json_is ".invocation == \"$invocation\" and .schema_version == 2 and
-      (.kind == \"retained-copy-ready\" or .kind == \"retained-copy\")" "$strict" || return 1
-    id=$(jq -r '.body.id' <<<"$strict") || return 1
+    json_is ".invocation == \"$invocation\" and .schema_version == 2" "$strict" || return 1
     kind=$(jq -r '.kind' <<<"$strict") || return 1
-    if [[ -z ${expected_copies[$id]:-} ]]; then
-      publication_recovery_copy_projection "$transaction_id" "$basis" "$id" || return 1
-      expected_copies[$id]=$_publication_recovery_copy_expected
-    fi
-    # Both variants carry the same exact source/provenance/file projection.
-    json_is '(.[0].body | del(.temporary)) == .[1]' "[$strict,${expected_copies[$id]}]" || return 1
-    [[ -z ${copied[$id]:-} ]] || return 1
-    if [[ $kind == retained-copy-ready ]]; then
-      [[ -z ${prepared_copies[$id]:-} ]] || return 1
-      prepared_copies[$id]=true
-    else
-      [[ -n ${prepared_copies[$id]:-} ]] || return 1
-      validate_publication_retained_file "$transaction_id" "$(jq -c '.body.file' <<<"$strict")" || return 1
-      copied_files=$(jq -c --argjson file "$(jq -c '.body.file' <<<"$strict")" '. + [$file]' <<<"$copied_files") || return 1
-      copied[$id]=true
-    fi
+    case $kind in
+      retained-copy-ready|retained-copy)
+        id=$(jq -r '.body.id' <<<"$strict") || return 1
+        if [[ -z ${effects[$id]:-} ]]; then
+          effects[$id]=$(publication_original_data_decode resolve <<<"[$basis,\"$id\"]") || return 1
+        fi
+        if [[ -z ${expected_copies[$id]:-} ]]; then
+          publication_recovery_copy_projection_from_effect "$transaction_id" "${effects[$id]}" || return 1
+          expected_copies[$id]=$_publication_recovery_copy_expected
+        fi
+        # Both variants carry the same exact source/provenance/file projection.
+        json_is '(.[0].body | del(.temporary)) == .[1]' "[$strict,${expected_copies[$id]}]" || return 1
+        [[ -z ${copied[$id]:-} ]] || return 1
+        if [[ $kind == retained-copy-ready ]]; then
+          [[ -z ${prepared_copies[$id]:-} ]] || return 1
+          prepared_copies[$id]=true
+        else
+          [[ -n ${prepared_copies[$id]:-} ]] || return 1
+          validate_publication_retained_file "$transaction_id" "$(jq -c '.body.file' <<<"$strict")" || return 1
+          copied_files=$(jq -c --argjson file "$(jq -c '.body.file' <<<"$strict")" '. + [$file]' <<<"$copied_files") || return 1
+          copied[$id]=true
+          copy_references[$id]=$reference
+        fi
+        ;;
+      recovery-context)
+        # One fresh stable context per attempt; it must equal the sealed original.
+        [[ -z $context_body ]] || return 1
+        publication_validate_recovery_context "$basis" "$strict" || return 1
+        context_body=$(jq -c '.body' <<<"$strict") || return 1
+        ;;
+      target-authorization)
+        [[ -n $context_body ]] || return 1
+        id=$(jq -r '.body.id' <<<"$strict") || return 1
+        [[ -n ${copied[$id]:-} && -z ${authorized[$id]:-} ]] || return 1
+        if [[ -z ${effects[$id]:-} ]]; then
+          effects[$id]=$(publication_original_data_decode resolve <<<"[$basis,\"$id\"]") || return 1
+        fi
+        publication_validate_target_authorization "${effects[$id]}" "$context_body" \
+          "${copy_references[$id]}" "${expected_copies[$id]}" "$strict" || return 1
+        authorization_views=$(jq -c --argjson view "$(jq -c '.body.mount_view' <<<"$strict")" \
+          '. + [$view]' <<<"$authorization_views") || return 1
+        authorized[$id]=true
+        ;;
+      *) return 1 ;;
+    esac
   done <<<"$references"
+  # Every fresh observation of one attempt shares its namespace and directory views.
+  json_is '([.[].namespace] | unique | length) <= 1 and
+    ([.[].directories[]] | group_by(.path) | all(.[]; unique | length == 1))' "$authorization_views" || return 1
   # Projections read strict members between complete original closure checks.
   # Unchanged hash-bound originals need no second projection reconstruction.
   publication_read_sealed_root "$(jq -c '.root' <<<"$basis")" || return 1
@@ -622,16 +694,54 @@ validate_publication_recovery_records() {
 # The strict original decoder checks real sealed members and preserves original
 # source identity separately from the already-retained (possibly signed) bytes.
 publication_recovery_copy_projection() {
-  local transaction_id=$1 basis=$2 id=$3 directory effect
+  local transaction_id=$1 basis=$2 id=$3 effect
+  _publication_recovery_copy_expected=''
+  [[ $id =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
+  effect=$(publication_original_data_decode resolve <<<"[$basis,\"$id\"]") || return 1
+  publication_recovery_copy_projection_from_effect "$transaction_id" "$effect"
+}
+
+publication_recovery_copy_projection_from_effect() {
+  local transaction_id=$1 effect=$2 directory
   _publication_recovery_copy_expected=''
   directory=$(lifecycle_manifest_path "$transaction_id") || return 1
   directory=${directory%/*}
-  [[ $id =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
-  effect=$(publication_original_data_decode resolve <<<"[$basis,\"$id\"]") || return 1
   _publication_recovery_copy_expected=$(jq -ce --arg directory "$directory" '
     {id,original_record:.authority.retained.reference,original_source,original_retained:.retained,signing,
      file:{path:($directory+"/publication-data-"+.basis.invocation+"-"+.id),
        sha256:.desired.sha256,bytes:.desired.bytes}}' <<<"$effect") || return 1
+}
+
+# The fresh context record must equal the sealed original context projected
+# through its real containing record, and match the sealed original intent.
+publication_validate_recovery_context() {
+  local basis=$1 document=$2 body parts
+  body=$(jq -c '.body' <<<"$document") || return 1
+  parts=$(publication_original_data_decode parts <<<"[$basis,null]") || return 1
+  # shellcheck disable=SC2016 # jq-local body/parts values.
+  json_is '.[0] as $body | .[1] as $parts | $parts.scope == "original-invocation-parts" and
+    $body.original_context == $parts.authority.context and $body.context == $parts.context' "[$body,$parts]" || return 1
+  publication_context_matches_intent "$(jq -c '.context' <<<"$body")" "$(jq -c '.intent' <<<"$parts")"
+}
+
+# A recorded authorization is data: the original effect must equal the strict
+# recomputation, the copy must be this attempt's bound copy of the same bytes,
+# and the classification must follow from the recorded observation. Observed
+# identities are live custody evidence, never proof for a later attempt.
+publication_validate_target_authorization() {
+  local effect=$1 context=$2 copy_reference=$3 copy_expected=$4 document=$5 body classification
+  body=$(jq -c '.body' <<<"$document") || return 1
+  # shellcheck disable=SC2016 # jq-local effect/context/copy values.
+  json_is '.[0] as $body | .[1] as $effect | .[2] as $context | .[3] as $copy_reference | .[4] as $copy |
+    ($body.original_effect + {basis:$effect.basis}) == $effect and
+    $body.copy.reference == $copy_reference and $body.copy.file == $copy.file and
+    $body.copy.file.sha256 == $effect.desired.sha256 and $body.copy.file.bytes == $effect.desired.bytes and
+    (if $effect.signing == "local-efi" then
+       $body.signature.certificate_der_sha256 == $context.context.local_db_certificate_der_sha256
+     else $body.signature == null end)' "[$body,$effect,$context,$copy_reference,$copy_expected]" || return 1
+  classification=$(publication_original_data_decode classify <<<"[$effect,$(jq -c '.observation' <<<"$body")]") || return 1
+  json_is '.[0].outcome == .[1].classification and (.[0].outcome == "prior" or .[0].outcome == "desired" or
+    .[0].outcome == "allowed-absence")' "[$classification,$body]"
 }
 
 validate_publication_recovery_evolution() {
@@ -693,6 +803,7 @@ append_publication_record() {
   [[ $kind != invocation-start ]] || schema=$PUBLICATION_INVOCATION_START_SCHEMA_VERSION
   [[ $kind != recovery-basis ]] || schema=$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION
   if [[ $kind == retained-copy-ready || $kind == retained-copy ]]; then schema=$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION; fi
+  if [[ $kind == recovery-context || $kind == target-authorization ]]; then schema=$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION; fi
   producer_session_context_is_owned || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   json_is '.schema_version == 3 and .status == "transition"' "$_manifest_json" || return 1
@@ -829,6 +940,7 @@ find_publication_authority_part() {
     container=$(jq -r '.kind' <<<"$document") || return 2
     if [[ $container == invocation-start ]]; then projection=".body.$part"
     elif [[ $container == "$part" && ( $part == intent || $part == context ) ]]; then projection=.body
+    elif [[ $container == recovery-context && $part == context ]]; then projection=.body.context
     else continue; fi
     body=$(jq -ce "$projection" <<<"$document") || return 2
     _publication_found_body=$body
@@ -1846,8 +1958,7 @@ def capture(filename, expected):
     finally:
         os.close(fd)
 
-def resolve(basis, effect_id):
-    identifier(effect_id)
+def originals(basis):
     require(basis["scope"] == "original-invocation-basis" and basis["schema"] in (1, 2))
     root, invocation = basis["root"], basis["invocation"]
     seal = capture(root["path"], root["sha256"])
@@ -1910,6 +2021,26 @@ def resolve(basis, effect_id):
     require([p["id"] for p in plan["puts"]] == [r["id"] for r in resources])
     require(plan["configuration"]["id"] == "configuration")
     effects = plan["puts"] + [plan["configuration"]]
+    return dict(root=root, invocation=invocation, manifest=manifest, directory=directory, member=member,
+                authority=authority, retained_file=retained_file, start=start, intent=intent, context=context,
+                intent_authority=intent_authority, context_authority=context_authority, plan=plan,
+                configuration=configuration, resources=resources, effects=effects)
+
+def parts(basis, nothing):
+    require(nothing is None)
+    original = originals(basis)
+    return dict(schema=1, scope="original-invocation-parts", basis=basis, intent=original["intent"],
+                context=original["context"],
+                authority=dict(intent=original["intent_authority"], context=original["context_authority"]),
+                effects=[effect["id"] for effect in original["effects"]])
+
+def resolve(basis, effect_id):
+    identifier(effect_id)
+    original = originals(basis)
+    invocation, manifest, member = original["invocation"], original["manifest"], original["member"]
+    authority, retained_file, start = original["authority"], original["retained_file"], original["start"]
+    intent, intent_authority, context_authority = original["intent"], original["intent_authority"], original["context_authority"]
+    plan, configuration, resources, effects = original["plan"], original["configuration"], original["resources"], original["effects"]
     selected = [(i, value) for i, value in enumerate(effects) if value["id"] == effect_id]
     require(len(selected) == 1)
     index, effect = selected[0]
@@ -2007,6 +2138,8 @@ try:
         result = resolve(*data)
     elif sys.argv[1] == "classify":
         result = classify(*data)
+    elif sys.argv[1] == "parts":
+        result = parts(*data)
     elif sys.argv[1] == "capture":
         result = capture(*data)
     elif sys.argv[1] == "normalize":
@@ -2046,6 +2179,27 @@ publication_resolve_original_effect() {
   # Revalidate the entire external closure after reading the actual members.
   publication_read_sealed_root "$root" || return 2
   _publication_original_effect=$result
+}
+
+# publication_resolve_original_parts ROOT_REFERENCE INVOCATION
+# 0: _publication_original_parts holds the rebuilt basis, the sealed original
+# intent and context bodies with their real authority references/projections,
+# and the plan effect ids in order (scope original-invocation-parts). Statuses
+# mirror the effect reader. It proves the complete closure and grants neither
+# selection, fresh context nor write authority.
+publication_resolve_original_parts() {
+  local _publication_original_basis='' _manifest_json='' _manifest_id='' _manifest_sha256=''
+  local _incident_json='' _incident_read_status=''
+  local -A _publication_validation_cache=()
+  local root invocation result status=0 LC_ALL=C
+  _publication_original_parts=''
+  [[ $# == 2 ]] || return 2
+  root=$1 invocation=$2
+  publication_load_complete_original_basis "$root" "$invocation" || status=$?
+  (( status == 0 )) || return "$status"
+  result=$(publication_original_data_decode parts <<<"[$_publication_original_basis,null]") || return 2
+  publication_read_sealed_root "$root" || return 2
+  _publication_original_parts=$result
 }
 
 # publication_classify_original_content ROOT_REFERENCE INVOCATION EFFECT_ID OBS

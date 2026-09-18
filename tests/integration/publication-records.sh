@@ -2108,6 +2108,687 @@ recovery_copy_a2_peer_cache() {
     validate_publication_recovery_records "$_transaction_id" "$manifest"
   done
 }
+# A3 fresh authority: one fresh stable context and one classified observation per
+# original effect inside the preparatory attempt. Platform acquisition and the
+# signer are seamed; directory opens, FD identity/state checks, the sticky live
+# checker, strict decoding and every journal reader stay real.
+recovery_target_parent_binding() {
+  local parent=$1 create=${2:-false} current component fd state mount previous=null components='[]' dependencies='[]' views='[]' rest
+  local -a parts=()
+  [[ $create == false ]] || fail_test 'fresh authorization requested directory creation'
+  [[ $_publication_mount_invalid == false && $(publication_namespace_value) == "$_publication_mount_namespace" ]] || { _publication_mount_invalid=true; return 1; }
+  if (( ${#_publication_directory_fds[@]} > 0 )); then publication_verify_live || return 1; fi
+  [[ $parent == "$CASE_DIR/esp" || $parent == "$CASE_DIR/esp/"* ]] || return 1
+  rest=${parent#"$CASE_DIR/esp"}
+  if [[ -n $rest ]]; then IFS=/ read -r -a parts <<<"${rest#/}"; fi
+  current=$CASE_DIR/esp
+  for component in '' "${parts[@]}"; do
+    [[ -z $component ]] || current="$current/$component"
+    fd=${_publication_directory_fds[$current]:-}
+    if [[ -z $fd ]]; then
+      publication_pin_directory "$current" || return 1
+      fd=${_publication_directory_fds[$current]}
+    fi
+    fd_matches_path "$fd" "$current" || return 1
+    state=$(publication_fd_state "$fd") || return 1
+    mount=${_publication_directory_mount_ids[$current]}
+    publication_verify_path_mount "$current" directory "$mount" "$(jq -r '.identity' <<<"$state")" || return 1
+    views=$(jq -c --arg path "$current" --arg mount "$mount" --argjson state "$state" \
+      '. + [{path:$path,mount_id:$mount,identity:$state.identity}]' <<<"$views") || return 1
+    components=$(jq -c --arg path "$current" --argjson state "$state" '. + [{path:$path,entry:$state,directory:$state}]' <<<"$components") || return 1
+    dependencies=$(jq -c --arg path "$current" --argjson state "$state" --argjson previous "$previous" \
+      '. + [{path:$path,entry:$state,parent_identity:$previous}]' <<<"$dependencies") || return 1
+    previous=$(jq -c '.identity' <<<"$state") || return 1
+  done
+  _publication_parent=$(jq -cn --arg path "$parent" --argjson components "$components" --argjson dependencies "$dependencies" \
+    '{path:$path,components:$components,dependencies:$dependencies}') || return 1
+  _publication_parent_view=$(jq -cn --arg namespace "$_publication_mount_namespace" --argjson directories "$views" \
+    '{namespace:$namespace,directories:$directories}') || return 1
+  publication_verify_live
+}
+recovery_target_seams() {
+  TARGET_COLLECTIONS=0 TARGET_VERIFICATIONS=0 TARGET_LIVE=0
+  TARGET_POLICY=$(jq -cn '{certificate:"/var/lib/sbctl/keys/db/db.pem",certificate_sha256:("c"*64),
+    configuration:"/etc/sbctl/sbctl.conf",configuration_state:"absent",configuration_sha256:"",
+    executable:"/usr/bin/sbctl",executable_sha256:("e"*64)}')
+  # shellcheck disable=SC2329
+  publication_namespace_value() { printf 'mnt:[8800]\n'; }
+  # shellcheck disable=SC2329
+  publication_fd_mount_id() { printf '42\n'; }
+  # shellcheck disable=SC2329
+  publication_check_path_mount() {
+    [[ ( $# == 3 || $# == 4 ) && $1 == "$CASE_DIR/esp"* && $3 == 42 ]] || return 1
+    case $2 in directory) [[ -d $1 && ! -L $1 ]] || return 1 ;; file) [[ -f $1 && ! -L $1 ]] || return 1 ;; *) return 1 ;; esac
+    [[ $# == 3 || $4 == "$(control_file_identity "$1")" ]] || return 1
+    TARGET_LIVE=$((TARGET_LIVE+1))
+    [[ ${TARGET_FAULT:-} != live ]]
+  }
+  # shellcheck disable=SC2329
+  publication_parent_binding() { recovery_target_parent_binding "$@"; }
+  # shellcheck disable=SC2329
+  publication_collect_stable_context() {
+    TARGET_COLLECTIONS=$((TARGET_COLLECTIONS+1))
+    [[ ${TARGET_FAULT:-} != collect && $_publication_mount_invalid == false ]] || return 1
+    _publication_collected_context=$(jq -c "${TARGET_CONTEXT_FILTER:-.}" <<<"$CONTEXT")
+    _publication_collected_signing_policy=$TARGET_POLICY
+  }
+  # shellcheck disable=SC2329
+  verify_publication_input() {
+    TARGET_VERIFICATIONS=$((TARGET_VERIFICATIONS+1))
+    [[ $1 == "$TXDIR/publication-data-$INVOCATION-kernel" ]] || fail_test "unexpected signature verification of $1"
+    return "${TARGET_SIGNATURE_STATUS:-0}"
+  }
+  # shellcheck disable=SC2329
+  publication_run_sbctl() { fail_test 'fresh authorization invoked the signer directly'; }
+  # shellcheck disable=SC2329
+  publication_validate_targets() { fail_test 'fresh authorization invoked the native validator'; }
+  # shellcheck disable=SC2329
+  publication_prepare_directory() { fail_test 'fresh authorization created a directory'; }
+  # shellcheck disable=SC2329
+  publication_stage_file() { fail_test 'fresh authorization staged a file'; }
+  # A narrowly scoped owner-observation fault requires no privileged chown.
+  # shellcheck disable=SC2329
+  stat() {
+    if [[ -n ${TARGET_OWNER_PATH:-} && ${*: -1} == "$TARGET_OWNER_PATH" && $* == *%u* ]]; then printf '999999\n'
+    else command stat "$@"; fi
+  }
+  TARGET_OWNER_PATH=''
+}
+recovery_target_fixture() {
+  basis_complete_fixture
+  basis_seal_fixture
+  TARGET_ROOT_DIR=$TXDIR
+  TARGET_ROOT_BEFORE=$(journal_fingerprint)
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  if [[ ${TARGET_COPIES:-both} != none ]]; then
+    retain_publication_recovery_input kernel
+    TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+    if [[ ${TARGET_COPIES:-both} == both ]]; then
+      retain_publication_recovery_input configuration
+      TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+    fi
+  fi
+  recovery_target_seams
+}
+recovery_target_original_unchanged() {
+  local TXDIR=$TARGET_ROOT_DIR
+  [[ $(journal_fingerprint) == "$TARGET_ROOT_BEFORE" ]] || fail_test 'fresh authorization modified the original root'
+  read_incident_seal "$(basename "$TXDIR")"
+}
+recovery_target_context_refused() {
+  local before
+  before=$(journal_fingerprint)
+  _publication_recovery_context_record=stale _publication_recovery_context_reference=stale
+  if prepare_publication_recovery_context; then fail_test "context accepted ${1:-invalid acquisition}"; fi
+  [[ -z $_publication_recovery_context_record && -z $_publication_recovery_context_reference ]] || fail_test 'refused context retained outputs'
+  [[ $(journal_fingerprint) == "$before" ]] || fail_test "refused context changed the journal: ${1:-}"
+  [[ -z $_publication_stable_context && -z $_publication_signing_policy ]] || fail_test 'refused context kept memory authority'
+}
+recovery_target_refused() {
+  local before
+  before=$(journal_fingerprint)
+  _publication_recovery_authorization_record=stale _publication_recovery_authorization_reference=stale
+  if authorize_publication_recovery_target "${2:-kernel}"; then fail_test "authorization accepted ${1:-invalid target}"; fi
+  [[ -z $_publication_recovery_authorization_record && -z $_publication_recovery_authorization_reference ]] ||
+    fail_test 'refused authorization retained outputs'
+  [[ $(journal_fingerprint) == "$before" ]] || fail_test "refused authorization changed the journal: ${1:-}"
+}
+recovery_target_assert_context() {
+  local body=$1 reference=$2 original
+  json_is '.[0].context == .[1] and .[0].signing_policy == .[2]' "[$body,$CONTEXT,$TARGET_POLICY]"
+  if [[ ${BASIS_CONTEXT:-bound} == start ]]; then original=$(jq -cn --argjson ref "$BASIS_START_REF" '{reference:$ref,projection:".body.context"}')
+  else original=$(jq -cn --argjson ref "$BASIS_CONTEXT_REF" '{reference:$ref,projection:".body"}'); fi
+  json_is '.[0].original_context == .[1]' "[$body,$original]"
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$TXDIR/manifest.json" >/dev/null
+  jq -e --argjson body "$body" '.schema_version == 2 and .kind == "recovery-context" and .body == $body' "$(jq -r '.path' <<<"$reference")" >/dev/null
+  # The record is the attempt's typed context authority part.
+  find_publication_authority_part "$INVOCATION" context
+  json_is '.[0] == .[1]' "[$_publication_found_body,$CONTEXT]"
+  [[ $_publication_found_reference == "$reference" && $_publication_found_container_kind == recovery-context &&
+    $_publication_found_projection == .body.context ]]
+}
+recovery_target_assert_authorization() {
+  local id=$1 classification=$2 body=$3 reference=$4 copy copy_reference target state=null der
+  if [[ $id == kernel ]]; then copy=$TARGET_KERNEL_COPY copy_reference=$TARGET_KERNEL_COPY_REF target=$CHILD_PATH/kernel
+  else copy=$TARGET_CONFIG_COPY copy_reference=$TARGET_CONFIG_COPY_REF target=$CASE_DIR/esp/limine.conf; fi
+  if [[ $classification != allowed-absence ]]; then state=$(basis_file_state "$target"); fi
+  der=$(jq -r '.local_db_certificate_der_sha256' <<<"$CONTEXT")
+  # shellcheck disable=SC2016 # jq-bound expected values.
+  jq -e --arg id "$id" --arg target "$target" --arg classification "$classification" --argjson copy "$copy" \
+    --argjson ref "$copy_reference" --argjson state "$state" --arg der "$der" '
+    .id == $id and .target == $target and .classification == $classification and
+    .copy.reference == $ref and .copy.file == $copy.file and .observation.path == .target and
+    .original_effect.id == $id and (.original_effect | has("basis") | not) and
+    .original_effect.desired.sha256 == $copy.file.sha256 and .mount_view.namespace == "mnt:[8800]" and
+    .parent.path == (.target | split("/")[:-1] | join("/")) and
+    (.mount_view.directories | map({path,identity})) == (.parent.components | map({path,identity:.directory.identity})) and
+    (if $classification == "allowed-absence" then .observation.state.kind == "absent" else .observation.state == $state end) and
+    (if .original_effect.signing == "local-efi" then .signature == {verified:true,certificate_der_sha256:$der}
+     else .signature == null end)' <<<"$body" >/dev/null
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$TXDIR/manifest.json" >/dev/null
+  jq -e --argjson body "$body" '.schema_version == 2 and .kind == "target-authorization" and .body == $body' "$(jq -r '.path' <<<"$reference")" >/dev/null
+}
+recovery_target_valid() {
+  local context_body context_reference before body reference kernel_reference verifications
+  recovery_target_fixture
+  # Authorization needs the fresh context first, and the context needs no target.
+  recovery_target_refused before-context kernel
+  prepare_publication_recovery_context
+  context_body=$_publication_recovery_context_record context_reference=$_publication_recovery_context_reference
+  [[ $TARGET_COLLECTIONS == 1 ]]
+  recovery_target_assert_context "$context_body" "$context_reference"
+  # Replay re-acquires, compares and rebinds the same record.
+  before=$(journal_fingerprint)
+  prepare_publication_recovery_context
+  [[ $_publication_recovery_context_reference == "$context_reference" && $(journal_fingerprint) == "$before" && $TARGET_COLLECTIONS == 2 ]]
+  # The resource target is absent: v1 original absence or v2 explicit recreation.
+  authorize_publication_recovery_target kernel
+  body=$_publication_recovery_authorization_record kernel_reference=$_publication_recovery_authorization_reference
+  recovery_target_assert_authorization kernel allowed-absence "$body" "$kernel_reference"
+  if [[ ${BASIS_SIGNING:-bytes} == local-efi ]]; then [[ $TARGET_VERIFICATIONS == 1 ]]; else [[ $TARGET_VERIFICATIONS == 0 ]]; fi
+  verifications=$TARGET_VERIFICATIONS
+  # The configuration target still carries the original bytes.
+  authorize_publication_recovery_target configuration
+  body=$_publication_recovery_authorization_record reference=$_publication_recovery_authorization_reference
+  recovery_target_assert_authorization configuration prior "$body" "$reference"
+  [[ $TARGET_VERIFICATIONS == "$verifications" ]]
+  # Unchanged observations replay to the same records without new evidence.
+  before=$(journal_fingerprint)
+  authorize_publication_recovery_target kernel
+  [[ $_publication_recovery_authorization_reference == "$kernel_reference" ]]
+  authorize_publication_recovery_target configuration
+  [[ $_publication_recovery_authorization_reference == "$reference" && $(journal_fingerprint) == "$before" ]]
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 8 and all(.schema_version == 2)' "$_manifest_json"
+  # A changed target after authorization is a changed observation, not a rewrite.
+  cp -- "$(jq -r '.file.path' <<<"$TARGET_CONFIG_COPY")" "$CASE_DIR/esp/limine.conf.next"
+  command mv -- "$CASE_DIR/esp/limine.conf.next" "$CASE_DIR/esp/limine.conf"
+  recovery_target_refused changed-observation configuration
+  json_is '.[0] == .[1]' "[$(jq -c '.body' "$(jq -r '.path' <<<"$reference")"),$body]"
+  # Fresh observations still fence completion and phases.
+  if commit_lifecycle_recovery_attempt; then fail_test 'fresh authorizations enabled completion'; fi
+  recovery_target_original_unchanged
+  # Interruption seals this attempt; a new attempt observes afresh in a new
+  # process, whose pins are its own. Release this process's pins to model that.
+  rollback_and_mark_recovery 31 'fixture authorization interrupted'
+  load_recovery_context
+  [[ $_recovery_attempt_count == 1 ]]
+  release_publication_pins
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  retain_publication_recovery_input kernel
+  TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+  prepare_publication_recovery_context
+  [[ $TARGET_COLLECTIONS == 3 ]]
+  authorize_publication_recovery_target kernel
+  recovery_target_assert_authorization kernel allowed-absence "$_publication_recovery_authorization_record" "$_publication_recovery_authorization_reference"
+  recovery_target_original_unchanged
+}
+recovery_target_desired_and_conflicts() {
+  local body reference
+  recovery_target_fixture
+  prepare_publication_recovery_context
+  # Desired bytes already present under a new inode classify as desired, with a
+  # fresh signature check of the private copy for local EFI.
+  cp -- "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")" "$CHILD_PATH/kernel"
+  chmod 600 "$CHILD_PATH/kernel"
+  authorize_publication_recovery_target kernel
+  body=$_publication_recovery_authorization_record reference=$_publication_recovery_authorization_reference
+  recovery_target_assert_authorization kernel desired "$body" "$reference"
+  # Third-state configuration content is a conflict: refused without a record.
+  printf 'unrelated third-state configuration\n' >"$CASE_DIR/esp/limine.conf"
+  recovery_target_refused third-state-content configuration
+  # Absent configuration is permitted only by v2 explicit recreation.
+  rm -- "$CASE_DIR/esp/limine.conf"
+  if [[ ${BASIS_CONTEXT:-bound} == start ]]; then
+    authorize_publication_recovery_target configuration
+    recovery_target_assert_authorization configuration allowed-absence "$_publication_recovery_authorization_record" "$_publication_recovery_authorization_reference"
+  else
+    recovery_target_refused absent-configuration configuration
+  fi
+  recovery_target_original_unchanged
+}
+recovery_target_refusals() {
+  local fault before target
+  recovery_target_fixture
+  target=$CHILD_PATH/kernel
+  for fault in context-machine context-certificate context-esp collect; do
+    case $fault in
+      context-machine) TARGET_CONTEXT_FILTER='.machine_id="22222222222222222222222222222222"' ;;
+      context-certificate) TARGET_CONTEXT_FILTER='.local_db_certificate_der_sha256=("b"*64)' ;;
+      context-esp) TARGET_CONTEXT_FILTER='.esp.partition_uuid="cccccccc-cccc-4ccc-8ccc-cccccccccccc"' ;;
+      collect) TARGET_FAULT=collect ;;
+    esac
+    recovery_target_context_refused "$fault"
+    TARGET_CONTEXT_FILTER='' TARGET_FAULT=''
+    printf 'CHECK: context refusal/%s\n' "$fault"
+  done
+  prepare_publication_recovery_context
+  recovery_target_refused unknown-id unknown
+  recovery_target_refused reserved-id original-configuration
+  # A missing ancestor is refused before any pin exists; creation is later work.
+  # A pinned ancestor that later disappears invalidates the live view instead.
+  for fault in missing-parent symlink directory unsafe-mode foreign-owner third-state live moved-parent; do
+    before=$(basis_fixture_fingerprint)
+    case $fault in
+      missing-parent|moved-parent) command mv -- "$CHILD_PATH" "$CHILD_PATH.moved" ;;
+      symlink) ln -s -- "$CASE_DIR/source" "$target" ;;
+      directory) mkdir -- "$target" ;;
+      unsafe-mode) cp -- "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")" "$target"; chmod 666 "$target" ;;
+      foreign-owner) cp -- "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")" "$target"; chmod 600 "$target"; TARGET_OWNER_PATH=$target ;;
+      third-state) printf 'unrelated bytes\n' >"$target" ;;
+      live) TARGET_FAULT=live ;;
+    esac
+    recovery_target_refused "$fault" kernel
+    # A non-regular object at a held mount is lost custody and latches, like a
+    # failed live check; unsafe or conflicting regular files simply refuse.
+    case $fault in
+      live|moved-parent|symlink|directory) [[ $_publication_mount_invalid == true ]] || fail_test "lost custody not latched after $fault" ;;
+      *) [[ $_publication_mount_invalid == false ]] || fail_test "live view invalidated by $fault" ;;
+    esac
+    case $fault in
+      directory) rmdir -- "$target"; _publication_mount_invalid=false ;;
+      symlink) rm -- "$target"; _publication_mount_invalid=false ;;
+      live) TARGET_FAULT='' _publication_mount_invalid=false ;;
+      missing-parent|moved-parent) command mv -- "$CHILD_PATH.moved" "$CHILD_PATH"; _publication_mount_invalid=false ;;
+      foreign-owner) TARGET_OWNER_PATH=''; rm -- "$target" ;;
+      *) rm -- "$target" ;;
+    esac
+    [[ $(basis_fixture_fingerprint) == "$before" ]] || fail_test "refusal $fault left filesystem changes"
+    printf 'CHECK: target refusal/%s\n' "$fault"
+  done
+  if [[ ${BASIS_SIGNING:-bytes} == local-efi ]]; then
+    for fault in 1 2; do
+      TARGET_SIGNATURE_STATUS=$fault recovery_target_refused "signature-status-$fault" kernel
+      printf 'CHECK: target refusal/signature-status-%s\n' "$fault"
+    done
+    [[ $TARGET_VERIFICATIONS == 2 ]]
+  fi
+  authorize_publication_recovery_target kernel
+  recovery_target_assert_authorization kernel allowed-absence "$_publication_recovery_authorization_record" "$_publication_recovery_authorization_reference"
+  recovery_target_original_unchanged
+}
+recovery_target_capture_fixture() {
+  # Capture valid record bodies without binding them, so hash-valid candidates
+  # derive from real writer output. The seam refuses only the selected append.
+  local definition
+  recovery_target_fixture
+  TARGET_TOKEN=$OMASECBOOT_TRANSACTION_TOKEN
+  definition=$(declare -f append_publication_record)
+  eval "${definition/append_publication_record/recovery_target_actual_append}"
+  # shellcheck disable=SC2329
+  append_publication_record() {
+    if [[ -n ${TARGET_CAPTURE:-} && $2 == "$TARGET_CAPTURE" ]]; then
+      printf '%s\n' "$3" >"$CASE_DIR/captured-$2"
+      return 1
+    fi
+    recovery_target_actual_append "$@"
+  }
+}
+recovery_target_candidate() {
+  # Both the pending and the historical reader must refuse this hash-valid record.
+  recovery_copy_a2_candidate "$(recovery_copy_a2_document "$1" "$2")"
+}
+recovery_target_schema_refused() {
+  local kind=$1 body=$2 filter=$3 altered
+  altered=$(jq -c "$filter" <<<"$(recovery_copy_a2_document "$kind" "$body")")
+  if validate_publication_record_json "$_transaction_id" "$(jq -r '.ordinal' <<<"$altered")" \
+    "$(jq -c '.previous' <<<"$altered")" "$altered"; then fail_test "$kind schema admitted $filter"; fi
+}
+recovery_target_semantic_candidate() {
+  # The mutation must pass the record schema, then fail the recovery reader.
+  local kind=$1 body=$2 COPY_MUTATION=$3 altered
+  shift 3
+  altered=$(jq -c "$@" "$COPY_MUTATION" <<<"$body")
+  validate_publication_record_json "$_transaction_id" "$(jq -r '(.publication_records | length)+1' "$TXDIR/manifest.json")" \
+    "$(jq -c '.publication_records[-1]' "$TXDIR/manifest.json")" "$(recovery_copy_a2_document "$kind" "$altered")" ||
+    fail_test "$kind mutation refused by schema instead of semantics: $COPY_MUTATION"
+  recovery_target_candidate "$kind" "$altered"
+}
+recovery_target_mutations() {
+  local context_valid kernel_valid config_valid filter mutation
+  recovery_target_capture_fixture
+  TARGET_CAPTURE=recovery-context recovery_target_context_refused capture
+  TARGET_CAPTURE=''
+  context_valid=$(<"$CASE_DIR/captured-recovery-context")
+  for filter in '.schema_version=1' '.body.extra=true' '.body.context.schema_version=2' \
+    '.body.original_context.projection=".body.intent"' '.body.signing_policy.configuration_sha256="x"' \
+    '.body.signing_policy.configuration_state="present"' '.body.signing_policy.executable="usr/bin/sbctl"' \
+    'del(.body.signing_policy)'; do
+    recovery_target_schema_refused recovery-context "$context_valid" "$filter"
+  done
+  # The envelope invocation must be the basis invocation: a semantic refusal.
+  COPY_MUTATION=context-foreign-invocation
+  recovery_copy_a2_candidate "$(jq -c '.invocation="88888888-8888-4888-8888-888888888888"' <<<"$(recovery_copy_a2_document recovery-context "$context_valid")")"
+  # The fresh context must equal the sealed original through its real containing
+  # record and projection, and match the sealed original intent.
+  # shellcheck disable=SC2016 # jq-bound peer references.
+  for mutation in '.context.machine_id="22222222222222222222222222222222"' \
+    '.context.local_db_certificate_der_sha256=("b"*64)' '.context.esp.partition_uuid="cccccccc-cccc-4ccc-8ccc-cccccccccccc"' \
+    '.original_context.reference=$plan' '.original_context.reference=$retained' \
+    '.original_context.projection=(if .original_context.projection == ".body" then ".body.context" else ".body" end)'; do
+    recovery_target_semantic_candidate recovery-context "$context_valid" "$mutation" \
+      --argjson plan "$BASIS_PLAN_REF" --argjson retained "$BASIS_RETAINED_REF"
+  done
+  prepare_publication_recovery_context
+  COPY_MUTATION=duplicate-context
+  recovery_target_candidate recovery-context "$_publication_recovery_context_record"
+  # Effect, copy join and signature mutations use the kernel candidate before it binds.
+  TARGET_CAPTURE=target-authorization recovery_target_refused capture kernel
+  TARGET_CAPTURE=''
+  kernel_valid=$(<"$CASE_DIR/captured-target-authorization")
+  for filter in '.schema_version=1' '.body.classification="conflict-content"' '.body.classification="unknown"' \
+    '.body.observation.state.kind="directory"' '.body.extra=true' '.body.original_effect.basis={}' \
+    '.body.copy.reference.schema_version=1' '.body.mount_view.namespace="mnt:[0]"' 'del(.body.signature)' \
+    '.body.target="relative/path"' '.body.observation.path=(.body.target+"x")' '.body.parent.path+="/x"' \
+    '.body.mount_view.directories[0].identity="1:1"' '.body.original_effect.id="other"'; do
+    recovery_target_schema_refused target-authorization "$kernel_valid" "$filter"
+  done
+  COPY_MUTATION=authorization-foreign-invocation
+  recovery_copy_a2_candidate "$(jq -c '.invocation="88888888-8888-4888-8888-888888888888"' <<<"$(recovery_copy_a2_document target-authorization "$kernel_valid")")"
+  # shellcheck disable=SC2016 # jq-bound peer references.
+  for mutation in '.classification="desired"' '.classification="prior"' \
+    '.copy.reference=$context' '.copy.reference=$ready' '.copy.file.sha256=("0"*64)' '.copy.file.bytes+=1' \
+    '.original_effect.desired.sha256=("0"*64)' '.original_effect.absence.allowed=false' \
+    '.original_effect.before={kind:"file",sha256:("0"*64)}' '.original_effect.authority.plan.projection=".body.configuration"'; do
+    recovery_target_semantic_candidate target-authorization "$kernel_valid" "$mutation" \
+      --argjson context "$_publication_recovery_context_reference" --argjson ready "$(jq -c '.publication_records[1]' "$TXDIR/manifest.json")"
+  done
+  if [[ ${BASIS_SIGNING:-bytes} == local-efi ]]; then
+    # Only signed bytes make the source and retained hashes distinct.
+    for mutation in '.signature.certificate_der_sha256=("0"*64)' \
+      '.original_effect.signing="bytes" | .signature=null' \
+      '.original_effect.original_source.sha256=.original_effect.desired.sha256'; do
+      recovery_target_semantic_candidate target-authorization "$kernel_valid" "$mutation"
+    done
+  else
+    recovery_target_semantic_candidate target-authorization "$kernel_valid" \
+      '.original_effect.signing="local-efi" | .signature={verified:true,certificate_der_sha256:("a"*64)}'
+  fi
+  # Cross-record custody and observation mutations use the configuration
+  # candidate after the kernel authorization is bound.
+  authorize_publication_recovery_target kernel
+  COPY_MUTATION=duplicate-authorization
+  recovery_target_candidate target-authorization "$_publication_recovery_authorization_record"
+  TARGET_CAPTURE=target-authorization recovery_target_refused capture configuration
+  TARGET_CAPTURE=''
+  config_valid=$(<"$CASE_DIR/captured-target-authorization")
+  json_is '.classification == "prior"' "$config_valid"
+  # shellcheck disable=SC2016 # jq-bound uid.
+  for mutation in '.classification="desired"' '.classification="allowed-absence"' \
+    '.observation.state.sha256=.original_effect.desired.sha256' \
+    '.observation.state={kind:"absent",identity:null,sha256:null,link_target:null,mode:0,uid:0,gid:0}' \
+    '.observation.state.mode=33206' '.mount_view.namespace="mnt:[1]"'; do
+    recovery_target_semantic_candidate target-authorization "$config_valid" "$mutation" --argjson uid "$(control_owner_uid)"
+  done
+  recovery_target_schema_refused target-authorization "$config_valid" '.body.observation.state.uid=999999'
+  authorize_publication_recovery_target configuration
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 8' "$_manifest_json"
+  for filter in '.current_phase="observe"' '.completed_phases=["observe"]' \
+    '.domain_records.final_proof=.publication_records[-1]' '.status="completed" | .completed_at=.created_at'; do
+    if validate_transaction_manifest_json "$_transaction_id" "$(jq -c "$filter" <<<"$_manifest_json")" false; then
+      fail_test "fresh authority removed preparatory fence: $filter"
+    fi
+  done
+  if commit_lifecycle_recovery_attempt; then fail_test 'fresh authority enabled completion'; fi
+  recovery_target_original_unchanged
+}
+recovery_target_order() {
+  local body history _publication_original_effect=''
+  # Without a bound copy for its id, an authorization is refused by writer and reader.
+  TARGET_COPIES=kernel recovery_target_capture_fixture
+  # Reader level: a well-formed authorization cannot precede the attempt's context.
+  publication_resolve_original_effect "$BASIS_ROOT_REF" "$INVOCATION" kernel
+  history=$(jq -c --arg esp "$CASE_DIR/esp" '[.[] | select(.path == $esp or (.path | startswith($esp + "/")))]' <<<"$HISTORY")
+  body=$(jq -cn --argjson effect "$(jq -c 'del(.basis)' <<<"$_publication_original_effect")" \
+    --argjson copy "$TARGET_KERNEL_COPY" --argjson reference "$TARGET_KERNEL_COPY_REF" --argjson history "$history" '
+    {id:"kernel",target:$effect.target,original_effect:$effect,copy:{reference:$reference,file:$copy.file},
+      observation:{path:$effect.target,state:{kind:"absent",identity:null,sha256:null,link_target:null,mode:0,uid:0,gid:0}},
+      mount_view:{namespace:"mnt:[8800]",directories:($history | map({path,mount_id,identity:.state.identity}))},
+      parent:{path:($effect.target | split("/")[:-1] | join("/")),
+        components:($history | map({path,entry:.state,directory:.state})),
+        dependencies:($history | to_entries | map({path:.value.path,entry:.value.state,
+          parent_identity:(if .key == 0 then null else $history[.key-1].state.identity end)}))},
+      classification:"allowed-absence",signature:null}')
+  COPY_MUTATION=authorization-before-context
+  recovery_target_candidate target-authorization "$body"
+  prepare_publication_recovery_context
+  recovery_target_refused missing-copy configuration
+  TARGET_CAPTURE=target-authorization recovery_target_refused capture kernel
+  TARGET_CAPTURE=''
+  body=$(<"$CASE_DIR/captured-target-authorization")
+  recovery_target_semantic_candidate target-authorization "$body" '.id="configuration" | .original_effect.id="configuration"'
+  authorize_publication_recovery_target kernel
+  recovery_target_original_unchanged
+}
+recovery_target_replay_drift() {
+  local reference verifications saved path fault
+  recovery_target_fixture
+  TARGET_TOKEN=$OMASECBOOT_TRANSACTION_TOKEN
+  prepare_publication_recovery_context
+  reference=$_publication_recovery_context_reference
+  # Platform drift at a live replay ends memory authority; later replays re-acquire.
+  TARGET_CONTEXT_FILTER='.machine_id="22222222222222222222222222222222"'
+  recovery_target_context_refused replay-machine-drift
+  recovery_target_refused memory-cleared kernel
+  TARGET_CONTEXT_FILTER=''
+  prepare_publication_recovery_context
+  [[ $_publication_recovery_context_reference == "$reference" && -n $_publication_stable_context ]]
+  saved=$TARGET_POLICY
+  TARGET_POLICY=$(jq -c '.executable_sha256=("f"*64)' <<<"$TARGET_POLICY")
+  recovery_target_context_refused replay-policy-drift
+  TARGET_POLICY=$saved
+  prepare_publication_recovery_context
+  # Memory that disagrees with the durable record authorizes nothing.
+  saved=$_publication_stable_context
+  _publication_stable_context=$(jq -c '.machine_id="22222222222222222222222222222222"' <<<"$saved")
+  recovery_target_refused memory-context-drift kernel
+  _publication_stable_context=$saved
+  saved=$_publication_signing_policy
+  _publication_signing_policy=$(jq -c '.executable_sha256=("f"*64)' <<<"$saved")
+  recovery_target_refused memory-policy-drift kernel
+  _publication_signing_policy=$saved
+  authorize_publication_recovery_target kernel
+  reference=$_publication_recovery_authorization_reference
+  # A replay re-verifies a local EFI copy rather than adopting the old result.
+  verifications=$TARGET_VERIFICATIONS
+  authorize_publication_recovery_target kernel
+  [[ $_publication_recovery_authorization_reference == "$reference" ]]
+  if [[ ${BASIS_SIGNING:-bytes} == local-efi ]]; then [[ $TARGET_VERIFICATIONS == $((verifications+1)) ]]
+  else [[ $TARGET_VERIFICATIONS == "$verifications" ]]; fi
+  # A latched live view refuses both writers without any new fault.
+  _publication_mount_invalid=true
+  recovery_target_context_refused latched-view
+  recovery_target_refused latched-view kernel
+  _publication_mount_invalid=false
+  prepare_publication_recovery_context
+  # A changed mount namespace at replay latches and refuses.
+  # shellcheck disable=SC2329
+  publication_namespace_value() { printf 'mnt:[8801]\n'; }
+  recovery_target_refused namespace-drift kernel
+  [[ $_publication_mount_invalid == true ]]
+  # shellcheck disable=SC2329
+  publication_namespace_value() { printf 'mnt:[8800]\n'; }
+  _publication_mount_invalid=false
+  # Lost lock bindings refuse authorization as they refuse context preparation.
+  for fault in boot repair; do
+    if [[ $fault == boot ]]; then path=$(limine_lock_path); else path=$(state_dir_path)/repair.lock; fi
+    command mv -- "$path" "$path.saved"; touch "$path"
+    recovery_target_refused "$fault-lock" kernel
+    rm -- "$path"; command mv -- "$path.saved" "$path"
+    with_boot_repair_lock
+  done
+  # A record whose bytes no longer match its manifest reference is refused, even
+  # with an equal body, before it can be adopted or synced.
+  path=$(jq -r '.path' <<<"$reference")
+  cp -- "$path" "$CASE_DIR/saved-authorization"
+  chmod u+w "$path"; jq -c '.recorded_at="2000-01-01T00:00:00Z"' "$CASE_DIR/saved-authorization" >"$path"; chmod 600 "$path"
+  recovery_target_refused rebound-record kernel
+  cp -- "$CASE_DIR/saved-authorization" "$path"; chmod 600 "$path"
+  authorize_publication_recovery_target kernel
+  [[ $_publication_recovery_authorization_reference == "$reference" ]]
+  recovery_target_original_unchanged
+}
+recovery_target_root_journal_refused() {
+  # Ordinary root journals reject the fresh-authority kinds even when well formed.
+  local body document ordinal previous
+  context_fixture
+  preserve_transaction_files_on_failure
+  append_publication_record "$INVOCATION" intent "$INTENT"
+  TARGET_POLICY=$(jq -cn '{certificate:"/var/lib/sbctl/keys/db/db.pem",certificate_sha256:("c"*64),
+    configuration:"/etc/sbctl/sbctl.conf",configuration_state:"absent",configuration_sha256:"",
+    executable:"/usr/bin/sbctl",executable_sha256:("e"*64)}')
+  body=$(jq -cn --argjson context "$CONTEXT" --argjson policy "$TARGET_POLICY" \
+    --argjson reference "$(jq -c '.publication_records[0]' "$TXDIR/manifest.json")" \
+    '{context:$context,original_context:{reference:$reference,projection:".body"},signing_policy:$policy}')
+  ordinal=$(jq -r '(.publication_records | length)+1' "$TXDIR/manifest.json")
+  previous=$(jq -c '.publication_records[-1]' "$TXDIR/manifest.json")
+  document=$(jq -cn --arg id "$_transaction_id" --arg invocation "$INVOCATION" --argjson body "$body" \
+    --argjson ordinal "$ordinal" --argjson previous "$previous" --arg timestamp "$(utc_timestamp)" --arg version "$OMASECBOOT_VERSION" '
+    {schema_version:2,transaction_id:$id,invocation:$invocation,ordinal:$ordinal,previous:$previous,
+      kind:"recovery-context",body:$body,recorded_at:$timestamp,writer_version:$version}')
+  validate_publication_record_json "$_transaction_id" "$ordinal" "$previous" "$document"
+  if append_publication_record "$INVOCATION" recovery-context "$body"; then fail_test 'root journal admitted recovery-context'; fi
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 1' "$_manifest_json"
+}
+recovery_target_cache() {
+  local slot path index
+  recovery_target_fixture
+  prepare_publication_recovery_context
+  authorize_publication_recovery_target kernel
+  authorize_publication_recovery_target configuration
+  read_transaction_manifest "$_transaction_id"
+  slot="$_transaction_id:$(control_owner_uid)"
+  [[ -n ${_publication_recovery_validation_cache[$slot]:-} ]]
+  # Warm validation must recheck every fresh-authority record on each hit.
+  for index in 5 6 7; do
+    path=$(jq -r --argjson n "$index" '.publication_records[$n].path' <<<"$_manifest_json")
+    cp -- "$path" "$CASE_DIR/saved-record"
+    chmod u+w "$path"; printf 'changed fresh authority\n' >>"$path"
+    if validate_publication_recovery_records "$_transaction_id" "$_manifest_json"; then fail_test "warm cache ignored $(basename "$path")"; fi
+    [[ -z ${_publication_recovery_validation_cache[$slot]:-} ]] || fail_test 'failed cache entry was retained'
+    cp -- "$CASE_DIR/saved-record" "$path"; chmod 600 "$path"
+    validate_publication_recovery_records "$_transaction_id" "$_manifest_json"
+    [[ -n ${_publication_recovery_validation_cache[$slot]:-} ]]
+  done
+  recovery_target_original_unchanged
+}
+recovery_target_fresh_attempt() {
+  # Each sync window needs an unbound record, so every window gets a new
+  # attempt, modelled as a new process view whose pins are its own.
+  rollback_and_mark_recovery 32 "fixture fresh-authority window $1"
+  release_publication_pins
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  retain_publication_recovery_input kernel
+  TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+  retain_publication_recovery_input configuration
+  TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+}
+recovery_target_sync_windows() {
+  local window ordinal kind count existing='' definition
+  recovery_target_fixture
+  definition=$(declare -f durable_sync)
+  eval "${definition/durable_sync/recovery_target_actual_sync}"
+  TARGET_WINDOW='' TARGET_WINDOW_ORDINAL=0
+  # shellcheck disable=SC2329
+  durable_sync() {
+    local n inject=false
+    if [[ -n $TARGET_WINDOW && ! -e $CASE_DIR/target-sync-fault ]]; then
+      n=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $TARGET_WINDOW:$1 in
+        record-temp:"$TXDIR/.publication-$TARGET_WINDOW_ORDINAL.json."*) inject=true ;;
+        record-file:"$TXDIR/publication-$TARGET_WINDOW_ORDINAL.json") inject=true ;;
+        record-directory:"$TXDIR") [[ ! -e $TXDIR/publication-$TARGET_WINDOW_ORDINAL.json || $n != $((TARGET_WINDOW_ORDINAL-1)) ]] || inject=true ;;
+        manifest-temp:"$TXDIR/.manifest.json."*) [[ $n != $((TARGET_WINDOW_ORDINAL-1)) ]] || inject=true ;;
+        manifest-file:"$TXDIR/manifest.json") [[ $n != "$TARGET_WINDOW_ORDINAL" ]] || inject=true ;;
+        manifest-directory:"$TXDIR") [[ $n != "$TARGET_WINDOW_ORDINAL" ]] || inject=true ;;
+      esac
+    fi
+    if [[ $inject == true ]]; then printf '%s\n' "$TARGET_WINDOW" >"$CASE_DIR/target-sync-fault"; return 1; fi
+    recovery_target_actual_sync "$@"
+  }
+  for kind in context authorization; do
+    # shellcheck disable=SC2153 # Case-prefix window list, like COPY_WINDOWS.
+    for window in $TARGET_WINDOWS; do
+      [[ $kind == context ]] || prepare_publication_recovery_context
+      ordinal=$(( $(jq -r '.publication_records | length' "$TXDIR/manifest.json") + 1 ))
+      rm -f -- "$CASE_DIR/target-sync-fault"
+      TARGET_WINDOW=$window TARGET_WINDOW_ORDINAL=$ordinal
+      if [[ $kind == context ]]; then
+        if prepare_publication_recovery_context; then fail_test "context accepted sync window $window"; fi
+        [[ -z $_publication_recovery_context_record && -z $_publication_recovery_context_reference ]]
+      else
+        if authorize_publication_recovery_target kernel; then fail_test "authorization accepted sync window $window"; fi
+        [[ -z $_publication_recovery_authorization_record && -z $_publication_recovery_authorization_reference ]]
+      fi
+      TARGET_WINDOW=''
+      [[ -s $CASE_DIR/target-sync-fault ]] || fail_test "sync seam missed $kind/$window"
+      count=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $window in
+        record-*|manifest-temp) [[ $count == $((ordinal-1)) ]] ;;
+        manifest-*) [[ $count == "$ordinal" ]] ;;
+      esac
+      existing=''
+      if [[ -e $TXDIR/publication-$ordinal.json ]]; then existing=$(sha256_file "$TXDIR/publication-$ordinal.json"); fi
+      # The retry adopts the exact pending or bound record from the same fresh
+      # observation; no second record and no rewritten evidence.
+      if [[ $kind == context ]]; then prepare_publication_recovery_context; else authorize_publication_recovery_target kernel; fi
+      [[ $(jq -r '.publication_records | length' "$TXDIR/manifest.json") == "$ordinal" ]]
+      [[ -z $existing || $(sha256_file "$TXDIR/publication-$ordinal.json") == "$existing" ]] || fail_test "retry rewrote $kind record after $window"
+      jq -e --argjson ordinal "$ordinal" '.publication_records[$ordinal-1].path | endswith("/publication-\($ordinal).json")' "$TXDIR/manifest.json" >/dev/null
+      recovery_target_original_unchanged
+      printf 'CHECK: fresh authority sync/%s/%s (%s -> %s records)\n' "$kind" "$window" "$count" "$ordinal"
+      recovery_target_fresh_attempt "$kind/$window"
+    done
+  done
+  recovery_target_original_unchanged
+}
+recovery_target_owner_loss() {
+  local fault path before collections
+  recovery_target_fixture
+  TARGET_TOKEN=$OMASECBOOT_TRANSACTION_TOKEN
+  before=$(journal_fingerprint)
+  for fault in owner boot repair marker; do
+    path=''
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN='invalid-token' ;;
+      boot|repair)
+        if [[ $fault == boot ]]; then path=$(limine_lock_path); else path=$(state_dir_path)/repair.lock; fi
+        command mv -- "$path" "$path.saved"; touch "$path" ;;
+      marker) touch "$(snapshot_restore_lock_path)" ;;
+    esac
+    collections=$TARGET_COLLECTIONS
+    recovery_target_context_refused "$fault"
+    [[ $TARGET_COLLECTIONS == "$collections" && $(journal_fingerprint) == "$before" ]]
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN=$TARGET_TOKEN ;;
+      boot|repair)
+        rm -- "$path"; command mv -- "$path.saved" "$path"
+        with_boot_repair_lock ;;
+      marker) rm -- "$(snapshot_restore_lock_path)" ;;
+    esac
+  done
+  prepare_publication_recovery_context
+  before=$(journal_fingerprint)
+  for fault in owner marker; do
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN='invalid-token' ;;
+      marker) touch "$(snapshot_restore_lock_path)" ;;
+    esac
+    recovery_target_refused "$fault" kernel
+    [[ $(journal_fingerprint) == "$before" ]]
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN=$TARGET_TOKEN ;;
+      marker) rm -- "$(snapshot_restore_lock_path)" ;;
+    esac
+  done
+  authorize_publication_recovery_target kernel
+  recovery_target_original_unchanged
+}
 expect_resolver_status() {
   local expected=$1 actual=0
   shift
@@ -3756,5 +4437,24 @@ run_case recovery-copy-a2-unsafe-ready-controls recovery_copy_a2_unsafe_ready
 run_case recovery-copy-a2-missing-ready-fresh-attempt recovery_copy_a2_missing_ready
 run_case recovery-copy-a2-owner-lock-marker-loss recovery_copy_a2_owner_loss
 run_case recovery-copy-a2-cache-unused-peer-closure recovery_copy_a2_peer_cache
+run_case recovery-target-v1-context-classification-and-fresh-retry recovery_target_valid
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-target-v2-signed-context-classification-and-fresh-retry recovery_target_valid
+run_case recovery-target-v1-desired-and-conflicts recovery_target_desired_and_conflicts
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-target-v2-desired-and-conflicts recovery_target_desired_and_conflicts
+run_case recovery-target-v1-refusals recovery_target_refusals
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-target-v2-refusals recovery_target_refusals
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-target-v2-hash-valid-mutations recovery_target_mutations
+run_case recovery-target-v1-hash-valid-mutations recovery_target_mutations
+run_case recovery-target-copy-order recovery_target_order
+run_case recovery-target-v1-replay-drift recovery_target_replay_drift
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-target-v2-replay-drift recovery_target_replay_drift
+run_case recovery-target-root-journal-refused recovery_target_root_journal_refused
+run_case recovery-target-cache-rechecked recovery_target_cache
+# Three durability shapes per kind: an unbound candidate record, a bound but
+# unsynced head, and an unsynced directory. Each needs a fresh attempt, and the
+# temp-file windows exercise the same append code the copy windows already cover.
+TARGET_WINDOWS='record-file manifest-file manifest-directory' \
+  run_case recovery-target-sync-windows recovery_target_sync_windows
+run_case recovery-target-owner-lock-marker-loss recovery_target_owner_loss
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

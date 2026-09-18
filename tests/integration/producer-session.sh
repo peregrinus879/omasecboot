@@ -1635,9 +1635,16 @@ cat >"$scratch/fixtures/recovery-copy" <<'SCRIPT'
 # platform acquisition. Only the final independent oracle invokes real sbctl.
 set -euo pipefail
 trap 'status=$?; printf "recovery-copy failed at line %s (status %s)\n" "$LINENO" "$status" >&2' ERR
-for module in common lifecycle records sign producer-session publication; do source "/core/lib/$module.sh"; done
+for module in common lifecycle records software checks discover sign enroll producer-session publication; do source "/core/lib/$module.sh"; done
 state_dir_path() { printf '/work/state\n'; }
 pacman_database_lock_path() { printf '/work/pacman-db.lck\n'; }
+# Keep the real collector/signer definitions for the later fresh-authority
+# phase; the copy phase below must reach none of them.
+for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
+  publication_run_sbctl verify_publication_input publication_input_is_efi; do
+  definition=$(declare -f "$helper")
+  eval "${definition/#"$helper"/fixture_real_$helper}"
+done
 for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
   publication_run_sbctl verify_publication_input publication_input_is_efi publication_authority_begin \
   publication_authority_handler publication_stage_file publication_start_executor run_bound_producer_session sbctl; do
@@ -1726,6 +1733,74 @@ file=$(jq -r 'select(.body.id == "resource-0") | .body.file.path' /work/recovery
 SYSTEMD_ESP_PATH="${file%/*}" ESP_PATH="${file%/*}" /real/sbctl verify --json "$file" >/work/recovery-copy-sbctl-verify.json
 jq -e --arg file "$file" 'length == 1 and .[0].file_name == $file and .[0].is_signed == 1' /work/recovery-copy-sbctl-verify.json >/dev/null
 sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-verified
+# A3: fresh stable context and one classified observation per original effect
+# in the same attempt. The real collector wrapper and the real signer run again
+# through the fixture bindings; the producer, renderer and staging stay forbidden.
+for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
+  publication_run_sbctl verify_publication_input publication_input_is_efi; do
+  definition=$(declare -f "fixture_real_$helper")
+  eval "${definition/#fixture_real_"$helper"/$helper}"
+done
+unset -f sbctl
+publication_context_helper_path() { printf '/core/lib/publication-context.py\n'; }
+publication_context_python_path() { printf '/fixtures/context-python\n'; }
+producer_package_version() { [[ $1 == sbctl ]] && printf '%s\n' "$SUPPORTED_SBCTL_VERSION"; }
+producer_file_owner_package() {
+  case $1 in
+    /core/lib/publication-context.py) printf 'omasecboot\n' ;;
+    /fixtures/context-python) printf 'python\n' ;;
+    /usr/bin/sbctl) printf 'sbctl\n' ;;
+    *) return 1 ;;
+  esac
+}
+printf 'valid\n' >/work/context-mode
+printf 'recovery\n' >/work/signer-phase
+witnesses=$(jq -s 'length' /work/context-wrapper.jsonl)
+printf 'fresh context\n'
+prepare_publication_recovery_context
+context=$_publication_recovery_context_record
+json_is '.[0].context == .[1].body.context and .[0].original_context.projection == ".body.context"' \
+  "[$context,$(cat "$directory/publication-1.json")]"
+json_is '.signing_policy.configuration_state == "absent" and .signing_policy.configuration_sha256 == "" and
+  .signing_policy.executable == "/usr/bin/sbctl" and .signing_policy.certificate == "/var/lib/sbctl/keys/db/db.pem"' "$context"
+[[ $(jq -r '.context.local_db_certificate_der_sha256' <<<"$context") == "$(</work/context-cert-before)" ]]
+[[ $(jq -s 'length' /work/context-wrapper.jsonl) == $((witnesses+1)) ]]
+jq -se --arg der "$(</work/context-cert-before)" 'last.certificate_der_sha256 == $der' /work/context-wrapper.jsonl >/dev/null
+# The resource target's ancestors are absent on the empty ESP: the fresh
+# authorization refuses rather than creating them. Recreate the ancestors as
+# the later readiness step would, then classify the absent target.
+[[ ! -e /boot/EFI ]]
+if authorize_publication_recovery_target resource-0; then exit 90; fi
+[[ -z $_publication_recovery_authorization_record && -z $_publication_recovery_authorization_reference &&
+  ! -e /boot/EFI && $_publication_mount_invalid == false ]]
+printf 'missing ancestors refused\n'
+mkdir -p /boot/EFI/Linux
+for id in resource-0 configuration; do
+  printf 'authorize %s\n' "$id"
+  authorize_publication_recovery_target "$id"
+  body=$_publication_recovery_authorization_record reference=$_publication_recovery_authorization_reference
+  copy=$(jq -c --arg id "$id" 'select(.body.id == $id)' /work/recovery-copies.jsonl)
+  json_is '.classification == "allowed-absence" and .observation.state.kind == "absent" and
+    .original_effect.absence.reason == "original-recreate-missing" and .mount_view.directories[0].path == "/"' "$body"
+  json_is '.[0].copy.reference == .[1].reference and .[0].copy.file == .[1].body.file' "[$body,$copy]"
+  if [[ $id == resource-0 ]]; then
+    # shellcheck disable=SC2016 # jq-bound certificate hash.
+    jq -e --arg der "$(</work/context-cert-before)" '.original_effect.signing == "local-efi" and
+      .signature == {verified:true,certificate_der_sha256:$der}' <<<"$body" >/dev/null
+  else json_is '.original_effect.signing == "bytes" and .signature == null' "$body"; fi
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$manifest" >/dev/null
+  jq -cn --argjson body "$body" --argjson reference "$reference" '{body:$body,reference:$reference}' >>/work/recovery-authorizations.jsonl
+done
+read_transaction_manifest "$_transaction_id"
+json_is '.kind == "recovery-attempt" and .status == "transition" and .file_rollback_policy == "preserve" and
+  .current_phase == null and .completed_phases == [] and (.domain_records | all(. == null)) and
+  (.publication_records | length == 8 and all(.schema_version == 2))' "$_manifest_json"
+if commit_lifecycle_recovery_attempt; then exit 90; fi
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-authorized
+# Only the recreated ancestor directories exist on the ESP: no file was written.
+[[ ! -e /work/recovery-copy-forbidden && ! -e /work/context-worker-apply && ! -e /boot/limine.conf &&
+  -d /boot/EFI/Linux && -z $(find /boot -type f) ]]
+printf 'PASS: fresh context and classified authorizations recorded in fresh namespace\n'
 release_boot_repair_lock
 printf 'PASS: exact signed PE and literal configuration retained in fresh namespace\n'
 SCRIPT
@@ -2516,6 +2591,15 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
       .tool_result == "real") and any(.[]; .event == "result" and .phase == "prepare" and .operation == "verify" and
       .status == 0 and (.verification | any(.is_signed == 1)))' "$work/signer-commands.jsonl" >/dev/null || die 'original managed path did not really sign and verify'
     cmp "$work/recovery-activity-before" "$work/recovery-activity-after" || die 'copy invoked signing, context acquisition or the producer'
+    jq -se '[.[].body.id] == ["resource-0","configuration"] and all(.[]; .reference.schema_version == 2 and
+      .body.classification == "allowed-absence")' "$work/recovery-authorizations.jsonl" >/dev/null || die 'fresh authorization evidence incomplete'
+    jq -se 'length == 2 and first.certificate_der_sha256 == last.certificate_der_sha256 and
+      all(.[]; .isolated_arguments and .clean_environment)' "$work/context-wrapper.jsonl" >/dev/null || die 'fresh context did not reuse the real collector wrapper once'
+    jq -se '([.[] | select(.phase == "recovery" and .event == "invoke")] | length == 1 and all(.[]; .operation == "verify" and .bound == true)) and
+      any(.[]; .event == "result" and .phase == "recovery" and .operation == "verify" and .status == 0 and
+        .tool_result == "real" and (.verification | any(.is_signed == 1)))' "$work/signer-commands.jsonl" >/dev/null ||
+      die 'fresh authorization signer activity is not exactly one real bound verification'
+    [[ -s $work/recovery-original-check-authorized && ! -e $work/context-host-query ]] || die 'fresh authorization changed originals or queried the host'
     cat "$work/recovery-copy.stdout"
   fi
   printf 'PASS: Core producer session/%s\n' "$name"
