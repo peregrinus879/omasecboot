@@ -6,7 +6,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 
 - [docs/spec.md](docs/spec.md) owns the design: decisions, non-goals, commands, integration points, the failure table, tests and acceptance.
 - [docs/upstream-contracts.md](docs/upstream-contracts.md) owns the upstream and hardware facts the design relies on (sections C1 to C8), each with its source.
-- [README.md](README.md) is the operator page and states only what exists. [docs/maintenance.md](docs/maintenance.md) owns open work, evidence still owed and recheck triggers.
+- [README.md](README.md) is the operator page and states only what exists. [docs/maintenance.md](docs/maintenance.md) owns open work, evidence still owed and recheck triggers; [docs/release-checklist.md](docs/release-checklist.md) owns what a release needs; [docs/omarchy-integration.md](docs/omarchy-integration.md) owns what lives on Omarchy's side and the claims never made.
 
 ## Principles
 
@@ -20,7 +20,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 - `bin/omasecboot`: the dispatcher and the commands (`setup`, `sign`, `status`, `remove`).
 - `lib/common.sh`: output, file safety, the settings lookup as upstream parses it, the boot lock. `lib/checks.sh`: preconditions and prompts. `lib/files.sh`: the EFI files on the ESP, history and fallback classification, signature state, sbctl's file list. `lib/firmware.sh`: the firmware's mode variables. `lib/limine.sh`: managed settings and originals, `limine.conf` facts, the loader proof and staged rebuild, the fallback, the watcher, the way back to stock. `lib/sign.sh`: the converge-and-verify pass. `lib/status.sh`: the report.
 - `limine-hooks/90-omasecboot-sign`: the only hook. `systemd/omasecboot-watch@.path` and `.service`: the `limine.conf` watcher templates. `PKGBUILD`, `Makefile`.
-- `tests/lib/harness.sh`: the fixture machine and the stub tools. `tests/*.sh`: the suites `common`, `limine`, `sign`, `status`, `commands`, `install` and `package`; `tests/container.sh` runs as root in a disposable container only.
+- `tests/lib/harness.sh`: the fixture machine and the stub tools. `tests/*.sh`: the suites `common`, `limine`, `sign`, `status`, `commands`, `install` and `package`; `tests/container.sh` runs as root in a disposable container only; `tests/acceptance-record.sh` records hardware acceptance rows.
 
 ## Conventions
 
@@ -34,4 +34,4 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 
 Run `make lint` and `make test` after every change; together they take about a minute. `make test` builds the package from the files on disk that git does not ignore, and CI also runs `tests/container.sh` in a container.
 
-Hermetic tests share assumptions with the code, so anything that touches boot behaviour or firmware is only proven on hardware, in the stages of [docs/spec.md](docs/spec.md) section 12. Never run the tool against the real ESP, firmware or package state of a machine you cannot afford to recover, and never claim more than the machines recorded.
+Hermetic tests share assumptions with the code, so anything that touches boot behaviour or firmware is only proven by the staged hardware rows in [docs/release-checklist.md](docs/release-checklist.md). Never run the tool against the real ESP, firmware or package state of a machine you cannot afford to recover, and never claim more than the machines recorded.

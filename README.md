@@ -91,7 +91,7 @@ make lint   # bash -n and ShellCheck
 make test   # hermetic suites and the package build, about a minute
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. Open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).
 
 ## License and credits
 

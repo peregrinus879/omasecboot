@@ -77,6 +77,8 @@ usr/share/doc/omasecboot/
 usr/share/doc/omasecboot/README.md
 usr/share/doc/omasecboot/docs/
 usr/share/doc/omasecboot/docs/maintenance.md
+usr/share/doc/omasecboot/docs/omarchy-integration.md
+usr/share/doc/omasecboot/docs/release-checklist.md
 usr/share/doc/omasecboot/docs/spec.md
 usr/share/doc/omasecboot/docs/upstream-contracts.md
 usr/share/licenses/
