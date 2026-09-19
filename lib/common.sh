@@ -61,6 +61,15 @@ qpass() { [[ $QUIET == true ]] || pass "$@"; }
 qnote() { [[ $QUIET == true ]] || note "$@"; }
 qact() { [[ $QUIET == true ]] || act "$@"; }
 
+# Runs a tool whose own progress output belongs to the user, unless quiet.
+run_visible() {
+  if [[ $QUIET == true ]]; then
+    "$@" >/dev/null
+  else
+    "$@"
+  fi
+}
+
 # --- File safety --------------------------------------------------------------
 
 path_has_no_symlink_components() {

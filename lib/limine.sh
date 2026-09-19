@@ -9,14 +9,6 @@ readonly LIMINE_CONFIG_MARKER='++CONFIG_B2SUM_SIGNATURE++'
 # under Secure Boot the firmware verifies the UKI itself (upstream-contracts C1).
 readonly -a MANAGED_SETTINGS=(ENABLE_VERIFICATION=no ENABLE_ENROLL_LIMINE_CONFIG=yes)
 
-run_visible() {
-  if [[ $QUIET == true ]]; then
-    "$@" >/dev/null
-  else
-    "$@"
-  fi
-}
-
 # --- Managed settings and their originals ----------------------------------------
 
 settings_originals_file() { printf '%s/settings-originals\n' "$(state_dir)"; }

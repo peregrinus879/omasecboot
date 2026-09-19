@@ -40,8 +40,8 @@ check_tools() {
   }
 }
 
-# Prompts need a terminal on both ends: gum declines silently without one,
-# which once read as a refusal nobody had given (upstream-contracts.md C6).
+# Prompts need a terminal on both ends: without one gum declines silently,
+# which reads as a refusal nobody gave (upstream-contracts.md C6).
 require_terminal() {
   [[ -t 0 && -t 2 ]] || {
     fail "This step asks for confirmation and needs a terminal"

@@ -128,8 +128,8 @@ children_run_unlocked() {
   ! run_unlocked true || fail_test "a child ran unlocked under an inherited lock"
 }
 
-# gum declines silently without a terminal, which once read as a refusal
-# nobody had given (C6); and a declined prompt says what was cancelled.
+# Without a terminal gum declines silently, which reads as a refusal nobody
+# gave (C6); and a declined prompt says what was cancelled.
 prompts_need_a_terminal_and_name_what_was_cancelled() {
   local output
   # shellcheck source=lib/checks.sh
