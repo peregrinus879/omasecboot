@@ -1,0 +1,10 @@
+# Started by omasecboot-watch@.path. The check looks at the file's current
+# state, because systemd merges changes that arrive while this runs; the start
+# limit is off so an editor that saves several times cannot fail the watcher.
+[Unit]
+Description=Re-seal the Limine loader after %f changed
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=@BINDIR@/omasecboot sign --quiet --config-only

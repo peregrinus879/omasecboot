@@ -1,0 +1,11 @@
+# Watches one limine.conf: the instance name is its escaped path, enabled by
+# "omasecboot setup". Editing that file without re-enrolling its checksum
+# stops Limine from booting, with Secure Boot on or off.
+[Unit]
+Description=Watch %f for OmaSecBoot
+
+[Path]
+PathChanged=%f
+
+[Install]
+WantedBy=multi-user.target

@@ -1,213 +1,185 @@
 #!/bin/bash
+# OmaSecBoot: Secure Boot for Omarchy with the user's own keys. It delegates to
+# sbctl and the Limine tools, verifies what they did and reports the truth.
+# Design: docs/spec.md. Upstream behaviour relied on: docs/upstream-contracts.md.
 set -euo pipefail
 
-# OmaSecBoot: sbctl signing, Limine enrollment, pacman hook, and Windows BootNext handoff.
-# Ongoing maintenance handled by zz-omasecboot-cleanup.hook, zz-sbctl.hook,
-# zzz-omasecboot.hook, and the Limine post-hook zzz-omasecboot-sign.
+# /usr/bin/omasecboot runs with /usr/lib/omasecboot; a checkout runs with lib/.
+SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+LIB_DIR=${SCRIPT_DIR}/../lib/omasecboot
+[[ -d $LIB_DIR ]] || LIB_DIR=${SCRIPT_DIR}/../lib
 
-# Resolve lib directory (handles symlinks from /usr/local/bin -> /usr/local/lib)
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-LIB_DIR="${SCRIPT_DIR}/../lib/omasecboot"
-# Fallback for development (running from repo checkout)
-[[ -d "$LIB_DIR" ]] || LIB_DIR="${SCRIPT_DIR}/../lib"
-
-for lib in common checks discover sign enroll windows status; do
+for module in common checks files firmware limine sign status; do
   # shellcheck source=/dev/null
-  source "${LIB_DIR}/${lib}.sh"
+  source "${LIB_DIR}/${module}.sh"
 done
 
-# --- Commands ----------------------------------------------------------------
+usage() {
+  print_message "${BOLD}omasecboot${NC} ${OMASECBOOT_VERSION}: Secure Boot for Omarchy with your own keys
 
-cmd_setup() {
-  header "Secure Boot Setup"
-  check_deps
-  check_efi_mode
-  check_root "setup"
-  require_gum
+  ${BOLD}sudo omasecboot setup${NC}         Prepare this machine; run it again after each step it asks for
+  ${BOLD}sudo omasecboot status${NC}        Report the state and the next step (--quiet: exit status only)
+  ${BOLD}sudo omasecboot sign${NC}          Seal and sign the boot files again; safe to run at any time
+  ${BOLD}sudo omasecboot remove${NC}        Return the boot files and Limine settings to stock
+  ${BOLD}omasecboot version${NC}
 
-  create_keys
-  ensure_limine_secure_boot_settings || die "Could not update Limine Secure Boot settings"
-  refresh_limine_config || die "Could not regenerate Limine config"
-
-  with_boot_repair_lock
-  snapshot_limine_conf_hash
-  ensure_windows_boot_entry || true
-  reenroll_limine_config_if_changed || die "Could not enroll Limine config checksum"
-
-  clean_stale_entries
-
-  echo
-  echo -e "  ${BOLD}Signing EFI files${NC}"
-  local sign_rc=0
-  sign_all_efi || sign_rc=$?
-
-  echo
-  echo -e "  ${BOLD}Next steps${NC}"
-  echo "    1. Reboot into BIOS/UEFI firmware settings"
-  echo "    2. Enable Setup Mode (clear/reset Secure Boot keys)"
-  echo "    3. Save and exit BIOS"
-  echo -e "    4. Run ${BOLD}sudo omasecboot enroll${NC}"
-  echo
-
-  return $sign_rc
+  ${BOLD}--quiet${NC} anywhere on the line keeps progress quiet; warnings and failures still print"
 }
 
-cmd_enroll() {
-  header "Key Enrollment"
-  check_deps
-  check_efi_mode
-  check_root "enroll"
-  require_gum
-  enroll_keys
+# Commands take no arguments beyond the ones they name.
+no_arguments() {
+  (( $# == 0 )) || {
+    usage >&2
+    exit 2
+  }
 }
 
-cmd_windows_help() {
-  header "Windows Dual-Boot"
-  echo -e "  ${BOLD}Usage${NC}   sudo omasecboot windows <command>"
-  echo
-  echo -e "  ${BOLD}Commands${NC}"
-  echo "    available   Check for Windows Boot Manager without root or output"
-  echo "    setup       Add the firmware BootNext entry to the Limine menu"
-  echo "    bootnext    Set firmware BootNext without rebooting"
-  echo "    reboot      Set firmware BootNext and reboot immediately"
-  echo
-}
-
-cmd_windows() {
-  if (( $# > 1 )); then
-    cmd_windows_help
-    fail "Expected one Windows command"
+# Everything that must hold before anything on the machine changes.
+setup_preflight() {
+  local leftovers shadows
+  check_architecture && check_uefi && check_esp && check_tools || return 1
+  # remove refuses without a readable SecureBoot variable, so a machine that
+  # cannot be undone is not set up in the first place.
+  { read_mode_variable SecureBoot && read_mode_variable SetupMode; } >/dev/null || {
+    fail "Could not read the firmware's SecureBoot and SetupMode variables"
+    return 1
+  }
+  leftovers=$(list_leftovers)
+  if [[ -n $leftovers ]]; then
+    fail "An earlier install of this tool is still present and would keep running its own hooks:"
+    print_message "$leftovers" >&2
+    act "Remove it with: ${BOLD}sudo rm -rf ${leftovers//$'\n'/ }${NC}"
     return 1
   fi
-
-  case "${1:-}" in
-    available)
-      find_windows_boot_entry >/dev/null
-      ;;
-    setup)
-      check_root "windows setup"
-      if windows_entry_is_configured; then
-        header "Windows Dual-Boot"
-        pass "Windows boot entry already in limine.conf"
-        return 0
-      fi
-      check_deps
-      require_gum
-      add_windows_boot_entry
-      ;;
-    bootnext)
-      check_root "windows bootnext"
-      header "Boot to Windows"
-      set_windows_bootnext
-      ;;
-    reboot)
-      check_root "windows reboot"
-      header "Boot to Windows"
-      reboot_to_windows
-      ;;
-    help|--help|-h)
-      cmd_windows_help
-      ;;
-    "")
-      cmd_windows_help
-      return 1
-      ;;
-    *)
-      cmd_windows_help
-      fail "Unknown Windows command: $1"
-      return 1
-      ;;
-  esac
+  shadows=$(list_shadowing_configs)
+  if [[ -n $shadows ]]; then
+    fail "Limine would read another limine.conf before $(limine_config_path):"
+    print_message "$shadows" >&2
+    return 1
+  fi
+  # Entries without a UKI need path hashes under Secure Boot, which the
+  # managed settings turn off; Omarchy ships UKIs.
+  [[ $(effective_setting ENABLE_UKI) == yes ]] || {
+    fail "ENABLE_UKI is not yes; OmaSecBoot supports unified kernel images only"
+    return 1
+  }
 }
 
-cmd_cleanup() {
-  check_core_deps
-  check_root "cleanup"
-  check_esp_mount
-  with_repair_lock
-  clean_stale_entries
+cmd_setup() {
+  no_arguments "$@"
+  check_root setup
+  header "Setup"
+  setup_preflight || exit 1
+  require_terminal || exit 1
+
+  if sbctl_keys_exist; then
+    pass "Signing keys exist"
+  else
+    # sbctl creates its own directories and writes nothing when they exist.
+    act "Creating signing keys with sbctl"
+    sbctl create-keys || die "sbctl could not create the keys"
+  fi
+  # sbctl arrived as a dependency; as an orphan candidate Omarchy's cleanup
+  # would offer to remove it, and the next kernel would boot unsigned.
+  pacman -D --asexplicit sbctl >/dev/null || warn "Could not mark sbctl as explicitly installed"
+
+  save_settings_originals || die "Could not record the original Limine settings"
+  remove_harmful_sbctl_rows || exit 1
+  boot_lock_acquire || exit "$?"
+  apply_managed_settings || die "Could not write $(limine_default_config)"
+  # From here on the hook and the watcher keep the boot files converged, also
+  # when this run is interrupted.
+  ensure_state_dir || die "Unsafe state directory $(state_dir)"
+  : >"$(enabled_marker)"
+  if os_entries_carry_hashes; then
+    regenerate_os_entries || die "The boot entries could not be regenerated without path hashes; run this again"
+  fi
+  boot_lock_release
+  sign_boot_files || exit "$?"
+
+  pass "This machine's boot files are ready for Secure Boot"
+  [[ $(fallback_state) != absent ]] ||
+    warn "There is no fallback loader. After a limine.conf mistake only rescue media could boot this machine; ${BOLD}sudo limine-install --fallback${NC} adds one."
+  act "Take a snapshot now, so a later restore brings the keys and this tool back with it"
 }
 
 cmd_sign() {
-  check_deps
-  check_root "sign"
-  with_boot_repair_lock
-  qheader "Signing EFI Files"
-  ensure_limine_secure_boot_settings || die "Could not update Limine Secure Boot settings"
-  snapshot_limine_conf_hash
-  ensure_windows_boot_entry || true
-  reenroll_limine_config_if_changed || die "Could not enroll Limine config checksum"
-  clean_stale_entries
-  local sign_rc=0
-  sign_all_efi || sign_rc=$?
-  return $sign_rc
+  local scope=full
+  if [[ ${1:-} == --config-only ]]; then
+    scope=config-only
+    shift
+  fi
+  no_arguments "$@"
+  check_root sign
+  is_set_up || die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"
+  qheader "Sign"
+  sign_boot_files "$scope"
 }
 
 cmd_status() {
-  check_core_deps
-  show_status
+  no_arguments "$@"
+  check_root status
+  if [[ $QUIET == true ]]; then
+    show_status >/dev/null 2>&1
+  else
+    show_status
+  fi
 }
 
-cmd_help() {
-  header "Command Help"
-  echo "  Secure Boot signing, Limine enrollment, pacman hooks, and Windows BootNext handoff for Omarchy."
-  echo -e "  After setup, ${DIM}zz-omasecboot-cleanup.hook${NC}, ${DIM}zz-sbctl.hook${NC}, ${DIM}zzz-omasecboot.hook${NC},"
-  echo -e "  and Limine post-hook ${DIM}zzz-omasecboot-sign${NC} keep Secure Boot state repaired."
-  echo
-  echo -e "  ${BOLD}Usage${NC}   sudo omasecboot <command>"
-  echo
-  echo -e "  ${BOLD}Commands${NC}"
-  echo "    setup       Set Limine verification/enrollment state and sign EFI files"
-  echo "    enroll      Enroll keys into firmware (requires Setup Mode)"
-  echo "    windows     Set up or hand off to Windows through firmware BootNext"
-  echo "    status      Show Secure Boot status and file verification"
-  echo "    sign        Reassert Limine settings, repair config drift, and sign EFI files"
-  echo "    cleanup     Remove stale sbctl tracked-file entries"
-  echo "    help        Show this help"
-  echo
-  echo -e "  ${DIM}Note:${NC} This tool keeps ${BOLD}ENABLE_VERIFICATION=no${NC} for Omarchy's EFI UKI flow while using Limine config enrollment."
-  echo -e "        ${BOLD}status${NC} warns if Limine 12 Secure Boot path-hash enforcement would affect non-EFI paths."
-  echo -e "        Limine-originated boot drift is repaired by the Limine post-hook after upstream writes finish."
-  echo
-  echo -e "  ${BOLD}Workflow${NC}"
-  echo "    1. sudo omasecboot setup"
-  echo "    2. Reboot -> BIOS -> enable Setup Mode (clear keys)"
-  echo "    3. sudo omasecboot enroll"
-  echo "    4. Reboot -> BIOS -> enable Secure Boot"
-  echo "    5. sudo omasecboot windows setup"
-  echo
-}
+# Re-runnable: the originals file drives it and is removed last, so a second
+# run after an interruption picks up where the first stopped.
+cmd_remove() {
+  local secure_boot
+  no_arguments "$@"
+  check_root remove
+  header "Remove"
+  [[ -e $(settings_originals_file) ]] || die "Nothing to remove: OmaSecBoot is not set up"
+  check_uefi && check_esp && check_tools || exit 1
+  # The stock boot files are unsigned, so an unreadable variable is no answer.
+  secure_boot=$(read_mode_variable SecureBoot) || die "Could not read the firmware's SecureBoot variable"
+  [[ $secure_boot == 0 ]] || die "Secure Boot is on. Turn it off in the firmware first: the stock boot files are unsigned."
+  confirm "returning to stock boot files" "Return the Limine settings and boot files to stock?" || exit 1
 
-# --- Dispatch ----------------------------------------------------------------
+  # The lock comes first: a busy lock must leave the hook and the watcher at
+  # work on a loader that is still sealed.
+  boot_lock_acquire || exit "$?"
+  rm -f -- "$(enabled_marker)"
+  disable_watch || warn "Could not disable the limine.conf watcher"
+  restore_settings_originals || die "Could not restore $(limine_default_config)"
+  restore_stock_boot_files || die "The boot files are not back to stock; run this again"
+  boot_lock_release
+  clear_attention
+  rm -f -- "$(settings_originals_file)"
+  pass "Limine settings and boot files are back to stock"
+  note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu."
+}
 
 main() {
-  # Parse global flags
-  while [[ "${1:-}" == --* ]]; do
-    case "$1" in
-      --quiet) QUIET=true; export QUIET; shift ;;
-      *)       break ;;
-    esac
+  local argument command
+  local -a arguments=()
+  for argument in "$@"; do
+    if [[ $argument == --quiet ]]; then
+      QUIET=true
+    else
+      arguments+=("$argument")
+    fi
   done
-
-  case "${1:-}" in
-    setup)    cmd_setup ;;
-    enroll)   cmd_enroll ;;
-    windows)  shift; cmd_windows "$@" ;;
-    cleanup)  cmd_cleanup ;;
-    sign)     cmd_sign ;;
-    status)   cmd_status ;;
-    help|--help|-h)  cmd_help ;;
+  set -- "${arguments[@]}"
+  command=${1:-help}
+  (( $# == 0 )) || shift
+  case $command in
+    setup) cmd_setup "$@" ;;
+    sign) cmd_sign "$@" ;;
+    status) cmd_status "$@" ;;
+    remove) cmd_remove "$@" ;;
+    version) print_message "omasecboot ${OMASECBOOT_VERSION}" ;;
+    help | -h | --help) usage ;;
     *)
-      cmd_help
-      if [[ -n "${1:-}" ]]; then
-        fail "Unknown command: $1"
-        echo
-      fi
-      return 1
+      usage >&2
+      exit 2
       ;;
   esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main "$@"
-fi
+# The test suites source this file for its command functions.
+[[ ${BASH_SOURCE[0]} != "$0" ]] || main "$@"

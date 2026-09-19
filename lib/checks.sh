@@ -1,51 +1,66 @@
 #!/bin/bash
-# OmaSecBoot: prerequisite validation
+# OmaSecBoot: preconditions and prompts.
 
 check_root() {
-  [[ $EUID -eq 0 ]] || die "Root required. Run: ${BOLD}sudo omasecboot ${1:-}${NC}"
+  (( EUID == 0 )) || die "Run as root: ${BOLD}sudo omasecboot $1${NC}"
 }
 
-check_core_deps() {
-  command -v sbctl >/dev/null 2>&1 \
-    || die "sbctl not installed. Run: ${BOLD}sudo pacman -S sbctl${NC}"
-  command -v jq >/dev/null 2>&1 \
-    || die "jq not installed. Run: ${BOLD}sudo pacman -S jq${NC}"
+# Omarchy and the Limine paths this tool knows are x86_64 only.
+check_architecture() {
+  [[ $(uname -m) == x86_64 ]] || {
+    fail "Unsupported architecture $(uname -m); OmaSecBoot supports x86_64"
+    return 1
+  }
 }
 
-check_deps() {
-  check_core_deps
-  command -v limine-update >/dev/null 2>&1 \
-    || die "limine-update not installed. Install: ${BOLD}limine-mkinitcpio-hook${NC}"
-  command -v limine-enroll-config >/dev/null 2>&1 \
-    || die "limine-enroll-config not installed. Update: ${BOLD}limine-mkinitcpio-hook${NC}"
-  command -v limine-reset-enroll >/dev/null 2>&1 \
-    || die "limine-reset-enroll not installed. Update: ${BOLD}limine-mkinitcpio-hook${NC}"
-  check_esp_mount
+check_uefi() {
+  local dir
+  dir=$(efivars_dir)
+  [[ -d $dir && $(findmnt -n -T "$dir" -o FSTYPE 2>/dev/null) == efivarfs ]] || {
+    fail "Not booted in UEFI mode: ${dir} is not an efivarfs mount"
+    return 1
+  }
 }
 
-check_esp_mount() {
-  command -v mountpoint >/dev/null 2>&1 \
-    || die "mountpoint not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
-  command -v findmnt >/dev/null 2>&1 \
-    || die "findmnt not installed. Run: ${BOLD}sudo pacman -S util-linux${NC}"
-
-  [[ -d "${ESP}/EFI" ]] \
-    || die "${ESP}/EFI not found. Is the EFI partition mounted?"
-  mountpoint -q "$ESP" \
-    || die "${ESP} is not a mountpoint. Refusing to modify a stale ESP directory."
-
-  local fstype=""
-  fstype=$(findmnt -n -T "$ESP" -o FSTYPE 2>/dev/null) || fstype=""
-  [[ "$fstype" == "vfat" ]] \
-    || die "${ESP} is mounted as ${fstype:-unknown}, expected vfat/FAT32 ESP"
+check_esp() {
+  esp_is_mounted_vfat || {
+    fail "The EFI system partition is not mounted as vfat; set ESP_PATH in $(limine_default_config)"
+    return 1
+  }
 }
 
-check_efi_mode() {
-  [[ -d /sys/firmware/efi ]] \
-    || die "System did not boot in UEFI mode. Secure Boot requires UEFI."
+check_tools() {
+  local tool missing=()
+  for tool in sbctl jq limine limine-install limine-mkinitcpio limine-reset-enroll b2sum flock findmnt tar; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  (( ${#missing[@]} == 0 )) || {
+    fail "Missing tools: ${missing[*]}"
+    return 1
+  }
 }
 
-require_gum() {
-  command -v gum >/dev/null 2>&1 \
-    || die "gum not installed. Run: ${BOLD}sudo pacman -S gum${NC}"
+# Prompts need a terminal on both ends: gum declines silently without one,
+# which once read as a refusal nobody had given (upstream-contracts.md C6).
+require_terminal() {
+  [[ -t 0 && -t 2 ]] || {
+    fail "This step asks for confirmation and needs a terminal"
+    return 1
+  }
+  command -v gum >/dev/null 2>&1 || {
+    fail "gum is not installed. Run: ${BOLD}sudo pacman -S gum${NC}"
+    return 1
+  }
+}
+
+# confirm WHAT QUESTION: default No; a declined prompt says what was cancelled.
+confirm() {
+  local what=$1 question=$2
+  require_terminal || return 1
+  if gum confirm --default=false "$question"; then
+    return 0
+  else
+    warn "Cancelled: ${what}. Nothing was changed by this step."
+    return 1
+  fi
 }

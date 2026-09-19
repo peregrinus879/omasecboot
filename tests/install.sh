@@ -1,73 +1,55 @@
 #!/bin/bash
+# Staged installation: what "make install" refuses, what it writes, and that
+# the installed pieces point at the installed command.
 set -euo pipefail
-
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-install.XXXXXX")
+ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
+# shellcheck source=tests/lib/harness.sh
+source "$ROOT_DIR/tests/lib/harness.sh"
+test_harness_init install
+CASE_NAME=staged-install
+STAGE=$TEST_DIR/stage
 PREFIX=/opt/omasecboot-test
 
-cleanup() {
-  rm -rf "$STAGE_DIR"
-}
-trap cleanup EXIT
-
-fail() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
-}
-
-canonical="${STAGE_DIR}${PREFIX}/bin/omasecboot"
-canonical_lib="${STAGE_DIR}${PREFIX}/lib/omasecboot"
-canonical_state="${STAGE_DIR}/var/lib/omasecboot"
-cleanup_hook_name=zz-omasecboot-cleanup.hook
-sbctl_hook_name=zz-sbctl.hook
-repair_hook_name=zzz-omasecboot.hook
-cleanup_hook="${STAGE_DIR}/etc/pacman.d/hooks/${cleanup_hook_name}"
-repair_hook="${STAGE_DIR}/etc/pacman.d/hooks/${repair_hook_name}"
-limine_hook="${STAGE_DIR}/etc/boot/hooks/post.d/zzz-omasecboot-sign"
-
-make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
-
-[[ -x "$canonical" ]] || fail "canonical command was not installed"
-for version_arg in version --version -v; do
-  if "$canonical" "$version_arg" >/dev/null 2>&1; then
-    fail "removed version form succeeded: ${version_arg}"
+# A source install onto the live root is never supported.
+ln -s / "$TEST_DIR/root-link"
+for unsafe in '' ' ' relative / // /./ "$TEST_DIR/root-link"; do
+  if make -s -C "$ROOT_DIR" install DESTDIR="$unsafe" >"$TEST_DIR/refused.out" 2>&1; then
+    fail_test "install accepted DESTDIR '${unsafe}'"
   fi
+  grep -Fq 'Refusing live source install' "$TEST_DIR/refused.out" || fail_test "no refusal message for '${unsafe}'"
 done
 
-grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet cleanup" "$cleanup_hook" \
-  || fail "cleanup hook does not target the canonical command"
-grep -Fxq "Exec = ${PREFIX}/bin/omasecboot --quiet sign" "$repair_hook" \
-  || fail "repair hook does not target the canonical command"
-grep -Fxq "exec ${PREFIX}/bin/omasecboot --quiet sign" "$limine_hook" \
-  || fail "Limine hook does not target the canonical command"
-grep -Fxq 'export OMASECBOOT_IN_LIMINE_HOOK=true' "$limine_hook" \
-  || fail "Limine hook does not export the canonical sentinel"
+make -s -C "$ROOT_DIR" install DESTDIR="$STAGE" PREFIX="$PREFIX" >/dev/null
+command_path=$STAGE$PREFIX/bin/omasecboot
+hook=$STAGE/etc/boot/hooks/post.d/90-omasecboot-sign
+[[ $("$command_path" version) == 'omasecboot 1.0.0' ]] || fail_test "the installed command does not run"
+"$command_path" help | grep -q 'sudo omasecboot setup' || fail_test "help"
+"$command_path" nonsense >/dev/null 2>&1 && fail_test "an unknown command succeeded"
+for module in common checks files firmware limine sign status; do
+  [[ -f $STAGE$PREFIX/lib/omasecboot/${module}.sh ]] || fail_test "missing module ${module}"
+done
+{ [[ -x $hook ]] && grep -qx "${PREFIX}/bin/omasecboot sign --quiet || :" "$hook"; } || fail_test "the hook does not call the installed command"
+[[ $(tail -n 1 "$hook") == 'exit 0' ]] || fail_test "the hook's last line is not exit 0"
+# Upstream runs hooks in glob order (C2): after its enroll hook, whose work
+# ours checks, and before its optional hook that remounts the ESP read-only.
+order=$(cd "$TEST_DIR" && mkdir order && cd order && : >90-limine-enroll-config && : >91-esp-set-ro && : >"${hook##*/}" && printf '%s ' *)
+[[ $order == "90-limine-enroll-config ${hook##*/} 91-esp-set-ro " ]] || fail_test "hook order: ${order}"
+! grep -qE '^(set -e|exec )' "$hook" || fail_test "the hook could fail its caller"
+for unit in omasecboot-watch@.path omasecboot-watch@.service; do
+  [[ -f $STAGE/usr/lib/systemd/system/$unit ]] || fail_test "missing unit ${unit}"
+  ! grep -q '@BINDIR@' "$STAGE/usr/lib/systemd/system/$unit" || fail_test "unsubstituted path in ${unit}"
+done
+grep -qx "ExecStart=${PREFIX}/bin/omasecboot sign --quiet --config-only" "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "watcher command"
+grep -qx 'StartLimitIntervalSec=0' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watcher's start limit is on"
+grep -qx 'PathChanged=%f' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.path" || fail_test "watch path"
+[[ ! -e $STAGE/usr/lib/tmpfiles.d ]] || fail_test "a tmpfiles declaration was installed"
+[[ ! -e $STAGE/usr/share/libalpm/hooks ]] || fail_test "a pacman hook was installed"
+[[ ! -e $STAGE/var ]] || fail_test "state was installed as package content"
 
-[[ -x "${STAGE_DIR}${PREFIX}/bin/omasecboot" ]] \
-  || fail "rendered hook target is not executable in the stage"
-grep -Fq "$STAGE_DIR" "$cleanup_hook" \
-  && fail "DESTDIR leaked into a runtime hook target"
-
-[[ -d "$canonical_lib" ]] || fail "canonical library path is missing"
-[[ -d "$canonical_state" ]] || fail "canonical state path is missing"
-[[ ! -e "${canonical_state}/repair.lock" ]] \
-  || fail "install created an ephemeral repair lock"
-[[ "$cleanup_hook_name" < "$sbctl_hook_name" ]] \
-  || fail "cleanup hook no longer sorts before sbctl"
-[[ "$sbctl_hook_name" < "$repair_hook_name" ]] \
-  || fail "repair hook no longer sorts after sbctl"
-
-printf 'canonical\n' > "${canonical_state}/windows-enabled"
-make -s -C "$ROOT_DIR" install DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
-grep -Fxq 'canonical' "${canonical_state}/windows-enabled" \
-  || fail "idempotent install replaced canonical Windows opt-in state"
-
-make -s -C "$ROOT_DIR" uninstall DESTDIR="$STAGE_DIR" PREFIX="$PREFIX" >/dev/null
-
-[[ ! -e "$canonical" ]] || fail "canonical command survived uninstall"
-[[ ! -e "$canonical_lib" ]] || fail "library path survived uninstall"
-[[ ! -e "$cleanup_hook" && ! -e "$repair_hook" && ! -e "$limine_hook" ]] \
-  || fail "a hook survived uninstall"
-[[ ! -e "$canonical_state" ]] || fail "state path survived uninstall"
-
-printf 'install tests passed\n'
+# Every relative link in the README resolves from the installed documentation.
+doc_dir=$STAGE$PREFIX/share/doc/omasecboot
+while IFS= read -r link; do
+  [[ -f $doc_dir/$link ]] || fail_test "README links to ${link}, which is not installed"
+done < <(grep -oE '\]\((docs/[^)#]+)' "$ROOT_DIR/README.md" | sed 's/^](//' | sort -u)
+cmp -s "$STAGE$PREFIX/share/licenses/omasecboot/LICENSE" "$ROOT_DIR/LICENSE" || fail_test "license"
+printf 'PASS: install/staged-install\ninstall tests passed (1 cases)\n'

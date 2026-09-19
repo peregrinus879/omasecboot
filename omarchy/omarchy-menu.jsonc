@@ -1,9 +1,0 @@
-{
-  "system.windows": {
-    "icon": "󰍲",
-    "label": "Reboot to Windows",
-    "description": "Boot Windows directly through firmware",
-    "when": "command -v omasecboot >/dev/null && omasecboot windows available",
-    "action": "omarchy-launch-floating-terminal-with-presentation 'sudo omasecboot windows bootnext && omarchy system reboot'"
-  }
-}

@@ -1,492 +1,116 @@
 #!/bin/bash
-# OmaSecBoot: key creation, EFI signing, database cleanup
+# OmaSecBoot: converge and verify. One idempotent pass that people, the Limine
+# hook and the limine.conf watcher all run; an interrupted pass is finished by
+# the next one.
 
-readonly LIMINE_DEFAULT_CONF="/etc/default/limine"
+# Rows that make sbctl's pacman hook sign a history file or the fallback loader
+# in place. OmaSecBoot adds no rows; these come from an earlier version of this
+# tool or from the user. Listing them makes sbctl read every tracked file, so
+# this belongs to setup and status, never to the hook's pass.
+list_harmful_sbctl_rows() {
+  local esp tracked file
+  esp=$(esp_path) || return 1
+  tracked=$(sbctl_tracked_files) || return 1
+  while IFS= read -r file; do
+    [[ $file == "${esp}/"* ]] || continue
+    if is_history_file "$file" || is_fallback_loader "$file"; then
+      printf '%s\n' "$file"
+    fi
+  done <<<"$tracked"
+}
 
-load_limine_default_entry() {
-  local key="$1" line raw=""
-  _limine_default_raw=""
-  _limine_default_count=0
+remove_harmful_sbctl_rows() {
+  local rows file
+  rows=$(list_harmful_sbctl_rows) || {
+    warn "Could not read sbctl's file list"
+    return 1
+  }
+  while IFS= read -r file; do
+    [[ -n $file ]] || continue
+    qnote "Removing ${file} from sbctl's list, so sbctl never signs it in place"
+    run_sbctl remove-file "$file" >/dev/null || return 1
+  done <<<"$rows"
+}
 
+# UKIs normally arrive signed by sbctl's mkinitcpio hook. One that did not is
+# signed where it is: staging a copy of a 267 MB image can exhaust a small ESP.
+# sbctl truncates the file and writes it back with the signature (C4), so
+# room is checked first. Every file is read once, and a pass that returns 0
+# has proved each of them signed.
+sign_unsigned_arrivals() {
+  local files file primary state failed=0
+  files=$(list_signable_files) || return 1
+  primary=$(primary_loader_path)
+  while IFS= read -r file; do
+    [[ -n $file && $file != "$primary" ]] || continue
+    state=0
+    signature_state "$file" || state=$?
+    case $state in
+      0) ;;
+      1)
+        qact "Signing ${file}"
+        { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
+          fail "Could not sign ${file}"
+          failed=1
+        }
+        ;;
+      *)
+        fail "Could not read the signature state of ${file}"
+        failed=1
+        ;;
+    esac
+  done <<<"$files"
+  return "$failed"
+}
+
+# A stale hash stops its OS entry once Secure Boot is on, and only
+# limine-mkinitcpio can rewrite it, which setup runs.
+check_os_path_hashes() {
+  local stale line failed=0
+  stale=$(list_stale_os_hashes) || return 1
   while IFS= read -r line; do
-    _limine_default_count=$((_limine_default_count + 1))
-    raw=${line#*=}
-  done < <(grep "^${key}=" "$LIMINE_DEFAULT_CONF" 2>/dev/null || true)
-
-  _limine_default_raw="$raw"
+    [[ -n $line ]] || continue
+    fail "Stale path hash in limine.conf, line ${line}"
+    failed=1
+  done <<<"$stale"
+  return "$failed"
 }
 
-replace_limine_default_entry() {
-  local key="$1" desired="${2:-}" tmp
-  tmp=$(mktemp "${LIMINE_DEFAULT_CONF}.XXXXXX") || return 2
-
-  if ! awk -v key="$key" -v desired="$desired" '
-    BEGIN { written = 0 }
-    index($0, key "=") == 1 {
-      if (desired != "" && !written) {
-        print desired
-        written = 1
-      }
-      next
-    }
-    { print }
-    END {
-      if (desired != "" && !written) {
-        print desired
-      }
-    }
-  ' "$LIMINE_DEFAULT_CONF" > "$tmp"; then
-    rm -f "$tmp"
-    return 2
-  fi
-
-  chmod --reference="$LIMINE_DEFAULT_CONF" "$tmp" 2>/dev/null || true
-  mv "$tmp" "$LIMINE_DEFAULT_CONF" || {
-    rm -f "$tmp"
-    return 2
-  }
-}
-
-# Set or replace a simple key=value entry in /etc/default/limine.
-# Returns 0 if the file changed, 1 if it was already correct, 2 on failure.
-set_limine_default_value() {
-  local key="$1" value="$2" raw desired
-  desired="${key}=${value}"
-
-  load_limine_default_entry "$key" || return 2
-  raw=${_limine_default_raw:-}
-  if [[ ${_limine_default_count:-0} -eq 1 && "$raw" == "$value" ]]; then
-    return 1
-  fi
-
-  replace_limine_default_entry "$key" "$desired"
-}
-
-# Ensure a space-delimited command is present in COMMANDS_* without
-# overwriting other upstream-managed commands.
-# Returns 0 if the file changed, 1 if already correct, 2 on failure.
-ensure_limine_default_command() {
-  local key="$1" command="$2"
-  local raw current desired
-
-  load_limine_default_entry "$key" || return 2
-  raw=${_limine_default_raw:-}
-
-  if [[ -z "$raw" ]]; then
-    replace_limine_default_entry "$key" "${key}=\"${command}\""
-    return $?
-  fi
-
-  current="$raw"
-  if [[ "$current" == \"*\" && "$current" == *\" ]]; then
-    current=${current:1:${#current}-2}
-  fi
-
-  if [[ " $current " == *" $command "* ]]; then
-    [[ ${_limine_default_count:-0} -eq 1 ]] && return 1
-    desired="${key}=\"${current}\""
-  elif [[ -n "$current" ]]; then
-    desired="${key}=\"${current} ${command}\""
-  else
-    desired="${key}=\"${command}\""
-  fi
-
-  replace_limine_default_entry "$key" "$desired"
-}
-
-# Remove a repo-managed command token from COMMANDS_* when Limine's hook
-# mechanism is available. Returns 0 if changed, 1 if already clean, 2 on failure.
-remove_limine_default_command() {
-  local key="$1" command="$2"
-  local raw current word desired="" changed=1
-
-  load_limine_default_entry "$key" || return 2
-  raw=${_limine_default_raw:-}
-  [[ ${_limine_default_count:-0} -gt 0 ]] || return 1
-
-  current="$raw"
-  if [[ "$current" == \"*\" && "$current" == *\" ]]; then
-    current=${current:1:${#current}-2}
-  fi
-
-  for word in $current; do
-    if [[ "$word" == "$command" ]]; then
-      changed=0
-      continue
-    fi
-    if [[ -n "$desired" ]]; then
-      desired="${desired} ${word}"
-    else
-      desired="$word"
-    fi
-  done
-
-  if [[ $changed -ne 0 && ${_limine_default_count:-0} -eq 1 ]]; then
-    return 1
-  fi
-
-  if [[ -n "$desired" ]]; then
-    replace_limine_default_entry "$key" "${key}=\"${desired}\""
-  else
-    replace_limine_default_entry "$key"
-  fi
-}
-
-limine_enrollment_hooks_present() {
-  [[ -x /etc/boot/hooks/pre.d/10-limine-reset-enroll \
-    && -x /etc/boot/hooks/post.d/90-limine-enroll-config ]]
-}
-
-# Ensure Limine is configured for Omarchy's current Secure Boot model:
-# signed EFI binaries, enrolled limine.conf checksum, and disabled Limine
-# path-hash generation. Limine >= 12 may still enforce path hashes
-# when Secure Boot and config enrollment are both active; status reports that.
-ensure_limine_secure_boot_settings() {
-  [[ -f "$LIMINE_DEFAULT_CONF" ]] || {
-    fail "${LIMINE_DEFAULT_CONF} not found"
-    return 1
-  }
-
-  local backup
-  local changed=1
-  local rc
-
-  backup=$(backup_file "$LIMINE_DEFAULT_CONF") || {
-    fail "Could not back up ${LIMINE_DEFAULT_CONF}"
-    return 1
-  }
-
-  set_limine_default_value "ENABLE_VERIFICATION" "no"
-  rc=$?
-  if [[ $rc -eq 0 ]]; then
-    changed=0
-  elif [[ $rc -ne 1 ]]; then
-    restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-    discard_file_backup "$backup"
-    fail "Could not update ENABLE_VERIFICATION in ${LIMINE_DEFAULT_CONF}"
-    return 1
-  fi
-
-  set_limine_default_value "ENABLE_ENROLL_LIMINE_CONFIG" "yes"
-  rc=$?
-  if [[ $rc -eq 0 ]]; then
-    changed=0
-  elif [[ $rc -ne 1 ]]; then
-    restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-    discard_file_backup "$backup"
-    fail "Could not update ENABLE_ENROLL_LIMINE_CONFIG in ${LIMINE_DEFAULT_CONF}"
-    return 1
-  fi
-
-  if limine_enrollment_hooks_present; then
-    remove_limine_default_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-      discard_file_backup "$backup"
-      fail "Could not remove deprecated COMMANDS_BEFORE_SAVE entry in ${LIMINE_DEFAULT_CONF}"
-      return 1
-    fi
-
-    remove_limine_default_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-      discard_file_backup "$backup"
-      fail "Could not remove deprecated COMMANDS_AFTER_SAVE entry in ${LIMINE_DEFAULT_CONF}"
-      return 1
-    fi
-  else
-    ensure_limine_default_command "COMMANDS_BEFORE_SAVE" "limine-reset-enroll"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-      discard_file_backup "$backup"
-      fail "Could not update COMMANDS_BEFORE_SAVE in ${LIMINE_DEFAULT_CONF}"
-      return 1
-    fi
-
-    ensure_limine_default_command "COMMANDS_AFTER_SAVE" "limine-enroll-config"
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
-      changed=0
-    elif [[ $rc -ne 1 ]]; then
-      restore_file_backup "$backup" "$LIMINE_DEFAULT_CONF" || true
-      discard_file_backup "$backup"
-      fail "Could not update COMMANDS_AFTER_SAVE in ${LIMINE_DEFAULT_CONF}"
-      return 1
-    fi
-  fi
-
-  discard_file_backup "$backup"
-
-  if [[ $changed -eq 0 ]]; then
-    qact "Updated Limine Secure Boot settings"
+# sign_boot_files [config-only]
+# config-only stops after the loader proof: the watcher's job is the seal.
+sign_boot_files() {
+  local scope=${1:-full} rc=0
+  if restore_in_progress; then
+    qnote "A snapshot restore is running; leaving the boot files to it"
     return 0
   fi
-
-  qpass "Limine Secure Boot settings already configured"
-  return 0
-}
-
-# Regenerate Limine entries during setup or explicit rebuild flows.
-refresh_limine_config() {
-  command -v limine-update >/dev/null 2>&1 || return 1
-  qact "Regenerating Limine boot entries"
-  if [[ "$QUIET" == true ]]; then
-    limine-update >/dev/null || return 1
-  else
-    limine-update || return 1
+  if ! esp_is_mounted_vfat; then
+    [[ $scope != config-only ]] || return 0
+    fail "The EFI system partition is not mounted"
+    return 1
   fi
+  boot_lock_acquire || return "$?"
 
-  if command -v limine-snapper-sync >/dev/null 2>&1; then
-    qact "Refreshing Limine snapshot entries"
-    if [[ "$QUIET" == true ]]; then
-      limine-snapper-sync >/dev/null || return 1
-    else
-      limine-snapper-sync || return 1
+  remove_stale_staging || rc=1
+  apply_managed_settings || rc=1
+  converge_primary_loader || rc=1
+  if [[ $scope == full ]]; then
+    if [[ $(fallback_state) == altered ]]; then
+      qact "Restoring the fallback loader to upstream's raw copy (it is the rescue loader)"
+      restore_raw_fallback || rc=1
     fi
+    sign_unsigned_arrivals || rc=1
+    check_os_path_hashes || rc=1
+    watch_is_active || enable_watch || rc=1
   fi
-}
+  boot_lock_release
 
-# Capture the current limine.conf checksum for later change detection.
-snapshot_limine_conf_hash() {
-  [[ -f "$LIMINE_CONF" ]] || return 0
-  _limine_conf_hash=$(md5sum "$LIMINE_CONF" | cut -d' ' -f1) || _limine_conf_hash=""
-}
-
-# Enroll the current limine.conf checksum into the Limine EFI binary.
-enroll_limine_config() {
-  command -v limine-enroll-config >/dev/null 2>&1 || return 1
-  qact "Enrolling Limine config checksum"
-  if [[ "$QUIET" == true ]]; then
-    limine-enroll-config >/dev/null || return 1
+  if (( rc == 0 )); then
+    clear_attention
+    qpass "Boot files are sealed and signed"
   else
-    limine-enroll-config || return 1
+    set_attention "sign could not finish on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+    fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run: sudo omasecboot status"
   fi
-}
-
-# Re-enroll the limine.conf checksum only if the config file has changed
-# since the last recorded checksum.
-reenroll_limine_config_if_changed() {
-  command -v limine-enroll-config >/dev/null 2>&1 || return 1
-  [[ -f "$LIMINE_CONF" ]] || return 1
-
-  local current_hash
-  current_hash=$(md5sum "$LIMINE_CONF" | cut -d' ' -f1) || return 1
-
-  if [[ "${_limine_conf_hash:-}" == "$current_hash" ]]; then
-    qpass "Limine config unchanged, skipping re-enrollment"
-    return 0
-  fi
-
-  enroll_limine_config
-}
-
-# Create sbctl signing keys if they do not already exist.
-create_keys() {
-  local installed
-  installed=$(sbctl status --json 2>/dev/null | jq -r '.installed // false') || true
-
-  if [[ "$installed" == "true" ]]; then
-    qpass "Signing keys already exist"
-    return 0
-  fi
-
-  if ! gum confirm "Create new sbctl signing keys?"; then
-    warn "Aborted"
-    return 1
-  fi
-
-  sbctl create-keys || die "Key creation failed"
-  qpass "Signing keys created"
-}
-
-sbctl_entry_should_be_removed() {
-  local file="$1" output="${2:-$1}"
-
-  [[ ! -e "$file" || ! -e "$output" \
-    || "$file" == */Microsoft/* || "$output" == */Microsoft/* \
-    || "$file" == *BOOTIA32.EFI || "$output" == *BOOTIA32.EFI ]]
-}
-
-list_stale_sbctl_entries() {
-  local entries rc=0
-  entries=$(list_enrolled_entries_for_cleanup) || rc=$?
-  if [[ $rc -ne 0 ]]; then
-    return 1
-  fi
-
-  if [[ -n "$entries" ]]; then
-    printf '%s\n' "$entries" | while IFS=$'\t' read -r file output; do
-      output="${output:-$file}"
-      if sbctl_entry_should_be_removed "$file" "$output"; then
-        printf '%s\t%s\n' "$file" "$output"
-      fi
-    done | sort -u
-  fi
-}
-
-# Remove stale entries from sbctl's database:
-#   - files missing from disk
-#   - Microsoft paths (trusted via -m enrollment flag)
-#   - BOOTIA32.EFI (32-bit, irrelevant on x86_64)
-clean_stale_entries() {
-  local stale rc=0
-  stale=$(list_stale_sbctl_entries) || rc=$?
-  if [[ $rc -ne 0 ]]; then
-    warn "Could not read sbctl tracking state; skipping stale entry cleanup"
-    return 0
-  fi
-
-  local -a removable=()
-  local file output
-  if [[ -n "$stale" ]]; then
-    while IFS=$'\t' read -r file output; do
-      removable+=("$file")
-    done <<< "$stale"
-  fi
-
-  [[ ${#removable[@]} -eq 0 ]] && return 0
-
-  qact "Cleaning ${#removable[@]} stale database entries"
-  for file in "${removable[@]}"; do
-    if sbctl remove-file "$file" >/dev/null 2>&1; then
-      qpass "${file#"${ESP}"/}"
-    else
-      warn "Could not remove: ${file#"${ESP}"/}"
-    fi
-  done
-}
-
-# sbctl 0.18 ignores --save for already-signed files. Persist the SigningEntry
-# directly so zz-sbctl.hook can track snapshot UKIs on current Arch packages.
-save_sbctl_file_entry() {
-  local file="$1"
-  local files_db backup="" tmp db_json
-
-  files_db=$(resolve_sbctl_files_db_path) || { warn "Could not resolve sbctl files database path"; return 1; }
-  mkdir -p "$(dirname "$files_db")" || { warn "Could not create directory for ${files_db}"; return 1; }
-
-  if [[ -f "$files_db" ]]; then
-    backup=$(backup_file "$files_db") || return 1
-    db_json=$(<"$files_db") || db_json="{}"
-  else
-    db_json="{}"
-  fi
-
-  [[ -n "$db_json" && "$db_json" != "null" ]] || db_json="{}"
-
-  local db_dir
-  db_dir=$(dirname "$files_db")
-  tmp=$(mktemp "${db_dir}/.omasecboot.sbctl-files.XXXXXX") || {
-    [[ -z "$backup" ]] || discard_file_backup "$backup"
-    return 1
-  }
-
-  if ! printf '%s\n' "$db_json" | jq --arg file "$file" '
-    (if type == "object" then . else {} end)
-    | .[$file] = {file: $file, output_file: $file}
-  ' > "$tmp"; then
-    warn "Could not update sbctl database entry for ${file}"
-    rm -f "$tmp"
-    [[ -z "$backup" ]] || discard_file_backup "$backup"
-    return 1
-  fi
-
-  # Preserve original permissions, or set default for first-create
-  if [[ -f "$files_db" ]]; then
-    chmod --reference="$files_db" "$tmp" 2>/dev/null || true
-  else
-    chmod 0644 "$tmp"
-  fi
-
-  if ! mv "$tmp" "$files_db"; then
-    warn "Could not write ${files_db}"
-    [[ -z "$backup" ]] || restore_file_backup "$backup" "$files_db" || true
-    rm -f "$tmp"
-    [[ -z "$backup" ]] || discard_file_backup "$backup"
-    return 1
-  fi
-
-  [[ -z "$backup" ]] || discard_file_backup "$backup"
-  return 0
-}
-
-# Discover all EFI files and sign any that are not yet signed.
-# Uses -s flag to register files in sbctl's database for zz-sbctl.hook.
-sign_all_efi() {
-  local -a efi_files
-  local -a enrolled=()
-  local enrolled_raw rc=0
-  mapfile -t efi_files < <(discover_efi_files)
-  enrolled_raw=$(list_enrolled_paths) || rc=$?
-  if [[ $rc -ne 0 ]]; then
-    warn "Could not read sbctl tracking state; treating all files as untracked"
-  elif [[ -n "$enrolled_raw" ]]; then
-    mapfile -t enrolled <<< "$enrolled_raw"
-  fi
-  [[ ${#efi_files[@]} -eq 0 ]] && die "No EFI files found in ${ESP}"
-
-  local -A enrolled_map=()
-  local signed=0 skipped=0 failed=0
-  local file is_signed
-
-  for file in "${enrolled[@]}"; do
-    enrolled_map["$file"]=1
-  done
-
-  for file in "${efi_files[@]}"; do
-    # sbctl verify exits 0 regardless of result; parse JSON for actual status
-    is_signed=$(sbctl verify --json "$file" 2>/dev/null \
-      | jq -r '.[0].is_signed // empty') || true
-
-    if [[ "$is_signed" == "1" && -n "${enrolled_map[$file]:-}" ]]; then
-      qpass "${file#"${ESP}"/} ${DIM}already signed${NC}"
-      skipped=$((skipped + 1))
-    elif [[ "$is_signed" == "1" ]]; then
-      if save_sbctl_file_entry "$file"; then
-        qact "${file#"${ESP}"/} ${DIM}registered${NC}"
-        enrolled_map["$file"]=1
-        signed=$((signed + 1))
-      else
-        warn "Failed to register: ${file#"${ESP}"/}"
-        failed=$((failed + 1))
-      fi
-    else
-      local _sign_rc=0
-      if [[ "$QUIET" == true ]]; then
-        sbctl sign -s "$file" >/dev/null || _sign_rc=$?
-      else
-        sbctl sign -s "$file" || _sign_rc=$?
-      fi
-      if [[ $_sign_rc -eq 0 ]]; then
-        qact "${file#"${ESP}"/} ${DIM}signed${NC}"
-        enrolled_map["$file"]=1
-        signed=$((signed + 1))
-      else
-        warn "Failed to sign: ${file#"${ESP}"/}"
-        failed=$((failed + 1))
-      fi
-    fi
-  done
-
-  if [[ "$QUIET" != true ]]; then
-    echo
-    if [[ $failed -gt 0 ]]; then
-      warn "Signed ${signed}, skipped ${skipped}, failed ${failed}"
-    else
-      pass "Signed ${signed}, skipped ${skipped} (already signed)"
-    fi
-  elif [[ $failed -gt 0 ]]; then
-    warn "Failed to sign ${failed} file(s)"
-  fi
-
-  [[ $failed -eq 0 ]]
+  return "$rc"
 }
