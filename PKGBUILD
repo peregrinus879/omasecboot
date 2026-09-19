@@ -9,6 +9,7 @@ url='https://github.com/peregrinus879/omasecboot'
 license=('MIT')
 # Version floors only: the tool never blocks a system update, and its status
 # report says what an upstream change broke.
+# limine 11 brought the efi_boot_entry protocol the Windows entry uses.
 depends=(
   'bash'
   'coreutils'
@@ -24,7 +25,8 @@ depends=(
   'jq'
   'gum'
   'sbctl>=0.18'
-  'limine'
+  'efibootmgr'
+  'limine>=11.0.0'
   'limine-mkinitcpio-hook>=1.38.0'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")

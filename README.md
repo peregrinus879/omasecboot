@@ -5,7 +5,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Development status, 2026-09-20:** no release exists and this build has not been accepted on hardware. It prepares and maintains the boot files and enrolls your keys in the firmware (`setup`, `sign`, `status`, `remove`); the Windows boot entry is designed in [docs/spec.md](docs/spec.md) and not built yet. Until the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) has passed, use it only on a machine you can afford to recover.
+> **Development status, 2026-09-20:** no release exists and this build has not been accepted on hardware. Every command below is written and covered by the hermetic suites; none of it is proven on a real machine until the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) has passed. Until then, use it only on a machine you can afford to recover.
 
 ## Why
 
@@ -27,7 +27,7 @@ The design, every decision behind it and the failure table are in [docs/spec.md]
 
 ## Requirements
 
-Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images and the ESP mounted as vfat, which is how Omarchy installs. Besides the base system the package depends on `sbctl`, `limine`, `limine-mkinitcpio-hook`, `jq` and `gum`.
+Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images and the ESP mounted as vfat, which is how Omarchy installs. Besides the base system the package depends on `sbctl`, `limine`, `limine-mkinitcpio-hook`, `efibootmgr`, `jq` and `gum`.
 
 ## Install
 
@@ -43,15 +43,27 @@ sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
 | Command | What it does |
 | --- | --- |
 | `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the `limine.conf` watcher, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: proves that nothing but the Platform Key is gone, asks once, and adds your certificates to the keys the firmware holds. After a reboot it tells you to turn Secure Boot on. On a machine coming from an earlier version it also removes the sbctl rows that would make sbctl sign a snapshot image or the fallback loader. |
-| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signed file, stale hashes, harmful sbctl rows, and leftovers of earlier installs, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
+| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signed file, stale hashes, harmful sbctl rows, the Windows entry and leftovers of earlier installs, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
 | `sudo omasecboot sign` | The same converge-and-verify pass the hook runs. Safe at any time; exits 75 when another tool is working on the boot files. |
-| `sudo omasecboot remove` | Returns the Limine settings and boot files to stock. Refuses while Secure Boot is on. Your keys stay. |
+| `sudo omasecboot remove` | Returns the Limine settings and boot files to stock and takes the Windows entry out. Refuses while Secure Boot is on. Your keys stay. |
+| `omasecboot windows preflight` | Looks for Windows and BitLocker volumes and prints what to do in Windows before Secure Boot changes. Read-only. |
+| `sudo omasecboot windows setup` | Adds a Windows entry to the boot menu; `windows remove` takes it out. |
+| `omasecboot windows status` | Shows the Windows target the firmware offers and the state of the entry. |
+| `sudo omasecboot windows bootnext` | Asks the firmware to start Windows at the next boot, once. Exit 0 means the firmware took the request, nothing more. |
 
 ## How your keys get into the firmware
 
 OmaSecBoot appends: it adds your certificates to the KEK and db entries the firmware already holds and replaces only the Platform Key, which you delete yourself in the firmware's menu. The manufacturer's and Microsoft's certificates stay, including any that Windows or a firmware update added, and the revocation list (dbx) is never written. Before it asks you to delete anything it copies PK, KEK, db and dbx byte for byte to `/var/lib/omasecboot/firmware-backup/`, and before it writes it compares the firmware with that backup and refuses when more than the Platform Key is gone. Each variable is written on its own and read back, so an interrupted run is finished by running `setup` again.
 
 Some firmware clears every key when it enters Setup Mode. Adding your certificates to empty lists would leave the machine without the certificates its option ROMs and Windows need, so `setup` never does that: it offers to rebuild KEK and db from your certificates, Microsoft's and the firmware's built-in defaults (Microsoft's alone where the firmware does not expose its defaults), and first lists every backup entry that this cannot bring back. Anything in between, some entries gone and others kept, is refused with the list and the way back.
+
+## Windows
+
+On a dual-boot machine `setup` asks one question before it tells you to delete the Platform Key and one before it writes your keys: whether Windows encryption is suspended or off, or its recovery key at hand. Both steps change what Windows measures at boot, and BitLocker or Device Encryption may then ask for the recovery key. `omasecboot windows preflight` prints the steps for Windows Pro and Home; a machine without Windows is asked nothing.
+
+`sudo omasecboot windows setup` adds a Windows entry to Limine's menu. It uses Limine's `efi_boot_entry` protocol, which restarts the machine into the firmware's own "Windows Boot Manager" entry instead of chainloading it, so Windows starts the way it does when you pick it in the firmware. The target is read from the firmware's boot entries every time: exactly one active Windows Boot Manager entry with a name no other entry shares, or the command refuses. `limine.conf` is only ever changed together with the loader's seal over it, or while the loader carries no seal at all, and a line of the tool's markers that lost its partner is reported instead of guessed at. The tool never creates or renames firmware entries and never mounts or reads a Windows partition. When Omarchy replaces `limine.conf` from its template, the next `sign` pass puts the entry back.
+
+`sudo omasecboot windows bootnext` does the same without the menu. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into `~/.config/omarchy/extensions/omarchy-menu.jsonc` to use it. Neither way promises that Windows starts, that BitLocker stays quiet or that its measurements stay stable.
 
 ## What it never touches
 
@@ -82,12 +94,14 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
 | A snapshot entry does not boot with Secure Boot on | The snapshot image predates setup and is unsigned | Boot it with Secure Boot off, or let snapshot rotation retire it |
+| `limine.conf holds a Windows marker line of this tool without its partner` | A `# omasecboot:windows begin` or `end` line was removed by hand | Remove the remaining marker line, then `sudo omasecboot sign` |
 
 ## Limits
 
 - Your keys being enrolled does not mean Secure Boot is on; `status` reports both.
 - After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK stays, so the db and dbx updates that Microsoft signs can still be applied.
 - The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.
+- A BootNext request is one boot. It does not prove that Windows started, keep BitLocker quiet or keep its measurements stable, and a clean `windows preflight` is an observation, not a clearance of the firmware.
 - A snapshot older than `setup` takes the tool, the keys and the settings with it when it is restored, while the ESP and the firmware keep the signed state. Keep Secure Boot off after such a restore until `setup` has run again.
 - The Omarchy installer ISO does not boot under Secure Boot; OmaSecBoot is for installed systems.
 
@@ -98,7 +112,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 ## Development
 
 ```bash
-make lint   # bash -n and ShellCheck
+make lint   # bash -n, ShellCheck and the JSONC fragment
 make test   # hermetic suites and the package build, about a minute
 ```
 

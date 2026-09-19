@@ -202,12 +202,14 @@ primary_is_proved() {
 
 readonly LOADER_STAGING_PREFIX='.omasecboot-loader.'
 
-# A pass that was killed leaves its staging file on the ESP, where space is
-# scarce. Called under the boot lock, so no live pass owns one.
+# A pass that was killed leaves its staging files on the ESP, where space is
+# scarce: a loader being built, or a limine.conf being replaced. Called under
+# the boot lock, so no live pass owns one.
 remove_stale_staging() {
   local esp
   esp=$(esp_path) || return 1
-  rm -f -- "${esp}/EFI/limine/${LOADER_STAGING_PREFIX}"* "${esp}/EFI/BOOT/${LOADER_STAGING_PREFIX}"*
+  rm -f -- "${esp}/EFI/limine/${LOADER_STAGING_PREFIX}"* "${esp}/EFI/BOOT/${LOADER_STAGING_PREFIX}"* \
+    "${esp}"/.limine.conf.??????
 }
 
 # Builds a loader from the raw executable in a staging file beside the target:

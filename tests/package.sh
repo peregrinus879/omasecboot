@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds the Arch package from the tracked files and inspects what it would
+# Builds the Arch package from the checkout's files and inspects what it would
 # put on a machine: metadata, dependencies, the exact payload, owners and modes.
 # Installation, the hook and removal run for real in tests/container.sh.
 set -euo pipefail
@@ -30,13 +30,14 @@ expected_depends=$(sort <<'DEPENDS'
 bash
 coreutils
 diffutils
+efibootmgr
 findutils
 gawk
 grep
 gum
 jq
-limine
 limine-mkinitcpio-hook>=1.38.0
+limine>=11.0.0
 pacman
 sbctl>=0.18
 sed
@@ -68,6 +69,7 @@ usr/lib/omasecboot/firmware.sh
 usr/lib/omasecboot/limine.sh
 usr/lib/omasecboot/sign.sh
 usr/lib/omasecboot/status.sh
+usr/lib/omasecboot/windows.sh
 usr/lib/systemd/
 usr/lib/systemd/system/
 usr/lib/systemd/system/omasecboot-watch@.path
@@ -82,6 +84,7 @@ usr/share/doc/omasecboot/docs/omarchy-integration.md
 usr/share/doc/omasecboot/docs/release-checklist.md
 usr/share/doc/omasecboot/docs/spec.md
 usr/share/doc/omasecboot/docs/upstream-contracts.md
+usr/share/doc/omasecboot/omarchy-menu.jsonc
 usr/share/licenses/
 usr/share/licenses/omasecboot/
 usr/share/licenses/omasecboot/LICENSE

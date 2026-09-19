@@ -83,7 +83,7 @@ replaced_lock_file_is_not_a_lock() {
 
 busy_lock_is_status_75() {
   local rc=0
-  flock "$(boot_lock_path)" sleep 5 &
+  flock -o "$(boot_lock_path)" sleep 5 &
   sleep 0.3
   boot_lock_acquire 2>/dev/null || rc=$?
   kill %1 2>/dev/null
@@ -97,7 +97,7 @@ busy_lock_is_status_75() {
 inherited_unlocked_descriptor_waits_briefly() {
   local rc=0 started=$SECONDS
   boot_lock_wait() { printf '30\n'; }
-  flock "$(boot_lock_path)" sleep 5 &
+  flock -o "$(boot_lock_path)" sleep 5 &
   sleep 0.3
   exec 200>>"$(boot_lock_path)"
   boot_lock_acquire 2>/dev/null || rc=$?

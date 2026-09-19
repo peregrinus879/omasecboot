@@ -5,7 +5,7 @@
 # test_harness_init, then runs cases with run_case.
 #
 # Rule for stubs: every behaviour a stub models cites the section of
-# docs/upstream-contracts.md (C1 to C7) that records it. Anything a stub does
+# docs/upstream-contracts.md (C1 to C8) that records it. Anything a stub does
 # without such a record is marked ASSUMPTION, because tests that share an
 # unchecked assumption with the code prove nothing about real machines.
 # shellcheck disable=SC2329 # Overrides and case functions are called indirectly.
@@ -38,6 +38,9 @@ finish_suite() { printf '%s tests passed (%s cases)\n' "$SUITE_NAME" "$CASES_RUN
 
 # shellcheck source=tests/lib/esl.sh
 source "$ROOT_DIR/tests/lib/esl.sh"
+
+# A case that needs the boot lock busy holds it with "flock -o ... sleep &":
+# -o keeps the lock out of the sleeping child, so killing the job frees it.
 
 # --- The fixture machine ---------------------------------------------------------
 
@@ -79,6 +82,9 @@ fixture_machine() {
   write_key_variable dbx "$(sha256_list "$MICROSOFT_OWNER" "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" | base64 -w0)"
   set_mode_variable SetupMode 0
   set_mode_variable SecureBoot 0
+  # The firmware boots Limine; a machine with Windows gets its entry per case.
+  write_boot_entry 0001 active 'Limine' '\EFI\limine\limine_x64.efi'
+  write_boot_order 0001
   install_stubs
   export FIX ROOT_DIR PATH="$FIX/bin:$PATH"
   load_library
@@ -126,6 +132,50 @@ delete_platform_key() {
   set_mode_variable SetupMode 1
 }
 
+utf16_hex() { printf '%s\0' "$1" | iconv -f UTF-8 -t UTF-16LE | od -An -v -tx1 | tr -d ' \n'; }
+
+# file_path_node FILE: a device path node of type 4, subtype 4, as hex.
+file_path_node() {
+  local file
+  file=$(utf16_hex "$1")
+  printf '0404%02x%02x%s' $(((${#file} / 2 + 4) & 255)) $(((${#file} / 2 + 4) >> 8)) "$file"
+}
+
+# write_boot_entry NUMBER active|inactive LABEL FILE [EXTRA-HEX]: a Boot####
+# variable as firmware writes it (UEFI 2.10, 3.1.3): attributes, the length of
+# the device path list, the label as UTF-16, then a hard-drive node, the file
+# path node and the end node. EXTRA-HEX follows the end node inside the list,
+# as a second device path does; Windows also appends optional data after the
+# list, which every entry here carries.
+write_boot_entry() {
+  local number=$1 attributes=01000000 path
+  [[ $2 == active ]] || attributes=00000000
+  path=$(printf '04012a00%076d%s7fff0400%s' 0 "$(file_path_node "$4")" "${5:-}")
+  {
+    printf '\x07\x00\x00\x00'
+    hex_bytes "$attributes"
+    hex_bytes "$(printf '%02x%02x' $(((${#path} / 2) & 255)) $(((${#path} / 2) >> 8)))"
+    hex_bytes "$(utf16_hex "$3")${path}"
+    printf 'WINDOWS\0optional data'
+  } >"$FIX/efivars/Boot${number}-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+}
+
+# write_boot_order NUMBER...: little-endian uint16 each.
+write_boot_order() {
+  local number
+  {
+    printf '\x07\x00\x00\x00'
+    for number in "$@"; do hex_bytes "${number:2:2}${number:0:2}"; done
+  } >"$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+}
+
+# The machine as most dual-boot laptops present it.
+add_windows() {
+  write_boot_entry 0000 active 'Windows Boot Manager' '\EFI\Microsoft\Boot\bootmgfw.efi'
+  write_boot_order 0001 0000
+  printf '/dev/nvme0n1p1 vfat\n/dev/nvme0n1p3 BitLocker\n/dev/nvme0n1p5 btrfs\n' >"$FIX/run/lsblk"
+}
+
 # Rows as the library prints them, computed here from the known fixture
 # content, so an assertion never depends on the reader under test.
 x509_row() { printf '%s %s %s\n' "$ESL_X509_TYPE" "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"; }
@@ -146,7 +196,7 @@ loader_is_sealed_and_signed() {
 # the fixture.
 load_library() {
   local module
-  for module in common checks files firmware limine sign status; do
+  for module in common checks files firmware limine windows sign status; do
     # shellcheck source=/dev/null
     source "$ROOT_DIR/lib/${module}.sh"
   done
@@ -184,6 +234,9 @@ fixture_overrides() {
   esp_is_mounted_vfat() { [[ ! -e $FIX/run/esp-unmounted ]]; }
   package_loader_path() { printf '%s/share/BOOTX64.EFI\n' "$FIX"; }
   limine_hook_path() { printf '%s/bin/limine-hook\n' "$FIX"; }
+  # The firmware's entries cannot be read at the moment the pass looks: the
+  # pass goes on without the Windows entry, as converge_windows_block does then.
+  [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_block() { :; }
   leftover_candidates() { printf '%s\n' "$FIX/old/omasecboot" "$FIX"/old/hooks/*omasecboot*; }
   durable_sync() { :; }
   check_root() { :; }
@@ -411,6 +464,23 @@ case $1 in
   disable) rm -f "$FIX/systemd/$unit" ;;
   is-enabled | is-active) [[ -e $FIX/systemd/$unit ]] ;;
 esac
+EOF
+  # lsblk --raw --noheadings --output PATH,FSTYPE: one "path type" line per
+  # block device, the type as libblkid names it, "BitLocker" for such a volume
+  # (C8); run/lsblk-fails is a machine whose devices cannot be listed.
+  cat >"$FIX/bin/lsblk" <<'EOF'
+#!/bin/bash
+[[ ! -e $FIX/run/lsblk-fails ]] || exit 1
+[[ ! -e $FIX/run/lsblk ]] || cat "$FIX/run/lsblk"
+EOF
+  # efibootmgr 18: --bootnext XXXX sets BootNext (its own usage text);
+  # firmware that ignores the write is run/firmware-ignores-bootnext.
+  cat >"$FIX/bin/efibootmgr" <<'EOF'
+#!/bin/bash
+printf '%s\n' "efibootmgr $*" >>"$FIX/run/calls"
+[[ $1 == --bootnext && $2 =~ ^[0-9A-F]{4}$ ]] || exit 64
+[[ -e $FIX/run/firmware-ignores-bootnext ]] ||
+  printf '%b' "\\x07\\x00\\x00\\x00\\x${2:2:2}\\x${2:0:2}" >"$FIX/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 EOF
   cat >"$FIX/bin/pacman" <<'EOF'
 #!/bin/bash

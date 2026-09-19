@@ -32,6 +32,10 @@ read_mode_variable() {
 
 # --- Signature lists ---------------------------------------------------------------
 
+# The bytes a string of hex digits stands for, NULs included.
+# shellcheck disable=SC2001 # Every pair of digits gets a prefix; no expansion does that.
+hex_to_bytes() { printf '%b' "$(sed 's/../\\x&/g' <<<"$1")"; }
+
 # Little-endian uint32 at a byte offset of a hex dump; sets _le32.
 _le32=0
 read_le32() {
@@ -68,8 +72,7 @@ list_signature_entries() {
     (( (list_size - 28 - header_size) % entry_size == 0 )) || return 1
     for ((entry = offset + 28 + header_size; entry < offset + list_size; entry += entry_size)); do
       data=${hex:$(((entry + 16) * 2)):$(((entry_size - 16) * 2))}
-      # shellcheck disable=SC2001 # Every pair of digits gets a prefix; no expansion does that.
-      digest=$(printf '%b' "$(sed 's/../\\x&/g' <<<"$data")" | sha256sum) || return 1
+      digest=$(hex_to_bytes "$data" | sha256sum) || return 1
       rows+="${hex:$((offset * 2)):32} ${hex:$((entry * 2)):32} ${digest%% *}"$'\n'
     done
     offset=$((offset + list_size))

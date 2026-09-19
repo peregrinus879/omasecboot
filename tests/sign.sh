@@ -76,10 +76,20 @@ foreign_fallback_is_left_alone() {
 }
 
 failure_leaves_the_marker() {
+  local output
   prepared_machine
   : >"$FIX/run/sbctl-sign-fails"
-  ! sign_boot_files 2>/dev/null || fail_test "a failed pass reported success"
+  output=$(sign_boot_files 2>&1) && fail_test "a failed pass reported success"
   [[ -s $(attention_marker) ]] || fail_test "no marker after a failed pass"
+  # A loader that is not sealed over limine.conf does not start at all (C1),
+  # which is a different warning from an unsigned file.
+  [[ $output == *'Do not reboot, with Secure Boot on or off'* ]] || fail_test "an unsealed loader was reported like any failure: ${output}"
+  rm "$FIX/run/sbctl-sign-fails"
+  sign_boot_files >/dev/null 2>&1 || fail_test "recovery pass"
+  printf 'an unsigned arrival' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  : >"$FIX/run/sbctl-sign-fails"
+  output=$(sign_boot_files 2>&1) && fail_test "a failed signing reported success"
+  [[ $output == *'Do not reboot with Secure Boot on'* ]] || fail_test "report: ${output}"
   rm "$FIX/run/sbctl-sign-fails"
   sign_boot_files && [[ ! -e $(attention_marker) ]] || fail_test "a later clean pass kept the marker"
 }
@@ -114,7 +124,7 @@ full_esp_is_not_written_to() {
 busy_lock_writes_no_marker() {
   local rc=0
   prepared_machine
-  flock "$(boot_lock_path)" sleep 5 &
+  flock -o "$(boot_lock_path)" sleep 5 &
   sleep 0.3
   sign_boot_files 2>/dev/null || rc=$?
   kill %1 2>/dev/null

@@ -6,7 +6,7 @@
 # only setup repairs, blocking_problem what no command of this tool repairs,
 # which includes everything that could not be read. The next step is chosen
 # from the worst kind seen.
-_status_problems=0 _status_next=sign _status_firmware=pending
+_status_problems=0 _status_next=sign _status_firmware=pending _status_sealed=true
 problem() {
   fail "$@"
   _status_problems=$((_status_problems + 1))
@@ -96,6 +96,7 @@ show_loader_status() {
     pass "The Limine loader is sealed with the current limine.conf and signed"
   else
     problem "The Limine loader is not sealed with the current limine.conf and signed"
+    _status_sealed=false
   fi
   while IFS= read -r shadow; do
     [[ -z $shadow ]] || blocking_problem "A second limine.conf shadows the real one; remove it: ${shadow}"
@@ -154,6 +155,37 @@ show_files_status() {
     note "${old_snapshots} snapshot image(s) predate Secure Boot setup and are unsigned: those entries boot only with Secure Boot off and leave with snapshot rotation"
 }
 
+# The Windows entry is in limine.conf exactly when it is enabled; the pass
+# keeps that so and leaves everything it cannot settle to this report.
+show_windows_status() {
+  local status=0 state
+  if [[ ! -e $(windows_flag) ]]; then
+    case $(windows_block_state '') in
+      absent) ;;
+      broken) blocking_problem "limine.conf holds a Windows marker line of this tool without its partner; remove that line by hand" ;;
+      unknown) blocking_problem "Could not read $(limine_config_path)" ;;
+      *) problem "limine.conf holds a Windows entry of this tool although the entry is not enabled" ;;
+    esac
+    return
+  fi
+  resolve_windows_target || status=$?
+  if (( status == 2 )); then
+    blocking_problem "The Windows entry is enabled, but the firmware's boot entries could not be read"
+    return
+  elif (( status != 0 )); then
+    blocking_problem "The Windows entry is enabled, but the firmware has no single active Windows Boot Manager entry with a name of its own. Take the entry out with: sudo omasecboot windows remove"
+    return
+  fi
+  state=$(windows_block_state "$(windows_target_label)")
+  case $state in
+    current) pass "The Windows entry restarts the machine into $(windows_target_label)" ;;
+    absent) problem "The Windows entry is missing from limine.conf" ;;
+    stale) problem "The Windows entry in limine.conf is not the one for $(windows_target_label)" ;;
+    broken) blocking_problem "limine.conf holds a Windows marker line of this tool without its partner; remove that line by hand" ;;
+    unknown) blocking_problem "Could not read $(limine_config_path)" ;;
+  esac
+}
+
 show_integration_status() {
   local hook leftover
   hook=$(limine_hook_path)
@@ -188,14 +220,19 @@ show_next_step() {
       setup) act "Next: ${BOLD}sudo omasecboot setup${NC}" ;;
       blocked) act "Next: resolve what is marked above, then run ${BOLD}sudo omasecboot setup${NC}" ;;
     esac
-    act "Do not reboot with Secure Boot on until this report is clean"
+    if [[ $_status_sealed == true ]]; then
+      act "Do not reboot with Secure Boot on until this report is clean"
+    else
+      # A loader that is not sealed over limine.conf does not start at all (C1).
+      act "Do not reboot, with Secure Boot on or off, until the loader is sealed again"
+    fi
   fi
 }
 
 # Exit 0 when nothing needs attention, 1 otherwise.
 show_status() {
   local marker
-  _status_problems=0 _status_next=sign _status_firmware=pending
+  _status_problems=0 _status_next=sign _status_firmware=pending _status_sealed=true
   header "Status"
   show_firmware_status
   if ! is_set_up; then
@@ -206,6 +243,7 @@ show_status() {
     show_settings_status
     show_loader_status
     show_files_status
+    show_windows_status
     show_integration_status
     marker=$(attention_marker)
     [[ ! -e $marker ]] || problem "An earlier pass could not finish: $(<"$marker")"

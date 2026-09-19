@@ -120,6 +120,8 @@ record_state() {
   block "sbctl list-files" sbctl list-files
   block "sbctl verify" sbctl verify
   block "omasecboot status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot status; printf "exit status: %s\n" "$?"; else echo "omasecboot is not installed"; fi'
+  block "omasecboot windows status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot windows status 2>&1; else echo "omasecboot is not installed"; fi'
+  block "BootNext" bash -c 'p=$(ls /sys/firmware/efi/efivars/BootNext-* 2>/dev/null | head -1); if [[ -n $p ]]; then od -An -tx1 -j4 "$p"; else echo absent; fi'
   block "limine.conf watcher" bash -c 'systemctl list-units --all --no-pager "omasecboot-watch@*" 2>&1; systemctl list-unit-files --no-pager "omasecboot-watch@*" 2>&1'
   block "Boot entries (MAC and NVMe nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
   block "ESP mount, free space and partitions" bash -c 'findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS $esp 2>&1; df -h $esp 2>&1; lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME,MOUNTPOINTS 2>&1'

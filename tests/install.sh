@@ -25,7 +25,7 @@ hook=$STAGE/etc/boot/hooks/post.d/90-omasecboot-sign
 [[ $("$command_path" version) == 'omasecboot 1.0.0' ]] || fail_test "the installed command does not run"
 "$command_path" help | grep -q 'sudo omasecboot setup' || fail_test "help"
 "$command_path" nonsense >/dev/null 2>&1 && fail_test "an unknown command succeeded"
-for module in common checks files firmware limine sign status; do
+for module in common checks files firmware limine windows sign status; do
   [[ -f $STAGE$PREFIX/lib/omasecboot/${module}.sh ]] || fail_test "missing module ${module}"
 done
 { [[ -x $hook ]] && grep -qx "${PREFIX}/bin/omasecboot sign --quiet || :" "$hook"; } || fail_test "the hook does not call the installed command"

@@ -1,0 +1,12 @@
+// Reference fragment for Omarchy's menu (default/omarchy/omarchy-menu.jsonc): a
+// "Reboot to Windows" row for the System menu. The guard runs unprivileged and
+// prints nothing; the action reboots only when the firmware took the request.
+{
+  "system.windows": {
+    "icon": "󰍲",
+    "label": "Reboot to Windows",
+    "description": "Start Windows once through the firmware",
+    "when": "command -v omasecboot >/dev/null && omasecboot windows available",
+    "action": "omarchy-launch-floating-terminal-with-presentation 'sudo omasecboot windows bootnext && omarchy system reboot'"
+  }
+}

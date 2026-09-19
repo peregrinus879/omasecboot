@@ -73,6 +73,8 @@ sign_repairs_these() {
   [[ $output == *'fallback loader is signed or sealed'* && $output == *'watcher is not active'* &&
     $output == *'ENABLE_VERIFICATION=no is not in effect'* && $output == *'loader is not sealed'* ]] || fail_test "report: ${output}"
   [[ $output == *'Next: sudo omasecboot sign'* ]] || fail_test "next step: ${output}"
+  # A loader that is not sealed over limine.conf does not start at all (C1).
+  [[ $output == *'Do not reboot, with Secure Boot on or off'* ]] || fail_test "the closing warning is the weaker one: ${output}"
   QUIET=true sign_boot_files || fail_test "sign"
   show_status >/dev/null 2>&1 || fail_test "sign did not repair what status told it to"
 }

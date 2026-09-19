@@ -79,7 +79,7 @@ check_os_path_hashes() {
 # sign_boot_files [config-only]
 # config-only stops after the loader proof: the watcher's job is the seal.
 sign_boot_files() {
-  local scope=${1:-full} rc=0
+  local scope=${1:-full} rc=0 sealed=true
   if restore_in_progress; then
     qnote "A snapshot restore is running; leaving the boot files to it"
     return 0
@@ -93,7 +93,8 @@ sign_boot_files() {
 
   remove_stale_staging || rc=1
   apply_managed_settings || rc=1
-  converge_primary_loader || rc=1
+  converge_windows_block
+  converge_primary_loader || sealed=false
   if [[ $scope == full ]]; then
     if [[ $(fallback_state) == altered ]]; then
       qact "Restoring the fallback loader to upstream's raw copy (it is the rescue loader)"
@@ -105,12 +106,16 @@ sign_boot_files() {
   fi
   boot_lock_release
 
-  if (( rc == 0 )); then
-    clear_attention
-    qpass "Boot files are sealed and signed"
-  else
+  if [[ $sealed == false ]]; then
+    # A loader sealed over another limine.conf does not start at all (C1).
+    set_attention "the loader could not be sealed on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+    fail "The Limine loader is not sealed with the current limine.conf. Do not reboot, with Secure Boot on or off; run: sudo omasecboot status"
+    return 1
+  elif (( rc != 0 )); then
     set_attention "sign could not finish on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
     fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run: sudo omasecboot status"
+    return 1
   fi
-  return "$rc"
+  clear_attention
+  qpass "Boot files are sealed and signed"
 }

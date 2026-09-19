@@ -103,7 +103,7 @@ remove_returns_to_stock() {
 busy_remove_changes_nothing() {
   local rc=0
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  flock "$(boot_lock_path)" sleep 5 &
+  flock -o "$(boot_lock_path)" sleep 5 &
   sleep 0.3
   run_cli remove || rc=$?
   kill %1 2>/dev/null
@@ -156,7 +156,7 @@ setup_removes_harmful_sbctl_rows() {
 busy_boot_files_exit_75() {
   local rc=0
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  flock "$(boot_lock_path)" sleep 5 &
+  flock -o "$(boot_lock_path)" sleep 5 &
   sleep 0.3
   run_cli sign || rc=$?
   kill %1 2>/dev/null

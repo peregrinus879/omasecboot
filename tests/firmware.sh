@@ -276,7 +276,7 @@ setup_asks_for_the_pk_then_enrolls_then_confirms() {
   local backup
   prepared_machine
   [[ $(<"$FIX/run/output") == *'delete only the Platform Key (PK)'* ]] || fail_test "no firmware instruction: $(<"$FIX/run/output")"
-  grep -n 'BitLocker\|delete only' "$FIX/run/output" | head -1 | grep -q BitLocker || fail_test "no encryption warning before the delete instruction"
+  [[ $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "a machine without Windows was asked about it: $(<"$FIX/run/output")"
   backup=$(latest_firmware_backup) || fail_test "no backup before the firmware instruction"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "the first run wrote to the firmware"
 

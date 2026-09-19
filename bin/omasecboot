@@ -9,7 +9,7 @@ SCRIPT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 LIB_DIR=${SCRIPT_DIR}/../lib/omasecboot
 [[ -d $LIB_DIR ]] || LIB_DIR=${SCRIPT_DIR}/../lib
 
-for module in common checks files firmware limine sign status; do
+for module in common checks files firmware limine windows sign status; do
   # shellcheck source=/dev/null
   source "${LIB_DIR}/${module}.sh"
 done
@@ -21,6 +21,10 @@ usage() {
   ${BOLD}sudo omasecboot status${NC}        Report the state and the next step (--quiet: exit status only)
   ${BOLD}sudo omasecboot sign${NC}          Seal and sign the boot files again; safe to run at any time
   ${BOLD}sudo omasecboot remove${NC}        Return the boot files and Limine settings to stock
+  ${BOLD}omasecboot windows preflight${NC}  Look for Windows and BitLocker, and say what to do before Secure Boot changes
+  ${BOLD}sudo omasecboot windows setup${NC}     Add a Windows entry to the boot menu     (${BOLD}windows remove${NC} takes it out)
+  ${BOLD}sudo omasecboot windows bootnext${NC}  Ask the firmware to start Windows at the next boot, once
+  ${BOLD}omasecboot windows status${NC}     Show the Windows target and the entry's state
   ${BOLD}omasecboot version${NC}
 
   ${BOLD}--quiet${NC} anywhere on the line keeps progress quiet; warnings and failures still print"
@@ -73,11 +77,6 @@ print_entries() {
   done <<<"$1"
 }
 
-# Replacing the Platform Key changes what Windows measures at boot.
-warn_about_windows_encryption() {
-  warn "If Windows uses BitLocker or Device Encryption on this machine, have its recovery key at hand before you go on"
-}
-
 # Setup Mode: write the local keys. The proof is made against the backup taken
 # while a PK was in place; a machine that reached Setup Mode before its first
 # setup has only a backup of what was left, and is told so.
@@ -127,7 +126,7 @@ setup_enrollment() {
   esac
 
   note "The backup of the keys this machine trusted is in ${backup}"
-  warn_about_windows_encryption
+  acknowledge_windows_encryption || exit 1
   confirm "the key enrollment" "$question" || exit 1
   enroll_local_keys "$path" || die "The enrollment stopped. The firmware stays in Setup Mode; run ${BOLD}sudo omasecboot setup${NC} again."
   { read_enrollment_plan && firmware_is_enrolled; } || die "The firmware does not hold your keys after the write; run ${BOLD}sudo omasecboot setup${NC} again."
@@ -152,12 +151,14 @@ setup_firmware_step() {
       pass "Secure Boot is on with your keys. Setup is complete."
     else
       pass "Your keys are enrolled and every boot file is proved"
+      remind_of_windows_encryption
       act "Reboot into the firmware and turn Secure Boot on"
     fi
   elif platform_key_is_present; then
     backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
     note "The keys this machine trusts now are backed up in ${backup}"
-    warn_about_windows_encryption
+    # Deleting the PK already changes what Windows measures at boot.
+    acknowledge_windows_encryption || exit 1
     act "Reboot into the firmware and delete only the Platform Key (PK); keep KEK, db and dbx. Some firmware shows its key menu only while Secure Boot is set to enabled."
     act "Then run ${BOLD}sudo omasecboot setup${NC} again"
   elif [[ $first_run == true ]]; then
@@ -254,11 +255,119 @@ cmd_remove() {
   disable_watch || warn "Could not disable the limine.conf watcher"
   restore_settings_originals || die "Could not restore $(limine_default_config)"
   restore_stock_boot_files || die "The boot files are not back to stock; run this again"
+  # Only now: the loader is proved raw, so limine.conf may change under it.
+  write_windows_block || die "Could not take the Windows entry out of $(limine_config_path); run this again"
+  rm -f -- "$(windows_flag)"
   boot_lock_release
   clear_attention
   rm -f -- "$(settings_originals_file)"
   pass "Limine settings and boot files are back to stock"
   note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu."
+}
+
+# The menu entry's guard: unprivileged and silent. The opt-in exists and the
+# firmware still has one clear target.
+windows_is_available() {
+  { [[ -e $(windows_flag) ]] && resolve_windows_target; } >/dev/null 2>&1 || return 1
+}
+
+cmd_windows() {
+  local action=${1:-} state status=0 checksum
+  (( $# == 0 )) || shift
+  no_arguments "$@"
+  case $action in
+    available)
+      windows_is_available
+      ;;
+    preflight)
+      header "Windows preflight"
+      state=$(windows_encryption_state)
+      case $state in
+        absent) pass "No Windows Boot Manager entry and no BitLocker volume were found. That is an observation, not a clearance of the firmware." ;;
+        present) print_encryption_guidance "$(list_bitlocker_volumes)" ;;
+        unknown)
+          fail "Could not tell whether Windows or a BitLocker volume is on this machine"
+          print_encryption_guidance ''
+          ;;
+      esac
+      [[ $state != unknown ]]
+      ;;
+    status)
+      header "Windows"
+      resolve_windows_target || status=$?
+      case $status in
+        0)
+          pass "Target: Boot$(windows_target_number), $(windows_target_label)"
+          note "The entry in limine.conf is $(windows_block_state "$(windows_target_label)")"
+          ;;
+        1) note "The firmware has no single active Windows Boot Manager entry with a name of its own" ;;
+        *) fail "Could not read the firmware's boot entries" ;;
+      esac
+      if [[ -e $(windows_flag) ]]; then note "The Windows entry is enabled"; else note "The Windows entry is not enabled"; fi
+      ;;
+    setup)
+      check_root "windows setup"
+      header "Windows entry"
+      is_set_up || die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"
+      check_uefi && check_esp || exit 1
+      ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
+      resolve_windows_target || status=$?
+      case $status in
+        0) ;;
+        1) die "The firmware has no single active Windows Boot Manager entry with a name of its own; this tool never creates or renames firmware entries" ;;
+        *) die "Could not read the firmware's boot entries" ;;
+      esac
+      # The lock first, so a busy lock changes nothing; the pass below keeps it,
+      # writes the entry and seals the loader over it.
+      boot_lock_acquire || exit "$?"
+      ensure_state_dir || die "Unsafe state directory $(state_dir)"
+      : >"$(windows_flag)"
+      sign_boot_files || exit "$?"
+      [[ $(windows_block_state "$(windows_target_label)") == current ]] ||
+        die "The Windows entry did not reach limine.conf. It stays enabled, and the next pass writes it; see: sudo omasecboot status"
+      pass "Windows is in the boot menu: the entry restarts the machine into $(windows_target_label)"
+      ;;
+    remove)
+      check_root "windows remove"
+      header "Windows entry"
+      check_esp || exit 1
+      ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
+      boot_lock_acquire || exit "$?"
+      if is_set_up; then
+        # The pass takes the entry out, because the flag is gone, and seals
+        # the loader over the result.
+        rm -f -- "$(windows_flag)"
+        sign_boot_files || exit "$?"
+      else
+        # No pass will seal the loader, so limine.conf may only change while
+        # the loader carries no checksum at all.
+        { checksum=$(embedded_checksum "$(primary_loader_path)") && checksum_is_zero "$checksum"; } ||
+          die "The Limine loader is sealed over the current limine.conf, or cannot be read, and nothing would seal it again. Run ${BOLD}sudo omasecboot remove${NC} or ${BOLD}sudo omasecboot setup${NC} first."
+        write_windows_block || die "Could not take the Windows entry out of $(limine_config_path)"
+        rm -f -- "$(windows_flag)"
+        boot_lock_release
+      fi
+      [[ $(windows_block_state '') == absent ]] || die "The Windows entry is still in limine.conf"
+      pass "The Windows entry is gone"
+      ;;
+    bootnext)
+      check_root "windows bootnext"
+      check_uefi || exit 1
+      command -v efibootmgr >/dev/null 2>&1 || die "efibootmgr is not installed"
+      resolve_windows_target || status=$?
+      case $status in
+        0) ;;
+        1) die "The firmware has no single active Windows Boot Manager entry with a name of its own; no request was made" ;;
+        *) die "Could not read the firmware's boot entries; no request was made" ;;
+      esac
+      request_windows_boot || die "BootNext does not read back as the Windows entry; check with: efibootmgr"
+      qpass "The firmware holds the request to start $(windows_target_label) at the next boot, once"
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
 }
 
 main() {
@@ -279,6 +388,7 @@ main() {
     sign) cmd_sign "$@" ;;
     status) cmd_status "$@" ;;
     remove) cmd_remove "$@" ;;
+    windows) cmd_windows "$@" ;;
     version) print_message "omasecboot ${OMASECBOOT_VERSION}" ;;
     help | -h | --help) usage ;;
     *)

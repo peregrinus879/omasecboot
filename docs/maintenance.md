@@ -5,7 +5,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 ## Open work before a release
 
 - Firmware enrollment ([spec.md](spec.md) D4 and the `setup` row) is written and covered by the hermetic suite, whose sbctl stub models C4. Done when stage 2 of [release-checklist.md](release-checklist.md) passes on hardware; until then nothing about a firmware write is proven.
-- The Windows entry, the BootNext request and the encryption acknowledgment before the firmware steps (the `windows` commands in the spec); until then `setup` prints a plain warning before it asks. Done when the Windows stage of hardware acceptance passes.
+- The Windows entry, the BootNext request and the encryption acknowledgment are written and covered by the hermetic suite, whose fixtures model C8. Done when stage 5 passes on hardware.
 - The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers.
 - The real-tool contract suites and the weekly CI job of spec section 11.
 - Hardware acceptance, stages 0 to 6, on at least one machine.
@@ -30,4 +30,5 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 | `limine-snapper-sync` | C2: history file names, `snapshots.json`, the restore marker |
 | `sbctl` | C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, and `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin` |
 | `systemd` | C5: `PathChanged=` semantics and the start limit |
+| `efibootmgr`, `limine`, `util-linux` | C8: `--bootnext`, the `efi_boot_entry` protocol and its `entry` option, `lsblk`'s `BitLocker` type |
 | `omarchy` | C7: the default settings, `omarchy-refresh-limine`, the security command pairs |
