@@ -112,8 +112,9 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 ## Development
 
 ```bash
-make lint   # bash -n, ShellCheck and the JSONC fragment
-make test   # hermetic suites and the package build, about a minute
+make lint            # bash -n, ShellCheck and the JSONC fragment
+make test            # hermetic suites and the package build, about a minute
+make test-contract   # the installed sbctl and Limine tools against the upstream contracts, in a sandbox
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).

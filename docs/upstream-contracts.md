@@ -1,6 +1,6 @@
 # Upstream contracts
 
-What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C8]. Recheck a section when its package changes version.
+What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C8]. Recheck a section when its package changes version. `tests/contract-limine.sh` and `tests/contract-sbctl.sh` check parts of C1 to C4 against the installed packages.
 
 Versions read (2026-09): Limine 12.8.0, limine-entry-tool and limine-mkinitcpio-hook 1.38.0, limine-snapper-sync 1.31.0, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, Omarchy 4.0.x (`quattro` branch), Linux 7.2.
 

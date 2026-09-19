@@ -7,7 +7,6 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 - Firmware enrollment ([spec.md](spec.md) D4 and the `setup` row) is written and covered by the hermetic suite, whose sbctl stub models C4. Done when stage 2 of [release-checklist.md](release-checklist.md) passes on hardware; until then nothing about a firmware write is proven.
 - The Windows entry, the BootNext request and the encryption acknowledgment are written and covered by the hermetic suite, whose fixtures model C8. Done when stage 5 passes on hardware.
 - The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers.
-- The real-tool contract suites and the weekly CI job of spec section 11.
 - Hardware acceptance, stages 0 to 6, on at least one machine.
 
 ## Remove when no longer needed
@@ -17,7 +16,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 ## Evidence owed
 
 - This tool has no hardware record yet. Every claim about boot behaviour rests on [upstream-contracts.md](upstream-contracts.md) until stage 1 runs.
-- C4's `sbctl verify`, `list-files`, `sign` and `enroll-keys` answers come from sbctl's source, plus the `null` and `-1` answers seen unprivileged; the real-sbctl suite replaces that reading.
+- The weekly contract job has not run on GitHub yet; its first run proves the container setup, not the suites, which pass locally against the versions [upstream-contracts.md](upstream-contracts.md) names. GitHub disables scheduled workflows in a public repository after 60 days without activity, so the workflow needs re-enabling after a quiet period.
 - The budget of two seconds per installed kernel for the hook is unmeasured; stage 1 measures it.
 - How `sbctl enroll-keys --firmware-builtin` behaves on firmware without `KEKDefault` or `dbDefault` is unverified; the tool does not ask sbctl for it there. How firmware answers a write outside Setup Mode is an assumption of the test stub only, because the tool never attempts one.
 

@@ -12,9 +12,11 @@ HOOKDIR     = /etc/boot/hooks/post.d
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) limine-hooks/90-omasecboot-sign \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
 TEST_SUITES = common limine sign status firmware windows commands install package
+CONTRACT_SUITES = sbctl limine
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
+CONTRACT_TARGETS = $(addprefix test-contract-,$(CONTRACT_SUITES))
 
-.PHONY: install package lint test $(TEST_TARGETS)
+.PHONY: install package lint test test-contract $(TEST_TARGETS) $(CONTRACT_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is
@@ -76,3 +78,10 @@ test: $(TEST_TARGETS)
 
 $(TEST_TARGETS): test-%:
 	bash tests/$*.sh
+
+# The contract suites run the installed sbctl and Limine tools in a sandbox.
+# Their result depends on those packages' versions, so "test" leaves them out.
+test-contract: $(CONTRACT_TARGETS)
+
+$(CONTRACT_TARGETS): test-contract-%:
+	bash tests/contract-$*.sh

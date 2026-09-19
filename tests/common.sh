@@ -1,6 +1,7 @@
 #!/bin/bash
 # Foundation: settings lookup exactly as upstream reads it, file writes, the
-# attention marker, the boot lock and the prompts.
+# attention marker, the boot lock, the prompts, and the guard that keeps the
+# contract suites' cases inside their sandbox.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
 set -uo pipefail
 ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -142,6 +143,34 @@ prompts_need_a_terminal_and_name_what_was_cancelled() {
   [[ $output == *'Cancelled: the test step'* ]] || fail_test "declined: ${output}"
 }
 
+# The contract suites delete and write firmware variables, keys and settings,
+# which are fixtures only inside their sandbox. in_sandbox_answer CLAIM
+# TOKEN-FILE FILESYSTEM is the guard's answer with its two probes pointed at
+# fixtures.
+in_sandbox_answer() {
+  # shellcheck disable=SC2016 # The inner shell expands its own variables.
+  OMASECBOOT_SANDBOX=$1 TOKEN_FILE=$2 FILESYSTEM=$3 bash -c '
+    SUITE_NAME=guard
+    source "$1" || exit 2
+    sandbox_token_file() { printf "%s\n" "$TOKEN_FILE"; }
+    filesystem_type() { printf "%s\n" "$FILESYSTEM"; }
+    in_sandbox' guard "$ROOT_DIR/tests/lib/sandbox.sh"
+}
+
+contract_cases_run_only_in_their_sandbox() {
+  local token=$FIX/run/sandbox-token
+  printf 'token\n' >"$token"
+  in_sandbox_answer token "$token" tmpfs || fail_test "the sandbox itself is not recognised"
+  in_sandbox_answer '' "$FIX/run/no-token" tmpfs
+  (( $? == 1 )) || fail_test "a plain shell, with no claim and no token, counts as the sandbox"
+  in_sandbox_answer forged "$token" tmpfs
+  (( $? == 1 )) || fail_test "a claim that does not match the token counts as the sandbox"
+  in_sandbox_answer token "$FIX/run/no-token" tmpfs
+  (( $? == 1 )) || fail_test "a claim without a token file counts as the sandbox"
+  in_sandbox_answer token "$token" efivarfs
+  (( $? == 1 )) || fail_test "the firmware's own variables count as a fixture"
+}
+
 run_case settings-follow-upstream-layers settings_follow_upstream_layers
 run_case enrollment-counts-only-in-the-default-file enrollment_counts_only_in_the_default_file
 run_case atomic-write-replaces-whole-files atomic_write_replaces_whole_files
@@ -154,4 +183,5 @@ run_case inherited-unlocked-descriptor-waits-briefly inherited_unlocked_descript
 run_case inherited-descriptor-is-reused inherited_descriptor_is_reused
 run_case children-run-unlocked children_run_unlocked
 run_case prompts-need-a-terminal-and-name-what-was-cancelled prompts_need_a_terminal_and_name_what_was_cancelled
+run_case contract-cases-run-only-in-their-sandbox contract_cases_run_only_in_their_sandbox
 finish_suite

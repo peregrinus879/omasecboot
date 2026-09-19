@@ -1,0 +1,78 @@
+name: Upstream contracts
+
+# The contract suites run the real sbctl and Limine tools, so their result
+# follows those packages, not this repository. They run weekly instead of on
+# every push, and a failure opens an issue instead of blocking a change.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Real-tool contract suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      # bubblewrap creates namespaces, mounts and an overlay, which a default
+      # container may not. The runner is a throwaway machine.
+      options: --privileged
+    # bash runs steps with pipefail, so a failed download fails its step.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The key is pinned by its fingerprint: signing locally fails for any other.
+      - name: Add Omarchy's package repository
+        env:
+          OMARCHY_KEY: 40DFB630FF42BCFFB047046CF0134EE680CAC571
+        run: |
+          pacman-key --init
+          curl -fsSL "https://keys.openpgp.org/vks/v1/by-fingerprint/${OMARCHY_KEY}" | pacman-key --add -
+          pacman-key --lsign-key "$OMARCHY_KEY"
+          printf '\n[omarchy]\nServer = https://pkgs.omarchy.org/stable/$arch\n' >>/etc/pacman.conf
+      # Upstream's pacman hooks run its deploy tools here; they find no ESP in
+      # the container and stop before doing anything.
+      - name: Install the tools under test
+        run: pacman -Syu --noconfirm --needed git jq make bubblewrap sbctl limine limine-mkinitcpio-hook
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # -k: a failure in one suite does not hide the other's result for a week.
+      - name: Run the contract suites
+        env:
+          CONTRACT_REQUIRED: "1"
+        run: make -k test-contract
+
+  # On a clean runner, so the job that ran other people's packages as root
+  # never holds a token that can write.
+  report:
+    name: Open an issue
+    needs: contracts
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'Weekly contract run failed'
+            const { owner, repo } = context.repo
+            const open = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open' })
+            if (!open.some(issue => issue.title === title)) {
+              await github.rest.issues.create({
+                owner, repo, title,
+                body: `The weekly run of the contract suites failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}. A FAIL line names the section of docs/upstream-contracts.md to recheck. A SKIP line or a failed install step means the job's environment needs attention, not a contract.`,
+              })
+            }
