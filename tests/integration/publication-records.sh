@@ -69,6 +69,9 @@ setup_case() {
 count=0
 run_case() {
   local name=$1 callback=$2
+  # List mode prints every registration, loop-generated names included, and
+  # runs nothing; the parallel runner consumes it.
+  if [[ -n ${PUBLICATION_RECORDS_LIST:-} ]]; then printf '%s\n' "$name"; return 0; fi
   # Explicit focused runs report their selection; the default runs every case.
   # shellcheck disable=SC2053 # The optional selector is a documented glob.
   [[ -z ${PUBLICATION_RECORDS_CASE:-} || $name == $PUBLICATION_RECORDS_CASE ]] || return 0
@@ -5402,5 +5405,6 @@ BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-hash-valid-m
 BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-stage-custody recovery_apply_custody
 run_case recovery-apply-cache-and-sync-windows recovery_apply_cache_and_sync
 run_case recovery-apply-root-journal-refused recovery_apply_root_journal_refused
+[[ -z ${PUBLICATION_RECORDS_LIST:-} ]] || exit 0
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

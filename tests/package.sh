@@ -308,16 +308,19 @@ installed_paths=(
   "${root}/usr/share/licenses/omasecboot/LICENSE"
 )
 assert_installed() {
-  local path
+  local path listing
   for path in "${installed_paths[@]}"; do
     [[ -f "$path" ]] || fail_test "installed file is missing: ${path#"$root"}"
   done
   [[ -x "${root}/usr/bin/omasecboot" ]] || fail_test "installed command is not executable"
   [[ $(stage_pacman -Q "$pkgname") == "${pkgname} ${pkgver}-$1" ]] \
     || fail_test "installed package version is not ${pkgver}-$1"
-  stage_pacman -Ql "$pkgname" | grep -Fq " ${root}/var/lib/omasecboot" \
+  # Capture the listing once: a grep that stops at its first match would give
+  # pacman EPIPE mid-write, and under pipefail the pipeline would report failure.
+  listing=$(stage_pacman -Ql "$pkgname") || fail_test "installed package listing failed"
+  grep -Fq " ${root}/var/lib/omasecboot" <<<"$listing" \
     && fail_test "installed package claims the durable state directory"
-  stage_pacman -Ql "$pkgname" | grep -Fq " ${root}/usr/bin/omasecboot" \
+  grep -Fq " ${root}/usr/bin/omasecboot" <<<"$listing" \
     || fail_test "installed package file listing is not root-prefixed as expected"
   stage_pacman -Qkk "$pkgname" >/dev/null 2>&1 \
     || fail_test "installed package failed its own file integrity check"

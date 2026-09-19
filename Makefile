@@ -29,7 +29,7 @@ LIMINE_NATIVE_EXECUTABLE ?=
 LIMINE_NATIVE_JSON_JAR ?=
 PACKAGE_RECIPES = PKGBUILD $(wildcard integrations/*/PKGBUILD)
 
-.PHONY: install uninstall package package-limine-entry-tool lint test test-integration test-native test-description test-build-settings test-pacman-contract test-package-catalog test-output-expectations test-producer-session test-publication-records test-publication-context $(TEST_TARGETS)
+.PHONY: install uninstall package package-limine-entry-tool lint test test-publication-records-parallel test-integration test-native test-description test-build-settings test-pacman-contract test-package-catalog test-output-expectations test-producer-session test-publication-records test-publication-context $(TEST_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is the
@@ -160,6 +160,12 @@ test-producer-session:
 
 test-publication-records:
 	bash tests/integration/publication-records.sh
+
+# The journal aggregate as one process per registered case; every registered
+# case must pass exactly once. JOBS bounds the pool.
+JOBS ?= 4
+test-publication-records-parallel:
+	bash tests/integration/publication-records-parallel.sh $(JOBS)
 
 # Read-only context contracts replace hardware acquisition only in test code.
 test-publication-context:

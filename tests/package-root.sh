@@ -125,7 +125,10 @@ printf 'installed publication context API probe passed\n'
   || fail_test "tmpfiles did not create the state directory as root 0755"
 [[ -f "${state}/repair.lock" && $(stat -c '%u:%a' "${state}/repair.lock") == 0:644 ]] \
   || fail_test "tmpfiles did not create the stable repair lock as root 0644"
-pacman -Ql "$pkgname" | grep -Fq ' /var/lib/omasecboot' \
+# Capture the listing once so a first-match grep cannot turn pacman's EPIPE
+# into a false "not found" under pipefail.
+listing=$(pacman -Ql "$pkgname") || fail_test "package listing failed"
+grep -Fq ' /var/lib/omasecboot' <<<"$listing" \
   && fail_test "package claims the durable state directory"
 
 # 2. Pristine lifecycle: a producer package transaction and package removal are
