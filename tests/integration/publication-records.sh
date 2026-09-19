@@ -2115,7 +2115,6 @@ recovery_copy_a2_peer_cache() {
 recovery_target_parent_binding() {
   local parent=$1 create=${2:-false} current component fd state mount previous=null components='[]' dependencies='[]' views='[]' rest
   local -a parts=()
-  [[ $create == false ]] || fail_test 'fresh authorization requested directory creation'
   [[ $_publication_mount_invalid == false && $(publication_namespace_value) == "$_publication_mount_namespace" ]] || { _publication_mount_invalid=true; return 1; }
   if (( ${#_publication_directory_fds[@]} > 0 )); then publication_verify_live || return 1; fi
   [[ $parent == "$CASE_DIR/esp" || $parent == "$CASE_DIR/esp/"* ]] || return 1
@@ -2126,6 +2125,7 @@ recovery_target_parent_binding() {
     [[ -z $component ]] || current="$current/$component"
     fd=${_publication_directory_fds[$current]:-}
     if [[ -z $fd ]]; then
+      [[ $create == false ]] || fail_test "fresh recovery requested creation of $current"
       publication_pin_directory "$current" || return 1
       fd=${_publication_directory_fds[$current]}
     fi
@@ -2184,6 +2184,7 @@ recovery_target_seams() {
   publication_validate_targets() { fail_test 'fresh authorization invoked the native validator'; }
   # shellcheck disable=SC2329
   publication_prepare_directory() { fail_test 'fresh authorization created a directory'; }
+  TARGET_REAL_STAGE_FILE=$(declare -f publication_stage_file)
   # shellcheck disable=SC2329
   publication_stage_file() { fail_test 'fresh authorization staged a file'; }
   # A narrowly scoped owner-observation fault requires no privileged chown.
@@ -2485,7 +2486,7 @@ recovery_target_mutations() {
     '.body.mount_view.directories[0].identity="1:1"' '.body.original_effect.id="other"'; do
     recovery_target_schema_refused target-authorization "$kernel_valid" "$filter"
   done
-  COPY_MUTATION=authorization-foreign-invocation
+  COPY_MUTATION='authorization-foreign-invocation'
   recovery_copy_a2_candidate "$(jq -c '.invocation="88888888-8888-4888-8888-888888888888"' <<<"$(recovery_copy_a2_document target-authorization "$kernel_valid")")"
   # shellcheck disable=SC2016 # jq-bound peer references.
   for mutation in '.classification="desired"' '.classification="prior"' \
@@ -2552,7 +2553,7 @@ recovery_target_order() {
         dependencies:($history | to_entries | map({path:.value.path,entry:.value.state,
           parent_identity:(if .key == 0 then null else $history[.key-1].state.identity end)}))},
       classification:"allowed-absence",signature:null}')
-  COPY_MUTATION=authorization-before-context
+  COPY_MUTATION='authorization-before-context'
   recovery_target_candidate target-authorization "$body"
   prepare_publication_recovery_context
   recovery_target_refused missing-copy configuration
@@ -2630,6 +2631,420 @@ recovery_target_replay_drift() {
   authorize_publication_recovery_target kernel
   [[ $_publication_recovery_authorization_reference == "$reference" ]]
   recovery_target_original_unchanged
+}
+# A4a fresh stages and readiness: disposable sibling stages from the private
+# copies for authorized targets, then the finite plan projection. Still no
+# canonical write; the native validator is a fixture executable here.
+recovery_ready_fixture() {
+  recovery_target_fixture
+  eval "$TARGET_REAL_STAGE_FILE"
+  cat >"$CASE_DIR/native" <<EOF
+#!/usr/bin/bash
+set -euo pipefail
+[[ \$# == 1 && \$1 == --validate-managed-plan ]] || exit 64
+plan=\$(cat)
+[[ -z \${READY_NATIVE_SLEEP:-} ]] || sleep "\$READY_NATIVE_SLEEP"
+jq -e '.format == "limine-prepared-publication" and .schema == 1 and .deletes == [] and .references == []' <<<"\$plan" >/dev/null
+printf '%s\n' "\$plan" >>"$CASE_DIR/native-validated-plans"
+exit "\${READY_NATIVE_STATUS:-0}"
+EOF
+  chmod 755 "$CASE_DIR/native"
+  exec {READY_NATIVE_FD}<"$CASE_DIR/native"
+  prepare_publication_recovery_context
+  authorize_publication_recovery_target kernel
+  READY_KERNEL_AUTH=$_publication_recovery_authorization_record
+  authorize_publication_recovery_target configuration
+  READY_CONFIG_AUTH=$_publication_recovery_authorization_record
+}
+recovery_ready_stage_files() { find "$CASE_DIR/esp" -name '.omasecboot-*' -type f | sort; }
+recovery_ready_stage_refused() {
+  local before files
+  before=$(journal_fingerprint) files=$(recovery_ready_stage_files)
+  _publication_recovery_stage_record=stale _publication_recovery_stage_reference=stale
+  if stage_publication_recovery_target "${2:-kernel}"; then fail_test "stage accepted ${1:-invalid state}"; fi
+  [[ -z $_publication_recovery_stage_record && -z $_publication_recovery_stage_reference ]] || fail_test 'refused stage retained outputs'
+  [[ $(journal_fingerprint) == "$before" && $(recovery_ready_stage_files) == "$files" ]] || fail_test "refused stage left evidence: ${1:-}"
+}
+recovery_ready_refused() {
+  local before
+  before=$(journal_fingerprint)
+  _publication_recovery_ready_record=stale _publication_recovery_ready_reference=stale
+  if ready_publication_recovery_plan "$@"; then fail_test "readiness accepted ${READY_REFUSAL:-invalid state}"; fi
+  [[ -z $_publication_recovery_ready_record && -z $_publication_recovery_ready_reference ]] || fail_test 'refused readiness retained outputs'
+  [[ $(journal_fingerprint) == "$before" ]] || fail_test "refused readiness changed the journal: ${READY_REFUSAL:-}"
+}
+recovery_ready_assert_stage() {
+  local id=$1 authorization=$2 body=$3 reference=$4 stage
+  stage=$(jq -r '.stage.path' <<<"$body")
+  # shellcheck disable=SC2016 # jq-bound authorization.
+  jq -e --argjson auth "$authorization" '.id == $auth.id and .target == $auth.target and .before == $auth.observation.state and
+    .retained == $auth.copy.file and .stage.state.sha256 == $auth.copy.file.sha256 and .stage.state.kind == "file" and
+    .mount_view == $auth.mount_view and .parent == $auth.parent' <<<"$body" >/dev/null
+  [[ $(dirname "$stage") == "$(dirname "$(jq -r '.target' <<<"$body")")" && $(basename "$stage") == .omasecboot-$INVOCATION-$id.*.stage ]]
+  cmp -- "$(jq -r '.retained.path' <<<"$body")" "$stage"
+  [[ $(basis_file_state "$stage") == "$(jq -c '.stage.state' <<<"$body")" ]]
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$TXDIR/manifest.json" >/dev/null
+  jq -e --argjson body "$body" '.schema_version == 2 and .kind == "recovery-stage" and .body == $body' "$(jq -r '.path' <<<"$reference")" >/dev/null
+  json_is '.[0] == .[1]' "[$body,${_publication_stage_bodies[$id]}]"
+}
+recovery_ready_expected_plan() {
+  jq -cn --arg invocation "$INVOCATION" --argjson kernel "$1" --argjson config "$2" '
+    def put: {id,target,before,after:.stage.state,parent,retained:.retained.path};
+    {format:"limine-prepared-publication",schema:1,invocation:$invocation,
+      puts:[$kernel | put],configuration:($config | put),deletes:[],references:[]}'
+}
+recovery_ready_valid() {
+  local body reference kernel_stage config_stage before plan files initial
+  recovery_ready_fixture
+  # The sealed original root left its own two stage siblings on the fixture ESP.
+  initial=$(recovery_ready_stage_files | wc -l)
+  recovery_ready_refused_before_stages
+  stage_publication_recovery_target kernel
+  body=$_publication_recovery_stage_record reference=$_publication_recovery_stage_reference
+  recovery_ready_assert_stage kernel "$READY_KERNEL_AUTH" "$body" "$reference"
+  kernel_stage=$body
+  json_is '.before.kind == "absent"' "$body"
+  # Replay rebinds the same stage record and file without a second stage.
+  before=$(journal_fingerprint) files=$(recovery_ready_stage_files)
+  stage_publication_recovery_target kernel
+  [[ $_publication_recovery_stage_reference == "$reference" && $(journal_fingerprint) == "$before" && $(recovery_ready_stage_files) == "$files" ]]
+  READY_REFUSAL=configuration-unstaged recovery_ready_refused "$READY_NATIVE_FD"
+  stage_publication_recovery_target configuration
+  config_stage=$_publication_recovery_stage_record
+  recovery_ready_assert_stage configuration "$READY_CONFIG_AUTH" "$config_stage" "$_publication_recovery_stage_reference"
+  json_is '.before.kind == "file"' "$config_stage"
+  [[ $(recovery_ready_stage_files | wc -l) == $((initial+2)) ]]
+  # Readiness is the pure projection, validated by the native executable too.
+  READY_NATIVE_STATUS=1 READY_REFUSAL=native-status-1 recovery_ready_refused "$READY_NATIVE_FD"
+  # Ten records exist (basis, four copies, context, two authorizations, two
+  # stages); a refused readiness leaves no eleventh.
+  [[ ! -e $TXDIR/publication-11.json ]]
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  plan=$_publication_recovery_ready_record reference=$_publication_recovery_ready_reference
+  json_is '.[0] == .[1]' "[$plan,$(recovery_ready_expected_plan "$kernel_stage" "$config_stage")]"
+  json_is '.[0] == .[1]' "[$plan,$_publication_plan]"
+  [[ $(jq -c . "$CASE_DIR/native-validated-plans" | sort -u | wc -l) == 1 && $(jq -c . "$CASE_DIR/native-validated-plans" | tail -1) == "$plan" ]]
+  jq -e --argjson reference "$reference" '.publication_records | index($reference) != null' "$TXDIR/manifest.json" >/dev/null
+  jq -e --argjson body "$plan" '.schema_version == 2 and .kind == "recovery-ready" and .body == $body' "$(jq -r '.path' <<<"$reference")" >/dev/null
+  before=$(journal_fingerprint)
+  ready_publication_recovery_plan
+  [[ $_publication_recovery_ready_reference == "$reference" && $(journal_fingerprint) == "$before" ]]
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 11 and all(.schema_version == 2)' "$_manifest_json"
+  # No canonical target changed; the stages are hidden siblings only.
+  [[ ! -e $CHILD_PATH/kernel ]]
+  [[ $(basis_file_state "$CASE_DIR/esp/limine.conf") == "$(jq -c '.observation.state' <<<"$READY_CONFIG_AUTH")" ]]
+  for filter in '.current_phase="apply"' '.completed_phases=["apply"]' \
+    '.domain_records.final_proof=.publication_records[-1]' '.status="completed" | .completed_at=.created_at'; do
+    if validate_transaction_manifest_json "$_transaction_id" "$(jq -c "$filter" <<<"$_manifest_json")" false; then
+      fail_test "readiness removed preparatory fence: $filter"
+    fi
+  done
+  if commit_lifecycle_recovery_attempt; then fail_test 'readiness enabled completion'; fi
+  recovery_target_original_unchanged
+  # Interruption leaves the old stages unbound on the ESP; a fresh attempt
+  # observes, stages and binds anew without touching them.
+  rollback_and_mark_recovery 33 'fixture readiness interrupted'
+  release_publication_pins
+  files=$(recovery_ready_stage_files)
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  retain_publication_recovery_input kernel
+  TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+  retain_publication_recovery_input configuration
+  TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+  prepare_publication_recovery_context
+  authorize_publication_recovery_target kernel
+  authorize_publication_recovery_target configuration
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  # The new siblings interleave with the old ones in sorted order; every old
+  # sibling is still present and untouched.
+  [[ $(recovery_ready_stage_files | wc -l) == $((initial+4)) ]]
+  [[ -z $(comm -13 <(recovery_ready_stage_files) <(printf '%s\n' "$files")) ]]
+  recovery_target_original_unchanged
+}
+# Readiness re-proves the held stages: a changed, replaced or removed sibling
+# refuses it, even as a replay of recorded readiness; the validator deadline
+# refuses before any record.
+recovery_ready_custody() {
+  local stage
+  recovery_ready_fixture
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  stage=$(jq -r '.stage.path' <<<"$_publication_recovery_stage_record")
+  _producer_session_io_timeout=1 READY_NATIVE_SLEEP=3 READY_REFUSAL=native-timeout recovery_ready_refused "$READY_NATIVE_FD"
+  printf 'altered\n' >>"$stage"
+  READY_REFUSAL=stage-modified recovery_ready_refused "$READY_NATIVE_FD"
+  # The exact bytes on the same inode readmit the held stage.
+  cp -- "$(jq -r '.retained.path' <<<"$_publication_recovery_stage_record")" "$stage"
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  cp -- "$stage" "$stage.next"; command mv -- "$stage.next" "$stage"
+  READY_REFUSAL=stage-replaced recovery_ready_refused "$READY_NATIVE_FD"
+  rm -- "$stage"
+  READY_REFUSAL=stage-removed recovery_ready_refused
+  recovery_target_original_unchanged
+}
+# Another process view of the attempt replays the context without stage
+# memory: a vanished unpinned ancestor refuses staging without creating a
+# directory, and a durable stage this view did not create is neither adopted
+# nor duplicated, so readiness stays refused.
+recovery_ready_ancestors_and_memory() {
+  recovery_ready_fixture
+  release_publication_pins
+  _publication_stable_context='' _publication_signing_policy=''
+  prepare_publication_recovery_context
+  command mv -- "$CHILD_PATH" "$CHILD_PATH.moved"
+  recovery_ready_stage_refused ancestor-missing kernel
+  [[ ! -e $CHILD_PATH ]]
+  command mv -- "$CHILD_PATH.moved" "$CHILD_PATH"
+  _publication_mount_invalid=false
+  authorize_publication_recovery_target kernel
+  stage_publication_recovery_target kernel
+  release_publication_pins
+  _publication_stable_context='' _publication_signing_policy=''
+  prepare_publication_recovery_context
+  recovery_ready_stage_refused stage-not-held kernel
+  authorize_publication_recovery_target configuration
+  stage_publication_recovery_target configuration
+  READY_REFUSAL=kernel-stage-not-held recovery_ready_refused "$READY_NATIVE_FD"
+  recovery_target_original_unchanged
+}
+recovery_ready_refused_before_stages() {
+  READY_REFUSAL=nothing-staged recovery_ready_refused
+  READY_REFUSAL=nothing-staged-native recovery_ready_refused "$READY_NATIVE_FD"
+}
+recovery_ready_refusals() {
+  local target copy token fault
+  recovery_target_fixture
+  eval "$TARGET_REAL_STAGE_FILE"
+  target=$CHILD_PATH/kernel
+  # Without a context there is no memory authority; without an authorization
+  # there is nothing to stage. Neither creates a stage file.
+  recovery_ready_stage_refused before-context kernel
+  prepare_publication_recovery_context
+  recovery_ready_stage_refused before-authorization kernel
+  authorize_publication_recovery_target kernel
+  # Malformed, unauthorized or extra arguments are refused before any proof.
+  recovery_ready_stage_refused malformed-id 'kernel!'
+  recovery_ready_stage_refused unauthorized-id extra
+  if stage_publication_recovery_target kernel extra; then fail_test 'stage accepted an extra argument'; fi
+  # The bound private copy must still be exact before a stage is cut from it.
+  copy=$(jq -r '.copy.file.path' <<<"$_publication_recovery_authorization_record")
+  command mv -- "$copy" "$copy.away"
+  recovery_ready_stage_refused copy-missing kernel
+  command mv -- "$copy.away" "$copy"
+  cp -- "$copy" "$CASE_DIR/saved-copy"
+  chmod u+w "$copy"; printf 'altered\n' >>"$copy"
+  recovery_ready_stage_refused copy-altered kernel
+  cp -- "$CASE_DIR/saved-copy" "$copy"; chmod 400 "$copy"
+  # A target that changed since its authorization is not staged.
+  printf 'appeared after authorization\n' >"$target"
+  recovery_ready_stage_refused target-appeared kernel
+  rm -- "$target"
+  stage_publication_recovery_target kernel
+  authorize_publication_recovery_target configuration
+  # An in-place change or a vanished present target is refused as well.
+  cp -- "$CASE_DIR/esp/limine.conf" "$CASE_DIR/saved-configuration"
+  printf 'appended\n' >>"$CASE_DIR/esp/limine.conf"
+  recovery_ready_stage_refused target-modified configuration
+  cp -- "$CASE_DIR/saved-configuration" "$CASE_DIR/esp/limine.conf"
+  command mv -- "$CASE_DIR/esp/limine.conf" "$CASE_DIR/esp/limine.conf.away"
+  recovery_ready_stage_refused target-absent configuration
+  command mv -- "$CASE_DIR/esp/limine.conf.away" "$CASE_DIR/esp/limine.conf"
+  cp -- "$(jq -r '.file.path' <<<"$TARGET_CONFIG_COPY")" "$CASE_DIR/esp/limine.conf.next"
+  command mv -- "$CASE_DIR/esp/limine.conf.next" "$CASE_DIR/esp/limine.conf"
+  recovery_ready_stage_refused target-replaced configuration
+  READY_REFUSAL=configuration-unstaged recovery_ready_refused
+  # Lost ownership or the restore marker refuse both writers.
+  token=$OMASECBOOT_TRANSACTION_TOKEN
+  for fault in owner marker; do
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN='invalid-token' ;;
+      marker) touch "$(snapshot_restore_lock_path)" ;;
+    esac
+    recovery_ready_stage_refused "$fault" kernel
+    READY_REFUSAL=$fault recovery_ready_refused
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN=$token ;;
+      marker) rm -- "$(snapshot_restore_lock_path)" ;;
+    esac
+  done
+  # A latched live view refuses staging and readiness without a new fault.
+  _publication_mount_invalid=true
+  recovery_ready_stage_refused latched kernel
+  READY_REFUSAL=latched recovery_ready_refused
+  _publication_mount_invalid=false
+  # An unreadable or non-executable native descriptor is refused before any record.
+  exec {fd}<"$CASE_DIR/source"
+  READY_REFUSAL=native-not-executable recovery_ready_refused "$fd"
+  exec {fd}<&-
+  READY_REFUSAL=native-bad-fd recovery_ready_refused 999
+  READY_REFUSAL=native-arity recovery_ready_refused 1 2
+  recovery_target_original_unchanged
+}
+recovery_ready_peer_root() {
+  local peer=66666666-6666-4666-8666-666666666666
+  basis_complete_fixture
+  INVOCATION=$peer basis_complete_fixture
+  basis_seal_fixture
+  TARGET_ROOT_DIR=$TXDIR
+  TARGET_ROOT_BEFORE=$(journal_fingerprint)
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  retain_publication_recovery_input kernel
+  TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+  retain_publication_recovery_input configuration
+  TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+  recovery_target_seams
+  eval "$TARGET_REAL_STAGE_FILE"
+  prepare_publication_recovery_context
+  authorize_publication_recovery_target kernel
+  authorize_publication_recovery_target configuration
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  # Whole-root scheduling across invocations is later work: refuse readiness.
+  READY_REFUSAL=peer-invocation recovery_ready_refused
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 10' "$_manifest_json"
+  recovery_target_original_unchanged
+}
+recovery_ready_mutations() {
+  local stage_valid ready_valid filter mutation definition
+  recovery_ready_fixture
+  definition=$(declare -f append_publication_record)
+  eval "${definition/append_publication_record/recovery_ready_actual_append}"
+  # shellcheck disable=SC2329
+  append_publication_record() {
+    if [[ -n ${READY_CAPTURE:-} && $2 == "$READY_CAPTURE" ]]; then
+      printf '%s\n' "$3" >"$CASE_DIR/captured-$2"
+      return 1
+    fi
+    recovery_ready_actual_append "$@"
+  }
+  READY_CAPTURE=recovery-stage
+  if stage_publication_recovery_target kernel; then fail_test 'captured stage accepted'; fi
+  READY_CAPTURE=''
+  stage_valid=$(<"$CASE_DIR/captured-recovery-stage")
+  # The refused writer left its candidate stage file; a fresh writer call must
+  # create its own stage rather than adopting an unbound sibling.
+  for filter in '.schema_version=1' '.body.extra=true' '.body.before.kind="directory"' 'del(.body.mount_view)' \
+    '.body.stage.state.kind="absent"' '.body.retained.path="/elsewhere"'; do
+    recovery_target_schema_refused recovery-stage "$stage_valid" "$filter"
+  done
+  # shellcheck disable=SC2016 # jq-bound values.
+  for mutation in '.before={kind:"file",identity:"8800:9007199254740993",sha256:.retained.sha256,link_target:null,mode:33152,uid:.parent.components[0].entry.uid,gid:0}' \
+    '.retained.sha256=("0"*64)' '.retained.bytes+=1' '.stage.state.sha256=("0"*64)' '.mount_view.namespace="mnt:[1]"' \
+    '.id="configuration"' '.target+="-x"' '.stage.state.uid+=1' '.parent.dependencies[0].entry.identity="8800:1"' \
+    '.parent.components[0].entry.identity="8800:1" | .parent.components[0].directory.identity="8800:1" | .mount_view.directories[0].identity="8800:1"' \
+    '.stage.path=(.stage.path | sub("-kernel\\."; "-configuration."))'; do
+    recovery_target_semantic_candidate recovery-stage "$stage_valid" "$mutation"
+  done
+  stage_publication_recovery_target kernel
+  COPY_MUTATION=duplicate-stage
+  recovery_target_candidate recovery-stage "$_publication_recovery_stage_record"
+  stage_publication_recovery_target configuration
+  READY_CAPTURE=recovery-ready
+  if ready_publication_recovery_plan; then fail_test 'captured readiness accepted'; fi
+  READY_CAPTURE=''
+  ready_valid=$(<"$CASE_DIR/captured-recovery-ready")
+  for filter in '.schema_version=1' '.body.deletes=[{}]' '.body.schema=2' 'del(.body.references)' '.body.puts[0].after.kind="absent"'; do
+    recovery_target_schema_refused recovery-ready "$ready_valid" "$filter"
+  done
+  # shellcheck disable=SC2016 # jq-bound values.
+  for mutation in '.puts[0].after.sha256=("0"*64)' '.puts[0].target+="x"' '.puts[0].before={kind:"absent",identity:null,sha256:null,link_target:null,mode:0,uid:0,gid:0} | .puts[0].before=.configuration.before' \
+    '.configuration.id="kernel" | .puts[0].id="configuration"' \
+    '.puts+=[.configuration]' '.puts=[]' '.configuration.retained=.puts[0].retained' \
+    '.puts[0].parent.dependencies[0].entry.identity="8800:1"' '.configuration.after.sha256=("1"*64)'; do
+    recovery_target_semantic_candidate recovery-ready "$ready_valid" "$mutation"
+  done
+  # The plan's invocation is bound to its envelope by schema; a foreign envelope
+  # with a matching body is refused by the reader against the basis invocation.
+  COPY_MUTATION='ready-foreign-invocation'
+  recovery_copy_a2_candidate "$(jq -c '.invocation="88888888-8888-4888-8888-888888888888" | .body.invocation=.invocation' \
+    <<<"$(recovery_copy_a2_document recovery-ready "$ready_valid")")"
+  ready_publication_recovery_plan
+  COPY_MUTATION=duplicate-ready
+  recovery_target_candidate recovery-ready "$_publication_recovery_ready_record"
+  COPY_MUTATION='stage-after-ready'
+  recovery_target_candidate recovery-stage "$_publication_recovery_stage_record"
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 11' "$_manifest_json"
+  recovery_target_original_unchanged
+}
+recovery_ready_cache_and_sync() {
+  local slot index path window kind ordinal count existing definition
+  recovery_ready_fixture
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  ready_publication_recovery_plan
+  read_transaction_manifest "$_transaction_id"
+  slot="$_transaction_id:$(control_owner_uid)"
+  [[ -n ${_publication_recovery_validation_cache[$slot]:-} ]]
+  for index in 8 9 10; do
+    path=$(jq -r --argjson n "$index" '.publication_records[$n].path' <<<"$_manifest_json")
+    cp -- "$path" "$CASE_DIR/saved-record"
+    chmod u+w "$path"; printf 'changed readiness\n' >>"$path"
+    if validate_publication_recovery_records "$_transaction_id" "$_manifest_json"; then fail_test "warm cache ignored $(basename "$path")"; fi
+    [[ -z ${_publication_recovery_validation_cache[$slot]:-} ]] || fail_test 'failed cache entry was retained'
+    cp -- "$CASE_DIR/saved-record" "$path"; chmod 600 "$path"
+    validate_publication_recovery_records "$_transaction_id" "$_manifest_json"
+  done
+  recovery_target_original_unchanged
+  # Durability windows: an unbound stage/readiness record and a bound but
+  # unsynced head are adopted by the retry without a second record or stage.
+  definition=$(declare -f durable_sync)
+  eval "${definition/durable_sync/recovery_ready_actual_sync}"
+  TARGET_WINDOW='' TARGET_WINDOW_ORDINAL=0
+  # shellcheck disable=SC2329
+  durable_sync() {
+    local n inject=false
+    if [[ -n $TARGET_WINDOW && ! -e $CASE_DIR/target-sync-fault ]]; then
+      n=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $TARGET_WINDOW:$1 in
+        record-file:"$TXDIR/publication-$TARGET_WINDOW_ORDINAL.json") inject=true ;;
+        manifest-file:"$TXDIR/manifest.json") [[ $n != "$TARGET_WINDOW_ORDINAL" ]] || inject=true ;;
+      esac
+    fi
+    if [[ $inject == true ]]; then printf '%s\n' "$TARGET_WINDOW" >"$CASE_DIR/target-sync-fault"; return 1; fi
+    recovery_ready_actual_sync "$@"
+  }
+  for kind in stage ready; do
+    for window in record-file manifest-file; do
+      rollback_and_mark_recovery 34 "fixture readiness window $kind/$window"
+      release_publication_pins
+      begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+      TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+      retain_publication_recovery_input kernel
+      TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+      retain_publication_recovery_input configuration
+      TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+      prepare_publication_recovery_context
+      authorize_publication_recovery_target kernel
+      authorize_publication_recovery_target configuration
+      if [[ $kind == ready ]]; then stage_publication_recovery_target kernel; stage_publication_recovery_target configuration; fi
+      ordinal=$(( $(jq -r '.publication_records | length' "$TXDIR/manifest.json") + 1 ))
+      rm -f -- "$CASE_DIR/target-sync-fault"
+      TARGET_WINDOW=$window TARGET_WINDOW_ORDINAL=$ordinal
+      if [[ $kind == stage ]]; then
+        if stage_publication_recovery_target kernel; then fail_test "stage accepted sync window $window"; fi
+      else
+        if ready_publication_recovery_plan; then fail_test "readiness accepted sync window $window"; fi
+      fi
+      TARGET_WINDOW=''
+      [[ -s $CASE_DIR/target-sync-fault ]] || fail_test "sync seam missed $kind/$window"
+      count=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $window in record-file) [[ $count == $((ordinal-1)) ]] ;; manifest-file) [[ $count == "$ordinal" ]] ;; esac
+      existing=''
+      if [[ -e $TXDIR/publication-$ordinal.json ]]; then existing=$(sha256_file "$TXDIR/publication-$ordinal.json"); fi
+      if [[ $kind == stage ]]; then stage_publication_recovery_target kernel; else ready_publication_recovery_plan; fi
+      [[ $(jq -r '.publication_records | length' "$TXDIR/manifest.json") == "$ordinal" ]]
+      [[ -z $existing || $(sha256_file "$TXDIR/publication-$ordinal.json") == "$existing" ]] || fail_test "retry rewrote $kind record after $window"
+      recovery_target_original_unchanged
+      printf 'CHECK: readiness sync/%s/%s (%s -> %s records)\n' "$kind" "$window" "$count" "$ordinal"
+    done
+  done
 }
 recovery_target_root_journal_refused() {
   # Ordinary root journals reject the fresh-authority kinds even when well formed.
@@ -4456,5 +4871,13 @@ run_case recovery-target-cache-rechecked recovery_target_cache
 TARGET_WINDOWS='record-file manifest-file manifest-directory' \
   run_case recovery-target-sync-windows recovery_target_sync_windows
 run_case recovery-target-owner-lock-marker-loss recovery_target_owner_loss
+run_case recovery-ready-v1-stages-plan-and-fresh-retry recovery_ready_valid
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-ready-v2-signed-stages-plan-and-fresh-retry recovery_ready_valid
+run_case recovery-ready-refusals recovery_ready_refusals
+run_case recovery-ready-stage-custody recovery_ready_custody
+run_case recovery-ready-ancestors-and-memory recovery_ready_ancestors_and_memory
+run_case recovery-ready-peer-invocation-refused recovery_ready_peer_root
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-ready-hash-valid-mutations recovery_ready_mutations
+run_case recovery-ready-cache-and-sync-windows recovery_ready_cache_and_sync
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

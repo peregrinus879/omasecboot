@@ -24,7 +24,7 @@ cp "$repo/tests/integration/fixtures/ProducerSessionContract.java" "$scratch/fix
 cat >"$scratch/fixtures/native" <<'SCRIPT'
 #!/usr/bin/bash
 set -euo pipefail
-if [[ -e /work/recovery-copy-active ]]; then
+if [[ -e /work/recovery-copy-active && ${1:-} != --validate-managed-plan ]]; then
   printf 'unexpected producer/render invocation during retained copy\n' >/work/recovery-copy-forbidden
   exit 90
 fi
@@ -1641,7 +1641,7 @@ pacman_database_lock_path() { printf '/work/pacman-db.lck\n'; }
 # Keep the real collector/signer definitions for the later fresh-authority
 # phase; the copy phase below must reach none of them.
 for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
-  publication_run_sbctl verify_publication_input publication_input_is_efi; do
+  publication_run_sbctl verify_publication_input publication_input_is_efi publication_stage_file; do
   definition=$(declare -f "$helper")
   eval "${definition/#"$helper"/fixture_real_$helper}"
 done
@@ -1801,6 +1801,43 @@ sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-
 [[ ! -e /work/recovery-copy-forbidden && ! -e /work/context-worker-apply && ! -e /boot/limine.conf &&
   -d /boot/EFI/Linux && -z $(find /boot -type f) ]]
 printf 'PASS: fresh context and classified authorizations recorded in fresh namespace\n'
+# A4a: disposable sibling stages from the private copies, then the readiness
+# plan validated by the real native plan validator through a held descriptor.
+# The stage writer stays forbidden through context and authorization; only
+# the staging phase restores it.
+definition=$(declare -f fixture_real_publication_stage_file)
+eval "${definition/#fixture_real_publication_stage_file/publication_stage_file}"
+for id in resource-0 configuration; do
+  printf 'stage %s\n' "$id"
+  stage_publication_recovery_target "$id"
+  body=$_publication_recovery_stage_record reference=$_publication_recovery_stage_reference
+  auth=$(jq -c --arg id "$id" 'select(.body.id == $id) | .body' /work/recovery-authorizations.jsonl)
+  # shellcheck disable=SC2016 # jq-local parent path.
+  json_is '(.[1].target | split("/")[:-1] | join("/")) as $parent |
+    .[0].target == .[1].target and .[0].before == .[1].observation.state and .[0].retained == .[1].copy.file and
+    .[0].stage.state.sha256 == .[1].copy.file.sha256 and (.[0].stage.path | startswith($parent + "/.omasecboot-"))' "[$body,$auth]"
+  cmp -- "$(jq -r '.retained.path' <<<"$body")" "$(jq -r '.stage.path' <<<"$body")"
+  jq -cn --argjson body "$body" --argjson reference "$reference" '{body:$body,reference:$reference}' >>/work/recovery-stages.jsonl
+done
+exec {native_fd}</fixtures/native
+printf 'ready\n'
+ready_publication_recovery_plan "$native_fd"
+exec {native_fd}<&-
+printf '%s\n' "$_publication_recovery_ready_record" >/work/recovery-ready.json
+json_is '.format == "limine-prepared-publication" and .schema == 1 and (.puts | length == 1) and .puts[0].id == "resource-0" and
+  .configuration.id == "configuration" and .puts[0].before.kind == "absent" and .configuration.before.kind == "absent" and
+  .puts[0].after.kind == "file" and .deletes == [] and .references == []' "$_publication_recovery_ready_record"
+json_is '.[0] == .[1]' "[$_publication_recovery_ready_record,$_publication_plan]"
+read_transaction_manifest "$_transaction_id"
+json_is '.status == "transition" and .current_phase == null and (.domain_records | all(. == null)) and
+  (.publication_records | length == 11 and all(.schema_version == 2))' "$_manifest_json"
+if commit_lifecycle_recovery_attempt; then exit 90; fi
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-ready
+# The stages are the only files on the ESP: hidden siblings, no canonical target.
+[[ ! -e /work/recovery-copy-forbidden && ! -e /work/context-worker-apply && ! -e /boot/limine.conf &&
+  ! -e /boot/EFI/Linux/contract_linux.efi && $(find /boot -type f | wc -l) == 2 &&
+  -z $(find /boot -type f ! -name '.omasecboot-*') ]]
+printf 'PASS: fresh stages and readiness plan recorded in fresh namespace\n'
 release_boot_repair_lock
 printf 'PASS: exact signed PE and literal configuration retained in fresh namespace\n'
 SCRIPT
@@ -2577,6 +2614,7 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
     # than the platform-acquisition seam. Each phase keeps the existing watchdog.
     rc=0
     timeout --kill-after=5 "$watchdog" "${sandbox[@]}" --bind "$work" /work --tmpfs /boot \
+      --ro-bind "$scratch/compiler/classes" /classes \
       --bind "$work/sbctl" /var/lib/sbctl --ro-bind "$(realpath "$(type -P python)")" /usr/bin/python \
       --ro-bind "$(realpath "$(type -P python)")" /real/namespace-python \
       /usr/bin/bash /fixtures/recovery-copy >"$work/recovery-copy.stdout" 2>"$work/recovery-copy.stderr" || rc=$?
@@ -2600,6 +2638,10 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
         .tool_result == "real" and (.verification | any(.is_signed == 1)))' "$work/signer-commands.jsonl" >/dev/null ||
       die 'fresh authorization signer activity is not exactly one real bound verification'
     [[ -s $work/recovery-original-check-authorized && ! -e $work/context-host-query ]] || die 'fresh authorization changed originals or queried the host'
+    jq -se '[.[].body.id] == ["resource-0","configuration"] and all(.[]; .reference.schema_version == 2 and .body.before.kind == "absent")' \
+      "$work/recovery-stages.jsonl" >/dev/null || die 'fresh stage evidence incomplete'
+    jq -e '.format == "limine-prepared-publication" and (.puts | length == 1)' "$work/recovery-ready.json" >/dev/null || die 'readiness plan missing'
+    [[ -s $work/recovery-original-check-ready && ! -e $work/context-worker-apply && ! -e $work/context-worker-prepare-recovery ]] || die 'readiness changed originals or ran a worker'
     cat "$work/recovery-copy.stdout"
   fi
   printf 'PASS: Core producer session/%s\n' "$name"

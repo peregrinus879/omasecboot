@@ -21,6 +21,7 @@ _publication_intent_matched=false
 _publication_stable_context=''
 _publication_signing_policy=''
 _publication_original_configuration=''
+_publication_attempt_mode=original
 # Bind the separately interpreted inspector to this Core source composition.
 readonly PUBLICATION_CONTEXT_HELPER_SHA256=fc1489eac40f934b80e65fabe9c40243c50feaa4d205c0d483e282a76a531f23
 
@@ -43,6 +44,19 @@ publication_reset_attempt() {
   _publication_stable_context=''
   _publication_signing_policy=''
   _publication_original_configuration=''
+  _publication_attempt_mode=original
+}
+
+# A recovery attempt records the original flow's bodies under kinds that only
+# the recovery reader admits; root journals keep their schema-1 kinds.
+publication_record_kind() {
+  case ${_publication_attempt_mode:-original}:$1 in
+    original:stage) printf 'boot-stage\n' ;;
+    original:plan) printf 'plan\n' ;;
+    recovery:stage) printf 'recovery-stage\n' ;;
+    recovery:plan) printf 'recovery-ready\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 # Selection runs before a new transaction owns a transition. Reassert the actual
@@ -198,6 +212,7 @@ publication_recovery_acquire_context() {
     [[ $_publication_pin_owner == "$BASHPID" && $_publication_pin_transaction == "$_transaction_id" ]] || return 1
   fi
   publication_reset_attempt
+  _publication_attempt_mode=recovery
   _publication_invocation=$invocation
   _publication_intent=$intent
   _publication_retained=()
@@ -344,6 +359,133 @@ authorize_publication_recovery_target() {
   append_publication_record "$invocation" target-authorization "$body" || return 1
   _publication_recovery_authorization_record=$body
   _publication_recovery_authorization_reference=$_publication_record_reference
+}
+
+# Shared preconditions of the post-authorization writers: an owned recovery
+# attempt whose live memory equals the durable context authority.
+publication_recovery_memory_is_bound() {
+  local invocation=$1
+  [[ $_publication_attempt_mode == recovery && $_publication_invocation == "$invocation" &&
+    -n $_publication_stable_context && -n $_publication_signing_policy ]] || return 1
+  find_publication_record "$invocation" recovery-context || return 1
+  json_is '.[0].context == .[1] and .[0].signing_policy == .[2]' \
+    "[$_publication_found_body,$_publication_stable_context,$_publication_signing_policy]"
+}
+
+# stage_publication_recovery_target EFFECT_ID
+# Create this attempt's same-directory stage for one authorized effect from its
+# private copy, after re-proving that the target is still exactly what the
+# authorization observed. The stage is a disposable sibling; no canonical path
+# changes and no directory is created. Records recovery-stage.
+stage_publication_recovery_target() {
+  local id parts invocation authorization copy target parent state lookup_rc
+  _publication_recovery_stage_record='' _publication_recovery_stage_reference=''
+  [[ $# == 1 && $1 =~ ^[A-Za-z0-9_-]{1,64}$ ]] || return 1
+  id=$1
+  publication_recovery_attempt_parts || return 1
+  parts=$_publication_recovery_attempt_parts
+  invocation=$(jq -r '.basis.invocation' <<<"$parts") || return 1
+  publication_recovery_memory_is_bound "$invocation" || return 1
+  find_publication_record "$invocation" target-authorization "$id" || return 1
+  authorization=$_publication_found_body
+  find_publication_record "$invocation" retained-copy "$id" || return 1
+  json_is '.[0].copy.reference == .[1] and .[0].copy.file == .[2].file' \
+    "[$authorization,$_publication_found_reference,$_publication_found_body]" || return 1
+  copy=$(jq -c '.copy.file' <<<"$authorization") || return 1
+  target=$(jq -r '.target' <<<"$authorization") || return 1
+  parent=$(dirname "$target") || return 1
+  # A durable stage is rebound only through this process's own bound or
+  # candidate memory. Another process view of the attempt neither adopts the
+  # recorded sibling nor creates a second one.
+  if find_publication_record "$invocation" "$(publication_record_kind stage)" "$id"; then
+    [[ -n ${_publication_stage_bodies[$id]:-} || -n ${_publication_stage_candidates[$id]:-} ]] || return 1
+  else
+    lookup_rc=$?
+    (( lookup_rc == 1 )) || return 1
+  fi
+  publication_verify_live || return 1
+  # The ancestors are re-proved without creation and must be exactly the
+  # custody the authorization observed; a stage never creates a directory.
+  publication_parent_binding "$parent" || return 1
+  json_is '.[0] == .[1].parent and .[2] == .[1].mount_view' \
+    "[$_publication_parent,$authorization,$_publication_parent_view]" || return 1
+  state='{"kind":"absent","identity":null,"sha256":null,"link_target":null,"mode":0,"uid":0,"gid":0}'
+  if [[ -e $target || -L $target ]]; then
+    [[ -n ${_publication_target_fds[$id]:-} ]] && fd_matches_path "${_publication_target_fds[$id]}" "$target" || return 1
+    state=$(publication_fd_state "${_publication_target_fds[$id]}") || return 1
+  fi
+  json_is '.[0] == .[1].observation.state' "[$state,$authorization]" || return 1
+  publication_stage_file "$id" "$target" "$copy" || return 1
+  json_is '.[0].before == .[1].observation.state and .[0].target == .[1].target and .[0].retained == .[1].copy.file' \
+    "[$_publication_stage_result,$authorization]" || return 1
+  find_publication_record "$invocation" "$(publication_record_kind stage)" "$id" || return 1
+  _publication_recovery_stage_record=$_publication_found_body
+  _publication_recovery_stage_reference=$_publication_found_reference
+}
+
+# ready_publication_recovery_plan [NATIVE_FD]
+# Bind this attempt's finite plan: the pure projection of its fresh stages for
+# exactly the sealed original effects, with the original targets and desired
+# bytes, for a root that holds only this invocation. An open native executable
+# descriptor additionally runs its plan validator. Every stage is re-proved
+# through its held descriptor first. Records recovery-ready and sets the
+# attempt plan; nothing is written to a canonical path.
+ready_publication_recovery_plan() {
+  local parts invocation intent id stages='{}' stage state plan fd=${1:-} existing lookup_rc
+  _publication_recovery_ready_record='' _publication_recovery_ready_reference=''
+  [[ $# -le 1 && ( -z $fd || $fd =~ ^[0-9]+$ ) ]] || return 1
+  publication_recovery_attempt_parts || return 1
+  parts=$_publication_recovery_attempt_parts
+  invocation=$(jq -r '.basis.invocation' <<<"$parts") || return 1
+  intent=$(jq -c '.intent' <<<"$parts") || return 1
+  publication_recovery_memory_is_bound "$invocation" || return 1
+  # Explicit boundary: whole-root scheduling across invocations is later work.
+  json_is '.invocations == [.basis.invocation]' "$parts" || return 1
+  while IFS= read -r id; do
+    [[ -n $id ]] || return 1
+    find_publication_record "$invocation" target-authorization "$id" || return 1
+    find_publication_record "$invocation" "$(publication_record_kind stage)" "$id" || return 1
+    json_is '.[0] == .[1]' "[$_publication_found_body,${_publication_stage_bodies[$id]:-null}]" || return 1
+    # The held descriptor must still be the recorded sibling in its recorded
+    # filesystem-effective state; a recorded identity alone proves nothing live.
+    stage=$(jq -r '.stage.path' <<<"$_publication_found_body") || return 1
+    [[ -n ${_publication_stage_fds[$id]:-} ]] && fd_matches_path "${_publication_stage_fds[$id]}" "$stage" || return 1
+    state=$(publication_fd_state "${_publication_stage_fds[$id]}") || return 1
+    json_is '.[0] == .[1].stage.state' "[$state,$_publication_found_body]" || return 1
+    stages=$(jq -c --arg id "$id" --argjson stage "$_publication_found_body" '.[$id]=$stage' <<<"$stages") || return 1
+  done < <(jq -r '.effects[]' <<<"$parts")
+  plan=$(jq -cn --arg invocation "$invocation" --argjson stages "$stages" --argjson intent "$intent" '
+    def put: {id,target,before,after:.stage.state,parent,retained:.retained.path};
+    {format:"limine-prepared-publication",schema:1,invocation:$invocation,
+      puts:[$intent.resources[].id as $id | $stages[$id] | put],configuration:($stages["configuration"] | put),
+      deletes:[],references:[]}') || return 1
+  validate_publication_plan_projection "$intent" "$stages" "$plan" || return 1
+  # shellcheck disable=SC2016 # jq-local plan/parts values.
+  json_is '.[0] as $plan | .[1] as $parts |
+    ([$plan.puts[],$plan.configuration] | map({id,target,sha256:.after.sha256})) == $parts.plan_effects' "[$plan,$parts]" || return 1
+  if [[ -n $fd ]]; then
+    [[ -f /proc/$BASHPID/fd/$fd && -x /proc/$BASHPID/fd/$fd ]] || return 1
+    publication_verify_live || return 1
+    /usr/bin/timeout --kill-after=1 "$_producer_session_io_timeout" "/proc/$BASHPID/fd/$fd" --validate-managed-plan <<<"$plan" || return 1
+    publication_verify_live || return 1
+  fi
+  if find_publication_record "$invocation" "$(publication_record_kind plan)"; then
+    existing=$_publication_found_body
+    json_is '.[0] == .[1]' "[$plan,$existing]" || return 1
+    sync_publication_reference "$_publication_found_reference" || return 1
+    _publication_plan=$existing
+    _publication_recovery_ready_record=$existing
+    _publication_recovery_ready_reference=$_publication_found_reference
+    return 0
+  else
+    lookup_rc=$?
+    (( lookup_rc == 1 )) || return 1
+  fi
+  publication_verify_live || return 1
+  append_publication_record "$invocation" "$(publication_record_kind plan)" "$plan" || return 1
+  _publication_plan=$plan
+  _publication_recovery_ready_record=$plan
+  _publication_recovery_ready_reference=$_publication_record_reference
 }
 
 publication_retain_original_configuration() {
@@ -736,11 +878,11 @@ publication_parent_binding() {
 }
 
 publication_stage_file() {
-  local id=$1 target=$2 retained=$3 parent fd stage before state body
+  local id=$1 target=$2 retained=$3 parent fd stage before state body create=false
   producer_session_context_is_owned || return 1
   publication_verify_live || return 1
   if [[ -n ${_publication_stage_bodies[$id]:-} ]]; then
-    find_publication_record "$_publication_invocation" boot-stage "$id" || return 1
+    find_publication_record "$_publication_invocation" "$(publication_record_kind stage)" "$id" || return 1
     sync_publication_reference "$_publication_found_reference" || return 1
     _publication_stage_result=${_publication_stage_bodies[$id]}
     return 0
@@ -753,13 +895,16 @@ publication_stage_file() {
     state=$(publication_fd_state "$fd") || return 1
     json_is '.[0] == .[1].stage.state' "[$state,$body]" || return 1
     durable_sync "$stage" && durable_sync "$(dirname "$stage")" || return 1
-    append_publication_record "$_publication_invocation" boot-stage "$body" || return 1
+    append_publication_record "$_publication_invocation" "$(publication_record_kind stage)" "$body" || return 1
     _publication_stage_bodies[$id]=$body
     _publication_stage_result=$body
     return 0
   fi
   parent=$(dirname "$target") || return 1
-  publication_parent_binding "$parent" true || return 1
+  # Only an original addition creates target-derived directories; a recovery
+  # attempt stages beside the ancestors its authorization already pinned.
+  [[ $_publication_attempt_mode != original ]] || create=true
+  publication_parent_binding "$parent" "$create" || return 1
   before='{"kind":"absent","identity":null,"sha256":null,"link_target":null,"mode":0,"uid":0,"gid":0}'
   if [[ -e $target || -L $target ]]; then
     publication_verify_path_mount "$target" file "${_publication_directory_mount_ids[$parent]}" || return 1
@@ -785,7 +930,7 @@ publication_stage_file() {
     '{id:$id,target:$target,before:$before,retained:$retained,parent:$parent,mount_view:$view,stage:{path:$stage,state:$state}}') || return 1
   _publication_stage_candidates[$id]=$body
   publication_verify_live || return 1
-  append_publication_record "$_publication_invocation" boot-stage "$body" || return 1
+  append_publication_record "$_publication_invocation" "$(publication_record_kind stage)" "$body" || return 1
   _publication_stage_bodies[$id]=$body
   _publication_stage_result=$body
 }
@@ -924,7 +1069,7 @@ publication_handle_request() {
       validate_publication_plan_projection "$_publication_intent" "$stages" "$plan" || return 1
       publication_validate_targets || return 1
       /usr/bin/timeout --kill-after=1 "$_producer_session_io_timeout" "$_producer_session_decoder_tool" --validate-managed-plan <<<"$plan" || return 1
-      append_publication_record "$_publication_invocation" plan "$plan" || return 1
+      append_publication_record "$_publication_invocation" "$(publication_record_kind plan)" "$plan" || return 1
       _publication_plan=$plan
       _producer_session_reply='{"accepted":true}'
       ;;

@@ -125,7 +125,8 @@ validate_publication_record_json() {
     .schema_version == (if .kind == "invocation-start" then $start_schema
       elif .kind == "recovery-basis" then $recovery_schema
       elif .kind == "retained-copy-ready" or .kind == "retained-copy" then $copy_schema
-      elif .kind == "recovery-context" or .kind == "target-authorization" then $authority_schema else $schema end) and
+      elif .kind == "recovery-context" or .kind == "target-authorization" or
+        .kind == "recovery-stage" or .kind == "recovery-ready" then $authority_schema else $schema end) and
     .transaction_id == $id and (.invocation | uuid) and
     .ordinal == $ordinal and .previous == $previous and (.recorded_at | timestamp) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
@@ -241,7 +242,8 @@ validate_publication_record_json() {
         (.body | type == "object" and keys == ["id","mount_id","path","state"] and
           (.id | digest) and (.path | canonical_path) and (.state | state) and .state.kind == "directory" and
           (.mount_id | type == "string" and test("^[1-9][0-9]*$")))
-      elif .kind == "boot-stage" then
+      elif .kind == "boot-stage" or .kind == "recovery-stage" then
+        (.kind == "boot-stage" or (.body | type == "object" and (.id | strict_resource_id))) and
         (.body | type == "object" and keys == ["before","id","mount_view","parent","retained","stage","target"] and
           (.id | resource_id) and (.target | canonical_path) and (.before | state) and (.before.kind == "absent" or .before.kind == "file") and
           (. as $body | .mount_view | type == "object" and keys == ["directories","namespace"] and
@@ -252,13 +254,14 @@ validate_publication_record_json() {
               (map({path,identity}) == ($body.parent.components | map({path,identity:.directory.identity}))))) and
          (.retained | file_ref) and (.parent | parent) and (.stage | type == "object" and keys == ["path","state"] and
            (.path | canonical_path) and (.state | state) and .state.kind == "file"))
-     elif .kind == "plan" then
+     elif .kind == "plan" or .kind == "recovery-ready" then
        (.body | type == "object" and keys == ["configuration","deletes","format","invocation","puts","references","schema"] and
          .format == "limine-prepared-publication" and .schema == 1 and (.invocation | uuid) and
          .deletes == [] and .references == [] and (.puts | type == "array") and
          all(.puts[],.configuration; keys == ["after","before","id","parent","retained","target"] and
            (.id | resource_id) and (.target | canonical_path) and (.retained | canonical_path) and
-           (.before | state) and (.after | state) and .after.kind == "file" and (.parent | parent))) and .body.invocation == .invocation
+           (.before | state) and (.after | state) and .after.kind == "file" and (.parent | parent))) and .body.invocation == .invocation and
+       (.kind == "plan" or all(.body.puts[].id, .body.configuration.id; strict_resource_id))
      elif .kind == "effect-pending" then
        (.body | type == "object" and keys == ["id","observed","result"] and (.id | resource_id) and
          (.observed | state) and (.result | state) and .result.kind == "file")
@@ -325,7 +328,7 @@ validate_publication_records() {
     kind=$(jq -r '.kind' <<<"$document") || return 1
     [[ -z ${terminals[$invocation]:-} ]] || return 1
     case $kind in
-      recovery-basis|retained-copy-ready|retained-copy|recovery-context|target-authorization) return 1 ;;
+      recovery-basis|retained-copy-ready|retained-copy|recovery-context|target-authorization|recovery-stage|recovery-ready) return 1 ;;
       invocation-start)
         [[ -z ${intents[$invocation]:-} && -z ${contexts[$invocation]:-} ]] || return 1
         intents[$invocation]=$(jq -c '.body.intent' <<<"$document") || return 1
@@ -552,12 +555,12 @@ publication_recovery_cache_recheck() {
 
 validate_publication_recovery_records() {
   local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior references invocation id kind strict ordinal=0 total
-  local context_body='' authorization_views='[]'
+  local context_body='' authorization_views='[]' ready_body='' parts=''
   local _publication_original_basis='' _publication_member_record=''
   local _publication_recovery_copy_expected=''
   local _manifest_json='' _manifest_id='' _manifest_sha256='' _incident_json='' _incident_read_status=''
   local owner slot cache_key canonical cached='' copied_files='[]'
-  local -A expected_copies=() prepared_copies=() copied=() copy_references=() authorized=() effects=()
+  local -A expected_copies=() prepared_copies=() copied=() copy_references=() authorized=() effects=() authorizations=() staged=()
   lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
   owner=$(control_owner_uid) || return 1
   [[ $owner =~ ^[0-9]+$ ]] || return 1
@@ -668,7 +671,24 @@ validate_publication_recovery_records() {
           "${copy_references[$id]}" "${expected_copies[$id]}" "$strict" || return 1
         authorization_views=$(jq -c --argjson view "$(jq -c '.body.mount_view' <<<"$strict")" \
           '. + [$view]' <<<"$authorization_views") || return 1
+        authorizations[$id]=$(jq -c '.body' <<<"$strict") || return 1
         authorized[$id]=true
+        ;;
+      recovery-stage)
+        # A fresh stage joins its authorization: same target, the observed
+        # before state, the bound copy as retained bytes and the same custody.
+        id=$(jq -r '.body.id' <<<"$strict") || return 1
+        [[ -n ${authorized[$id]:-} && -z ${staged[$id]:-} && -z $ready_body ]] || return 1
+        publication_validate_recovery_stage "${authorizations[$id]}" "$strict" || return 1
+        authorization_views=$(jq -c --argjson view "$(jq -c '.body.mount_view' <<<"$strict")" \
+          '. + [$view]' <<<"$authorization_views") || return 1
+        staged[$id]=$(jq -c '.body' <<<"$strict") || return 1
+        ;;
+      recovery-ready)
+        [[ -z $ready_body ]] || return 1
+        if [[ -z $parts ]]; then parts=$(publication_original_data_decode parts <<<"[$basis,null]") || return 1; fi
+        publication_validate_recovery_ready "$parts" "$strict" staged || return 1
+        ready_body=$(jq -c '.body' <<<"$strict") || return 1
         ;;
       *) return 1 ;;
     esac
@@ -744,6 +764,44 @@ publication_validate_target_authorization() {
     .[0].outcome == "allowed-absence")' "[$classification,$body]"
 }
 
+# A stage record joins its authorization completely: the same target, before
+# state, copy and ancestor custody, the control owner, and a sibling named for
+# this invocation and effect in the target's directory. Its recorded identity
+# is data; the writers' held descriptors and later execution prove the live file.
+publication_validate_recovery_stage() {
+  local authorization=$1 document=$2 input
+  input=$(jq -cn --argjson document "$document" --argjson auth "$authorization" --argjson uid "$(control_owner_uid)" \
+    '{stage:$document.body,invocation:$document.invocation,auth:$auth,uid:$uid}') || return 1
+  # shellcheck disable=SC2016 # jq-local stage/authorization values.
+  json_is '.stage as $stage | .auth as $auth | .invocation as $invocation | .uid as $uid |
+    ($stage.stage.path | split("/")) as $path |
+    $stage.id == $auth.id and $stage.target == $auth.target and
+    $stage.before == $auth.observation.state and $stage.retained == $auth.copy.file and
+    $stage.parent == $auth.parent and $stage.mount_view == $auth.mount_view and
+    $stage.stage.state.sha256 == $auth.copy.file.sha256 and $stage.stage.state.uid == $uid and
+    $path[:-1] == ($stage.target | split("/")[:-1]) and
+    ($path[-1] | test("^\\.omasecboot-" + $invocation + "-" + $stage.id + "\\.[A-Za-z0-9]{6}\\.stage$"))' "$input"
+}
+
+# Readiness is the pure projection of this attempt's fresh stages for exactly
+# the sealed original effects: same ids, targets and desired bytes, this
+# attempt's before/after/parent, and a root that holds only this invocation.
+publication_validate_recovery_ready() {
+  local parts=$1 document=$2 stages_name=$3 body stages='{}' id
+  local -n stages_ref=$stages_name
+  body=$(jq -c '.body' <<<"$document") || return 1
+  json_is '.invocations == [.basis.invocation]' "$parts" || return 1
+  while IFS= read -r id; do
+    [[ -n $id && -n ${stages_ref[$id]:-} ]] || return 1
+    stages=$(jq -c --arg id "$id" --argjson stage "${stages_ref[$id]}" '.[$id]=$stage' <<<"$stages") || return 1
+  done < <(jq -r '.effects[]' <<<"$parts")
+  [[ $(jq -r 'length' <<<"$stages") == "${#stages_ref[@]}" ]] || return 1
+  validate_publication_plan_projection "$(jq -c '.intent' <<<"$parts")" "$stages" "$body" || return 1
+  # shellcheck disable=SC2016 # jq-local plan/parts values.
+  json_is '.[0] as $plan | .[1] as $parts | $plan.invocation == $parts.basis.invocation and
+    ([$plan.puts[],$plan.configuration] | map({id,target,sha256:.after.sha256})) == $parts.plan_effects' "[$body,$parts]"
+}
+
 validate_publication_recovery_evolution() {
   local previous=$1 current=$2 previous_record current_record root
   local _publication_member_record=''
@@ -803,7 +861,7 @@ append_publication_record() {
   [[ $kind != invocation-start ]] || schema=$PUBLICATION_INVOCATION_START_SCHEMA_VERSION
   [[ $kind != recovery-basis ]] || schema=$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION
   if [[ $kind == retained-copy-ready || $kind == retained-copy ]]; then schema=$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION; fi
-  if [[ $kind == recovery-context || $kind == target-authorization ]]; then schema=$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION; fi
+  if [[ $kind == recovery-context || $kind == target-authorization || $kind == recovery-stage || $kind == recovery-ready ]]; then schema=$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION; fi
   producer_session_context_is_owned || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   json_is '.schema_version == 3 and .status == "transition"' "$_manifest_json" || return 1
@@ -2029,10 +2087,17 @@ def originals(basis):
 def parts(basis, nothing):
     require(nothing is None)
     original = originals(basis)
+    member = original["member"]
+    invocations = sorted({member(reference)["invocation"] for reference in original["manifest"]["publication_records"]})
+    for effect in original["effects"]:
+        path(effect["target"])
+        state(effect["after"])
     return dict(schema=1, scope="original-invocation-parts", basis=basis, intent=original["intent"],
                 context=original["context"],
                 authority=dict(intent=original["intent_authority"], context=original["context_authority"]),
-                effects=[effect["id"] for effect in original["effects"]])
+                effects=[effect["id"] for effect in original["effects"]], invocations=invocations,
+                plan_effects=[dict(id=effect["id"], target=effect["target"], sha256=effect["after"]["sha256"])
+                              for effect in original["effects"]])
 
 def resolve(basis, effect_id):
     identifier(effect_id)
