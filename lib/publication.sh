@@ -53,8 +53,16 @@ publication_record_kind() {
   case ${_publication_attempt_mode:-original}:$1 in
     original:stage) printf 'boot-stage\n' ;;
     original:plan) printf 'plan\n' ;;
+    original:executor) printf 'executor\n' ;;
+    original:effect-pending) printf 'effect-pending\n' ;;
+    original:effect-applied) printf 'effect-applied\n' ;;
+    original:terminal) printf 'terminal\n' ;;
     recovery:stage) printf 'recovery-stage\n' ;;
     recovery:plan) printf 'recovery-ready\n' ;;
+    recovery:executor) printf 'recovery-executor\n' ;;
+    recovery:effect-pending) printf 'recovery-effect-pending\n' ;;
+    recovery:effect-applied) printf 'recovery-effect-applied\n' ;;
+    recovery:terminal) printf 'recovery-result\n' ;;
     *) return 1 ;;
   esac
 }
@@ -486,6 +494,65 @@ ready_publication_recovery_plan() {
   _publication_plan=$plan
   _publication_recovery_ready_record=$plan
   _publication_recovery_ready_reference=$_publication_record_reference
+}
+
+# publication_start_recovery_executor [NATIVE_FD]
+# Enable the apply phase for this attempt's readiness plan: the durable
+# recovery-ready equals the attempt plan, the stable context is collected again
+# and equal, every plan effect is re-proved (held stage descriptor and state,
+# exact private copy, locally signed copies and stages reverified under the
+# attempt policy) and the private copies are pinned for the worker. An open
+# native executable descriptor additionally validates the original targets.
+# Records nothing; the executor launch records recovery-executor.
+publication_start_recovery_executor() {
+  local parts invocation id authorization copy stage state path fd pinned native=${1:-}
+  [[ $# -le 1 && ( -z $native || $native =~ ^[0-9]+$ ) ]] || return 1
+  publication_recovery_attempt_parts || return 1
+  parts=$_publication_recovery_attempt_parts
+  invocation=$(jq -r '.basis.invocation' <<<"$parts") || return 1
+  publication_recovery_memory_is_bound "$invocation" || return 1
+  producer_session_context_is_owned || return 1
+  [[ $_producer_session_active == false && $_publication_apply_phase == false && -n $_publication_plan ]] || return 1
+  find_publication_record "$invocation" "$(publication_record_kind plan)" || return 1
+  json_is '.[0] == .[1]' "[$_publication_plan,$_publication_found_body]" || return 1
+  sync_publication_reference "$_publication_found_reference" || return 1
+  publication_verify_live || return 1
+  publication_verify_stable_context || return 1
+  json_is '.[0] == .[1]' "[$_publication_collected_signing_policy,$_publication_signing_policy]" || return 1
+  if [[ -n $native ]]; then
+    [[ -f /proc/$BASHPID/fd/$native && -x /proc/$BASHPID/fd/$native ]] || return 1
+    /usr/bin/timeout --kill-after=1 "$_producer_session_io_timeout" "/proc/$BASHPID/fd/$native" --validate-managed-targets <<<"$_publication_intent" || return 1
+    publication_verify_live || return 1
+  fi
+  while IFS= read -r id; do
+    [[ -n $id ]] || return 1
+    find_publication_record "$invocation" target-authorization "$id" || return 1
+    authorization=$_publication_found_body
+    find_publication_record "$invocation" retained-copy "$id" || return 1
+    copy=$_publication_found_body
+    json_is '.[0].copy.reference == .[1] and .[0].copy.file == .[2].file' \
+      "[$authorization,$_publication_found_reference,$copy]" || return 1
+    find_publication_record "$invocation" "$(publication_record_kind stage)" "$id" || return 1
+    json_is '.[0] == .[1]' "[$_publication_found_body,${_publication_stage_bodies[$id]:-null}]" || return 1
+    stage=$(jq -r '.stage.path' <<<"$_publication_found_body") || return 1
+    [[ -n ${_publication_stage_fds[$id]:-} ]] && fd_matches_path "${_publication_stage_fds[$id]}" "$stage" || return 1
+    state=$(publication_fd_state "${_publication_stage_fds[$id]}") || return 1
+    json_is '.[0] == .[1].stage.state' "[$state,$_publication_found_body]" || return 1
+    validate_publication_retained_file "$_transaction_id" "$(jq -c '.file' <<<"$copy")" || return 1
+    path=$(jq -r '.file.path' <<<"$copy") || return 1
+    pinned=false
+    for fd in "${_publication_pins[@]}"; do
+      if fd_matches_path "$fd" "$path"; then pinned=true; break; fi
+    done
+    if [[ $pinned == false ]]; then publication_pin_path "$path" file || return 1; fi
+    if json_is '.signature != null' "$authorization"; then
+      verify_publication_input "$path" && verify_publication_input "$stage" || return 1
+    fi
+    # shellcheck disable=SC2004 # associative array declared by producer-session.sh.
+    _publication_retained[$id]=$(jq -c '{id,signing,file}' <<<"$copy") || return 1
+  done < <(jq -r '.effects[]' <<<"$parts")
+  publication_verify_live || return 1
+  _publication_apply_phase=true
 }
 
 publication_retain_original_configuration() {
@@ -963,7 +1030,7 @@ publication_all_effects_applied() {
   [[ -n $_publication_plan ]] || return 1
   ids=$(jq -r '.puts[].id, .configuration.id' <<<"$_publication_plan") || return 1
   for id in $ids; do
-    find_publication_record "$_publication_invocation" effect-applied "$id" || return 1
+    find_publication_record "$_publication_invocation" "$(publication_record_kind effect-applied)" "$id" || return 1
     expected=$(jq -c '.state' <<<"$_publication_found_body") || return 1
     publication_capture_result "$id" || return 1
     json_is '.[0] == .[1]' "[$_publication_observed,$expected]" || return 1
@@ -1111,12 +1178,12 @@ publication_handle_effect() {
   case $operation in
     frontier)
       json_is '.payload | keys == ["id","operation"]' "$document" || return 1
-      if find_publication_record "$_publication_invocation" effect-applied "$id"; then
+      if find_publication_record "$_publication_invocation" "$(publication_record_kind effect-applied)" "$id"; then
         json_is '.[0] == .[1].state' "[$_publication_observed,$_publication_found_body]" || return 1
         _producer_session_reply=$(jq -c '{phase:"applied",observed:.state}' <<<"$_publication_found_body") || return 1
       else
         (( $? == 1 )) || return 1
-        if find_publication_record "$_publication_invocation" effect-pending "$id"; then
+        if find_publication_record "$_publication_invocation" "$(publication_record_kind effect-pending)" "$id"; then
           json_is '.[0] == .[1].observed or .[0] == .[1].result' "[$_publication_observed,$_publication_found_body]" || return 1
           _producer_session_reply=$(jq -c '{phase:"pending",observed:.result}' <<<"$_publication_found_body") || return 1
         else
@@ -1129,8 +1196,8 @@ publication_handle_effect() {
     before)
       json_is '.payload | keys == ["id","operation","state"]' "$document" || return 1
       json_is '.[0] == .[1].payload.state' "[$_publication_observed,$document]" || return 1
-      if find_publication_record "$_publication_invocation" effect-applied "$id"; then return 1; else (( $? == 1 )) || return 1; fi
-      if find_publication_record "$_publication_invocation" effect-pending "$id"; then
+      if find_publication_record "$_publication_invocation" "$(publication_record_kind effect-applied)" "$id"; then return 1; else (( $? == 1 )) || return 1; fi
+      if find_publication_record "$_publication_invocation" "$(publication_record_kind effect-pending)" "$id"; then
         pending=$_publication_found_body
         json_is '.[0] == .[1].observed or .[0] == .[1].result' "[$_publication_observed,$pending]" || return 1
         sync_publication_reference "$_publication_found_reference" || return 1
@@ -1141,12 +1208,12 @@ publication_handle_effect() {
       expected=$(jq -c 'if .before.kind == "file" and ((.before|del(.identity)) == (.stage.state|del(.identity))) then .before else .stage.state end' <<<"$body") || return 1
       record=$(jq -cn --arg id "$id" --argjson result "$expected" --argjson observed "$_publication_observed" \
         '{id:$id,result:$result,observed:$observed}') || return 1
-      append_publication_record "$_publication_invocation" effect-pending "$record" || return 1
+      append_publication_record "$_publication_invocation" "$(publication_record_kind effect-pending)" "$record" || return 1
       _producer_session_reply='{"accepted":true}'
       ;;
     stage)
       json_is '.payload | keys == ["id","operation"]' "$document" || return 1
-      find_publication_record "$_publication_invocation" effect-pending "$id" || return 1
+      find_publication_record "$_publication_invocation" "$(publication_record_kind effect-pending)" "$id" || return 1
       pending=$_publication_found_body
       json_is '.[0].result == .[1].stage.state' "[$pending,$body]" || return 1
       path=$(jq -r '.stage.path' <<<"$body") || return 1
@@ -1158,11 +1225,11 @@ publication_handle_effect() {
       ;;
     applied)
       json_is '.payload | keys == ["id","operation","state"]' "$document" || return 1
-      find_publication_record "$_publication_invocation" effect-pending "$id" || return 1
+      find_publication_record "$_publication_invocation" "$(publication_record_kind effect-pending)" "$id" || return 1
       expected=$(jq -c '.result' <<<"$_publication_found_body") || return 1
       json_is '.[0] == .[1] and .[0] == .[2].payload.state' "[$_publication_observed,$expected,$document]" || return 1
       record=$(jq -cn --arg id "$id" --argjson state "$expected" '{id:$id,state:$state}') || return 1
-      append_publication_record "$_publication_invocation" effect-applied "$record" || return 1
+      append_publication_record "$_publication_invocation" "$(publication_record_kind effect-applied)" "$record" || return 1
       _producer_session_reply='{"accepted":true}'
       ;;
   esac

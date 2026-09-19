@@ -126,7 +126,9 @@ validate_publication_record_json() {
       elif .kind == "recovery-basis" then $recovery_schema
       elif .kind == "retained-copy-ready" or .kind == "retained-copy" then $copy_schema
       elif .kind == "recovery-context" or .kind == "target-authorization" or
-        .kind == "recovery-stage" or .kind == "recovery-ready" then $authority_schema else $schema end) and
+        .kind == "recovery-stage" or .kind == "recovery-ready" or .kind == "recovery-executor" or
+        .kind == "recovery-effect-pending" or .kind == "recovery-effect-applied" or .kind == "recovery-result" then $authority_schema
+      else $schema end) and
     .transaction_id == $id and (.invocation | uuid) and
     .ordinal == $ordinal and .previous == $previous and (.recorded_at | timestamp) and
     (.writer_version | type == "string" and length > 0 and length <= 128) and
@@ -217,7 +219,7 @@ validate_publication_record_json() {
            [{id:"configuration",target:.intent.configuration.path}]))
      elif .kind == "context" then
        (.body | publication_context)
-     elif .kind == "session" or .kind == "executor" then
+     elif .kind == "session" or .kind == "executor" or .kind == "recovery-executor" then
        (.body | type == "object" and keys == ["boot_id","supervisor","worker"] and (.boot_id | uuid) and
          all(.supervisor,.worker; type == "object" and keys == ["pid","start_time","uid"] and
            (.pid | type == "number" and . > 0 and floor == .) and .uid == $uid and
@@ -262,12 +264,14 @@ validate_publication_record_json() {
            (.id | resource_id) and (.target | canonical_path) and (.retained | canonical_path) and
            (.before | state) and (.after | state) and .after.kind == "file" and (.parent | parent))) and .body.invocation == .invocation and
        (.kind == "plan" or all(.body.puts[].id, .body.configuration.id; strict_resource_id))
-     elif .kind == "effect-pending" then
+     elif .kind == "effect-pending" or .kind == "recovery-effect-pending" then
        (.body | type == "object" and keys == ["id","observed","result"] and (.id | resource_id) and
-         (.observed | state) and (.result | state) and .result.kind == "file")
-     elif .kind == "effect-applied" then
-       (.body | type == "object" and keys == ["id","state"] and (.id | resource_id) and (.state | state) and .state.kind == "file")
-     elif .kind == "terminal" or .kind == "prepared-terminal" then
+         (.observed | state) and (.result | state) and .result.kind == "file") and
+       (.kind == "effect-pending" or (.body.id | strict_resource_id))
+     elif .kind == "effect-applied" or .kind == "recovery-effect-applied" then
+       (.body | type == "object" and keys == ["id","state"] and (.id | resource_id) and (.state | state) and .state.kind == "file") and
+       (.kind == "effect-applied" or (.body.id | strict_resource_id))
+     elif .kind == "terminal" or .kind == "prepared-terminal" or .kind == "recovery-result" then
        (.body | type == "object" and keys == ["completion_acknowledged","decoder_status","invocation",
          "protocol_complete","supervision_status","worker_status"] and
          (.invocation | uuid) and (.completion_acknowledged | type == "boolean") and
@@ -328,7 +332,8 @@ validate_publication_records() {
     kind=$(jq -r '.kind' <<<"$document") || return 1
     [[ -z ${terminals[$invocation]:-} ]] || return 1
     case $kind in
-      recovery-basis|retained-copy-ready|retained-copy|recovery-context|target-authorization|recovery-stage|recovery-ready) return 1 ;;
+      recovery-basis|retained-copy-ready|retained-copy|recovery-context|target-authorization|recovery-stage|recovery-ready|\
+      recovery-executor|recovery-effect-pending|recovery-effect-applied|recovery-result) return 1 ;;
       invocation-start)
         [[ -z ${intents[$invocation]:-} && -z ${contexts[$invocation]:-} ]] || return 1
         intents[$invocation]=$(jq -c '.body.intent' <<<"$document") || return 1
@@ -555,12 +560,13 @@ publication_recovery_cache_recheck() {
 
 validate_publication_recovery_records() {
   local transaction_id=$1 manifest=$2 pending=${3:-} reference document basis prior references invocation id kind strict ordinal=0 total
-  local context_body='' authorization_views='[]' ready_body='' parts=''
+  local context_body='' authorization_views='[]' ready_body='' parts='' executor_body='' result_body=''
   local _publication_original_basis='' _publication_member_record=''
   local _publication_recovery_copy_expected=''
   local _manifest_json='' _manifest_id='' _manifest_sha256='' _incident_json='' _incident_read_status=''
   local owner slot cache_key canonical cached='' copied_files='[]'
   local -A expected_copies=() prepared_copies=() copied=() copy_references=() authorized=() effects=() authorizations=() staged=()
+  local -A pending_effects=() applied_effects=()
   lifecycle_manifest_path "$transaction_id" >/dev/null || return 1
   owner=$(control_owner_uid) || return 1
   [[ $owner =~ ^[0-9]+$ ]] || return 1
@@ -690,8 +696,38 @@ validate_publication_recovery_records() {
         publication_validate_recovery_ready "$parts" "$strict" staged || return 1
         ready_body=$(jq -c '.body' <<<"$strict") || return 1
         ;;
+      recovery-executor)
+        # One executor launch per attempt, after readiness, by the attempt owner.
+        [[ -n $ready_body && -z $executor_body ]] || return 1
+        json_is '.[0].body.supervisor == .[1].owner and .[0].body.boot_id == .[1].boot_id' "[$strict,$manifest]" || return 1
+        executor_body=$(jq -c '.body' <<<"$strict") || return 1
+        ;;
+      recovery-effect-pending|recovery-effect-applied)
+        [[ -n $executor_body && -z $result_body ]] || return 1
+        id=$(jq -r '.body.id' <<<"$strict") || return 1
+        [[ -n ${staged[$id]:-} && -z ${applied_effects[$id]:-} ]] || return 1
+        if [[ $kind == recovery-effect-pending ]]; then
+          [[ -z ${pending_effects[$id]:-} ]] || return 1
+          publication_validate_recovery_effect_pending "$ready_body" "${staged[$id]}" "$strict" applied_effects || return 1
+          pending_effects[$id]=$(jq -c '.body.result' <<<"$strict") || return 1
+        else
+          [[ -n ${pending_effects[$id]:-} ]] || return 1
+          json_is '.[0].body.state == .[1]' "[$strict,${pending_effects[$id]}]" || return 1
+          applied_effects[$id]=true
+        fi
+        ;;
+      recovery-result)
+        [[ -n $executor_body && -z $result_body ]] || return 1
+        publication_validate_recovery_result "$ready_body" "$strict" applied_effects || return 1
+        result_body=$(jq -c '.body' <<<"$strict") || return 1
+        ;;
       *) return 1 ;;
     esac
+    # Nothing follows the result, and only effects and the result follow the executor.
+    [[ -z $result_body || $kind == recovery-result ]] || return 1
+    if [[ -n $executor_body ]]; then
+      case $kind in recovery-executor|recovery-effect-pending|recovery-effect-applied|recovery-result) ;; *) return 1 ;; esac
+    fi
   done <<<"$references"
   # Every fresh observation of one attempt shares its namespace and directory views.
   json_is '([.[].namespace] | unique | length) <= 1 and
@@ -802,6 +838,34 @@ publication_validate_recovery_ready() {
     ([$plan.puts[],$plan.configuration] | map({id,target,sha256:.after.sha256})) == $parts.plan_effects' "[$body,$parts]"
 }
 
+# A pending effect mirrors the root reader: every earlier plan effect already
+# applied, the result the no-op or stage projection of this attempt's stage,
+# and the observation that stage's before state.
+publication_validate_recovery_effect_pending() {
+  local plan=$1 stage=$2 document=$3 applied_name=$4 id expected
+  local -n applied_ref=$applied_name
+  id=$(jq -r '.body.id' <<<"$document") || return 1
+  while IFS= read -r expected; do
+    [[ $expected != "$id" ]] || break
+    [[ -n ${applied_ref[$expected]:-} ]] || return 1
+  done < <(jq -r '.puts[].id, .configuration.id' <<<"$plan")
+  expected=$(jq -c 'if .before.kind == "file" and ((.before|del(.identity)) == (.stage.state|del(.identity))) then .before else .stage.state end' <<<"$stage") || return 1
+  json_is '.[0].body.result == .[1] and .[0].body.observed == .[2].before' "[$document,$expected,$stage]"
+}
+
+# The result closes the attempt. With supervision status 0 it requires an
+# acknowledged complete protocol, both children at 0 and every plan effect applied.
+publication_validate_recovery_result() {
+  local plan=$1 document=$2 applied_name=$3 id
+  local -n applied_ref=$applied_name
+  if json_is '.body.supervision_status == 0' "$document"; then
+    json_is '.body.completion_acknowledged and .body.protocol_complete and .body.worker_status == 0 and .body.decoder_status == 0' "$document" || return 1
+    while IFS= read -r id; do
+      [[ -n $id && -n ${applied_ref[$id]:-} ]] || return 1
+    done < <(jq -r '.puts[].id, .configuration.id' <<<"$plan")
+  fi
+}
+
 validate_publication_recovery_evolution() {
   local previous=$1 current=$2 previous_record current_record root
   local _publication_member_record=''
@@ -861,7 +925,10 @@ append_publication_record() {
   [[ $kind != invocation-start ]] || schema=$PUBLICATION_INVOCATION_START_SCHEMA_VERSION
   [[ $kind != recovery-basis ]] || schema=$PUBLICATION_RECOVERY_BASIS_SCHEMA_VERSION
   if [[ $kind == retained-copy-ready || $kind == retained-copy ]]; then schema=$PUBLICATION_RECOVERY_COPY_SCHEMA_VERSION; fi
-  if [[ $kind == recovery-context || $kind == target-authorization || $kind == recovery-stage || $kind == recovery-ready ]]; then schema=$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION; fi
+  case $kind in
+    recovery-context|target-authorization|recovery-stage|recovery-ready|recovery-executor|recovery-effect-pending|recovery-effect-applied|recovery-result)
+      schema=$PUBLICATION_RECOVERY_AUTHORITY_SCHEMA_VERSION ;;
+  esac
   producer_session_context_is_owned || return 1
   read_transaction_manifest "$_transaction_id" || return 1
   json_is '.schema_version == 3 and .status == "transition"' "$_manifest_json" || return 1

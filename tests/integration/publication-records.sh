@@ -2175,7 +2175,12 @@ recovery_target_seams() {
   # shellcheck disable=SC2329
   verify_publication_input() {
     TARGET_VERIFICATIONS=$((TARGET_VERIFICATIONS+1))
-    [[ $1 == "$TXDIR/publication-data-$INVOCATION-kernel" ]] || fail_test "unexpected signature verification of $1"
+    # The kernel's private copy, its held stage and, once applied, its target.
+    case $1 in
+      "$TXDIR/publication-data-$INVOCATION-kernel"|"$CHILD_PATH/kernel") ;;
+      *) [[ -n ${_publication_stage_bodies[kernel]:-} && $1 == "$(jq -r '.stage.path' <<<"${_publication_stage_bodies[kernel]}")" ]] ||
+           fail_test "unexpected signature verification of $1" ;;
+    esac
     return "${TARGET_SIGNATURE_STATUS:-0}"
   }
   # shellcheck disable=SC2329
@@ -2641,12 +2646,21 @@ recovery_ready_fixture() {
   cat >"$CASE_DIR/native" <<EOF
 #!/usr/bin/bash
 set -euo pipefail
-[[ \$# == 1 && \$1 == --validate-managed-plan ]] || exit 64
-plan=\$(cat)
-[[ -z \${READY_NATIVE_SLEEP:-} ]] || sleep "\$READY_NATIVE_SLEEP"
-jq -e '.format == "limine-prepared-publication" and .schema == 1 and .deletes == [] and .references == []' <<<"\$plan" >/dev/null
-printf '%s\n' "\$plan" >>"$CASE_DIR/native-validated-plans"
-exit "\${READY_NATIVE_STATUS:-0}"
+[[ \$# == 1 ]] || exit 64
+case \$1 in
+  --validate-managed-plan)
+    plan=\$(cat)
+    [[ -z \${READY_NATIVE_SLEEP:-} ]] || sleep "\$READY_NATIVE_SLEEP"
+    jq -e '.format == "limine-prepared-publication" and .schema == 1 and .deletes == [] and .references == []' <<<"\$plan" >/dev/null
+    printf '%s\n' "\$plan" >>"$CASE_DIR/native-validated-plans"
+    exit "\${READY_NATIVE_STATUS:-0}" ;;
+  --validate-managed-targets)
+    intent=\$(cat)
+    jq -e 'has("publication") and (.resources | length) >= 1 and (.configuration.path | type == "string")' <<<"\$intent" >/dev/null
+    printf '%s\n' "\$intent" >>"$CASE_DIR/native-validated-targets"
+    exit "\${APPLY_NATIVE_STATUS:-0}" ;;
+  *) exit 64 ;;
+esac
 EOF
   chmod 755 "$CASE_DIR/native"
   exec {READY_NATIVE_FD}<"$CASE_DIR/native"
@@ -3045,6 +3059,508 @@ recovery_ready_cache_and_sync() {
       printf 'CHECK: readiness sync/%s/%s (%s -> %s records)\n' "$kind" "$window" "$count" "$ordinal"
     done
   done
+}
+# A4b fresh execution: the attempt's readiness plan is applied through the real
+# authority handler with a scripted worker (the fixture performs the atomic
+# rename the JVM worker performs), recording recovery-executor, effect
+# frontiers and the result; completion stays refused and a failed/preserve
+# seal keeps the canonical writes for a later no-op attempt.
+recovery_apply_fixture() {
+  recovery_ready_fixture
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  APPLY_PLAN=$_publication_plan
+}
+recovery_apply_launch() {
+  publication_authority_handler launch "$(jq -c --arg invocation "$INVOCATION" '. + {invocation:$invocation}' <<<"$SESSION")"
+}
+recovery_apply_request() {
+  local extra=${2:-'{}'} payload
+  payload=$(jq -cn --arg op "$1" --argjson extra "$extra" '{operation:$op} + $extra')
+  _producer_session_reply=''
+  publication_authority_handler request "$(jq -cn --arg invocation "$INVOCATION" --argjson payload "$payload" '{invocation:$invocation,payload:$payload}')"
+}
+recovery_apply_terminal() {
+  publication_authority_handler terminal "$(jq -cn --arg invocation "$INVOCATION" --argjson status "${1:-0}" --argjson worker "${2:-0}" \
+    '{invocation:$invocation,completion_acknowledged:true,protocol_complete:true,supervision_status:$status,worker_status:$worker,decoder_status:0}')"
+}
+# An identical repeat of a launch or result is the writer's durability retry:
+# adopted without a second record. A different repeat is refused by the reader.
+recovery_apply_idempotent() {
+  local before
+  before=$(journal_fingerprint)
+  "$@"
+  [[ $(journal_fingerprint) == "$before" ]] || fail_test "identical repeat changed the journal: $*"
+}
+recovery_apply_refused() {
+  local before
+  before=$(journal_fingerprint)
+  if "$@"; then fail_test "apply step accepted: ${APPLY_REFUSAL:-$*}"; fi
+  [[ $(journal_fingerprint) == "$before" ]] || fail_test "refused apply step changed the journal: ${APPLY_REFUSAL:-$*}"
+}
+recovery_apply_start_refused() {
+  local before phase=$_publication_apply_phase
+  before=$(journal_fingerprint)
+  if publication_start_recovery_executor "$@"; then fail_test "executor start accepted: ${APPLY_REFUSAL:-}"; fi
+  [[ $_publication_apply_phase == "$phase" && $(journal_fingerprint) == "$before" ]] || fail_test "refused executor start left state: ${APPLY_REFUSAL:-}"
+}
+# Drive one effect as the worker would: unstarted frontier, before, pending
+# frontier, then either the atomic rename of the sibling or the no-op path.
+recovery_apply_effect() {
+  local id=$1 body stage target before
+  body=${_publication_stage_bodies[$id]}
+  stage=$(jq -r '.stage.path' <<<"$body") target=$(jq -r '.target' <<<"$body") before=$(jq -c '.before' <<<"$body")
+  recovery_apply_request frontier "$(jq -cn --arg id "$id" '{id:$id}')"
+  json_is '.phase == "unstarted" and .observed == null' "$_producer_session_reply"
+  recovery_apply_request before "$(jq -cn --arg id "$id" --argjson state "$before" '{id:$id,state:$state}')"
+  json_is '.accepted' "$_producer_session_reply"
+  recovery_apply_request frontier "$(jq -cn --arg id "$id" '{id:$id}')"
+  json_is '.phase == "pending" and .observed != null' "$_producer_session_reply"
+  if json_is '.before.kind == "file" and ((.before|del(.identity)) == (.stage.state|del(.identity)))' "$body"; then
+    recovery_apply_request applied "$(jq -cn --arg id "$id" --argjson state "$before" '{id:$id,state:$state}')"
+  else
+    recovery_apply_request stage "$(jq -cn --arg id "$id" '{id:$id}')"
+    json_is '.[0] == .[1].stage' "[$_producer_session_reply,$body]"
+    command mv -- "$stage" "$target"
+    durable_sync "$target" && durable_sync "$(dirname "$target")"
+    recovery_apply_request applied "$(jq -cn --arg id "$id" --argjson state "$(jq -c '.stage.state' <<<"$body")" '{id:$id,state:$state}')"
+  fi
+  json_is '.accepted' "$_producer_session_reply"
+  recovery_apply_request frontier "$(jq -cn --arg id "$id" '{id:$id}')"
+  json_is '.phase == "applied"' "$_producer_session_reply"
+}
+recovery_apply_assert_records() {
+  local count=$1 status=$2
+  read_transaction_manifest "$_transaction_id"
+  json_is ".publication_records | length == $count and all(.schema_version == 2)" "$_manifest_json"
+  jq -se --argjson n "$count" --argjson status "$status" '
+    length == $n and (map(.kind)[11:] == ["recovery-executor","recovery-effect-pending","recovery-effect-applied",
+      "recovery-effect-pending","recovery-effect-applied","recovery-result"][:($n-11)]) and
+    (.[11].body.supervisor == .[11].body.worker) and
+    (if $n == 17 then .[16].body.supervision_status == $status and .[16].body.invocation == .[16].invocation else true end)' \
+    "$TXDIR"/publication-{1,2,3,4,5,6,7,8,9}.json "$TXDIR"/publication-1[0-9].json >/dev/null
+}
+recovery_apply_copy_identities() {
+  jq -r '.puts[].retained, .configuration.retained' <<<"$APPLY_PLAN" | while IFS= read -r path; do
+    basis_file_state "$path" | jq -r '.identity'
+  done | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+recovery_apply_session() {
+  # The full scripted apply session for the current attempt.
+  publication_start_recovery_executor "$READY_NATIVE_FD"
+  [[ $_publication_apply_phase == true ]]
+  recovery_apply_launch
+  recovery_apply_request application
+  # Every stage and every private copy of the plan is pinned for the worker.
+  # shellcheck disable=SC2016 # jq-local reply/plan values.
+  json_is '.[0] as $reply | .[1] as $plan | .[2] as $copies | $reply.plan == $plan and
+    ($reply.directories | length) > 0 and $reply.mount_namespace == "mnt:[8800]" and
+    all(($plan.puts + [$plan.configuration])[]; .after.identity as $after | any($reply.pins[]; .state.identity == $after)) and
+    all($copies[]; . as $copy | any($reply.pins[]; .state.identity == $copy))' \
+    "[$_producer_session_reply,$APPLY_PLAN,$(recovery_apply_copy_identities)]"
+  recovery_apply_request validate-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+  json_is '.accepted' "$_producer_session_reply"
+  recovery_apply_effect kernel
+  recovery_apply_effect configuration
+  recovery_apply_request complete
+  json_is '.accepted' "$_producer_session_reply"
+  recovery_apply_terminal 0
+}
+recovery_apply_valid() {
+  local before kernel_identity config_identity
+  recovery_apply_fixture
+  recovery_apply_session
+  cmp -- "$CHILD_PATH/kernel" "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")"
+  cmp -- "$CASE_DIR/esp/limine.conf" "$(jq -r '.file.path' <<<"$TARGET_CONFIG_COPY")"
+  recovery_apply_assert_records 17 0
+  # The attempt is closed: a second executor start, a different result and
+  # another effect are refused without a record; an identical result and an
+  # identical launch are adopted without a record.
+  APPLY_REFUSAL=start-after-result recovery_apply_start_refused "$READY_NATIVE_FD"
+  recovery_apply_idempotent recovery_apply_terminal 0
+  APPLY_REFUSAL=launch-after-result recovery_apply_refused recovery_apply_launch
+  APPLY_REFUSAL=different-result recovery_apply_refused recovery_apply_terminal 0 1
+  APPLY_REFUSAL=effect-after-result recovery_apply_refused recovery_apply_request before \
+    "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  if commit_lifecycle_recovery_attempt; then fail_test 'apply enabled completion'; fi
+  for filter in '.current_phase="apply"' '.status="completed" | .completed_at=.created_at'; do
+    if validate_transaction_manifest_json "$_transaction_id" "$(jq -c "$filter" <<<"$_manifest_json")" false; then
+      fail_test "apply removed preparatory fence: $filter"
+    fi
+  done
+  recovery_target_original_unchanged
+  # This attempt's siblings became the targets; the original root's two remain.
+  [[ $(recovery_ready_stage_files | wc -l) == 2 ]]
+  # A failed seal with preserve policy keeps the canonical writes.
+  rollback_and_mark_recovery 35 'fixture apply sealed'
+  release_publication_pins
+  cmp -- "$CHILD_PATH/kernel" "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")"
+  cmp -- "$CASE_DIR/esp/limine.conf" "$(jq -r '.file.path' <<<"$TARGET_CONFIG_COPY")"
+  kernel_identity=$(basis_file_state "$CHILD_PATH/kernel") config_identity=$(basis_file_state "$CASE_DIR/esp/limine.conf")
+  # A fresh attempt observes both targets as desired and applies as a no-op.
+  begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+  TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+  retain_publication_recovery_input kernel
+  TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+  retain_publication_recovery_input configuration
+  TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+  prepare_publication_recovery_context
+  authorize_publication_recovery_target kernel
+  json_is '.classification == "desired"' "$_publication_recovery_authorization_record"
+  authorize_publication_recovery_target configuration
+  json_is '.classification == "desired"' "$_publication_recovery_authorization_record"
+  stage_publication_recovery_target kernel
+  stage_publication_recovery_target configuration
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  APPLY_PLAN=$_publication_plan
+  recovery_apply_session
+  recovery_apply_assert_records 17 0
+  [[ $(basis_file_state "$CHILD_PATH/kernel") == "$kernel_identity" && $(basis_file_state "$CASE_DIR/esp/limine.conf") == "$config_identity" ]]
+  # No-op puts leave their unbound siblings beside the two original ones.
+  [[ $(recovery_ready_stage_files | wc -l) == 4 ]]
+  recovery_target_original_unchanged
+}
+recovery_apply_refusals() {
+  local before fd stage copy token fault
+  recovery_ready_fixture
+  stage_publication_recovery_target kernel
+  # Nothing executes before readiness: no executor start, no launch, no request.
+  APPLY_REFUSAL=before-readiness recovery_apply_start_refused "$READY_NATIVE_FD"
+  APPLY_REFUSAL=launch-outside-apply recovery_apply_refused recovery_apply_launch
+  APPLY_REFUSAL=application-before-executor recovery_apply_refused recovery_apply_request application
+  stage_publication_recovery_target configuration
+  ready_publication_recovery_plan "$READY_NATIVE_FD"
+  APPLY_PLAN=$_publication_plan
+  # Native target validation, bad descriptors and arity refuse the start.
+  APPLY_NATIVE_STATUS=1 APPLY_REFUSAL=native-targets-status-1 recovery_apply_start_refused "$READY_NATIVE_FD"
+  exec {fd}<"$CASE_DIR/source"
+  APPLY_REFUSAL=native-not-executable recovery_apply_start_refused "$fd"
+  exec {fd}<&-
+  APPLY_REFUSAL=native-bad-fd recovery_apply_start_refused 999
+  APPLY_REFUSAL=arity recovery_apply_start_refused 1 2
+  # A changed held stage, a changed private copy or a failed signature refuse
+  # the start; exact restoration readmits it.
+  stage=$(jq -r '.stage.path' <<<"${_publication_stage_bodies[kernel]}")
+  printf 'altered\n' >>"$stage"
+  APPLY_REFUSAL=stage-modified recovery_apply_start_refused "$READY_NATIVE_FD"
+  cp -- "$(jq -r '.retained.path' <<<"${_publication_stage_bodies[kernel]}")" "$stage"
+  copy=$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")
+  cp -- "$copy" "$CASE_DIR/saved-copy"
+  chmod u+w "$copy"; printf 'altered\n' >>"$copy"
+  APPLY_REFUSAL=copy-altered recovery_apply_start_refused "$READY_NATIVE_FD"
+  cp -- "$CASE_DIR/saved-copy" "$copy"; chmod 400 "$copy"
+  TARGET_SIGNATURE_STATUS=1 APPLY_REFUSAL=signature recovery_apply_start_refused "$READY_NATIVE_FD"
+  # Lost ownership, the restore marker and a latched view refuse the start.
+  token=$OMASECBOOT_TRANSACTION_TOKEN
+  for fault in owner marker latched; do
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN='invalid-token' ;;
+      marker) touch "$(snapshot_restore_lock_path)" ;;
+      latched) _publication_mount_invalid=true ;;
+    esac
+    APPLY_REFUSAL=$fault recovery_apply_start_refused "$READY_NATIVE_FD"
+    case $fault in
+      owner) OMASECBOOT_TRANSACTION_TOKEN=$token ;;
+      marker) rm -- "$(snapshot_restore_lock_path)" ;;
+      latched) _publication_mount_invalid=false ;;
+    esac
+  done
+  publication_start_recovery_executor "$READY_NATIVE_FD"
+  APPLY_REFUSAL=start-repeated recovery_apply_refused publication_start_recovery_executor "$READY_NATIVE_FD"
+  [[ $_publication_apply_phase == true ]]
+  # Requests before the launch, then preparation requests and wrong payloads
+  # during apply, are refused without a record.
+  recovery_apply_launch
+  recovery_apply_idempotent recovery_apply_launch
+  APPLY_REFUSAL=retain recovery_apply_refused recovery_apply_request retain '{"id":"kernel"}'
+  APPLY_REFUSAL=stage-input recovery_apply_refused recovery_apply_request stage-input '{"id":"kernel"}'
+  APPLY_REFUSAL=prepare-plan recovery_apply_refused recovery_apply_request prepare-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+  APPLY_REFUSAL=match-intent recovery_apply_refused recovery_apply_request match-intent "$(jq -cn --argjson intent "$_publication_intent" '{intent:$intent}')"
+  recovery_apply_request application
+  APPLY_REFUSAL=validate-other-plan recovery_apply_refused recovery_apply_request validate-plan \
+    "$(jq -cn --argjson plan "$(jq -c '.puts[0].after.sha256=("0"*64)' <<<"$APPLY_PLAN")" '{plan:$plan}')"
+  recovery_apply_request validate-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+  # A target that appears after the executor start refuses its first effect request.
+  printf 'appeared\n' >"$CHILD_PATH/kernel"
+  APPLY_REFUSAL=frontier-with-appeared-target recovery_apply_refused recovery_apply_request frontier '{"id":"kernel"}'
+  APPLY_REFUSAL=before-with-appeared-target recovery_apply_refused recovery_apply_request before \
+    "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  rm -- "$CHILD_PATH/kernel"
+  APPLY_REFUSAL=unknown-effect recovery_apply_refused recovery_apply_request frontier '{"id":"extra"}'
+  APPLY_REFUSAL=configuration-before-kernel recovery_apply_refused recovery_apply_request before \
+    "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[configuration]}")" '{id:"configuration",state:$state}')"
+  APPLY_REFUSAL=wrong-before-state recovery_apply_refused recovery_apply_request before \
+    "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  APPLY_REFUSAL=stage-before-pending recovery_apply_refused recovery_apply_request stage '{"id":"kernel"}'
+  APPLY_REFUSAL=applied-before-pending recovery_apply_refused recovery_apply_request applied \
+    "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  # Completion before every effect is applied is refused; a successful result
+  # claimed early is recorded as a failed result and closes the attempt.
+  recovery_apply_effect kernel
+  APPLY_REFUSAL=complete-early recovery_apply_refused recovery_apply_request complete
+  before=$(journal_fingerprint)
+  if recovery_apply_terminal 0; then fail_test 'premature success result accepted'; fi
+  [[ $(journal_fingerprint) != "$before" ]]
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 15' "$_manifest_json"
+  jq -e '.kind == "recovery-result" and .schema_version == 2 and .body.supervision_status == 1' "$TXDIR/publication-15.json" >/dev/null
+  APPLY_REFUSAL=effect-after-failed-result recovery_apply_refused recovery_apply_request before \
+    "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[configuration]}")" '{id:"configuration",state:$state}')"
+  recovery_apply_idempotent recovery_apply_terminal 1
+  APPLY_REFUSAL=different-failed-result recovery_apply_refused recovery_apply_terminal 1 1
+  # The kernel write stands; the configuration target never changed.
+  cmp -- "$CHILD_PATH/kernel" "$(jq -r '.file.path' <<<"$TARGET_KERNEL_COPY")"
+  [[ $(basis_file_state "$CASE_DIR/esp/limine.conf") == "$(jq -c '.before' <<<"${_publication_stage_bodies[configuration]}")" ]]
+  if commit_lifecycle_recovery_attempt; then fail_test 'failed result enabled completion'; fi
+  recovery_target_original_unchanged
+}
+# Custody between the executor start and the worker's requests: a held stage
+# changed in place or replaced refuses the stage and applied requests; a
+# success claim with an unapplied effect becomes a failed result.
+recovery_apply_custody() {
+  local stage before
+  recovery_apply_fixture
+  publication_start_recovery_executor "$READY_NATIVE_FD"
+  recovery_apply_launch
+  recovery_apply_request application
+  recovery_apply_request validate-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+  recovery_apply_request frontier '{"id":"kernel"}'
+  recovery_apply_request before "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  stage=$(jq -r '.stage.path' <<<"${_publication_stage_bodies[kernel]}")
+  printf 'altered\n' >>"$stage"
+  APPLY_REFUSAL=stage-modified recovery_apply_refused recovery_apply_request stage '{"id":"kernel"}'
+  cp -- "$(jq -r '.retained.path' <<<"${_publication_stage_bodies[kernel]}")" "$stage"
+  recovery_apply_request stage '{"id":"kernel"}'
+  cp -- "$stage" "$stage.next"; command mv -- "$stage.next" "$stage"
+  APPLY_REFUSAL=stage-replaced recovery_apply_refused recovery_apply_request stage '{"id":"kernel"}'
+  APPLY_REFUSAL=applied-with-replaced-stage recovery_apply_refused recovery_apply_request applied \
+    "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  before=$(journal_fingerprint)
+  if recovery_apply_terminal 0; then fail_test 'success claimed with an unapplied effect'; fi
+  [[ $(journal_fingerprint) != "$before" && ! -e $CHILD_PATH/kernel ]]
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 14' "$_manifest_json"
+  [[ $(jq -r '.kind' "$TXDIR/publication-12.json" "$TXDIR/publication-13.json" "$TXDIR/publication-14.json" | tr '\n' ' ') == 'recovery-executor recovery-effect-pending recovery-result ' ]]
+  jq -e '.body.supervision_status == 1' "$TXDIR/publication-14.json" >/dev/null
+  recovery_target_original_unchanged
+}
+recovery_apply_mutations() {
+  local executor_valid pending_valid applied_valid result_valid filter mutation definition
+  recovery_apply_fixture
+  definition=$(declare -f append_publication_record)
+  eval "${definition/append_publication_record/recovery_apply_actual_append}"
+  # shellcheck disable=SC2329
+  append_publication_record() {
+    if [[ -n ${APPLY_CAPTURE:-} && $2 == "$APPLY_CAPTURE" ]]; then
+      printf '%s\n' "$3" >"$CASE_DIR/captured-$2"
+      return 1
+    fi
+    recovery_apply_actual_append "$@"
+  }
+  publication_start_recovery_executor "$READY_NATIVE_FD"
+  APPLY_CAPTURE=recovery-executor
+  if recovery_apply_launch; then fail_test 'captured executor accepted'; fi
+  APPLY_CAPTURE=''
+  executor_valid=$(<"$CASE_DIR/captured-recovery-executor")
+  for filter in '.schema_version=1' '.body.extra=true' 'del(.body.boot_id)' '.body.worker.uid=0'; do
+    recovery_target_schema_refused recovery-executor "$executor_valid" "$filter"
+  done
+  for mutation in '.supervisor.pid+=1' '.supervisor.start_time+="0"' '.boot_id="99999999-9999-4999-8999-999999999999"'; do
+    recovery_target_semantic_candidate recovery-executor "$executor_valid" "$mutation"
+  done
+  recovery_apply_launch
+  COPY_MUTATION=duplicate-executor
+  recovery_target_candidate recovery-executor "$executor_valid"
+  recovery_apply_request application
+  recovery_apply_request validate-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+  recovery_apply_request frontier '{"id":"kernel"}'
+  APPLY_CAPTURE=recovery-effect-pending
+  if recovery_apply_request before "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"; then
+    fail_test 'captured pending accepted'
+  fi
+  APPLY_CAPTURE=''
+  pending_valid=$(<"$CASE_DIR/captured-recovery-effect-pending")
+  for filter in '.schema_version=1' '.body.extra=true' '.body.result.kind="absent"' 'del(.body.observed)'; do
+    recovery_target_schema_refused recovery-effect-pending "$pending_valid" "$filter"
+  done
+  # shellcheck disable=SC2016 # jq-bound values.
+  for mutation in '.observed=.result' '.result.sha256=("0"*64)' '.result.identity="8800:1"' '.id="configuration"'; do
+    recovery_target_semantic_candidate recovery-effect-pending "$pending_valid" "$mutation"
+  done
+  # An applied record before its pending is refused as data too.
+  COPY_MUTATION=applied-before-pending
+  recovery_target_candidate recovery-effect-applied "$(jq -c '{id,state:.result}' <<<"$pending_valid")"
+  recovery_apply_request before "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  COPY_MUTATION=duplicate-pending
+  recovery_target_candidate recovery-effect-pending "$pending_valid"
+  recovery_apply_request stage '{"id":"kernel"}'
+  command mv -- "$(jq -r '.stage.path' <<<"${_publication_stage_bodies[kernel]}")" "$CHILD_PATH/kernel"
+  durable_sync "$CHILD_PATH/kernel" && durable_sync "$CHILD_PATH"
+  APPLY_CAPTURE=recovery-effect-applied
+  if recovery_apply_request applied "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"; then
+    fail_test 'captured applied accepted'
+  fi
+  APPLY_CAPTURE=''
+  applied_valid=$(<"$CASE_DIR/captured-recovery-effect-applied")
+  for filter in '.schema_version=1' '.body.extra=true' '.body.state.kind="absent"'; do
+    recovery_target_schema_refused recovery-effect-applied "$applied_valid" "$filter"
+  done
+  # shellcheck disable=SC2016 # jq-bound values.
+  for mutation in '.state.sha256=("0"*64)' '.state.identity="8800:1"' '.id="configuration"'; do
+    recovery_target_semantic_candidate recovery-effect-applied "$applied_valid" "$mutation"
+  done
+  recovery_apply_request applied "$(jq -cn --argjson state "$(jq -c '.stage.state' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+  COPY_MUTATION=duplicate-applied
+  recovery_target_candidate recovery-effect-applied "$applied_valid"
+  recovery_apply_effect configuration
+  recovery_apply_request complete
+  APPLY_CAPTURE=recovery-result
+  if recovery_apply_terminal 0; then fail_test 'captured result accepted'; fi
+  APPLY_CAPTURE=''
+  result_valid=$(<"$CASE_DIR/captured-recovery-result")
+  for filter in '.schema_version=1' '.body.extra=true' '.body.invocation="88888888-8888-4888-8888-888888888888"' '.body.worker_status=-1'; do
+    recovery_target_schema_refused recovery-result "$result_valid" "$filter"
+  done
+  for mutation in '.completion_acknowledged=false' '.protocol_complete=false' '.worker_status=1' '.decoder_status=1'; do
+    recovery_target_semantic_candidate recovery-result "$result_valid" "$mutation"
+  done
+  recovery_apply_terminal 0
+  COPY_MUTATION=duplicate-result
+  recovery_target_candidate recovery-result "$result_valid"
+  COPY_MUTATION=executor-after-result
+  recovery_target_candidate recovery-executor "$executor_valid"
+  recovery_apply_assert_records 17 0
+  recovery_target_original_unchanged
+}
+# The applied state of an effect: its before state for a no-op put (a present
+# target already equal to the stage), otherwise the stage state.
+recovery_apply_result_state() {
+  jq -c 'if .before.kind == "file" and ((.before|del(.identity)) == (.stage.state|del(.identity))) then .before else .stage.state end' \
+    <<<"${_publication_stage_bodies[$1]}"
+}
+recovery_apply_window_step() {
+  case $1 in
+    executor) recovery_apply_launch ;;
+    pending) recovery_apply_request before "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')" ;;
+    applied) recovery_apply_request applied "$(jq -cn --argjson state "$(recovery_apply_result_state kernel)" '{id:"kernel",state:$state}')" ;;
+    result) recovery_apply_terminal 0 ;;
+  esac
+}
+recovery_apply_cache_and_sync() {
+  local slot index path window kind ordinal count existing definition
+  recovery_apply_fixture
+  recovery_apply_session
+  read_transaction_manifest "$_transaction_id"
+  slot="$_transaction_id:$(control_owner_uid)"
+  [[ -n ${_publication_recovery_validation_cache[$slot]:-} ]]
+  for index in 11 12 13 16; do
+    path=$(jq -r --argjson n "$index" '.publication_records[$n].path' <<<"$_manifest_json")
+    cp -- "$path" "$CASE_DIR/saved-record"
+    chmod u+w "$path"; printf 'changed apply\n' >>"$path"
+    if validate_publication_recovery_records "$_transaction_id" "$_manifest_json"; then fail_test "warm cache ignored $(basename "$path")"; fi
+    [[ -z ${_publication_recovery_validation_cache[$slot]:-} ]] || fail_test 'failed cache entry was retained'
+    cp -- "$CASE_DIR/saved-record" "$path"; chmod 600 "$path"
+    validate_publication_recovery_records "$_transaction_id" "$_manifest_json"
+  done
+  recovery_target_original_unchanged
+  # Durability windows for a pending effect and the result: the retry adopts
+  # the unbound or unsynced record without a second one.
+  definition=$(declare -f durable_sync)
+  eval "${definition/durable_sync/recovery_apply_actual_sync}"
+  TARGET_WINDOW='' TARGET_WINDOW_ORDINAL=0
+  # shellcheck disable=SC2329
+  durable_sync() {
+    local n inject=false
+    if [[ -n $TARGET_WINDOW && ! -e $CASE_DIR/target-sync-fault ]]; then
+      n=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $TARGET_WINDOW:$1 in
+        record-file:"$TXDIR/publication-$TARGET_WINDOW_ORDINAL.json") inject=true ;;
+        manifest-file:"$TXDIR/manifest.json") [[ $n != "$TARGET_WINDOW_ORDINAL" ]] || inject=true ;;
+      esac
+    fi
+    if [[ $inject == true ]]; then printf '%s\n' "$TARGET_WINDOW" >"$CASE_DIR/target-sync-fault"; return 1; fi
+    recovery_apply_actual_sync "$@"
+  }
+  for kind in executor pending applied result; do
+    for window in record-file manifest-file; do
+      rollback_and_mark_recovery 36 "fixture apply window $kind/$window"
+      release_publication_pins
+      begin_publication_recovery_attempt "$BASIS_ROOT_REF" "$INVOCATION"
+      TXDIR=$(dirname "$(lifecycle_manifest_path "$_transaction_id")")
+      retain_publication_recovery_input kernel
+      TARGET_KERNEL_COPY=$_publication_recovery_copy_record TARGET_KERNEL_COPY_REF=$_publication_recovery_copy_reference
+      retain_publication_recovery_input configuration
+      TARGET_CONFIG_COPY=$_publication_recovery_copy_record TARGET_CONFIG_COPY_REF=$_publication_recovery_copy_reference
+      prepare_publication_recovery_context
+      authorize_publication_recovery_target kernel
+      authorize_publication_recovery_target configuration
+      stage_publication_recovery_target kernel
+      stage_publication_recovery_target configuration
+      ready_publication_recovery_plan "$READY_NATIVE_FD"
+      APPLY_PLAN=$_publication_plan
+      publication_start_recovery_executor "$READY_NATIVE_FD"
+      if [[ $kind != executor ]]; then
+        recovery_apply_launch
+        recovery_apply_request application
+        recovery_apply_request validate-plan "$(jq -cn --argjson plan "$APPLY_PLAN" '{plan:$plan}')"
+      fi
+      case $kind in
+        pending) recovery_apply_request frontier '{"id":"kernel"}' ;;
+        applied)
+          # After the case's first apply the kernel target holds the desired
+          # bytes, so this is the no-op path: before, no stage, no rename.
+          recovery_apply_request before "$(jq -cn --argjson state "$(jq -c '.before' <<<"${_publication_stage_bodies[kernel]}")" '{id:"kernel",state:$state}')"
+          if ! json_is '.[0] == .[1].before' "[$(recovery_apply_result_state kernel),${_publication_stage_bodies[kernel]}]"; then
+            recovery_apply_request stage '{"id":"kernel"}'
+            command mv -- "$(jq -r '.stage.path' <<<"${_publication_stage_bodies[kernel]}")" "$CHILD_PATH/kernel"
+            durable_sync "$CHILD_PATH/kernel" && durable_sync "$CHILD_PATH"
+          fi ;;
+        result) recovery_apply_effect kernel; recovery_apply_effect configuration; recovery_apply_request complete ;;
+      esac
+      ordinal=$(( $(jq -r '.publication_records | length' "$TXDIR/manifest.json") + 1 ))
+      rm -f -- "$CASE_DIR/target-sync-fault"
+      TARGET_WINDOW=$window TARGET_WINDOW_ORDINAL=$ordinal
+      if recovery_apply_window_step "$kind"; then fail_test "$kind accepted sync window $window"; fi
+      TARGET_WINDOW=''
+      [[ -s $CASE_DIR/target-sync-fault ]] || fail_test "sync seam missed $kind/$window"
+      count=$(jq -r '.publication_records | length' "$TXDIR/manifest.json")
+      case $window in record-file) [[ $count == $((ordinal-1)) ]] ;; manifest-file) [[ $count == "$ordinal" ]] ;; esac
+      existing=''
+      if [[ -e $TXDIR/publication-$ordinal.json ]]; then existing=$(sha256_file "$TXDIR/publication-$ordinal.json"); fi
+      recovery_apply_window_step "$kind"
+      [[ $(jq -r '.publication_records | length' "$TXDIR/manifest.json") == "$ordinal" ]]
+      [[ -z $existing || $(sha256_file "$TXDIR/publication-$ordinal.json") == "$existing" ]] || fail_test "retry rewrote $kind record after $window"
+      recovery_target_original_unchanged
+      printf 'CHECK: apply sync/%s/%s (%s -> %s records)\n' "$kind" "$window" "$count" "$ordinal"
+    done
+  done
+}
+recovery_apply_root_journal_refused() {
+  # Ordinary root journals reject the execution kinds even when well formed.
+  local kind body ordinal previous document state
+  context_fixture
+  preserve_transaction_files_on_failure
+  append_publication_record "$INVOCATION" intent "$INTENT"
+  state=$(jq -cn --argjson uid "$(control_owner_uid)" '{kind:"file",identity:"8800:1",sha256:("0"*64),link_target:null,mode:33152,uid:$uid,gid:0}')
+  for kind in recovery-executor recovery-effect-pending recovery-effect-applied recovery-result; do
+    case $kind in
+      recovery-executor) body=$SESSION ;;
+      recovery-effect-pending) body=$(jq -cn --argjson state "$state" '{id:"kernel",observed:{kind:"absent",identity:null,sha256:null,link_target:null,mode:0,uid:0,gid:0},result:$state}') ;;
+      recovery-effect-applied) body=$(jq -cn --argjson state "$state" '{id:"kernel",state:$state}') ;;
+      recovery-result) body=$(jq -cn --arg invocation "$INVOCATION" '{invocation:$invocation,completion_acknowledged:true,protocol_complete:true,supervision_status:0,worker_status:0,decoder_status:0}') ;;
+    esac
+    ordinal=$(jq -r '(.publication_records | length)+1' "$TXDIR/manifest.json")
+    previous=$(jq -c '.publication_records[-1]' "$TXDIR/manifest.json")
+    document=$(jq -cn --arg id "$_transaction_id" --arg invocation "$INVOCATION" --argjson body "$body" --arg kind "$kind" \
+      --argjson ordinal "$ordinal" --argjson previous "$previous" --arg timestamp "$(utc_timestamp)" --arg version "$OMASECBOOT_VERSION" '
+      {schema_version:2,transaction_id:$id,invocation:$invocation,ordinal:$ordinal,previous:$previous,
+        kind:$kind,body:$body,recorded_at:$timestamp,writer_version:$version}')
+    validate_publication_record_json "$_transaction_id" "$ordinal" "$previous" "$document" || fail_test "well-formed $kind failed its schema"
+    if append_publication_record "$INVOCATION" "$kind" "$body"; then fail_test "root journal admitted $kind"; fi
+  done
+  read_transaction_manifest "$_transaction_id"
+  json_is '.publication_records | length == 1' "$_manifest_json"
 }
 recovery_target_root_journal_refused() {
   # Ordinary root journals reject the fresh-authority kinds even when well formed.
@@ -4879,5 +5395,12 @@ run_case recovery-ready-ancestors-and-memory recovery_ready_ancestors_and_memory
 run_case recovery-ready-peer-invocation-refused recovery_ready_peer_root
 BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-ready-hash-valid-mutations recovery_ready_mutations
 run_case recovery-ready-cache-and-sync-windows recovery_ready_cache_and_sync
+run_case recovery-apply-v1-effects-result-and-fresh-retry recovery_apply_valid
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-v2-signed-effects-result-and-fresh-retry recovery_apply_valid
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-refusals recovery_apply_refusals
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-hash-valid-mutations recovery_apply_mutations
+BASIS_CONTEXT=start BASIS_SIGNING=local-efi run_case recovery-apply-stage-custody recovery_apply_custody
+run_case recovery-apply-cache-and-sync-windows recovery_apply_cache_and_sync
+run_case recovery-apply-root-journal-refused recovery_apply_root_journal_refused
 (( count > 0 )) || fail_test 'publication-journal selection matched no cases'
 printf 'Passed %s publication-journal contracts.\n' "$count"

@@ -24,7 +24,8 @@ cp "$repo/tests/integration/fixtures/ProducerSessionContract.java" "$scratch/fix
 cat >"$scratch/fixtures/native" <<'SCRIPT'
 #!/usr/bin/bash
 set -euo pipefail
-if [[ -e /work/recovery-copy-active && ${1:-} != --validate-managed-plan ]]; then
+if [[ -e /work/recovery-copy-active && ${1:-} != --validate-managed-plan ]] &&
+  ! [[ -e /work/recovery-apply-active && ( ${1:-} == --validate-managed-targets || ${1:-} == --decode-managed-stream || ${1:-} == publish-apply ) ]]; then
   printf 'unexpected producer/render invocation during retained copy\n' >/work/recovery-copy-forbidden
   exit 90
 fi
@@ -1641,7 +1642,8 @@ pacman_database_lock_path() { printf '/work/pacman-db.lck\n'; }
 # Keep the real collector/signer definitions for the later fresh-authority
 # phase; the copy phase below must reach none of them.
 for helper in publication_collect_stable_context publication_verify_stable_context publication_verify_live \
-  publication_run_sbctl verify_publication_input publication_input_is_efi publication_stage_file; do
+  publication_run_sbctl verify_publication_input publication_input_is_efi publication_stage_file \
+  publication_authority_handler run_bound_producer_session; do
   definition=$(declare -f "$helper")
   eval "${definition/#"$helper"/fixture_real_$helper}"
 done
@@ -1838,6 +1840,53 @@ sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-
   ! -e /boot/EFI/Linux/contract_linux.efi && $(find /boot -type f | wc -l) == 2 &&
   -z $(find /boot -type f ! -name '.omasecboot-*') ]]
 printf 'PASS: fresh stages and readiness plan recorded in fresh namespace\n'
+# A4b: apply the readiness plan through the real executor start and the real
+# JVM apply worker; the attempt then seals failed with preserve policy.
+touch /work/recovery-apply-active
+for helper in publication_authority_handler run_bound_producer_session; do
+  definition=$(declare -f "fixture_real_$helper")
+  eval "${definition/#fixture_real_$helper/$helper}"
+done
+# The worker fixture is a JVM launcher, as in the original case: the same seam
+# binds the actual JVM and main class; every other session check is production code.
+producer_session_worker_is_bound() {
+  [[ $(control_file_identity "/proc/$1/exe") == "$(control_file_identity /jdk/bin/java)" ]] &&
+    process_cmdline_has_argument "$1" ProducerSessionContract
+}
+exec {native_fd}</fixtures/native
+printf 'executor\n'
+publication_start_recovery_executor "$native_fd"
+[[ $_publication_apply_phase == true ]]
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-executor
+printf 'apply\n'
+rc=0
+run_bound_producer_session "$native_fd" "$native_fd" "$_publication_invocation" publication_authority_handler 30 publish-apply publish-recovery-copy-signed </work/user-input || rc=$?
+exec {native_fd}<&-
+printf '%s\n' "$rc" >/work/recovery-apply-result
+printf '%s\n' "$_producer_session_result" >/work/recovery-apply-terminal.json
+[[ $rc == 0 ]]
+json_is '.supervision_status == 0 and .worker_status == 0 and .decoder_status == 0 and .protocol_complete and .completion_acknowledged' "$_producer_session_result"
+read_transaction_manifest "$_transaction_id"
+json_is '.status == "transition" and .current_phase == null and (.domain_records | all(. == null)) and
+  (.publication_records | length == 17 and all(.schema_version == 2))' "$_manifest_json"
+kinds=$(jq -r '.publication_records[].path' <<<"$_manifest_json" | while IFS= read -r path; do jq -r '.kind' "$path"; done | jq -Rsc 'split("\n") | map(select(length > 0))')
+printf '%s\n' "$kinds" >/work/recovery-apply-kinds.json
+json_is '.[11:] == ["recovery-executor","recovery-effect-pending","recovery-effect-applied","recovery-effect-pending","recovery-effect-applied","recovery-result"]' "$kinds"
+# The siblings became the canonical targets with the exact desired bytes, and
+# the written EFI target really verifies under the attempt policy.
+cmp -- "$(jq -r '.puts[0].retained' <<<"$_publication_plan")" /boot/EFI/Linux/contract_linux.efi
+cmp -- "$(jq -r '.configuration.retained' <<<"$_publication_plan")" /boot/limine.conf
+[[ $(find /boot -type f | wc -l) == 2 && -z $(find /boot -name '.omasecboot-*') && -e /work/context-worker-apply ]]
+verify_publication_input /boot/EFI/Linux/contract_linux.efi
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-applied
+if commit_lifecycle_recovery_attempt; then exit 90; fi
+rollback_and_mark_recovery 37 'fixture apply sealed'
+release_publication_pins
+[[ $(jq -r '.state' /work/state/lifecycle.json) == recovery-required ]]
+cmp -- "$(jq -r '.puts[0].retained' <<<"$_publication_plan")" /boot/EFI/Linux/contract_linux.efi
+cmp -- "$(jq -r '.configuration.retained' <<<"$_publication_plan")" /boot/limine.conf
+sha256sum --check /work/recovery-original-sha256 >/work/recovery-original-check-sealed
+printf 'PASS: readiness plan applied by the real worker and sealed preserved in fresh namespace\n'
 release_boot_repair_lock
 printf 'PASS: exact signed PE and literal configuration retained in fresh namespace\n'
 SCRIPT
@@ -1904,6 +1953,11 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
   # An outer watchdog makes a broken internal deadline a bounded test failure.
   watchdog=45
   [[ $name != publish-* ]] || watchdog=300
+  # The recovery-copy namespace runs the whole preparatory attempt (copies,
+  # context, authorizations, stages, readiness) and then the real executor
+  # start and JVM apply worker after the original preparation; each validated
+  # journal read re-proves the sealed root, so it needs a longer budget.
+  [[ $name != publish-recovery-copy-signed ]] || watchdog=1800
   mount_case=false
   case $name in
     publish-core-directory-bind|publish-native-namespace|publish-native-directory-bind|publish-native-stage-bind|publish-core-death-directory-bind|publish-core-config-bind) mount_case=true ;;
@@ -2631,17 +2685,24 @@ for name in supervision-races decoder-exit-0 decoder-exit-19 success nonzero-aft
     cmp "$work/recovery-activity-before" "$work/recovery-activity-after" || die 'copy invoked signing, context acquisition or the producer'
     jq -se '[.[].body.id] == ["resource-0","configuration"] and all(.[]; .reference.schema_version == 2 and
       .body.classification == "allowed-absence")' "$work/recovery-authorizations.jsonl" >/dev/null || die 'fresh authorization evidence incomplete'
-    jq -se 'length == 2 and first.certificate_der_sha256 == last.certificate_der_sha256 and
-      all(.[]; .isolated_arguments and .clean_environment)' "$work/context-wrapper.jsonl" >/dev/null || die 'fresh context did not reuse the real collector wrapper once'
-    jq -se '([.[] | select(.phase == "recovery" and .event == "invoke")] | length == 1 and all(.[]; .operation == "verify" and .bound == true)) and
-      any(.[]; .event == "result" and .phase == "recovery" and .operation == "verify" and .status == 0 and
-        .tool_result == "real" and (.verification | any(.is_signed == 1)))' "$work/signer-commands.jsonl" >/dev/null ||
-      die 'fresh authorization signer activity is not exactly one real bound verification'
+    # Four acquisitions through the real wrapper: the original session, the fresh
+    # context, the executor start and the terminal re-verification, one certificate.
+    jq -se 'length == 4 and (map(.certificate_der_sha256) | unique | length == 1) and
+      all(.[]; .isolated_arguments and .clean_environment)' "$work/context-wrapper.jsonl" >/dev/null || die 'fresh authority did not reuse the real collector wrapper exactly four times'
+    jq -se '([.[] | select(.phase == "recovery" and .event == "invoke")] | length == 6 and all(.[]; .operation == "verify" and .bound == true)) and
+      ([.[] | select(.event == "result" and .phase == "recovery" and .operation == "verify" and .status == 0 and
+        .tool_result == "real" and (.verification | any(.is_signed == 1)))] | length == 6)' "$work/signer-commands.jsonl" >/dev/null ||
+      die 'fresh authority signer activity is not exactly six real bound verifications (copy; copy and stage; target at complete, terminal and the fixture proof)'
     [[ -s $work/recovery-original-check-authorized && ! -e $work/context-host-query ]] || die 'fresh authorization changed originals or queried the host'
     jq -se '[.[].body.id] == ["resource-0","configuration"] and all(.[]; .reference.schema_version == 2 and .body.before.kind == "absent")' \
       "$work/recovery-stages.jsonl" >/dev/null || die 'fresh stage evidence incomplete'
     jq -e '.format == "limine-prepared-publication" and (.puts | length == 1)' "$work/recovery-ready.json" >/dev/null || die 'readiness plan missing'
-    [[ -s $work/recovery-original-check-ready && ! -e $work/context-worker-apply && ! -e $work/context-worker-prepare-recovery ]] || die 'readiness changed originals or ran a worker'
+    [[ -s $work/recovery-original-check-ready && ! -e $work/context-worker-prepare-recovery ]] || die 'readiness changed originals or ran a prepare worker'
+    [[ $(cat "$work/recovery-apply-result") == 0 && -e $work/context-worker-apply && -s $work/recovery-original-check-executor &&
+      -s $work/recovery-original-check-applied && -s $work/recovery-original-check-sealed ]] || die 'apply did not complete through the real worker with originals intact'
+    jq -e '.[11:] == ["recovery-executor","recovery-effect-pending","recovery-effect-applied","recovery-effect-pending","recovery-effect-applied","recovery-result"]' \
+      "$work/recovery-apply-kinds.json" >/dev/null || die 'apply records incomplete'
+    jq -e '.supervision_status == 0 and .worker_status == 0 and .decoder_status == 0 and .protocol_complete' "$work/recovery-apply-terminal.json" >/dev/null || die 'apply terminal not clean'
     cat "$work/recovery-copy.stdout"
   fi
   printf 'PASS: Core producer session/%s\n' "$name"

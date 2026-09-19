@@ -49,8 +49,10 @@ publication_authority_begin() {
   _publication_invocation=$invocation
   _publication_intent=$intent
   _publication_retained=()
+  # Every original session starts in original mode with the apply phase
+  # closed, whatever attempt this process ran before.
+  publication_reset_attempt
   if json_is 'has("publication")' "$intent"; then
-    publication_reset_attempt
     _publication_mount_namespace=$(publication_namespace_value) || return 1
     publication_parent_binding "$(dirname "$config")" || return 1
     publication_collect_stable_context || return 1
@@ -83,11 +85,20 @@ publication_authority_handler() {
   case $event in
     launch)
       [[ $(jq -r '.invocation' <<<"$document") == "$_publication_invocation" ]] || return 1
-      # A rejected same-invocation retry may have changed preparation variables.
-      # Only the exact durable original intent can authorize either worker.
-      find_publication_authority_part "$_publication_invocation" intent || return 1
-      json_is '.[0] == .[1]' "[$_publication_intent,$_publication_found_body]" || return 1
-      sync_publication_reference "$_publication_found_reference" || return 1
+      if [[ $_publication_attempt_mode == recovery ]]; then
+        # A recovery attempt has no prepare session: only its executor launches,
+        # and its intent authority is the sealed original basis, re-read now.
+        [[ ${_publication_apply_phase:-false} == true ]] || return 1
+        publication_recovery_attempt_parts || return 1
+        json_is '.[0] == .[1].intent and .[2] == .[1].basis.invocation' \
+          "[$_publication_intent,$_publication_recovery_attempt_parts,\"$_publication_invocation\"]" || return 1
+      else
+        # A rejected same-invocation retry may have changed preparation variables.
+        # Only the exact durable original intent can authorize either worker.
+        find_publication_authority_part "$_publication_invocation" intent || return 1
+        json_is '.[0] == .[1]' "[$_publication_intent,$_publication_found_body]" || return 1
+        sync_publication_reference "$_publication_found_reference" || return 1
+      fi
       if json_is 'has("publication")' "$_publication_intent"; then
         [[ -n $_publication_stable_context ]] || return 1
         find_publication_authority_part "$_publication_invocation" context || return 1
@@ -98,7 +109,7 @@ publication_authority_handler() {
         --argjson owner "$(manifest_owner_json "$self")" --arg boot "$(boot_id_value)" \
         '{worker:$worker,supervisor:$owner,boot_id:$boot}') || return 1
       if [[ ${_publication_apply_phase:-false} == true ]]; then
-        append_publication_record "$_publication_invocation" executor "$body"
+        append_publication_record "$_publication_invocation" "$(publication_record_kind executor)" "$body"
       else append_publication_record "$_publication_invocation" session "$body"; fi
       ;;
     request)
@@ -145,10 +156,10 @@ publication_authority_handler() {
         else
           if json_is '.supervision_status == 0' "$document" && ! { publication_all_effects_applied && publication_verify_stable_context; }; then
             document=$(jq -c '.supervision_status=1' <<<"$document") || return 1
-            append_publication_record "$_publication_invocation" terminal "$document" || return 1
+            append_publication_record "$_publication_invocation" "$(publication_record_kind terminal)" "$document" || return 1
             return 1
           fi
-          append_publication_record "$_publication_invocation" terminal "$document"
+          append_publication_record "$_publication_invocation" "$(publication_record_kind terminal)" "$document"
         fi
       else append_publication_record "$_publication_invocation" terminal "$document"; fi
       ;;
