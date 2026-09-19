@@ -66,7 +66,7 @@ sed -i '/^NoExtract/d' /etc/pacman.conf
 # Arch provides every dependency except limine-mkinitcpio-hook, which comes
 # from the Omarchy repository and is assumed here.
 logged "$build/dependencies.log" "dependency install failed" \
-  pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep tar util-linux systemd pacman jq gum sbctl limine
+  pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep sed tar util-linux systemd pacman jq gum sbctl limine
 assume=(--assume-installed limine-mkinitcpio-hook=1.38.0-1.1)
 
 logged "$build/install.log" "package install failed" pacman -U --noconfirm "${assume[@]}" "$package"

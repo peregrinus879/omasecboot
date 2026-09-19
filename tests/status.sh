@@ -20,11 +20,36 @@ not_set_up_is_not_a_problem() {
   [[ $output == *'sudo omasecboot setup'* ]] || fail_test "no next step: ${output}"
 }
 
-clean_machine_reports_nothing_to_do() {
+clean_machine_names_the_firmware_step() {
   local output
   set_up_machine
   output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
-  [[ $output == *'Nothing to do'* && $output == *'rescue loader'* ]] || fail_test "report: ${output}"
+  [[ $output == *'rescue loader'* && $output == *'not enrolled in the firmware yet'* ]] || fail_test "report: ${output}"
+  [[ $output == *'Next: sudo omasecboot setup for the firmware step'* ]] || fail_test "next step: ${output}"
+}
+
+# The firmware half, as status sees it after each step of setup.
+enrollment_state_chooses_the_next_step() {
+  local output
+  set_up_machine
+  delete_platform_key
+  { read_enrollment_plan && enroll_local_keys append; } >/dev/null || fail_test "fixture enrollment"
+  output=$(show_status 2>&1) || fail_test "a freshly enrolled machine reported problems: ${output}"
+  [[ $output == *'Next: reboot, then run'* ]] || fail_test "the enrollment's own boot: ${output}"
+  set_mode_variable SetupMode 0
+  output=$(show_status 2>&1) || fail_test "an enrolled machine reported problems: ${output}"
+  [[ $output == *'Your keys are enrolled in the firmware'* && $output == *'Next: turn Secure Boot on'* ]] || fail_test "report: ${output}"
+  set_mode_variable SecureBoot 1
+  output=$(show_status 2>&1) || fail_test "a complete machine reported problems: ${output}"
+  [[ $output == *'Secure Boot is on'* && $output == *'Nothing to do'* ]] || fail_test "report: ${output}"
+
+  # A firmware update or a CMOS reset put the factory keys back.
+  write_key_variable PK "$(x509_list "$OEM_OWNER" 'OEM platform key' | base64 -w0)"
+  output=$(show_status 2>&1) && fail_test "Secure Boot on without the local keys passed"
+  [[ $output == *'does not hold your keys'* && $output == *'Next: resolve what is marked above'* ]] || fail_test "report: ${output}"
+  : >"$FIX/run/sbctl-owner-changed"
+  output=$(show_status 2>&1) && fail_test "unidentifiable certificates passed"
+  [[ $output == *'which certificates are yours'* ]] || fail_test "report: ${output}"
 }
 
 problems_set_exit_status() {
@@ -133,7 +158,8 @@ old_snapshots_are_a_note_not_a_problem() {
 }
 
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
-run_case clean-machine-reports-nothing-to-do clean_machine_reports_nothing_to_do
+run_case clean-machine-names-the-firmware-step clean_machine_names_the_firmware_step
+run_case enrollment-state-chooses-the-next-step enrollment_state_chooses_the_next_step
 run_case problems-set-exit-status problems_set_exit_status
 run_case sign-repairs-these sign_repairs_these
 run_case stale-os-hash-needs-setup stale_os_hash_needs_setup

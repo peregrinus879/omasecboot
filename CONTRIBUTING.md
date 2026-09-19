@@ -17,10 +17,10 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 
 ## Layout
 
-- `bin/omasecboot`: the dispatcher and the commands (`setup`, `sign`, `status`, `remove`).
-- `lib/common.sh`: output, file safety, the settings lookup as upstream parses it, the boot lock. `lib/checks.sh`: preconditions and prompts. `lib/files.sh`: the EFI files on the ESP, history and fallback classification, signature state, sbctl's file list. `lib/firmware.sh`: the firmware's mode variables. `lib/limine.sh`: managed settings and originals, `limine.conf` facts, the loader proof and staged rebuild, the fallback, the watcher, the way back to stock. `lib/sign.sh`: the converge-and-verify pass. `lib/status.sh`: the report.
+- `bin/omasecboot`: the dispatcher and the commands (`setup` with its one firmware step per run, `sign`, `status`, `remove`).
+- `lib/common.sh`: output, file safety, the settings lookup as upstream parses it, the boot lock. `lib/checks.sh`: preconditions and prompts. `lib/files.sh`: the EFI files on the ESP, history and fallback classification, signature state, sbctl's file list. `lib/firmware.sh`: the firmware's mode variables, the signature-list reader, the backup, the enrollment plan with its proofs and the per-variable enrollment. `lib/limine.sh`: managed settings and originals, `limine.conf` facts, the loader proof and staged rebuild, the fallback, the watcher, the way back to stock. `lib/sign.sh`: the converge-and-verify pass. `lib/status.sh`: the report.
 - `limine-hooks/90-omasecboot-sign`: the only hook. `systemd/omasecboot-watch@.path` and `.service`: the `limine.conf` watcher templates. `PKGBUILD`, `Makefile`.
-- `tests/lib/harness.sh`: the fixture machine and the stub tools. `tests/*.sh`: the suites `common`, `limine`, `sign`, `status`, `commands`, `install` and `package`; `tests/container.sh` runs as root in a disposable container only; `tests/acceptance-record.sh` records hardware acceptance rows.
+- `tests/lib/harness.sh`: the fixture machine and the stub tools; `tests/lib/esl.sh`: signature-list builders shared with the sbctl stub. `tests/*.sh`: the suites `common`, `limine`, `sign`, `status`, `firmware`, `commands`, `install` and `package`; `tests/container.sh` runs as root in a disposable container only; `tests/acceptance-record.sh` records hardware acceptance rows.
 
 ## Conventions
 

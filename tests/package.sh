@@ -39,6 +39,7 @@ limine
 limine-mkinitcpio-hook>=1.38.0
 pacman
 sbctl>=0.18
+sed
 systemd
 tar
 util-linux

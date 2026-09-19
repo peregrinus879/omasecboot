@@ -65,12 +65,117 @@ setup_preflight() {
   }
 }
 
+# print_entries ROWS: "NAME entry" rows, each as a line a person can act on.
+print_entries() {
+  local name type owner digest
+  while read -r name type owner digest; do
+    [[ -z $name ]] || print_message "      ${name}: $(describe_entry "$type" "$owner" "$digest")" >&2
+  done <<<"$1"
+}
+
+# Replacing the Platform Key changes what Windows measures at boot.
+warn_about_windows_encryption() {
+  warn "If Windows uses BitLocker or Device Encryption on this machine, have its recovery key at hand before you go on"
+}
+
+# Setup Mode: write the local keys. The proof is made against the backup taken
+# while a PK was in place; a machine that reached Setup Mode before its first
+# setup has only a backup of what was left, and is told so.
+setup_enrollment() {
+  local backup path lost question name
+  [[ $(read_mode_variable SetupMode) == 1 ]] || die "The firmware has no Platform Key but does not report Setup Mode; nothing was written"
+  if ! backup=$(reference_backup); then
+    backup=$(latest_firmware_backup) || backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
+    warn "The only backup was taken in Setup Mode, so this tool cannot tell what the firmware's key menu removed"
+  fi
+  lost=$(list_lost_entries "$backup" current) || die "Could not compare the firmware's keys with the backup ${backup}"
+  if append_is_safe "$backup"; then
+    path=append
+  elif read_rebuild_plan && rebuild_applies; then
+    path=rebuild
+  else
+    path=refuse
+  fi
+
+  case $path in
+    append)
+      append_plan_is_sound || die "sbctl's plan is not the firmware's entries plus your certificates; nothing was written"
+      note "Your certificates join the $(count_foreign_entries) KEK and db entries the firmware holds; nothing is removed"
+      question="Write your keys to the firmware? The Platform Key becomes yours."
+      ;;
+    rebuild)
+      rebuild_plan_is_sound || die "sbctl's rebuild plan does not hold your certificates; nothing was written"
+      lost=$(list_lost_entries "$backup" planned) || die "Could not compare the rebuild plan with the backup ${backup}"
+      warn "The firmware's key menu cleared KEK and db together with the Platform Key. sbctl can put back $(describe_rebuild_sources)."
+      if [[ -n $lost ]]; then
+        warn "These entries of the backup cannot be put back and will no longer be trusted:"
+        print_entries "$lost"
+      fi
+      dbx_equals_backup "$backup" ||
+        warn "The revocation list (dbx) differs from the backup. This tool never writes it; a firmware update or fwupd restores it."
+      question="Rebuild KEK and db as described above, and write your keys to the firmware?"
+      ;;
+    refuse)
+      fail "The firmware's keys are in a state this tool will not write to:"
+      print_entries "$lost"
+      for name in KEK db; do
+        [[ -n $(foreign_entries "$name") ]] || print_message "      ${name} holds no entries besides yours, while the other list was kept" >&2
+      done
+      dbx_equals_backup "$backup" || print_message "      The revocation list (dbx) differs from the backup" >&2
+      die "Restore the factory keys in the firmware, run ${BOLD}sudo omasecboot setup${NC}, then delete only the Platform Key (PK)."
+      ;;
+  esac
+
+  note "The backup of the keys this machine trusted is in ${backup}"
+  warn_about_windows_encryption
+  confirm "the key enrollment" "$question" || exit 1
+  enroll_local_keys "$path" || die "The enrollment stopped. The firmware stays in Setup Mode; run ${BOLD}sudo omasecboot setup${NC} again."
+  { read_enrollment_plan && firmware_is_enrolled; } || die "The firmware does not hold your keys after the write; run ${BOLD}sudo omasecboot setup${NC} again."
+  pass "Your keys are enrolled"
+  act "Reboot, then run ${BOLD}sudo omasecboot setup${NC} once more"
+}
+
+# The firmware half of setup: one step per run, chosen from what the firmware
+# holds. first_run: this invocation created the "enabled" marker, so it ends
+# with an instruction and leaves any firmware write to the next one.
+setup_firmware_step() {
+  local first_run=$1 backup
+  read_enrollment_plan || die "Could not ask sbctl what an enrollment would write"
+  # Everything after this rests on knowing the local certificates, so it is
+  # settled before the user is asked to delete anything.
+  local_certificates_are_identified || die "sbctl's export does not show exactly one certificate of yours for each of db, KEK and PK"
+  if firmware_is_enrolled; then
+    # SetupMode keeps reading 1 in the boot that wrote the PK (C6).
+    if [[ $(read_mode_variable SetupMode) == 1 ]]; then
+      act "Your keys are enrolled. Reboot, then run ${BOLD}sudo omasecboot setup${NC} once more"
+    elif [[ $(read_mode_variable SecureBoot) == 1 ]]; then
+      pass "Secure Boot is on with your keys. Setup is complete."
+    else
+      pass "Your keys are enrolled and every boot file is proved"
+      act "Reboot into the firmware and turn Secure Boot on"
+    fi
+  elif platform_key_is_present; then
+    backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
+    note "The keys this machine trusts now are backed up in ${backup}"
+    warn_about_windows_encryption
+    act "Reboot into the firmware and delete only the Platform Key (PK); keep KEK, db and dbx. Some firmware shows its key menu only while Secure Boot is set to enabled."
+    act "Then run ${BOLD}sudo omasecboot setup${NC} again"
+  elif [[ $first_run == true ]]; then
+    reference_backup >/dev/null || take_firmware_backup >/dev/null || die "Could not back up the firmware's key variables"
+    act "The firmware is in Setup Mode. Run ${BOLD}sudo omasecboot setup${NC} again to enroll your keys"
+  else
+    setup_enrollment
+  fi
+}
+
 cmd_setup() {
+  local first_run=true
   no_arguments "$@"
   check_root setup
   header "Setup"
   setup_preflight || exit 1
   require_terminal || exit 1
+  ! is_set_up || first_run=false
 
   if sbctl_keys_exist; then
     pass "Signing keys exist"
@@ -100,7 +205,9 @@ cmd_setup() {
   pass "This machine's boot files are ready for Secure Boot"
   [[ $(fallback_state) != absent ]] ||
     warn "There is no fallback loader. After a limine.conf mistake only rescue media could boot this machine; ${BOLD}sudo limine-install --fallback${NC} adds one."
-  act "Take a snapshot now, so a later restore brings the keys and this tool back with it"
+  [[ $first_run == false ]] ||
+    act "Take a snapshot now, so a later restore brings the keys and this tool back with it"
+  setup_firmware_step "$first_run"
 }
 
 cmd_sign() {

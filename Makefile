@@ -10,7 +10,7 @@ UNITDIR     = /usr/lib/systemd/system
 HOOKDIR     = /etc/boot/hooks/post.d
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) limine-hooks/90-omasecboot-sign \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
-TEST_SUITES = common limine sign status commands install package
+TEST_SUITES = common limine sign status firmware commands install package
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 
 .PHONY: install package lint test $(TEST_TARGETS)

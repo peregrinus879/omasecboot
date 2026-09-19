@@ -16,6 +16,7 @@ depends=(
   'findutils'
   'gawk'
   'grep'
+  'sed'
   'tar'
   'util-linux'
   'systemd'

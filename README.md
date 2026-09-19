@@ -5,7 +5,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Development status, 2026-09-20:** no release exists and this build has not been accepted on hardware. It prepares and maintains the boot files (`setup`, `sign`, `status`, `remove`). Enrolling your keys in the firmware and the Windows boot entry are designed in [docs/spec.md](docs/spec.md) and not built yet. Do not turn Secure Boot on with this build.
+> **Development status, 2026-09-20:** no release exists and this build has not been accepted on hardware. It prepares and maintains the boot files and enrolls your keys in the firmware (`setup`, `sign`, `status`, `remove`); the Windows boot entry is designed in [docs/spec.md](docs/spec.md) and not built yet. Until the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) has passed, use it only on a machine you can afford to recover.
 
 ## Why
 
@@ -42,10 +42,16 @@ sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
 
 | Command | What it does |
 | --- | --- |
-| `sudo omasecboot setup` | Creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, and enables the `limine.conf` watcher. It also removes the sbctl rows that would make sbctl sign a snapshot image or the fallback loader. Safe to run again. |
+| `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the `limine.conf` watcher, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: proves that nothing but the Platform Key is gone, asks once, and adds your certificates to the keys the firmware holds. After a reboot it tells you to turn Secure Boot on. On a machine coming from an earlier version it also removes the sbctl rows that would make sbctl sign a snapshot image or the fallback loader. |
 | `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signed file, stale hashes, harmful sbctl rows, and leftovers of earlier installs, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
 | `sudo omasecboot sign` | The same converge-and-verify pass the hook runs. Safe at any time; exits 75 when another tool is working on the boot files. |
 | `sudo omasecboot remove` | Returns the Limine settings and boot files to stock. Refuses while Secure Boot is on. Your keys stay. |
+
+## How your keys get into the firmware
+
+OmaSecBoot appends: it adds your certificates to the KEK and db entries the firmware already holds and replaces only the Platform Key, which you delete yourself in the firmware's menu. The manufacturer's and Microsoft's certificates stay, including any that Windows or a firmware update added, and the revocation list (dbx) is never written. Before it asks you to delete anything it copies PK, KEK, db and dbx byte for byte to `/var/lib/omasecboot/firmware-backup/`, and before it writes it compares the firmware with that backup and refuses when more than the Platform Key is gone. Each variable is written on its own and read back, so an interrupted run is finished by running `setup` again.
+
+Some firmware clears every key when it enters Setup Mode. Adding your certificates to empty lists would leave the machine without the certificates its option ROMs and Windows need, so `setup` never does that: it offers to rebuild KEK and db from your certificates, Microsoft's and the firmware's built-in defaults (Microsoft's alone where the firmware does not expose its defaults), and first lists every backup entry that this cannot bring back. Anything in between, some entries gone and others kept, is refused with the list and the way back.
 
 ## What it never touches
 
@@ -72,11 +78,16 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 | `The Limine loader is not sealed with the current limine.conf` | The loader would refuse to start, with Secure Boot on or off | `sudo omasecboot sign` before you reboot. If the machine is already down, see "If the machine does not boot" |
 | `Stale path hash in limine.conf` | An OS entry still carries a hash of a file that has changed since | `sudo omasecboot setup`, which regenerates the entries |
 | `An earlier install of this tool is still present` | Files of a pre-package install remain, and their hooks keep running the old tool | Run the removal command that `setup` prints, then `setup` again |
+| `The firmware's keys are in a state this tool will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `setup`, then delete only the Platform Key |
+| `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
 | A snapshot entry does not boot with Secure Boot on | The snapshot image predates setup and is unsigned | Boot it with Secure Boot off, or let snapshot rotation retire it |
 
 ## Limits
 
+- Your keys being enrolled does not mean Secure Boot is on; `status` reports both.
+- After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK stays, so the db and dbx updates that Microsoft signs can still be applied.
+- The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.
 - A snapshot older than `setup` takes the tool, the keys and the settings with it when it is restored, while the ESP and the firmware keep the signed state. Keep Secure Boot off after such a restore until `setup` has run again.
 - The Omarchy installer ISO does not boot under Secure Boot; OmaSecBoot is for installed systems.
 

@@ -36,6 +36,9 @@ run_case() {
 
 finish_suite() { printf '%s tests passed (%s cases)\n' "$SUITE_NAME" "$CASES_RUN"; }
 
+# shellcheck source=tests/lib/esl.sh
+source "$ROOT_DIR/tests/lib/esl.sh"
+
 # --- The fixture machine ---------------------------------------------------------
 
 readonly FIXTURE_MARKER='++CONFIG_B2SUM_SIGNATURE++'
@@ -69,11 +72,15 @@ fixture_machine() {
   printf 'ENABLE_UKI=yes\nENABLE_LIMINE_FALLBACK=yes\n' >"$FIX/etc/layers/20-omarchy.conf"
   printf 'ESP_PATH="/boot"\nKERNEL_CMDLINE[default]+="quiet splash"\n' >"$FIX/etc/default-limine"
   write_limine_conf hashed
-  # SetupMode 0 and SecureBoot 0.
-  printf '\x06\x00\x00\x00\x00' >"$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
-  printf '\x06\x00\x00\x00\x00' >"$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  # Factory keys, SetupMode 0 and SecureBoot 0.
+  write_key_variable PK "$(x509_list "$OEM_OWNER" 'OEM platform key' | base64 -w0)"
+  write_key_variable KEK "$({ x509_list "$OEM_OWNER" 'OEM KEK'; x509_list "$MICROSOFT_OWNER" 'Microsoft KEK'; } | base64 -w0)"
+  write_key_variable db "$({ x509_list "$MICROSOFT_OWNER" 'Microsoft Windows CA'; x509_list "$MICROSOFT_OWNER" 'Microsoft UEFI CA'; x509_list "$OEM_OWNER" 'OEM db'; } | base64 -w0)"
+  write_key_variable dbx "$(sha256_list "$MICROSOFT_OWNER" "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" | base64 -w0)"
+  set_mode_variable SetupMode 0
+  set_mode_variable SecureBoot 0
   install_stubs
-  export FIX PATH="$FIX/bin:$PATH"
+  export FIX ROOT_DIR PATH="$FIX/bin:$PATH"
   load_library
 }
 
@@ -95,6 +102,33 @@ EOF
 }
 
 set_mode_variable() { printf '%b' "\\x06\\x00\\x00\\x00\\x0$2" >"$FIX/efivars/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
+
+readonly OEM_OWNER=11111111111111111111111111111111
+readonly MICROSOFT_OWNER=bd9afa775903324dbd6028f4e78f784b
+
+key_variable_path() {
+  case $1 in
+    db | dbx) printf '%s/efivars/%s-d719b2cb-3d3a-4596-a3bc-dad00e67656f\n' "$FIX" "$1" ;;
+    *) printf '%s/efivars/%s-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' "$FIX" "$1" ;;
+  esac
+}
+
+# write_key_variable NAME BASE64-OF-THE-LISTS: efivarfs puts four attribute
+# bytes before the data. The lists travel as base64 because they hold NULs.
+write_key_variable() {
+  { printf '\x27\x00\x00\x00'; base64 -d <<<"$2"; } >"$(key_variable_path "$1")"
+}
+
+# What the firmware's key menu does on the reference machine: only the PK
+# goes, and the firmware enters Setup Mode (C6).
+delete_platform_key() {
+  rm "$(key_variable_path PK)"
+  set_mode_variable SetupMode 1
+}
+
+# Rows as the library prints them, computed here from the known fixture
+# content, so an assertion never depends on the reader under test.
+x509_row() { printf '%s %s %s\n' "$ESL_X509_TYPE" "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"; }
 
 file_is_fixture_signed() { [[ $(tail -c ${#FIXTURE_SIGNATURE} "$1") == "$FIXTURE_SIGNATURE" ]]; }
 
@@ -156,12 +190,33 @@ fixture_overrides() {
   check_architecture() { :; }
   check_uefi() { :; }
   require_terminal() { :; }
-  confirm() { [[ ${CONFIRM_ANSWER:-yes} == yes ]]; }
+  confirm() {
+    printf 'QUESTION: %s\n' "$2"
+    [[ ${CONFIRM_ANSWER:-yes} == yes ]]
+  }
 }
 
 # --- Stub tools --------------------------------------------------------------------
 
 install_stubs() {
+  # sbctl 0.18 enroll-keys (C4): every entry sbctl writes is owned by the GUID
+  # its status reports; --append adds the local certificate to what each
+  # variable holds, again on every run (run/sbctl-append-is-idempotent models
+  # a later sbctl that stops doing that); --microsoft and
+  # --firmware-builtin build from the local certificate, Microsoft's and the
+  # firmware's dbDefault and KEKDefault instead, and the PK is always the local
+  # certificate alone in that form; --export esl writes db.esl, KEK.esl and
+  # PK.esl into the current directory and touches nothing; a write goes db,
+  # KEK, PK or to the one --partial names, stops at the first error without
+  # rolling back (run/sbctl-enroll-fails-at-NAME), and is refused without
+  # --ignore-immutable because the kernel marks the variables immutable.
+  # Firmware that reports success and keeps the old value is
+  # run/firmware-ignores-writes. The export works with a PK in place and
+  # outside Setup Mode, and nothing works without keys (C4). ASSUMPTIONS:
+  # outside Setup Mode the firmware rejects the write, because nothing it
+  # trusts signed it; and --firmware-builtin fails on firmware without
+  # dbDefault or KEKDefault.
+  #
   # sbctl 0.18 (C4): status reports whether keys exist; create-keys makes
   # them; verify exits 0 and answers with an array of one entry whose
   # is_signed is 1, 0 or -1, or with null for a file it may not read, which
@@ -175,7 +230,70 @@ sig='SIGNED-BY-FIXTURE-KEY'
 signed() { [[ $(tail -c ${#sig} "$1" 2>/dev/null) == "$sig" ]]; }
 printf '%s\n' "sbctl $*" >>"$FIX/run/calls"
 case $1 in
-  status) [[ -e $FIX/sbctl/keys ]] && printf '{"installed":true}\n' || printf '{"installed":false}\n' ;;
+  status)
+    if [[ -e $FIX/sbctl/keys ]]; then
+      guid=01020304-0506-0708-090a-0b0c0d0e0f10
+      [[ ! -e $FIX/run/sbctl-owner-changed ]] || guid=ffffffff-0506-0708-090a-0b0c0d0e0f10
+      [[ ! -e $FIX/run/sbctl-owner-malformed ]] || guid='.*020304-0506-0708-090a-0b0c0d0e0f10'
+      printf '{"installed":true,"guid":"%s"}\n' "$guid"
+    else
+      printf '{"installed":false}\n'
+    fi
+    ;;
+  enroll-keys)
+    source "$ROOT_DIR/tests/lib/esl.sh"
+    [[ -e $FIX/sbctl/keys && ! -e $FIX/run/sbctl-enroll-keys-fails ]] || { printf 'stub: enroll-keys failed\n' >&2; exit 1; }
+    shift
+    append=false microsoft=false builtin=false export=false immutable_ok=false targets=(db KEK PK)
+    while (( $# > 0 )); do
+      case $1 in
+        --append) append=true ;;
+        --microsoft) microsoft=true ;;
+        --firmware-builtin) builtin=true ;;
+        --ignore-immutable) immutable_ok=true ;;
+        --export) [[ $2 == esl ]] || exit 64; export=true; shift ;;
+        --partial) targets=("$2"); shift ;;
+        *) exit 64 ;;
+      esac
+      shift
+    done
+    variable() {
+      case $1 in
+        db | dbx) printf '%s/efivars/%s-d719b2cb-3d3a-4596-a3bc-dad00e67656f\n' "$FIX" "$1" ;;
+        *) printf '%s/efivars/%s-8be4df61-93ca-11d2-aa0d-00e098032b8c\n' "$FIX" "$1" ;;
+      esac
+    }
+    planned() {
+      local name=$1
+      if [[ $append == true ]]; then
+        [[ ! -e $(variable "$name") ]] || tail -c +5 "$(variable "$name")"
+        [[ -e $FIX/run/sbctl-append-is-idempotent && -e $(variable "$name") ]] &&
+          grep -aqF "local ${name} certificate" "$(variable "$name")" ||
+          x509_list 0403020106050807090a0b0c0d0e0f10 "local ${name} certificate"
+        [[ ! -e $FIX/run/sbctl-plans-a-stowaway ]] || x509_list 11111111111111111111111111111111 'stowaway'
+      else
+        x509_list 0403020106050807090a0b0c0d0e0f10 "local ${name} certificate"
+        [[ ! -e $FIX/run/sbctl-plans-a-stowaway || $export == false ]] || x509_list 11111111111111111111111111111111 'stowaway'
+        [[ $name != PK ]] || return 0
+        [[ $microsoft == false ]] || x509_list bd9afa775903324dbd6028f4e78f784b "Microsoft ${name} as sbctl ships it"
+        if [[ $builtin == true ]]; then
+          [[ -e $(variable "${name}Default") ]] || exit 1
+          tail -c +5 "$(variable "${name}Default")"
+        fi
+      fi
+    }
+    if [[ $export == true ]]; then
+      for name in db KEK PK; do planned "$name" >"${name}.esl" || exit 1; done
+      exit 0
+    fi
+    [[ $immutable_ok == true ]] || exit 1
+    [[ $(od -An -tu1 -j4 -N1 "$(variable SetupMode)" | tr -d ' ') == 1 ]] || exit 1
+    for name in "${targets[@]}"; do
+      [[ ! -e $FIX/run/sbctl-enroll-fails-at-${name} ]] || exit 1
+      [[ -e $FIX/run/firmware-ignores-writes ]] || { printf '\x27\x00\x00\x00'; planned "$name"; } >"$FIX/run/variable.new"
+      [[ -e $FIX/run/firmware-ignores-writes ]] || mv "$FIX/run/variable.new" "$(variable "$name")"
+    done
+    ;;
   create-keys) : >"$FIX/sbctl/keys" ;;
   verify)
     if [[ -e $FIX/run/sbctl-cannot-read || -z ${ESP_PATH:-} || $3 != "$ESP_PATH/"* ]]; then

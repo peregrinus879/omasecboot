@@ -6,7 +6,7 @@
 # only setup repairs, blocking_problem what no command of this tool repairs,
 # which includes everything that could not be read. The next step is chosen
 # from the worst kind seen.
-_status_problems=0 _status_next=sign
+_status_problems=0 _status_next=sign _status_firmware=pending
 problem() {
   fail "$@"
   _status_problems=$((_status_problems + 1))
@@ -62,6 +62,21 @@ show_firmware_status() {
     note "Secure Boot is off"
   fi
   [[ $setup_mode == 0 ]] || note "The firmware is in Setup Mode"
+  # Without keys there is no certificate to look for; the files section says so.
+  is_set_up && sbctl_keys_exist || return 0
+  if ! read_enrollment_plan 2>/dev/null || ! local_certificates_are_identified; then
+    blocking_problem "Could not tell from sbctl which certificates are yours, so the firmware's keys cannot be judged"
+  elif firmware_is_enrolled; then
+    pass "Your keys are enrolled in the firmware"
+    _status_firmware=enrolled
+    # SetupMode keeps reading 1 in the boot that wrote the PK (C6).
+    [[ $setup_mode == 0 ]] || _status_firmware=reboot
+    [[ $secure_boot == 0 ]] || _status_firmware=complete
+  elif [[ $secure_boot == 1 ]]; then
+    blocking_problem "Secure Boot is on, but the firmware does not hold your keys: it will refuse these boot files. Turn Secure Boot off, then run setup."
+  else
+    note "Your keys are not enrolled in the firmware yet"
+  fi
 }
 
 show_settings_status() {
@@ -161,7 +176,12 @@ show_next_step() {
   if ! is_set_up; then
     act "Next: ${BOLD}sudo omasecboot setup${NC}"
   elif (( _status_problems == 0 )); then
-    act "Nothing to do"
+    case $_status_firmware in
+      complete) act "Nothing to do" ;;
+      reboot) act "Next: reboot, then run ${BOLD}sudo omasecboot setup${NC} once more" ;;
+      enrolled) act "Next: turn Secure Boot on in the firmware, or run ${BOLD}sudo omasecboot setup${NC} for the steps" ;;
+      pending) act "Next: ${BOLD}sudo omasecboot setup${NC} for the firmware step" ;;
+    esac
   else
     case $_status_next in
       sign) act "Next: ${BOLD}sudo omasecboot sign${NC}" ;;
@@ -175,7 +195,7 @@ show_next_step() {
 # Exit 0 when nothing needs attention, 1 otherwise.
 show_status() {
   local marker
-  _status_problems=0 _status_next=sign
+  _status_problems=0 _status_next=sign _status_firmware=pending
   header "Status"
   show_firmware_status
   if ! is_set_up; then
