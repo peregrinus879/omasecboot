@@ -29,6 +29,15 @@ The design, every decision behind it and the failure table are in [docs/spec.md]
 
 Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images and the ESP mounted as vfat, which is how Omarchy installs. Besides the base system the package depends on `sbctl`, `limine`, `limine-mkinitcpio-hook`, `jq` and `gum`.
 
+## Install
+
+```bash
+make package
+sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
+```
+
+`make package` needs `base-devel` and git and builds from the files of the checkout that git does not ignore. `make install` only stages a package and refuses the live system.
+
 ## Commands
 
 | Command | What it does |
@@ -79,7 +88,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 
 ```bash
 make lint   # bash -n and ShellCheck
-make test   # hermetic suites, about a minute
+make test   # hermetic suites and the package build, about a minute
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. Open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md).

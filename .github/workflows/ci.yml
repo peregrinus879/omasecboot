@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Syntax and ShellCheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git make shellcheck
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Syntax and ShellCheck
+        run: make lint
+
+  hermetic:
+    name: Hermetic suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git jq make diffutils tar util-linux systemd
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the suites as an unprivileged user
+        run: |
+          useradd --create-home builder
+          chown -R builder .
+          runuser -u builder -- env HOME=/home/builder make test-common test-limine test-sign test-status test-commands test-install
+
+  package:
+    name: Package build and privileged install
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git jq diffutils util-linux libarchive
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Unprivileged package build and payload inspection
+        run: |
+          useradd --create-home builder
+          chown -R builder .
+          runuser -u builder -- env HOME=/home/builder bash tests/package.sh
+      - name: Privileged install, dormant hook, upgrade and removal
+        env:
+          OMASECBOOT_DISPOSABLE_ROOT: "1"
+        run: bash tests/container.sh

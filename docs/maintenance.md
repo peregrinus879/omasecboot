@@ -6,7 +6,6 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 - Firmware enrollment ([spec.md](spec.md) D4 and the `setup` row): the backup, the signature-list reader, the proofs, the per-variable append and the confirmation. Done when the enrollment stage of hardware acceptance passes.
 - The Windows entry, the BootNext request and the encryption acknowledgment before the firmware steps (the `windows` commands in the spec). Done when the Windows stage of hardware acceptance passes.
-- The Arch package and CI.
 - The release checklist, the page for Omarchy's side and the acceptance recorder.
 - The real-tool contract suites and the weekly CI job of spec section 11.
 - Hardware acceptance, stages 0 to 6, on at least one machine.
