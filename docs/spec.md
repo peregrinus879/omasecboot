@@ -22,7 +22,9 @@ limine-snapper-sync stores a hash of every snapshot image it keeps and never rew
 
 ### D2. The fallback loader stays raw
 
-Limine checks an enrolled config checksum unconditionally and refuses to start on a mismatch, with Secure Boot on or off [C1]. The fallback loader `EFI/BOOT/BOOTX64.EFI` is therefore left exactly as upstream deploys it, unsealed and unsigned, which makes it the rescue that needs no rescue media: turn Secure Boot off, pick it in the firmware's boot menu, run `sign`. With Secure Boot on the firmware refuses it, so it costs no security, and where `ENABLE_LIMINE_FALLBACK` is yes, Omarchy's default, upstream re-copies it raw on every Limine upgrade anyway [C2]. A machine that Omarchy installed beside another system starts without a fallback [C7], so `setup` offers to add one through `limine-install --fallback`, and only while nothing stands at that path, because upstream's step copies over whatever does [C2]. A fallback that is signed but not sealed, which the comments in upstream's configuration file suggest [C2], would boot under Secure Boot without enforcing `limine.conf`; `status` reports one and `sign` restores the raw copy. The accepted cost: a firmware that loses its Limine boot entry but keeps the keys needs one Secure Boot toggle to recover.
+Limine checks an enrolled config checksum unconditionally and refuses to start on a mismatch, with Secure Boot on or off [C1]. The fallback loader `EFI/BOOT/BOOTX64.EFI` is therefore left exactly as upstream deploys it, unsealed and unsigned, which makes it the rescue that needs no rescue media: turn Secure Boot off, pick it in the firmware's boot menu, run `sign`. With Secure Boot on the firmware refuses it, so it costs no security, and where `ENABLE_LIMINE_FALLBACK` is yes, Omarchy's default, upstream re-copies it raw on every Limine upgrade anyway [C2].
+
+A machine that Omarchy installed beside another system starts without a fallback [C7], so `setup` offers to add one through `limine-install --fallback`, and only while nothing stands at that path, because upstream's step copies over whatever does [C2]. A fallback that is signed but not sealed, which the comments in upstream's configuration file suggest [C2], would boot under Secure Boot without enforcing `limine.conf`; `status` reports one and `sign` restores the raw copy. The accepted cost: a firmware that loses its Limine boot entry but keeps the keys needs one Secure Boot toggle to recover.
 
 ### D3. Watchers re-seal the loader when `limine.conf` or the loader changes
 
@@ -111,7 +113,10 @@ Boot files, on every run:
 Then the firmware step:
 
 - **A Platform Key is in place and it is not the user's.** The keys are backed up, and the user is told to delete only the PK in the firmware.
-- **Setup Mode.** Never in the run that created `enabled`, which ends with an instruction instead. The local certificates are identified first: they are the entries sbctl owns in an export that does not read the firmware [C4], so they are known before, during and after an enrollment and beside an older certificate that rotated keys left behind. Then the proofs of D4, one confirmation (default No) that says the PK is replaced, how many KEK and db entries are kept and where the backup is, and the writes. The result is judged by reading the variables back, never by `SetupMode`, which keeps reading 1 in the boot that wrote the PK [C6].
+- **Setup Mode.** Never in the run that created `enabled`, which ends with an instruction instead.
+  - The local certificates are identified first: they are the entries sbctl owns in an export that does not read the firmware [C4], so they are known before, during and after an enrollment and beside an older certificate that rotated keys left behind.
+  - Then the proofs of D4, one confirmation (default No) that says the PK is replaced, how many KEK and db entries are kept and where the backup is, and the writes.
+  - The result is judged by reading the variables back, never by `SetupMode`, which keeps reading 1 in the boot that wrote the PK [C6].
 - **The user's keys are enrolled.** "Reboot" while `SetupMode` still reads 1; "turn Secure Boot on" after that; "complete" once it is on.
 
 Where Windows or a BitLocker volume is found, or cannot be ruled out, the delete instruction and the enrollment are each preceded by the encryption guidance and one acknowledgment (default No), and the instruction to turn Secure Boot on by a reminder, because each of them changes what Windows measures at boot. A machine without Windows is asked nothing.
@@ -133,7 +138,13 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 
 ### `status`
 
-Read-only. It reports the firmware state and whether the user's keys are enrolled, the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`. On a machine that is not set up it still names leftovers of an earlier install, and it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it. On a set-up machine it ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs; before `setup`, a problem's own line says what to do. Anything that could not be read belongs to the last kind. `--quiet` only sets the exit status.
+Read-only.
+
+- It reports the firmware state and whether the user's keys are enrolled, the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`.
+- On a machine that is not set up it still names leftovers of an earlier install, and it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it.
+- On a set-up machine it ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs; before `setup`, a problem's own line says what to do.
+- Anything that could not be read belongs to the last kind.
+- `--quiet` only sets the exit status.
 
 ### `windows preflight | setup | remove | status | bootnext | available`
 
@@ -146,7 +157,11 @@ Read-only. It reports the firmware state and whether the user's keys are enrolle
 
 ### `remove`
 
-The way back to stock, named as Omarchy names the counterpart of a `setup` [C7]. It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned, and asks once. It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption: it takes the lock, deletes `enabled` so the hook goes quiet, disables the watchers, restores the settings, runs upstream's install, entry generation and reset (their post-hooks sign the primary while keys exist, so the reset comes last), verifies that the primary is upstream's raw executable again, and only then takes the Windows entry and flag out, because `limine.conf` must not change under a sealed loader, and clears `needs-attention`. Keys and firmware backups stay, and so does a fallback loader that `setup` added: it is upstream's raw copy.
+The way back to stock, named as Omarchy names the counterpart of a `setup` [C7].
+
+- It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned, and asks once.
+- It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption: it takes the lock, deletes `enabled` so the hook goes quiet, disables the watchers, restores the settings, runs upstream's install, entry generation and reset (their post-hooks sign the primary while keys exist, so the reset comes last), verifies that the primary is upstream's raw executable again, and only then takes the Windows entry and flag out, because `limine.conf` must not change under a sealed loader, and clears `needs-attention`.
+- Keys and firmware backups stay, and so does a fallback loader that `setup` added: it is upstream's raw copy.
 
 ## 6. Observed states
 
@@ -214,7 +229,11 @@ Any later finding or feature cites a row here or adds one with its evidence.
 
 - Hermetic suites against a fixture machine with stub tools, with a case for every failure-table row that software can simulate. The commands run as processes of their own, so errexit behaves as installed, through the tool's own prompt code, and a command that fails without a line that says why fails its case (section 5). Every stub behaviour cites the section of upstream-contracts.md that records it; anything else is marked as an assumption in the stub. The whole run takes about a minute.
 - Every safety predicate has a named case that fails when the predicate is disabled.
-- Real-tool contract suites, in a sandbox that hides the machine's own keys, firmware, settings and ESP. One runs the real sbctl with keys made for the run and a fixture firmware directory: the export in the forms D4 relies on, what a write produces, `--partial` with `--append`, the owner GUID, the signature and file-list answers. The other runs upstream's own Limine shell code from the installed package on fixture settings, hooks and an ESP: the configuration layers, hook order and exit statuses, the lock, the loader backup, the `limine-install` options, its fallback step with the policy that decides it, and the hooks this tool relies on by name, and one loader through the whole exchange: enrolled and signed by upstream's code and proved by this tool, rebuilt by this tool after `limine.conf` changed, and still proved after upstream's next operation over it. A scheduled CI job reads the versions of sbctl, Limine and Omarchy's Limine tools every day and runs both suites when one of them or the contract code has changed, and at least once a week; a failure opens an issue instead of blocking users. The watchers' `PathChanged` units on vfat are left to stage 1 of acceptance, where systemd and the ESP are the real ones.
+- Real-tool contract suites, in a sandbox that hides the machine's own keys, firmware, settings and ESP.
+  - One runs the real sbctl with keys made for the run and a fixture firmware directory: the export in the forms D4 relies on, what a write produces, `--partial` with `--append`, the owner GUID, the signature and file-list answers.
+  - The other runs upstream's own Limine shell code from the installed package on fixture settings, hooks and an ESP: the configuration layers, hook order and exit statuses, the lock, the loader backup, the `limine-install` options, its fallback step with the policy that decides it, and the hooks this tool relies on by name, and one loader through the whole exchange: enrolled and signed by upstream's code and proved by this tool, rebuilt by this tool after `limine.conf` changed, and still proved after upstream's next operation over it.
+  - A scheduled CI job reads the versions of sbctl, Limine and Omarchy's Limine tools every day and runs both suites when one of them or the contract code has changed, and at least once a week; a failure opens an issue instead of blocking users.
+  - The watchers' `PathChanged` units on vfat are left to stage 1 of acceptance, where systemd and the ESP are the real ones.
 - CI: lint, the hermetic suites, the package build, and installation, upgrade and removal in a container.
 - Outside any software test: Limine's behaviour at boot, firmware writes, and sbctl's signing step inside mkinitcpio. Stages 1 to 3 of acceptance are their evidence.
 
