@@ -71,7 +71,7 @@ Config enrollment is required, not optional: Omarchy's UKIs carry no embedded co
 
 ### Who owns what
 
-Upstream owns the primary loader cycle (raw in the pre-hook, enrolled and signed by `90-limine-enroll-config`), the fallback loader, `snapshots.json`, the history files and `limine.conf`. The one exception in `limine.conf` is the marked Windows block, written only under the lock inside a pass that seals the loader afterwards, or while the loader carries no checksum. sbctl owns its file list and signs rebuilt UKIs through its mkinitcpio hook.
+Upstream owns the primary loader cycle (raw in the pre-hook, enrolled and signed by `90-limine-enroll-config`), the fallback loader, `snapshots.json`, the history files and `limine.conf`. The one exception in `limine.conf` is the Windows entry, written only under the lock inside a pass that seals the loader afterwards, or while the loader carries no checksum. Upstream's rewrites keep a foreign entry and drop comment lines beside it [C8], so the entry carries no markers: it is this tool's when its header is `/Windows` and its body holds nothing but this tool's three keys, its comment among them. sbctl owns its file list and signs rebuilt UKIs through its mkinitcpio hook.
 
 OmaSecBoot verifies the primary after every Limine operation: the checksum embedded in it must equal `b2sum limine.conf`, and it must carry the local signature. Only when that proof fails, because upstream masks enroll and sign failures [C2], does it rebuild the loader: from the raw executable upstream deployed (its backup beside the primary, else the package's file), in a staging file beside the target, enroll, sign, verify, sync, rename, with a free-space check first. It signs, with plain `sbctl sign`, only files that arrive unsigned and are neither Microsoft's, history files nor the fallback.
 
@@ -115,7 +115,7 @@ Where Windows or a BitLocker volume is found, or cannot be ruled out, the delete
 The converge-and-verify pass that people, the hook and the watcher all run. It is idempotent and cheap when nothing changed.
 
 - Sweeps staging files a killed pass left on the ESP, and ensures the managed settings.
-- Keeps the Windows block in step with `windows-enabled`: written or replaced while the flag exists, taken out when it does not. Whatever keeps the block from being written is said and left to `status`, never made the pass's failure.
+- Keeps the Windows entry in step with `windows-enabled`: written or replaced while the flag exists, taken out when it does not. Whatever keeps the entry from being written is said and left to `status`, never made the pass's failure.
 - Proves the primary loader or rebuilds it (section 4).
 - Restores a fallback that is Limine's (it contains the checksum marker) and is signed or sealed to the raw copy, and never touches any other `BOOTX64.EFI`.
 - Signs EFI files that arrived unsigned (D1 and D2 apply) and proves each signable file with one read.
@@ -133,13 +133,13 @@ Read-only. It reports the firmware state and whether the user's keys are enrolle
 
 - The target comes from the firmware alone [C8]: the file node of an entry's first device path must be exactly `\EFI\Microsoft\Boot\bootmgfw.efi`, exactly one such entry may be active among every `Boot####` variable, and no other entry may share its label. The tool never creates or renames firmware entries and never mounts or reads a foreign filesystem.
 - `preflight` looks for a Windows Boot Manager entry and for BitLocker volumes and prints what to do in Windows before Secure Boot changes. A clean result is an observation, not a clearance.
-- `setup` writes the flag and runs the pass, which writes the block, using Limine's `efi_boot_entry` protocol, and seals the loader over it. `remove` deletes the flag and runs the pass the same way; on a machine that is not set up it takes the block out only while the loader carries no checksum. Both refuse during a snapshot restore and report what `limine.conf` holds afterwards.
+- `setup` writes the flag and runs the pass, which writes the entry, using Limine's `efi_boot_entry` protocol, and seals the loader over it. `remove` deletes the flag and runs the pass the same way; on a machine that is not set up it takes the entry out only while the loader carries no checksum. Both refuse during a snapshot restore and report what `limine.conf` holds afterwards.
 - `bootnext` asks the firmware for one boot of the target and reads `BootNext` back. Exit 0 means the firmware holds the request, nothing more; a request for a loader that has gone missing falls through to the next boot entry [C8].
 - `available` is the silent, unprivileged guard of the menu row: the flag exists and the firmware still has one clear target.
 
 ### `remove`
 
-The way back to stock, named as Omarchy names the counterpart of a `setup` [C7]. It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned. It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption: it takes the lock, deletes `enabled` so the hook goes quiet, disables the watcher, restores the settings, runs upstream's install, entry generation and reset (their post-hooks sign the primary while keys exist, so the reset comes last), verifies that the primary is upstream's raw executable again, and only then takes the Windows block and flag out, because `limine.conf` must not change under a sealed loader. Keys and firmware backups stay.
+The way back to stock, named as Omarchy names the counterpart of a `setup` [C7]. It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned. It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption: it takes the lock, deletes `enabled` so the hook goes quiet, disables the watcher, restores the settings, runs upstream's install, entry generation and reset (their post-hooks sign the primary while keys exist, so the reset comes last), verifies that the primary is upstream's raw executable again, and only then takes the Windows entry and flag out, because `limine.conf` must not change under a sealed loader. Keys and firmware backups stay.
 
 ## 6. Observed states
 
@@ -174,8 +174,8 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | Power is lost during the staged rebuild | The old primary or the new one | Same | `sign` | Stage, sync, rename |
 | Power is lost while the pass signs an unsigned UKI in place (rare: sbctl's build hook normally signs it first) | That entry is torn | Same | Boot a snapshot entry, rebuild with `limine-mkinitcpio` | In place by choice: a staged copy of a 267 MB image can exhaust a small ESP |
 | Power is lost while the tool replaces `limine.conf` or a loader on the FAT ESP | The file may be missing or torn, and the primary refuses a `limine.conf` it is not sealed over | Same | Secure Boot off, the fallback loader, `sign`; rescue media without a fallback | Staging in the same directory, a sync before and after the rename, staging files swept by the next pass; FAT cannot do better |
-| Omarchy replaces `limine.conf` from its template (`omarchy-refresh-limine`, `omarchy-reinstall-configs`) | The Windows entry disappears | Same | `sign` | The `windows-enabled` flag; the pass puts the block back |
-| A line of the tool's Windows markers lost its partner, `limine.conf` is not root's alone, or it changed while the entry was being written | Omarchy boots; the Windows entry may be missing or doubled | Same | Fix what `status` names, then `sign` | The pass says so and goes on; `status` error; a refused write never touches `limine.conf` |
+| Omarchy replaces `limine.conf` from its template (`omarchy-refresh-limine`, `omarchy-reinstall-configs`) | The Windows entry disappears | Same | `sign` | The `windows-enabled` flag; the pass puts the entry back |
+| The tool's Windows comment stands in an entry the tool did not write that way, `limine.conf` is not root's alone, or it changed while the entry was being written | Omarchy boots; the Windows entry may be missing or out of date | Same | Fix what `status` names, then `sign` | The pass says so and goes on; `status` error; a refused write never touches `limine.conf` |
 | Windows is removed, or a second Windows Boot Manager entry appears, while the entry is enabled | Omarchy boots; the menu entry may point nowhere | Same | `windows remove`, or fix the firmware's entries | The pass goes on quietly; `status` error that names `windows remove`; the menu guard hides the row |
 | An Omarchy factory reset rebuilds the ESP from a root without keys | Boot files unsigned while the firmware still holds the local PK | Boots | Secure Boot off, `setup` with new keys | Documented |
 | `sbctl rotate-keys` | Files signed with the old key are refused once the new keys are enrolled | Boots | `sign` after rotating, before rebooting | `status` verifies signatures against the current key. Append never removes the old certificate: it stays trusted until the firmware's keys are reset |
@@ -222,7 +222,7 @@ Recorded with their evidence in [C6]:
 | `lib/files.sh` | The EFI files on the ESP, history and fallback classification, signature state, sbctl's file list |
 | `lib/firmware.sh` | Mode variables, the signature-list reader, the backup, the enrollment plan with its proofs, the per-variable enrollment |
 | `lib/limine.sh` | Managed settings and originals, `limine.conf` facts, the loader proof and staged rebuild, the fallback, the watcher, the way back to stock |
-| `lib/windows.sh` | The target from the firmware's boot entries, the managed block, the BootNext request, the encryption acknowledgment |
+| `lib/windows.sh` | The target from the firmware's boot entries, the managed entry, the BootNext request, the encryption acknowledgment |
 | `lib/sign.sh` | The converge-and-verify pass |
 | `lib/status.sh` | The report and its next step |
 

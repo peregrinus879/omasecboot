@@ -6,8 +6,7 @@
 # entry, so the worst outcome of a wrong guess is an ordinary boot.
 
 readonly WINDOWS_LOADER='\efi\microsoft\boot\bootmgfw.efi'
-readonly WINDOWS_BLOCK_BEGIN='# omasecboot:windows begin'
-readonly WINDOWS_BLOCK_END='# omasecboot:windows end'
+readonly WINDOWS_ENTRY_COMMENT='comment: Windows Boot Manager through the firmware, managed by OmaSecBoot'
 
 # The zero-byte opt-in: Omarchy replaces limine.conf from its template, and
 # this is how "sign" knows the entry belongs back (upstream-contracts C7).
@@ -120,63 +119,94 @@ firmware_lists_windows() {
   [[ ${entries,,} == *"$WINDOWS_LOADER"* ]]
 }
 
-# --- The managed block in limine.conf -------------------------------------------------
+# --- The managed entry in limine.conf --------------------------------------------------
 
-# Upstream owns limine.conf; this block is the one exception. It is written
+# Upstream owns limine.conf; this entry is the one exception. It is written
 # only inside a pass that holds the boot lock and seals the loader afterwards,
 # or while the loader carries no checksum at all, because a loader sealed over
-# another limine.conf does not boot (C1). Upstream's tools keep a trailing
-# entry and the comment lines around it through their rewrites (C8).
+# another limine.conf does not boot (C1). Upstream's tools keep a foreign
+# top-level entry and its body through their rewrites and drop comment lines
+# beside it (C8), so nothing but the entry itself says that it is this tool's:
+# the header "/Windows" and a body of this tool's three keys, its comment
+# among them.
 
-windows_block() {
-  printf '%s\n/Windows\n    comment: Reboot into Windows Boot Manager through the firmware\n    protocol: efi_boot_entry\n    entry: %s\n%s\n' \
-    "$WINDOWS_BLOCK_BEGIN" "$1" "$WINDOWS_BLOCK_END"
+windows_entry() {
+  printf '/Windows\n    %s\n    protocol: efi_boot_entry\n    entry: %s\n' "$WINDOWS_ENTRY_COMMENT" "$1"
 }
 
-# Prints limine.conf without any managed block. Fails on markers that do not
-# pair up: deleting from a begin marker to the end of the file could take the
-# user's own entries with it.
-limine_conf_without_blocks() {
-  awk -v begin="$WINDOWS_BLOCK_BEGIN" -v end="$WINDOWS_BLOCK_END" '
-    $0 == begin { if (inside) broken = 1; inside = 1; next }
-    $0 == end { if (!inside) broken = 1; inside = 0; next }
-    !inside { print }
-    END { exit (inside || broken) }
+# scan_windows_entries without|entries: limine.conf without the managed
+# entries, or those entries alone. An entry is a top-level header and the
+# indented lines under it. Status 1: this tool's comment stands somewhere else,
+# in an entry that holds more than this tool writes or under another header.
+# Such an entry is never deleted, because it may be the user's own.
+scan_windows_entries() {
+  awk -v mode="$1" -v signature="$WINDOWS_ENTRY_COMMENT" '
+    function finish_entry(   i, ours) {
+      ours = (count > 0 && entry[1] == "/Windows" && signed && !foreign)
+      if (signed && !ours) misplaced = 1
+      if (ours && mode == "without" && kept > 0 && out[kept] == "") kept--
+      for (i = 1; i <= count; i++) {
+        if (ours && mode == "entries") print entry[i]
+        if (!ours) out[++kept] = entry[i]
+      }
+      count = 0; signed = 0; foreign = 0
+    }
+    /^\/[^\/]/ { finish_entry(); entry[++count] = $0; next }
+    count > 0 && /^[ \t]+[^ \t]/ {
+      entry[++count] = $0
+      line = $0; sub(/^[ \t]+/, "", line)
+      if (line == signature) signed = 1
+      else if (line !~ /^(protocol|entry): /) foreign = 1
+      next
+    }
+    {
+      if (count > 0 && /^\/\//) foreign = 1
+      finish_entry()
+      line = $0; sub(/^[ \t]+/, "", line)
+      if (line == signature) misplaced = 1
+      out[++kept] = $0
+    }
+    END {
+      finish_entry()
+      if (mode == "without") for (i = 1; i <= kept; i++) print out[i]
+      exit misplaced
+    }
   ' "$(limine_config_path)"
 }
 
-# absent, current (exactly the block for LABEL, once), stale (another block),
-# broken (markers that do not pair up) or unknown (limine.conf unreadable).
-windows_block_state() {
-  local config markers
-  config=$(limine_config_path)
-  # grep counts to stdout and says nothing there when it cannot read the file.
-  markers=$(grep -cxF -e "$WINDOWS_BLOCK_BEGIN" -e "$WINDOWS_BLOCK_END" -- "$config" 2>/dev/null) || :
-  if [[ -z $markers ]]; then
+# absent, current (exactly the entry for LABEL, once), stale (another entry of
+# this tool, or several), misplaced (see scan_windows_entries) or unknown
+# (limine.conf unreadable).
+windows_entry_state() {
+  local entries status=0
+  entries=$(scan_windows_entries entries 2>/dev/null) || status=$?
+  if (( status == 1 )); then
+    printf 'misplaced\n'
+  elif (( status != 0 )); then
     printf 'unknown\n'
-  elif [[ $markers == 0 ]]; then
+  elif [[ -z $entries ]]; then
     printf 'absent\n'
-  elif ! limine_conf_without_blocks >/dev/null; then
-    printf 'broken\n'
-  elif [[ $markers == 2 && $(sed -n "/^${WINDOWS_BLOCK_BEGIN}\$/,/^${WINDOWS_BLOCK_END}\$/p" "$config") == "$(windows_block "$1")" ]]; then
+  elif [[ $entries == "$(windows_entry "$1")" ]]; then
     printf 'current\n'
   else
     printf 'stale\n'
   fi
 }
 
-# write_windows_block [LABEL]: limine.conf with exactly the block for LABEL,
+readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds this tool's Windows comment in an entry this tool did not write that way; remove that comment line, or the entry, by hand"
+
+# write_windows_entry [LABEL]: limine.conf with exactly the entry for LABEL,
 # or with none. Nothing is touched when it already reads that way. Omarchy
 # replaces limine.conf outside any lock (C7), so the file must still be what
 # was read when the new content goes in.
-write_windows_block() {
+write_windows_entry() {
   local label=${1:-} config mode content before
   config=$(limine_config_path)
-  case $(windows_block_state "$label") in
+  case $(windows_entry_state "$label") in
     current) [[ -z $label ]] || return 0 ;;
     absent) [[ -n $label ]] || return 0 ;;
-    broken)
-      warn "limine.conf holds a \"${WINDOWS_BLOCK_BEGIN}\" or \"${WINDOWS_BLOCK_END}\" line without its partner; remove that line by hand"
+    misplaced)
+      warn "$WINDOWS_ENTRY_MISPLACED"
       return 1
       ;;
     unknown)
@@ -191,11 +221,11 @@ write_windows_block() {
   esp_has_room || return 1
   mode=$(stat -Lc '%a' "$config") || return 1
   before=$(config_checksum) || return 1
-  content=$(limine_conf_without_blocks && printf x) || return 1
+  content=$(scan_windows_entries without && printf x) || return 1
   content=${content%x}
   if [[ -n $label ]]; then
     [[ -z $content || $content == *$'\n\n' ]] || content+=$'\n'
-    content+=$(windows_block "$label")$'\n'
+    content+=$(windows_entry "$label")$'\n'
   fi
   [[ $(config_checksum) == "$before" ]] || {
     warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
@@ -206,15 +236,15 @@ write_windows_block() {
 
 # Inside every pass, before the loader is sealed: the entry is in limine.conf
 # exactly when the opt-in flag exists. Whatever keeps it from getting there (no
-# clear target in the firmware, entries that cannot be read just now, markers
-# that do not pair up, a limine.conf that changed meanwhile) is said and left
+# clear target in the firmware, entries that cannot be read just now, a
+# misplaced comment, a limine.conf that changed meanwhile) is said and left
 # to the status report, never made the pass's failure: the loader is sealed
 # over what limine.conf holds, and Omarchy boots.
-converge_windows_block() {
+converge_windows_entry() {
   local status=0
   if [[ ! -e $(windows_flag) ]]; then
-    [[ $(windows_block_state '') == absent ]] || qact "Taking the Windows entry out of limine.conf"
-    write_windows_block || :
+    [[ $(windows_entry_state '') == absent ]] || qact "Taking the Windows entry out of limine.conf"
+    write_windows_entry || :
     return 0
   fi
   resolve_windows_target || status=$?
@@ -224,8 +254,8 @@ converge_windows_block() {
     *) qnote "The Windows entry is enabled, but the firmware's boot entries cannot be read right now" ;;
   esac
   (( status == 0 )) || return 0
-  [[ $(windows_block_state "$(windows_target_label)") == current ]] || qact "Writing the Windows entry to limine.conf"
-  write_windows_block "$(windows_target_label)" || :
+  [[ $(windows_entry_state "$(windows_target_label)") == current ]] || qact "Writing the Windows entry to limine.conf"
+  write_windows_entry "$(windows_target_label)" || :
 }
 
 # --- The BootNext request ----------------------------------------------------------------

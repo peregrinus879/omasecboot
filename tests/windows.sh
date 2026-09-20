@@ -1,6 +1,6 @@
 #!/bin/bash
 # The Windows entry: the target read from the firmware's boot entries, the
-# managed block in limine.conf and when it may be touched, the BootNext
+# managed entry in limine.conf and when it may be touched, the BootNext
 # request, and the encryption acknowledgment before anything changes what
 # Windows measures at boot.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
@@ -11,7 +11,7 @@ source "$ROOT_DIR/tests/lib/harness.sh"
 test_harness_init windows
 
 readonly WINDOWS_FILE='\EFI\Microsoft\Boot\bootmgfw.efi'
-block_count() { grep -cxF -e '# omasecboot:windows begin' "$FIX/esp/limine.conf"; }
+entry_count() { grep -cxF -e "    $WINDOWS_ENTRY_COMMENT" "$FIX/esp/limine.conf"; }
 row() { printf '%s\x1f%s\x1f%s\x1f%s' "$@"; }
 
 set_up_with_windows() {
@@ -91,45 +91,77 @@ target_is_one_clear_entry_or_none() {
   (( status == 2 )) || fail_test "unreadable entries: status ${status}"
 }
 
-block_is_written_once_and_taken_out_whole() {
+entry_is_written_once_and_taken_out_whole() {
   local before=$FIX/run/limine-before inode
+  # Writing and taking out again leaves the file it started from.
+  cp "$FIX/esp/limine.conf" "$before"
+  { write_windows_entry 'Windows Boot Manager' && write_windows_entry; } || fail_test "round trip"
+  cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a round trip changed limine.conf: $(diff "$before" "$FIX/esp/limine.conf")"
+  # A last line without its newline, as an editor may leave it.
   printf '/Mine\n    protocol: efi\n    path: boot():/EFI/mine.efi' >>"$FIX/esp/limine.conf"
   cp "$FIX/esp/limine.conf" "$before"
-  write_windows_block || fail_test "taking nothing out failed"
-  cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a file without a block was rewritten"
+  write_windows_entry || fail_test "taking nothing out failed"
+  cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a file without the entry was rewritten"
 
-  write_windows_block 'Windows Boot Manager' || fail_test "write"
-  [[ $(windows_block_state 'Windows Boot Manager') == current ]] || fail_test "state after writing"
+  write_windows_entry 'Windows Boot Manager' || fail_test "write"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "state after writing"
   grep -qx '    protocol: efi_boot_entry' "$FIX/esp/limine.conf" || fail_test "protocol line"
   grep -qx '    entry: Windows Boot Manager' "$FIX/esp/limine.conf" || fail_test "entry line"
   printf '\n/After\n    protocol: efi\n' >>"$FIX/esp/limine.conf"
   inode=$(stat -c %i "$FIX/esp/limine.conf")
-  write_windows_block 'Windows Boot Manager' || fail_test "second write"
-  [[ $(block_count) == 1 ]] || fail_test "a second write added a second block"
+  write_windows_entry 'Windows Boot Manager' || fail_test "second write"
+  [[ $(entry_count) == 1 ]] || fail_test "a second write added a second entry"
   [[ $(stat -c %i "$FIX/esp/limine.conf") == "$inode" ]] || fail_test "limine.conf was replaced although nothing changed"
-  [[ $(windows_block_state 'Another name') == stale ]] || fail_test "a block for another label read as current"
-  write_windows_block 'Another name' || fail_test "rewrite"
-  [[ $(block_count) == 1 && $(windows_block_state 'Another name') == current ]] || fail_test "a stale block was not replaced"
-  grep -qx '/After' "$FIX/esp/limine.conf" || fail_test "the user's entry after the block was lost"
-  write_windows_block || fail_test "removal"
-  [[ $(windows_block_state '') == absent ]] || fail_test "state after removal"
-  { grep -qx '/Mine' "$FIX/esp/limine.conf" && grep -qx '/After' "$FIX/esp/limine.conf"; } || fail_test "removal took more than the block"
-  cmp -s <(head -c "$(stat -c %s "$before")" "$FIX/esp/limine.conf") "$before" || fail_test "the lines before the block changed"
+  [[ $(windows_entry_state 'Another name') == stale ]] || fail_test "an entry for another label read as current"
+  write_windows_entry 'Another name' || fail_test "rewrite"
+  [[ $(entry_count) == 1 && $(windows_entry_state 'Another name') == current ]] || fail_test "a stale entry was not replaced"
+  grep -qx '/After' "$FIX/esp/limine.conf" || fail_test "the user's entry after this tool's was lost"
+  write_windows_entry || fail_test "removal"
+  [[ $(windows_entry_state '') == absent ]] || fail_test "state after removal"
+  { grep -qx '/Mine' "$FIX/esp/limine.conf" && grep -qx '/After' "$FIX/esp/limine.conf"; } || fail_test "removal took more than the entry"
+  cmp -s <(head -c "$(stat -c %s "$before")" "$FIX/esp/limine.conf") "$before" || fail_test "the lines before the entry changed"
+  # Two entries of this tool, as a restored file could hold: one remains.
+  { windows_entry 'Windows Boot Manager'; windows_entry 'Windows Boot Manager'; } >>"$FIX/esp/limine.conf"
+  [[ $(windows_entry_state 'Windows Boot Manager') == stale ]] || fail_test "a doubled entry read as $(windows_entry_state 'Windows Boot Manager')"
+  write_windows_entry 'Windows Boot Manager' || fail_test "rewrite of a doubled entry"
+  [[ $(entry_count) == 1 && $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "a doubled entry was not settled"
 }
 
-# Markers that do not pair up: deleting to the end of the file could take the
-# user's own entries with it, so nothing is written and the reason is given.
-broken_markers_are_refused() {
-  local before=$FIX/run/limine-before output
-  for broken in $'# omasecboot:windows begin\n/Mine\n' $'# omasecboot:windows end\n' $'# omasecboot:windows begin\n# omasecboot:windows begin\n# omasecboot:windows end\n'; do
+# The entry is this tool's only when it is the header "/Windows" over nothing
+# but this tool's keys. Its comment anywhere else may stand in the user's own
+# entry, so nothing is deleted and the reason is given.
+misplaced_comment_is_never_deleted() {
+  local before=$FIX/run/limine-before output misplaced
+  for misplaced in \
+    "/Omarchy rescue"$'\n'"    ${WINDOWS_ENTRY_COMMENT}"$'\n'"    protocol: efi_boot_entry"$'\n' \
+    "/Windows"$'\n'"    ${WINDOWS_ENTRY_COMMENT}"$'\n'"    protocol: efi"$'\n'"    path: boot():/EFI/mine.efi"$'\n' \
+    "/Windows"$'\n'"    ${WINDOWS_ENTRY_COMMENT}"$'\n'"//Child"$'\n'"    protocol: efi"$'\n' \
+    "    ${WINDOWS_ENTRY_COMMENT}"$'\n'; do
     write_limine_conf unhashed
-    printf '%s' "$broken" >>"$FIX/esp/limine.conf"
+    printf '\n%s' "$misplaced" >>"$FIX/esp/limine.conf"
     cp "$FIX/esp/limine.conf" "$before"
-    [[ $(windows_block_state x) == broken ]] || fail_test "state: $(windows_block_state x)"
-    output=$(write_windows_block 'Windows Boot Manager' 2>&1) && fail_test "a broken block was rewritten"
-    [[ $output == *'without its partner'* ]] || fail_test "no reason: ${output}"
+    [[ $(windows_entry_state x) == misplaced ]] || fail_test "state: $(windows_entry_state x) for: ${misplaced}"
+    output=$(write_windows_entry 'Windows Boot Manager' 2>&1) && fail_test "limine.conf was rewritten around a misplaced comment"
+    [[ $output == *'by hand'* ]] || fail_test "no reason: ${output}"
+    output=$(write_windows_entry 2>&1) && fail_test "an entry that is not this tool's was taken out"
     cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a refused rewrite changed limine.conf"
   done
+}
+
+# What the hardware showed (C8): when upstream rewrites limine.conf it drops a
+# comment line that stands between its own entries and a foreign one, and keeps
+# the foreign entry. The entry must still be this tool's afterwards, for the
+# report and for taking it out.
+entry_survives_upstreams_rewrite() {
+  set_up_with_windows
+  sed -i 's|^/Windows$|# a comment line above the entry\n/Windows|' "$FIX/esp/limine.conf"
+  run_cli sign || fail_test "sign failed: $(<"$FIX/run/output")"
+  run_unlocked limine-mkinitcpio || fail_test "upstream's rewrite"
+  ! grep -q '^# a comment line above the entry$' "$FIX/esp/limine.conf" || fail_test "the stub kept the comment line, unlike upstream"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "after upstream's rewrite the entry reads as $(windows_entry_state 'Windows Boot Manager')"
+  run_cli status || fail_test "status after upstream's rewrite: $(<"$FIX/run/output")"
+  run_cli windows remove || fail_test "windows remove after upstream's rewrite: $(<"$FIX/run/output")"
+  [[ $(entry_count) == 0 ]] || fail_test "the entry stayed"
 }
 
 # limine.conf is only written when that is safe: by root alone, with room on
@@ -139,30 +171,30 @@ unsafe_writes_are_refused() {
   local before=$FIX/run/limine-before
   cp "$FIX/esp/limine.conf" "$before"
   chmod 666 "$FIX/esp/limine.conf"
-  ! write_windows_block 'Windows Boot Manager' 2>/dev/null || fail_test "a world-writable limine.conf was rewritten"
+  ! write_windows_entry 'Windows Boot Manager' 2>/dev/null || fail_test "a world-writable limine.conf was rewritten"
   chmod 644 "$FIX/esp/limine.conf"
   (
     free_bytes() { printf '4096\n'; }
-    ! write_windows_block 'Windows Boot Manager' 2>/dev/null
+    ! write_windows_entry 'Windows Boot Manager' 2>/dev/null
   ) || fail_test "limine.conf was rewritten on a full ESP"
   (
-    limine_conf_without_blocks() {
+    scan_windows_entries() {
       cat "$FIX/esp/limine.conf"
-      printf 'timeout: 1\n' >>"$FIX/esp/limine.conf"
+      [[ $1 != without ]] || printf 'timeout: 1\n' >>"$FIX/esp/limine.conf"
     }
-    ! write_windows_block 'Windows Boot Manager' 2>/dev/null
+    ! write_windows_entry 'Windows Boot Manager' 2>/dev/null
   ) || fail_test "a limine.conf that changed meanwhile was overwritten"
   sed -i '$d' "$FIX/esp/limine.conf"
   cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a refused write changed limine.conf"
   rm "$FIX/esp/limine.conf"
-  [[ $(windows_block_state x) == unknown ]] || fail_test "a missing limine.conf: $(windows_block_state x)"
+  [[ $(windows_entry_state x) == unknown ]] || fail_test "a missing limine.conf: $(windows_entry_state x)"
 }
 
 # Omarchy replaces limine.conf from its template (C7); the opt-in brings the
 # entry back with the next pass, and the loader is sealed over the result.
 entry_comes_back_after_limine_conf_is_replaced() {
   set_up_with_windows
-  [[ -e $(windows_flag) && $(block_count) == 1 ]] || fail_test "flag or block missing"
+  [[ -e $(windows_flag) && $(entry_count) == 1 ]] || fail_test "flag or entry missing"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over the new limine.conf"
   run_cli windows available || fail_test "the menu guard refuses a working entry"
   [[ ! -s $FIX/run/output ]] || fail_test "the guard printed: $(<"$FIX/run/output")"
@@ -175,7 +207,7 @@ entry_comes_back_after_limine_conf_is_replaced() {
   run_cli status && fail_test "status passed without the entry"
   [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli sign --quiet --config-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
-  [[ $(block_count) == 1 ]] || fail_test "the entry did not come back"
+  [[ $(entry_count) == 1 ]] || fail_test "the entry did not come back"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over the restored entry"
 }
 
@@ -189,28 +221,28 @@ entry_is_only_taken_out_when_the_loader_follows() {
   run_cli windows remove || rc=$?
   kill %1 2>/dev/null
   (( rc == 75 )) || fail_test "busy: ${rc}"
-  [[ -e $(windows_flag) && $(block_count) == 1 ]] || fail_test "a busy windows remove changed something"
+  [[ -e $(windows_flag) && $(entry_count) == 1 ]] || fail_test "a busy windows remove changed something"
   : >"$(restore_marker_path)"
   run_cli windows remove && fail_test "windows remove ran during a snapshot restore"
-  [[ $(block_count) == 1 && -e $(windows_flag) ]] || fail_test "something changed during a restore"
+  [[ $(entry_count) == 1 && -e $(windows_flag) ]] || fail_test "something changed during a restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "report: $(<"$FIX/run/output")"
   rm "$(restore_marker_path)"
 
   # Not set up, but the loader is still sealed (a remove that stopped half way).
   rm "$(enabled_marker)"
   run_cli windows remove && fail_test "limine.conf was edited under a sealed loader nobody re-seals"
-  [[ $(<"$FIX/run/output") == *'sealed over the current limine.conf'* && $(block_count) == 1 ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'sealed over the current limine.conf'* && $(entry_count) == 1 ]] || fail_test "report: $(<"$FIX/run/output")"
   : >"$(enabled_marker)"
   run_cli windows remove || fail_test "windows remove failed: $(<"$FIX/run/output")"
-  [[ ! -e $(windows_flag) && $(block_count) == 0 ]] || fail_test "flag or block left"
+  [[ ! -e $(windows_flag) && $(entry_count) == 0 ]] || fail_test "flag or entry left"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed after the removal"
   run_cli windows available && fail_test "the guard accepts a removed entry"
 
   # Not set up and the loader raw: nothing to seal, the edit is safe.
   run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
-  write_windows_block 'Windows Boot Manager' || fail_test "fixture block"
+  write_windows_entry 'Windows Boot Manager' || fail_test "fixture entry"
   run_cli windows remove || fail_test "windows remove on a raw loader failed: $(<"$FIX/run/output")"
-  [[ $(block_count) == 0 ]] || fail_test "the block stayed"
+  [[ $(entry_count) == 0 ]] || fail_test "the entry stayed"
 }
 
 # remove must leave a machine that boots at every point it can stop at: the
@@ -219,37 +251,37 @@ failed_remove_keeps_limine_conf_and_loader_together() {
   set_up_with_windows
   : >"$FIX/run/limine-install-fails"
   run_cli remove && fail_test "a failed Limine tool went unnoticed"
-  [[ $(block_count) == 1 && -e $(windows_flag) ]] || fail_test "the entry went before the loader was unsealed"
+  [[ $(entry_count) == 1 && -e $(windows_flag) ]] || fail_test "the entry went before the loader was unsealed"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "limine.conf and the sealed loader were torn apart"
   rm "$FIX/run/limine-install-fails"
   run_cli remove || fail_test "second remove failed: $(<"$FIX/run/output")"
-  [[ $(block_count) == 0 && ! -e $(windows_flag) ]] || fail_test "remove left the Windows entry behind"
+  [[ $(entry_count) == 0 && ! -e $(windows_flag) ]] || fail_test "remove left the Windows entry behind"
   cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not raw"
 }
 
 # The entry is a matter for the report, never a reason to fail a pass that
 # runs inside a kernel update: the loader is sealed and Omarchy boots.
-block_problems_are_reported_not_failed() {
+entry_problems_are_reported_not_failed() {
   local output
   add_windows
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  # A stray marker on a machine that never enabled the entry.
-  printf '# omasecboot:windows end\n' >>"$FIX/esp/limine.conf"
-  run_cli sign --quiet || fail_test "a stray marker failed the pass: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'without its partner'* && ! -e $(attention_marker) ]] || fail_test "pass: $(<"$FIX/run/output")"
+  # This tool's comment in somebody's entry, on a machine that never enabled ours.
+  printf '    %s\n' "$WINDOWS_ENTRY_COMMENT" >>"$FIX/esp/limine.conf"
+  run_cli sign --quiet || fail_test "a misplaced comment failed the pass: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'by hand'* && ! -e $(attention_marker) ]] || fail_test "pass: $(<"$FIX/run/output")"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over limine.conf as it stands"
-  run_cli status && fail_test "status passed over a stray marker"
-  [[ $(<"$FIX/run/output") == *'remove that line by hand'* && $(<"$FIX/run/output") == *'Next: resolve what is marked above'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  run_cli status && fail_test "status passed over a misplaced comment"
+  [[ $(<"$FIX/run/output") == *'by hand'* && $(<"$FIX/run/output") == *'Next: resolve what is marked above'* ]] || fail_test "status: $(<"$FIX/run/output")"
   sed -i '$d' "$FIX/esp/limine.conf"
 
-  # A block without the opt-in: the next pass takes it out, and status says so.
-  { boot_lock_acquire && write_windows_block 'Windows Boot Manager' && ensure_primary_loader >/dev/null && boot_lock_release; } || fail_test "fixture block"
+  # An entry without the opt-in: the next pass takes it out, and status says so.
+  { boot_lock_acquire && write_windows_entry 'Windows Boot Manager' && ensure_primary_loader >/dev/null && boot_lock_release; } || fail_test "fixture entry"
   run_cli status && fail_test "status passed over an entry that is not enabled"
   [[ $(<"$FIX/run/output") == *'although the entry is not enabled'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli sign || fail_test "sign failed: $(<"$FIX/run/output")"
-  [[ $(block_count) == 0 && $(<"$FIX/run/output") == *'Taking the Windows entry out'* ]] || fail_test "the pass did not take the entry out: $(<"$FIX/run/output")"
+  [[ $(entry_count) == 0 && $(<"$FIX/run/output") == *'Taking the Windows entry out'* ]] || fail_test "the pass did not take the entry out: $(<"$FIX/run/output")"
 
-  # Enabled, with a block for another name, then with entries that cannot be read.
+  # Enabled, with an entry for another name, then with entries that cannot be read.
   run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
   sed -i 's/^    entry: Windows Boot Manager$/    entry: Another name/' "$FIX/esp/limine.conf"
   output=$(show_windows_status 2>&1)
@@ -362,13 +394,14 @@ unknown_encryption_state_is_asked_about() {
 
 run_case boot-entries-are-read-from-the-firmware boot_entries_are_read_from_the_firmware
 run_case target-is-one-clear-entry-or-none target_is_one_clear_entry_or_none
-run_case block-is-written-once-and-taken-out-whole block_is_written_once_and_taken_out_whole
-run_case broken-markers-are-refused broken_markers_are_refused
+run_case entry-is-written-once-and-taken-out-whole entry_is_written_once_and_taken_out_whole
+run_case misplaced-comment-is-never-deleted misplaced_comment_is_never_deleted
+run_case entry-survives-upstreams-rewrite entry_survives_upstreams_rewrite
 run_case unsafe-writes-are-refused unsafe_writes_are_refused
 run_case entry-comes-back-after-limine-conf-is-replaced entry_comes_back_after_limine_conf_is_replaced
 run_case entry-is-only-taken-out-when-the-loader-follows entry_is_only_taken_out_when_the_loader_follows
 run_case failed-remove-keeps-limine-conf-and-loader-together failed_remove_keeps_limine_conf_and_loader_together
-run_case block-problems-are-reported-not-failed block_problems_are_reported_not_failed
+run_case entry-problems-are-reported-not-failed entry_problems_are_reported_not_failed
 run_case lost-target-is-left-to-the-report lost_target_is_left_to_the_report
 run_case setup-reports-what-reached-limine-conf setup_reports_what_reached_limine_conf
 run_case setup-without-a-target-changes-nothing setup_without_a_target_changes_nothing

@@ -256,7 +256,7 @@ cmd_remove() {
   restore_settings_originals || die "Could not restore $(limine_default_config)"
   restore_stock_boot_files || die "The boot files are not back to stock; run this again"
   # Only now: the loader is proved raw, so limine.conf may change under it.
-  write_windows_block || die "Could not take the Windows entry out of $(limine_config_path); run this again"
+  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); run this again"
   rm -f -- "$(windows_flag)"
   boot_lock_release
   clear_attention
@@ -298,7 +298,7 @@ cmd_windows() {
       case $status in
         0)
           pass "Target: Boot$(windows_target_number), $(windows_target_label)"
-          note "The entry in limine.conf is $(windows_block_state "$(windows_target_label)")"
+          note "The entry in limine.conf is $(windows_entry_state "$(windows_target_label)")"
           ;;
         1) note "The firmware has no single active Windows Boot Manager entry with a name of its own" ;;
         *) fail "Could not read the firmware's boot entries" ;;
@@ -323,7 +323,7 @@ cmd_windows() {
       ensure_state_dir || die "Unsafe state directory $(state_dir)"
       : >"$(windows_flag)"
       sign_boot_files || exit "$?"
-      [[ $(windows_block_state "$(windows_target_label)") == current ]] ||
+      [[ $(windows_entry_state "$(windows_target_label)") == current ]] ||
         die "The Windows entry did not reach limine.conf. It stays enabled, and the next pass writes it; see: sudo omasecboot status"
       pass "Windows is in the boot menu: the entry restarts the machine into $(windows_target_label)"
       ;;
@@ -343,11 +343,11 @@ cmd_windows() {
         # the loader carries no checksum at all.
         { checksum=$(embedded_checksum "$(primary_loader_path)") && checksum_is_zero "$checksum"; } ||
           die "The Limine loader is sealed over the current limine.conf, or cannot be read, and nothing would seal it again. Run ${BOLD}sudo omasecboot remove${NC} or ${BOLD}sudo omasecboot setup${NC} first."
-        write_windows_block || die "Could not take the Windows entry out of $(limine_config_path)"
+        write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path)"
         rm -f -- "$(windows_flag)"
         boot_lock_release
       fi
-      [[ $(windows_block_state '') == absent ]] || die "The Windows entry is still in limine.conf"
+      [[ $(windows_entry_state '') == absent ]] || die "The Windows entry is still in limine.conf"
       pass "The Windows entry is gone"
       ;;
     bootnext)

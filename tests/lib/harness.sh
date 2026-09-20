@@ -235,8 +235,8 @@ fixture_overrides() {
   package_loader_path() { printf '%s/share/BOOTX64.EFI\n' "$FIX"; }
   limine_hook_path() { printf '%s/bin/limine-hook\n' "$FIX"; }
   # The firmware's entries cannot be read at the moment the pass looks: the
-  # pass goes on without the Windows entry, as converge_windows_block does then.
-  [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_block() { :; }
+  # pass goes on without the Windows entry, as converge_windows_entry does then.
+  [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_entry() { :; }
   leftover_candidates() { printf '%s\n' "$FIX/old/omasecboot" "$FIX"/old/hooks/*omasecboot*; }
   durable_sync() { :; }
   check_root() { :; }
@@ -430,6 +430,18 @@ case $name in
       hash=''
       [[ $(setting ENABLE_VERIFICATION) == no ]] || hash="#$(b2sum <"$FIX/esp/EFI/Linux/omarchy_linux.efi" | cut -d' ' -f1)"
       sed -i "s|^\(    path: boot():/EFI/Linux/omarchy_linux.efi\).*|\1${hash}|" "$FIX/esp/limine.conf"
+      # The rewrite keeps a foreign top-level entry with its body and drops a
+      # comment line that stands right above it, after upstream's own (C8).
+      awk '{ lines[NR] = $0 }
+        END {
+          for (i = 1; i <= NR; i++) {
+            if (seen && lines[i] ~ /^#/ && lines[i + 1] ~ /^\/[^\/]/) continue
+            if (lines[i] ~ /^\/[^\/]/) seen = 1
+            print lines[i]
+          }
+        }' "$FIX/esp/limine.conf" >"$FIX/esp/limine.conf.rewrite"
+      cat "$FIX/esp/limine.conf.rewrite" >"$FIX/esp/limine.conf"
+      rm "$FIX/esp/limine.conf.rewrite"
     fi
     ;;
   limine-install)

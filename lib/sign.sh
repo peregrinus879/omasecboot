@@ -93,7 +93,7 @@ sign_boot_files() {
 
   remove_stale_staging || rc=1
   apply_managed_settings || rc=1
-  converge_windows_block
+  converge_windows_entry
   converge_primary_loader || sealed=false
   if [[ $scope == full ]]; then
     if [[ $(fallback_state) == altered ]]; then

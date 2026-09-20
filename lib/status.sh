@@ -160,9 +160,9 @@ show_files_status() {
 show_windows_status() {
   local status=0 state
   if [[ ! -e $(windows_flag) ]]; then
-    case $(windows_block_state '') in
+    case $(windows_entry_state '') in
       absent) ;;
-      broken) blocking_problem "limine.conf holds a Windows marker line of this tool without its partner; remove that line by hand" ;;
+      misplaced) blocking_problem "$WINDOWS_ENTRY_MISPLACED" ;;
       unknown) blocking_problem "Could not read $(limine_config_path)" ;;
       *) problem "limine.conf holds a Windows entry of this tool although the entry is not enabled" ;;
     esac
@@ -176,12 +176,12 @@ show_windows_status() {
     blocking_problem "The Windows entry is enabled, but the firmware has no single active Windows Boot Manager entry with a name of its own. Take the entry out with: sudo omasecboot windows remove"
     return
   fi
-  state=$(windows_block_state "$(windows_target_label)")
+  state=$(windows_entry_state "$(windows_target_label)")
   case $state in
     current) pass "The Windows entry restarts the machine into $(windows_target_label)" ;;
     absent) problem "The Windows entry is missing from limine.conf" ;;
     stale) problem "The Windows entry in limine.conf is not the one for $(windows_target_label)" ;;
-    broken) blocking_problem "limine.conf holds a Windows marker line of this tool without its partner; remove that line by hand" ;;
+    misplaced) blocking_problem "$WINDOWS_ENTRY_MISPLACED" ;;
     unknown) blocking_problem "Could not read $(limine_config_path)" ;;
   esac
 }
