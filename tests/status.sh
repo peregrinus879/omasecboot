@@ -173,6 +173,19 @@ old_snapshots_are_a_note_not_a_problem() {
   [[ $output == *'1 snapshot image(s) predate'*'snapper -c root delete'* ]] || fail_test "no note: ${output}"
 }
 
+# What Microsoft can still deliver to the machine, not what it boots (C9).
+missing_2023_certificates_are_notes() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
+  [[ $output != *'CA 2023'* ]] || fail_test "a note on a machine that holds them: ${output}"
+  write_key_variable KEK "$(x509_list "$OEM_OWNER" 'OEM KEK' | base64 -w0)"
+  write_key_variable db "$({ x509_list "$MICROSOFT_OWNER" 'Microsoft Windows CA'; x509_list "$OEM_OWNER" 'OEM db'; } | base64 -w0)"
+  output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
+  [[ $output == *'KEK does not hold Microsoft Corporation KEK 2K CA 2023'* ]] || fail_test "no note on KEK: ${output}"
+  [[ $output == *'db does not hold Microsoft UEFI CA 2023:'* && $output != *'Windows UEFI CA 2023'* ]] || fail_test "the note on db: ${output}"
+}
+
 # Not a problem of the boot chain, so it leaves the exit status alone.
 full_esp_is_a_note() {
   local output
@@ -214,5 +227,6 @@ run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
 run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
 run_case full-esp-is-a-note full_esp_is_a_note
+run_case missing-2023-certificates-are-notes missing_2023_certificates_are_notes
 run_case old-rescue-loader-is-a-note old_rescue_loader_is_a_note
 finish_suite

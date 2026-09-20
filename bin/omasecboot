@@ -169,6 +169,7 @@ setup_firmware_step() {
   elif platform_key_is_present; then
     backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
     note "The keys this machine trusts now are backed up in ${backup}"
+    acknowledge_missing_microsoft_kek || exit 1
     # Deleting the PK already changes what Windows measures at boot.
     acknowledge_windows_encryption || exit 1
     act "Reboot into the firmware and delete only the Platform Key (PK); keep KEK, db and dbx. Some firmware shows its key menu only while Secure Boot is set to enabled."

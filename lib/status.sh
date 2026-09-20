@@ -79,6 +79,18 @@ show_firmware_status() {
   fi
 }
 
+# Microsoft's 2023 certificates (C9). Notes: this machine's boot chain does
+# not depend on them, what Microsoft can still deliver to it does.
+show_microsoft_2023_status() {
+  local missing
+  if missing=$(missing_microsoft_2023 KEK | paste -sd, -) && [[ -n $missing ]]; then
+    note "KEK does not hold ${missing}, which signs Microsoft's db and dbx updates from 2026 on: they cannot reach this machine"
+  fi
+  if missing=$(missing_microsoft_2023 db | paste -sd, -) && [[ -n $missing ]]; then
+    note "db does not hold ${missing//,/, }: Microsoft delivers them as db updates, which need its 2023 certificate in KEK"
+  fi
+}
+
 show_settings_status() {
   local setting
   for setting in "${MANAGED_SETTINGS[@]}"; do
@@ -289,6 +301,7 @@ show_status() {
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"
   else
+    show_microsoft_2023_status
     show_settings_status
     show_loader_status
     show_files_status

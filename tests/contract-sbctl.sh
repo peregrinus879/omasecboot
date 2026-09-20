@@ -119,6 +119,19 @@ rebuild_plan_for_cleared_firmware() {
   cmp -s <(tail -c "$(stat -c %s db.esl)" "$(firmware_variable_path db)") db.esl || fail_test "the rebuilt variable does not end with the exported list"
 }
 
+# The four fingerprints this tool looks for (C9) against the certificates the
+# installed sbctl carries for --microsoft.
+microsoft_2023_certificates_are_the_ones_sbctl_ships() {
+  local variable digest name
+  machine_in_setup_mode
+  { mkdir -p /tmp/microsoft && cd /tmp/microsoft; } || fail_test "scratch"
+  sbctl enroll-keys --microsoft --export esl >/dev/null 2>&1 || fail_test "export"
+  while read -r variable digest name; do
+    list_signature_entries "${variable}.esl" | grep -q " ${digest}\$" ||
+      fail_test "sbctl's ${variable} for --microsoft does not hold ${name} with the fingerprint this tool knows: recheck C9"
+  done < <(microsoft_2023_certificates)
+}
+
 signature_answers() {
   local loader=/boot/EFI/Linux/contract.efi status
   machine_in_setup_mode
@@ -163,6 +176,7 @@ run_case plan-is-the-firmware-plus-the-local-certificate plan_is_the_firmware_pl
 run_case export-is-what-a-write-produces export_is_what_a_write_produces
 run_case enrolled-state-is-recognised-and-left-alone enrolled_state_is_recognised_and_left_alone
 run_case rebuild-plan-for-cleared-firmware rebuild_plan_for_cleared_firmware
+run_case microsoft-2023-certificates-are-the-ones-sbctl-ships microsoft_2023_certificates_are_the_ones_sbctl_ships
 run_case signature-answers signature_answers
 run_case file-list-answers file_list_answers
 finish_suite "sbctl $(sbctl version 2>/dev/null | head -n 1)"

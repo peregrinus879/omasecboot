@@ -112,7 +112,7 @@ Boot files, on every run:
 
 Then the firmware step:
 
-- **A Platform Key is in place and it is not the user's.** The keys are backed up, and the user is told to delete only the PK in the firmware.
+- **A Platform Key is in place and it is not the user's.** The keys are backed up. When KEK lacks Microsoft's 2023 KEK certificate the user is warned and asked, because after this step only the user can add it [C9]. Then the user is told to delete only the PK in the firmware.
 - **Setup Mode.** Never in the run that created `enabled`, which ends with an instruction instead.
   - The local certificates are identified first: they are the entries sbctl owns in an export that does not read the firmware [C4], so they are known before, during and after an enrollment and beside an older certificate that rotated keys left behind.
   - Then the proofs of D4, one confirmation (default No) that says the PK is replaced, how many KEK and db entries are kept and where the backup is, and the writes.
@@ -140,7 +140,7 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 
 Read-only.
 
-- It reports the firmware state and whether the user's keys are enrolled, the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`.
+- It reports the firmware state and whether the user's keys are enrolled, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`.
 - On a machine that is not set up it still names leftovers of an earlier install, and it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it.
 - On a set-up machine it ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs; before `setup`, a problem's own line says what to do.
 - Anything that could not be read belongs to the last kind.
@@ -213,6 +213,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | A configuration without UKIs | Entries without hashes are refused | Boots | Enable UKIs | `setup` preflight |
 | A firmware update or CMOS reset restores the factory keys | Limine is refused; Windows boots | Boots | Secure Boot off, `setup` again | `status` error while Secure Boot is on without the local keys; with it off, `status` names the firmware step again |
 | Microsoft or firmware servicing changes db or dbx | Unaffected | Unaffected | None | Never refused |
+| KEK lacks Microsoft's 2023 KEK certificate when the Platform Key becomes the user's [C9] | Boots | Boots | Install the pending Windows and firmware updates before the PK is deleted; afterwards only the user's own keys can add it | `setup` warns and asks before it tells the user to delete the PK; `status` notes every missing 2023 certificate |
 | BitLocker asks for its recovery key | Windows side only | n/a | Enter the key | Guidance and an acknowledgment before the two steps that cannot be taken back, deleting the PK and writing keys; a reminder before Secure Boot is turned on |
 | Snapshot entries older than setup | Those entries do not boot: Limine panics on the firmware's refusal and halts [C6] | Boot | Power cycle and pick another entry; they age out, or delete them | D1; `status` counts them |
 | The ESP is full, sooner than before setup: an image that is rebuilt and signed again never deduplicates against its predecessor in the snapshot history [C2] | The next kernel image does not fit and a Limine tool's failure is masked upstream [C2] | Same | Delete old snapshots, rebuild with `limine-mkinitcpio`, `sign` | `status` notes an ESP with less free space than its largest boot file needs; a free-space check before every write to the ESP, also before upstream's fallback step; the proof after every Limine operation |

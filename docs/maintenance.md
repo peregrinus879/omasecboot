@@ -16,11 +16,8 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Deferred
 
-Decided after a second machine runs the tool from its package.
-
-- A note in `setup` on whether KEK and db already hold Microsoft's 2023 certificates before the Platform Key is replaced. It needs Microsoft's guidance and the set behind sbctl's `--microsoft` checked first.
-- How the Omarchy side is put to its maintainers, and with what evidence. One ask belongs to it: on an install beside another system, deploy the fallback loader when the ESP is Omarchy's own and holds no `BOOTX64.EFI` (C7).
-- A notice from the package when it is removed from a machine that is still set up (the failure table's row on that).
+- A notice from the package when it is removed from a machine that is still set up (the failure table's row on that). The package carries no install script by design, and `tests/package.sh` holds it to that, so the notice needs that rule weighed first.
+- A way to add Microsoft's 2023 KEK certificate with the user's own keys on a machine that lacks it after the Platform Key changed hands [C9 of [upstream-contracts.md](upstream-contracts.md)]. sbctl's append always adds the local certificate again (C4), so it needs a route of its own, and field reports that show the need.
 
 ## Recheck when something changes
 
@@ -29,7 +26,7 @@ Decided after a second machine runs the tool from its package.
 | `limine` | C1: the checksum marker, the unconditional check, the lookup order of `limine.conf` |
 | `limine-mkinitcpio-hook` | C2 and C3: hook names 89, 90 and 91 (ours sorts between the last two), the loader backup `limine_x64.bak`, `limine-install --no-efi-register` and `--fallback`, when the fallback is deployed and that the step copies over whatever is there, the lock path and descriptor, the configuration layers |
 | `limine-snapper-sync` | C2 and C8: history file names, `snapshots.json`, the restore marker, what its rewrite of `limine.conf` keeps |
-| `sbctl` | C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, and `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin` |
+| `sbctl` | C9: the four fingerprints against the certificates it ships. C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, and `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin` |
 | `systemd` | C5: `PathChanged=` semantics, the start limit and `KillMode=mixed` |
 | `pacman` | C7: `db.lck` held until the post-transaction hooks are done |
 | `efibootmgr`, `limine`, `util-linux` | C8: `--bootnext`, the `efi_boot_entry` protocol and its `entry` option, `lsblk`'s `BitLocker` type |

@@ -87,6 +87,41 @@ variable_entries() {
   [[ ! -e $path ]] || list_signature_entries "$path" 4
 }
 
+# Microsoft's 2023 certificates (C9), as "VARIABLE SHA256-OF-THE-DER NAME": the
+# KEK certificate that signs Microsoft's db and dbx updates from 2026 on, and
+# the three db certificates that replace the 2011 ones.
+microsoft_2023_certificates() {
+  printf '%s\n' \
+    'KEK 3cd3f0309edae228767a976dd40d9f4affc4fbd5218f2e8cc3c9dd97e8ac6f9d Microsoft Corporation KEK 2K CA 2023' \
+    'db 076f1fea90ac29155ebf77c17682f75f1fdd1be196da302dc8461e350a9ae330 Windows UEFI CA 2023' \
+    'db f6124e34125bee3fe6d79a574eaa7b91c0e7bd9d929c1a321178efd611dad901 Microsoft UEFI CA 2023' \
+    'db e5be3e64c6e66a281457ecdece0d6d0787577aad2a3a0144262c10c14ba8d8f1 Microsoft Option ROM UEFI CA 2023'
+}
+
+# missing_microsoft_2023 VARIABLE: the names of the 2023 certificates that the
+# firmware's VARIABLE lacks, one per line. Status 1 when it cannot be read.
+missing_microsoft_2023() {
+  local entries variable digest name
+  entries=$(variable_entries "$1") || return 1
+  while read -r variable digest name; do
+    [[ $variable != "$1" ]] || grep -q " ${digest}\$" <<<"$entries" || printf '%s\n' "$name"
+  done < <(microsoft_2023_certificates)
+}
+
+# Once the Platform Key is the user's, only the user can sign a KEK update. The
+# last moment the manufacturer's updates can still bring Microsoft's 2023 KEK
+# certificate is therefore before the PK is deleted (C9).
+acknowledge_missing_microsoft_kek() {
+  local missing
+  missing=$(missing_microsoft_2023 KEK) || {
+    fail "Could not read the firmware's KEK"
+    return 1
+  }
+  [[ -n $missing ]] || return 0
+  warn "KEK does not hold ${missing}. Microsoft signs its db and dbx updates with it from 2026 on, and once the Platform Key is yours the manufacturer can no longer add it. Install the pending Windows and firmware updates first, then run setup again."
+  confirm "the firmware step" "Go on without Microsoft's 2023 KEK certificate?"
+}
+
 # Rows of the first list that are missing from the second, as multisets.
 entries_missing_from() { LC_ALL=C comm -23 <(printf '%s' "$1") <(printf '%s' "$2"); }
 

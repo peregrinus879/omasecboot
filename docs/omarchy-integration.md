@@ -13,6 +13,7 @@ What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. Th
 | Update check | A step in `omarchy-update` before the restart prompt that runs `sudo omasecboot status --quiet` when the package is set up and, on a non-zero exit, tells the user not to reboot with Secure Boot on. Until it exists, the tool's own red line during the update is the only signal. |
 | Menu row for Windows | The package ships `omarchy-menu.jsonc` beside its documentation: a "Reboot to Windows" row whose guard is the silent, unprivileged `omasecboot windows available` and whose action runs `sudo omasecboot windows bootnext` and reboots only when that succeeded. |
 | Installer hook | `99-omarchy-limine.hook` [C7] undoes `ENABLE_ENROLL_LIMINE_CONFIG` for every user of that upstream feature. The request to the maintainers: drop the hook, or run `limine-install` in its place. The tool's watcher rebuilds the loader either way. |
+| Fallback on installs beside another system | The installer writes `ENABLE_LIMINE_FALLBACK=no` there [C7], so such a machine starts without the rescue loader. The request: deploy the fallback when the ESP is Omarchy's own and holds no `BOOTX64.EFI`. Until then `setup` offers the same step. |
 | Offline package list | `omasecboot` and `sbctl` in the list the ISO builder reads (`install/omarchy-other.packages`), once the package resolves from a repository. |
 | Manual page | One page: what it does, the firmware steps, the rescue procedure, within the claim limits of [spec.md](spec.md) section 3. |
 

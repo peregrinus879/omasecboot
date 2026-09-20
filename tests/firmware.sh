@@ -272,6 +272,25 @@ lost_entries_are_named() {
   ! dbx_equals_backup "$backup" || fail_test "a cleared dbx equalled the backup"
 }
 
+# Once the PK is the user's, the manufacturer can no longer add Microsoft's
+# 2023 KEK certificate (C9): the last moment to say so is before it is deleted.
+missing_2023_kek_is_asked_about_before_the_pk_goes() {
+  [[ -z $(missing_microsoft_2023 KEK) && -z $(missing_microsoft_2023 db) ]] || fail_test "the stock fixture lacks a certificate: $(missing_microsoft_2023 KEK; missing_microsoft_2023 db)"
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'CA 2023'* ]] || fail_test "asked although KEK holds the certificate: $(<"$FIX/run/output")"
+  write_key_variable KEK "$(x509_list "$OEM_OWNER" 'OEM KEK' | base64 -w0)"
+  sleep 1 # Backups are named by the second, and the changed KEK asks for a new one.
+  [[ $(missing_microsoft_2023 KEK) == 'Microsoft Corporation KEK 2K CA 2023' ]] || fail_test "missing: $(missing_microsoft_2023 KEK)"
+  CONFIRM_ANSWER=no run_cli setup && fail_test "setup went on although the question was declined"
+  [[ $(<"$FIX/run/output") == *'KEK does not hold Microsoft Corporation KEK 2K CA 2023'*'QUESTION: Go on without'* ]] || fail_test "no warning or no question: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "the instruction was given although the question was declined"
+  run_cli setup || fail_test "setup failed after a yes: $(<"$FIX/run/output")"
+  grep -n 'QUESTION: Go on without\|delete only the Platform Key' "$FIX/run/output" | head -1 | grep -q QUESTION || fail_test "the instruction came before the question: $(<"$FIX/run/output")"
+  printf 'garbage' >"$(key_variable_path KEK)"
+  missing_microsoft_2023 KEK >/dev/null 2>&1 && fail_test "an unreadable KEK was read as holding everything"
+  return 0
+}
+
 setup_asks_for_the_pk_then_enrolls_then_confirms() {
   local backup
   prepared_machine
@@ -431,6 +450,7 @@ run_case interrupted-enrollment-is-finished-without-duplicates interrupted_enrol
 run_case write-is-judged-by-reading-back write_is_judged_by_reading_back
 run_case lost-entries-are-named lost_entries_are_named
 run_case setup-asks-for-the-pk-then-enrolls-then-confirms setup_asks_for_the_pk_then_enrolls_then_confirms
+run_case missing-2023-kek-is-asked-about-before-the-pk-goes missing_2023_kek_is_asked_about_before_the_pk_goes
 run_case first-run-never-writes-to-the-firmware first_run_never_writes_to_the_firmware
 run_case partial-loss-is-refused partial_loss_is_refused
 run_case changed-dbx-is-refused changed_dbx_is_refused

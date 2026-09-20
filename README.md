@@ -128,7 +128,7 @@ Omarchy installed beside another system starts without a fallback loader, and th
 ## Limits
 
 - Your keys being enrolled does not mean Secure Boot is on; `status` reports both.
-- After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK stays, so the db and dbx updates that Microsoft signs can still be applied.
+- After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK entries stay, so the db and dbx updates that Microsoft signs can still be applied, as long as KEK holds Microsoft's 2023 certificate: the 2011 one expired in June 2026. `setup` warns before you delete the Platform Key when it is missing, because the manufacturer's updates are the easy way to get it, and `status` names any of Microsoft's 2023 certificates that KEK or db lack.
 - The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.
 - A BootNext request is one boot. It does not prove that Windows started, keep BitLocker quiet or keep its measurements stable, and a clean `windows preflight` is an observation, not a clearance of the firmware.
 - A snapshot older than `setup` takes the tool, the keys and the settings with it when it is restored, while the ESP and the firmware keep the signed state. Keep Secure Boot off after such a restore until `setup` has run again.

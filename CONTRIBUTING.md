@@ -5,7 +5,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 ## Read first
 
 - [docs/spec.md](docs/spec.md) owns the design: decisions, non-goals, commands, integration points, the failure table, tests and acceptance.
-- [docs/upstream-contracts.md](docs/upstream-contracts.md) owns the upstream and hardware facts the design relies on (sections C1 to C8), each with its source.
+- [docs/upstream-contracts.md](docs/upstream-contracts.md) owns the upstream and hardware facts the design relies on (sections C1 to C9), each with its source.
 - [README.md](README.md) is the operator page and states only what exists. [docs/maintenance.md](docs/maintenance.md) owns open work, evidence still owed and recheck triggers; [docs/release-checklist.md](docs/release-checklist.md) owns what a release needs and [docs/field-testing.md](docs/field-testing.md) how anyone adds to that evidence; [docs/omarchy-integration.md](docs/omarchy-integration.md) owns what lives on Omarchy's side.
 
 ## Principles

@@ -244,6 +244,14 @@ start_cli() {
 
 fixture_overrides() {
   state_dir() { printf '%s/state\n' "$FIX"; }
+  # The fixture firmware's Microsoft certificates stand in for the 2023 ones:
+  # the sha256 of 'Microsoft KEK', 'Microsoft Windows CA' and 'Microsoft UEFI CA'.
+  microsoft_2023_certificates() {
+    printf '%s\n' \
+      'KEK f71824e5e352a6ee66f081201984dcc1c63a54d6f8a83ebeed7378913c746860 Microsoft Corporation KEK 2K CA 2023' \
+      'db 863ae5b466ae14f4f14ce9dddfba8be869e35a776735d002103bb7aecc0255ab Windows UEFI CA 2023' \
+      'db e4aaca72d31f33c2a0ce0f65afb87f7c0aed0e402504054a436b451edf10ff8c Microsoft UEFI CA 2023'
+  }
   efivars_dir() { printf '%s/efivars\n' "$FIX"; }
   limine_default_config() { printf '%s/etc/default-limine\n' "$FIX"; }
   restore_marker_path() { printf '%s/run/restore.lock\n' "$FIX"; }

@@ -1,6 +1,6 @@
 # Upstream contracts
 
-What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C8]. Recheck a section when its package changes version. `tests/contract-limine.sh` and `tests/contract-sbctl.sh` check parts of C1 to C4 against the installed packages.
+What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C9]. Recheck a section when its package changes version. `tests/contract-limine.sh` and `tests/contract-sbctl.sh` check parts of C1 to C4 and C9 against the installed packages.
 
 Versions read: Limine 12.8.0, limine-mkinitcpio-hook 1.38.0 (built from the limine-entry-tool sources), limine-snapper-sync 1.31.0, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, pacman 7, efibootmgr 18, util-linux 2.41, Omarchy 4.0.x (`quattro` branch) and its installer, Linux 7.2.
 
@@ -112,3 +112,17 @@ Source: UEFI 2.10 sections 3.1.1 to 3.1.3, Limine's `CONFIG.md` and `ChangeLog` 
 - `efibootmgr --bootnext XXXX` sets `BootNext`, which the firmware consumes at the next start; when that entry cannot be started the firmware goes on with `BootOrder` (UEFI 2.10, 3.1.1).
 - libblkid names a BitLocker volume's type `BitLocker`, which Device Encryption on Windows Home uses too; `lsblk --raw --noheadings --output PATH,FSTYPE` prints it from the udev database and needs no privileges.
 
+## C9. Microsoft's 2011 and 2023 Secure Boot certificates
+
+Source: Microsoft's support article "Windows Secure Boot certificate expiration and CA updates" as updated on 2026-05-18; the certificates `Foxboron/sbctl` tag `0.18` ships under `certs/microsoft/`, with their own expiry dates.
+
+- The 2011 certificates expire in 2026: Microsoft Corporation KEK CA 2011 (KEK, 24 June), which signs Microsoft's updates to db and dbx; Microsoft Corporation UEFI CA 2011 (db, 27 June), for third-party loaders and option ROMs; Microsoft Windows Production PCA 2011 (db, 19 October), for the Windows boot loader.
+- Their replacements: Microsoft Corporation KEK 2K CA 2023 in KEK; Windows UEFI CA 2023, Microsoft UEFI CA 2023 and Microsoft Option ROM UEFI CA 2023 in db.
+- Microsoft: a machine without the new certificates keeps starting and keeps installing ordinary updates, but no longer receives new protections for the early boot process: boot manager updates, database updates and revocations.
+- A KEK update must be signed by the Platform Key's owner. Once the PK is the user's, the manufacturer's updates can no longer add the 2023 KEK certificate; with it in KEK, Microsoft's db and dbx updates keep arriving, the three db certificates among them.
+- The sha256 of each certificate's DER form, which is what a signature-list entry holds:
+  - Microsoft Corporation KEK 2K CA 2023: `3cd3f0309edae228767a976dd40d9f4affc4fbd5218f2e8cc3c9dd97e8ac6f9d`
+  - Windows UEFI CA 2023: `076f1fea90ac29155ebf77c17682f75f1fdd1be196da302dc8461e350a9ae330`
+  - Microsoft UEFI CA 2023: `f6124e34125bee3fe6d79a574eaa7b91c0e7bd9d929c1a321178efd611dad901`
+  - Microsoft Option ROM UEFI CA 2023: `e5be3e64c6e66a281457ecdece0d6d0787577aad2a3a0144262c10c14ba8d8f1`
+- sbctl 0.18 carries all seven for `--microsoft`, so the rebuild path of enrollment writes the 2023 certificates; the append path writes none of Microsoft's and keeps what the firmware held (C4).
