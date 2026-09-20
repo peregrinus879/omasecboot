@@ -221,6 +221,21 @@ hook_never_fails_its_caller() {
   "$hook" 2>/dev/null || fail_test "a missing tool made the hook fail its caller"
 }
 
+# remove that stops half way leaves a machine that reads as neither set up
+# nor stock; the report says so instead of passing it as "not set up".
+unfinished_remove_is_reported() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/limine-install-fails"
+  run_cli remove && fail_test "a failed Limine tool went unnoticed"
+  [[ ! -e $(enabled_marker) && -e $(settings_originals_file) ]] || fail_test "the fixture is not a remove that stopped half way"
+  run_cli status && fail_test "status passed over a remove that did not finish"
+  [[ $(<"$FIX/run/output") == *'did not finish'* && $(<"$FIX/run/output") != *'Next:'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  rm "$FIX/run/limine-install-fails"
+  run_cli remove || fail_test "second remove failed: $(<"$FIX/run/output")"
+  run_cli status || fail_test "status after a finished remove: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'is not set up on this machine'* && $(<"$FIX/run/output") == *'Next:'*'omasecboot setup'* ]] || fail_test "report: $(<"$FIX/run/output")"
+}
+
 # A reboot straight after an update stops the watchers' service while its pass
 # is rebuilding the loader. The unit's KillMode signals the pass alone; cut off
 # between the raw loader and the sealed one it would leave a machine that does
@@ -258,5 +273,6 @@ run_case hook-pass-works-under-the-callers-lock hook_pass_works_under_the_caller
 run_case usage-errors-exit-2 usage_errors_exit_2
 run_case status-quiet-prints-nothing status_quiet_prints_nothing
 run_case hook-never-fails-its-caller hook_never_fails_its_caller
+run_case unfinished-remove-is-reported unfinished_remove_is_reported
 run_case watchers-pass-finishes-through-a-stop watchers_pass_finishes_through_a_stop
 finish_suite

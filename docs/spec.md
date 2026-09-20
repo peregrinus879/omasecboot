@@ -127,7 +127,7 @@ The converge-and-verify pass that people, the hook and the watcher all run. It i
 
 ### `status`
 
-Read-only. It reports the firmware state and whether the user's keys are enrolled, the managed settings, the loader proof, the fallback, the signing keys, every signable file, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watcher, leftovers and `needs-attention`. It ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs. Anything that could not be read belongs to the last kind. `--quiet` only sets the exit status.
+Read-only. It reports the firmware state and whether the user's keys are enrolled, the managed settings, the loader proof, the fallback, the signing keys, every signable file, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`. On a machine that is not set up it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it. It ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs. Anything that could not be read belongs to the last kind. `--quiet` only sets the exit status.
 
 ### `windows preflight | setup | remove | status | bootnext | available`
 

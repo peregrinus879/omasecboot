@@ -89,6 +89,7 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 | A red line after an update: `OmaSecBoot could not finish` | The pass inside the update could not prove the boot files | `sudo omasecboot status`, then the command it names. Do not reboot with Secure Boot on until the report is clean |
 | `The Limine loader is not sealed with the current limine.conf` | The loader would refuse to start, with Secure Boot on or off | `sudo omasecboot sign` before you reboot. If the machine is already down, see "If the machine does not boot" |
 | `Stale path hash in limine.conf` | An OS entry still carries a hash of a file that has changed since | `sudo omasecboot setup`, which regenerates the entries |
+| `An earlier setup or remove did not finish` | One of the two stopped half way, for example when a Limine tool failed | `sudo omasecboot remove` to return to stock, or `sudo omasecboot setup` to set up again |
 | `An earlier install of this tool is still present` | Files of a pre-package install remain, and their hooks keep running the old tool | Run the removal command that `setup` prints, then `setup` again |
 | `The firmware's keys are in a state this tool will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `setup`, then delete only the Platform Key |
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |

@@ -206,7 +206,7 @@ show_integration_status() {
 
 show_next_step() {
   if ! is_set_up; then
-    act "Next: ${BOLD}sudo omasecboot setup${NC}"
+    (( _status_problems > 0 )) || act "Next: ${BOLD}sudo omasecboot setup${NC}"
   elif (( _status_problems == 0 )); then
     case $_status_firmware in
       complete) act "Nothing to do" ;;
@@ -236,7 +236,14 @@ show_status() {
   header "Status"
   show_firmware_status
   if ! is_set_up; then
-    note "OmaSecBoot is not set up on this machine"
+    # setup records the settings' originals before it writes "enabled", and
+    # remove deletes "enabled" first and the originals last. Originals without
+    # "enabled" are one of the two stopped half way, and either finishes it.
+    if [[ -e $(settings_originals_file) ]]; then
+      problem "An earlier setup or remove did not finish. Run ${BOLD}sudo omasecboot remove${NC} to return to stock, or ${BOLD}sudo omasecboot setup${NC} to set up again"
+    else
+      note "OmaSecBoot is not set up on this machine"
+    fi
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"
   else
