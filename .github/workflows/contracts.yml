@@ -60,7 +60,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .contracts-green
-          key: contracts-${{ steps.subject.outputs.key }}-${{ hashFiles('tests/contract-*.sh', 'tests/lib/sandbox.sh', 'tests/lib/esl.sh', 'lib/*.sh', 'limine-hooks/*') }}
+          key: contracts-${{ steps.subject.outputs.key }}-${{ hashFiles('tests/contract-*.sh', 'tests/lib/sandbox.sh', 'tests/lib/esl.sh', 'lib/*.sh', 'limine/*') }}
           lookup-only: true
       # Upstream's pacman hooks run its deploy tools here; they find no ESP in
       # the container and stop before doing anything.

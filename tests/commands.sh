@@ -251,7 +251,7 @@ status_quiet_prints_nothing() {
 hook_never_fails_its_caller() {
   local hook=$FIX/bin/hook-under-test
   sed -e "s|@BINDIR@|$FIX/bin|g" -e "s|/var/lib/omasecboot/enabled|$FIX/state/enabled|" \
-    "$ROOT_DIR/limine-hooks/90-omasecboot-sign" >"$hook" && chmod 755 "$hook"
+    "$ROOT_DIR/limine/90-omasecboot-sign" >"$hook" && chmod 755 "$hook"
   printf '#!/bin/bash\nprintf ran >>"%s/run/hook-ran"\nexit 1\n' "$FIX" >"$FIX/bin/omasecboot" && chmod 755 "$FIX/bin/omasecboot"
   "$hook" || fail_test "the dormant hook failed"
   [[ ! -e $FIX/run/hook-ran ]] || fail_test "the dormant hook ran the tool"

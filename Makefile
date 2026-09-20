@@ -9,7 +9,7 @@ DOCDIR      = $(PREFIX)/share/doc/omasecboot
 # PREFIX.
 UNITDIR     = /usr/lib/systemd/system
 HOOKDIR     = /etc/boot/hooks/post.d
-SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) limine-hooks/90-omasecboot-sign \
+SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) limine/90-omasecboot-sign \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
 TEST_SUITES = common limine sign status firmware windows commands records install package
 CONTRACT_SUITES = sbctl limine
@@ -26,7 +26,7 @@ install:
 	install -Dm644 -t "$(DESTDIR)$(LIBDIR)/" lib/*.sh
 	install -Dm755 bin/omasecboot "$(DESTDIR)$(BINDIR)/omasecboot"
 	install -d "$(DESTDIR)$(HOOKDIR)" "$(DESTDIR)$(UNITDIR)"
-	sed 's|@BINDIR@|$(BINDIR)|g' limine-hooks/90-omasecboot-sign > "$(DESTDIR)$(HOOKDIR)/90-omasecboot-sign"
+	sed 's|@BINDIR@|$(BINDIR)|g' limine/90-omasecboot-sign > "$(DESTDIR)$(HOOKDIR)/90-omasecboot-sign"
 	chmod 755 "$(DESTDIR)$(HOOKDIR)/90-omasecboot-sign"
 	@for unit in omasecboot-watch@.path omasecboot-watch@.service; do \
 	  sed 's|@BINDIR@|$(BINDIR)|g' "systemd/$$unit" > "$(DESTDIR)$(UNITDIR)/$$unit" || exit 1; \

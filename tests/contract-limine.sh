@@ -28,7 +28,7 @@ for module in common checks files firmware limine; do
   # shellcheck source=/dev/null
   source "$ROOT_DIR/lib/${module}.sh"
 done
-HOOK_NAME=$(basename "$ROOT_DIR"/limine-hooks/*)
+HOOK_NAME=$(basename "$ROOT_DIR"/limine/*)
 readonly HOOK_NAME
 
 # Upstream's library in the case's own subshell. It is not written for

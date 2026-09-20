@@ -86,7 +86,7 @@ file_block() {
 compare_installed_files() {
   local source installed
   local -A installed_as=([bin/omasecboot]=/usr/bin/omasecboot
-    [limine-hooks/90-omasecboot-sign]=/etc/boot/hooks/post.d/90-omasecboot-sign
+    [limine/90-omasecboot-sign]=/etc/boot/hooks/post.d/90-omasecboot-sign
     ["systemd/omasecboot-watch@.path"]=/usr/lib/systemd/system/omasecboot-watch@.path
     ["systemd/omasecboot-watch@.service"]=/usr/lib/systemd/system/omasecboot-watch@.service)
   for source in "$root_dir"/lib/*.sh; do
