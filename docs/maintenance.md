@@ -2,10 +2,10 @@
 
 Open work, the evidence still owed, and what triggers a recheck. A closed item leaves this page; Git history keeps it.
 
-## Open work before a release
+## Open work
 
-- The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers, including the request about the installer's `99-omarchy-limine.hook`.
-- Leftover detection covers installs of an earlier version that were copied into place without pacman. Drop it one release after 1.0.0: `leftover_candidates` and its report in `lib/status.sh`, the refusal in `setup`, the failure-table row and step 1 in [spec.md](spec.md), the README's troubleshooting row, the check in [field-testing.md](field-testing.md), the setup command's duty in omarchy-integration.md and the recorder's block in `tests/acceptance-record.sh`.
+- The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers, including the request about the installer's `99-omarchy-limine.hook`. It follows a release and does not gate one.
+- Leftover detection covers installs of an earlier version that were copied into place without pacman. Drop it one release after the first: `leftover_candidates` and its report in `lib/status.sh`, the refusal in `setup`, the failure-table row and step 1 in [spec.md](spec.md), the README's troubleshooting row, the check in [field-testing.md](field-testing.md), the setup command's duty in omarchy-integration.md and the recorder's block in `tests/acceptance-record.sh`.
 
 ## Evidence owed
 
