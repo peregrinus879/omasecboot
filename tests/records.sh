@@ -38,6 +38,8 @@ cmdline: cryptdevice=UUID=${LUKS}:omarchy_root
 SUDO_USER=te.ster USER=teXster hostname=testhost
 Boot0002* Windows Boot Manager	HD(1,GPT,${PARTITION},0x800,0x82000)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi57494e444f5753000100000088000000
 ]3008;end=abc;hostname=testhost\\after a mark without its escape byte
+      data: 57 49 4e 44 4f 57 53 00 53 45 52 49 41 4c
+Boot0007  Legacy disk	BBS(HD,,0x0)0000474f00004e4f53455249414c
 ${SESSION_MARK}Signing keys created
 RECORD
   cat >"$FIX/records/20260102T040506Z-1-status.md" <<RECORD
@@ -54,7 +56,7 @@ identifiers_are_renamed_and_the_rest_stays() {
   local first=$FIX/records/share/20260102T030405Z-1-setup.md second=$FIX/records/share/20260102T040506Z-1-status.md value
   write_records
   share || fail_test "the share step failed: $(<"$FIX/run/output")"
-  for value in "$PARTITION" "${PARTITION^^}" "$LUKS" "$MACHINE_ID" /home/te.ster 'testhost sudo' 'hostname=testhost' 'SUDO_USER=te.ster' '3008;' 'dp: 04' 57494e44; do
+  for value in "$PARTITION" "${PARTITION^^}" "$LUKS" "$MACHINE_ID" /home/te.ster 'testhost sudo' 'hostname=testhost' 'SUDO_USER=te.ster' '3008;' 'dp: 04' 'data: 57' 57494e44 4e4f5345; do
     ! grep -q -F -- "$value" "$first" "$second" || fail_test "still in the copies: ${value}"
   done
   grep -q -F "HD(6,GPT,uuid-1,0x800,0x400001)" "$first" || fail_test "the partition is not uuid-1: $(grep HD "$first")"
@@ -68,9 +70,10 @@ identifiers_are_renamed_and_the_rest_stays() {
   grep -q -x 'after a mark without its escape byte' "$first" || fail_test "a session mark without its escape byte: $(grep -n 'escape byte' "$first")"
   grep -q -x 'SUDO_USER=user USER=teXster hostname=host' "$first" || fail_test "the environment line, where the dot of the name must not match any character: $(grep -n SUDO_USER "$first")"
   grep -q -F 'bootmgfw.efi (optional data left out)' "$first" || fail_test "a boot entry's optional data: $(grep -n bootmgfw "$first")"
+  grep -q -F 'BBS(HD,,0x0) (optional data left out)' "$first" || fail_test "a legacy entry's optional data: $(grep -n BBS "$first")"
   # A name inside text the recorder did not place is left alone and pointed at.
   grep -q -F "the te.ster's session" "$second" || fail_test "free text was rewritten"
-  [[ $(<"$FIX/run/output") == *'The name "te.ster" still occurs 1 times'* ]] || fail_test "the remaining name was not pointed at: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'The name "te.ster" still occurs in the copies, 1 time(s)'* ]] || fail_test "the remaining name was not pointed at: $(<"$FIX/run/output")"
   [[ $(tar -tzf "$FIX/records/share/omasecboot-records.tgz" | sort | tr '\n' ' ') == '20260102T030405Z-1-setup.md 20260102T040506Z-1-status.md ' ]] || fail_test "archive: $(tar -tzf "$FIX/records/share/omasecboot-records.tgz")"
   cmp -s <(tar -xOzf "$FIX/records/share/omasecboot-records.tgz" 20260102T030405Z-1-setup.md) "$first" || fail_test "the archive does not hold the copy"
   # tar writes the owner's name into every member's header unless told not to.
@@ -84,7 +87,7 @@ names_that_stay_are_pointed_at() {
   mkdir -p "$FIX/records"
   printf '# Acceptance record 1-note\n2026-01-02T03:04:05+00:00 testhost systemd[1]: up\nwelcome to testhost\n' >"$FIX/records/20260102T030405Z-1-note.md"
   share || fail_test "the share step failed: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'The name "testhost" still occurs 1 times'* ]] || fail_test "the remaining host name was not pointed at: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'The name "testhost" still occurs in the copies, 1 time(s)'* ]] || fail_test "the remaining host name was not pointed at: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'No login name was found'* ]] || fail_test "silence about a login name that was never looked for: $(<"$FIX/run/output")"
 }
 
@@ -97,7 +100,13 @@ only_records_are_read_and_only_copies_deleted() {
   : >"$FIX/records/share/somebody-elses-file"
   share || status=$?
   [[ $status == 2 && -e $FIX/records/share/somebody-elses-file ]] || fail_test "a share directory with a foreign file: status ${status}"
-  rm "$FIX/records/share/somebody-elses-file"
+  rm -r "$FIX/records/share"
+  mkdir "$FIX/run/elsewhere"
+  ln -s "$FIX/run/elsewhere" "$FIX/records/share"
+  status=0
+  share || status=$?
+  [[ $status == 2 && -d $FIX/run/elsewhere ]] || fail_test "a share directory that is a link: status ${status}"
+  rm "$FIX/records/share"
   printf '# Notes\n' >"$FIX/records/notes.md"
   status=0
   share || status=$?
@@ -110,8 +119,8 @@ recorder_keeps_control_and_raw_bytes_out() {
   # shellcheck disable=SC2016,SC2119 # The bytes are literal, and the filter reads stdin.
   text=$(printf 'a\033]3008;start=x;hostname=h\033\\b\033]0;title\007c \033[1;32mgreen\033[0m \033[?2026$p\033[>4;2m\033[=1;1uend\r\n' | strip_terminal_control)
   [[ $text == 'abc green end' ]] || fail_test "terminal control: $(printf '%s' "$text" | od -c | head -n 3)"
-  text=$(printf 'Boot0000* Limine\tHD(6,GPT,x)/\\EFI\\limine\\limine_x64.efi\n      dp: 04 01 2a\nBoot0002* Windows\tHD(1,GPT,y)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi57494e444f575300\nBoot0003* Net\tMAC(aabbccddeeff,0)/NVMe(0x1,AA-BB)\n' | strip_boot_entry_bytes)
-  [[ $text != *'dp: '* && $text != *57494e44* && $text != *aabbccddeeff* && $text != *AA-BB* ]] || fail_test "raw bytes stayed: ${text}"
+  text=$(printf 'Boot0000* Limine\tHD(6,GPT,x)/\\EFI\\limine\\limine_x64.efi\n      dp: 04 01 2a\nBoot0002* Windows\tHD(1,GPT,y)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi57494e444f575300\n    data: 57 49 4e 44\nBoot0003* Net\tMAC(aabbccddeeff,0)/NVMe(0x1,AA-BB)\nBoot0007  Legacy\tBBS(HD,,0x0)0000474f4e4f5345\n' | strip_boot_entry_bytes)
+  [[ $text != *'dp: '* && $text != *'data: '* && $text != *57494e44* && $text != *4e4f5345* && $text != *aabbccddeeff* && $text != *AA-BB* ]] || fail_test "raw bytes stayed: ${text}"
   [[ $text == *'limine_x64.efi'$'\n'* && $text == *'bootmgfw.efi (optional data left out)'* && $text == *'MAC(redacted)/NVMe(redacted)'* ]] || fail_test "too much was taken out: ${text}"
 }
 

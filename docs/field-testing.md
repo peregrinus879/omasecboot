@@ -14,9 +14,18 @@ How to try OmaSecBoot on your own machine and report what happened, so that the 
 
 A Snapper snapshot holds the root filesystem. It does not hold the ESP, where the loader, the kernel images and `limine.conf` live, and it does not hold firmware keys. The snapshots this page takes are material for the snapshot rows; every one of them carries `omasecboot-test` in its description and is deleted at the end. Do not restore one while the tool is set up: that is a level 3 drill.
 
-## What "stop" means
+## What stop means
 
-Stop means: do not reboot and do not go on to the next step. When a `status` exits 1, run `sudo omasecboot sign`, then record `status` again under the same row name with `-again` added. If it still exits 1, do not reboot with Secure Boot on; go to "The way back", which ends with a loader that starts whatever `limine.conf` holds, and report where you stopped. A report of a run that stopped half way is as useful as one that went through.
+Stop means: do not reboot and do not go on to the next step. Go to "The way back", which copes with whatever state the machine is in and ends with a loader that starts whatever `limine.conf` holds, and then report where you stopped. A report of a run that stopped half way is as useful as one that went through.
+
+One case has a repair first. When a `status` exits 1 on a machine where `setup` has run, record the repair and the report again, under the row's name with `-sign` and `-again` added:
+
+```bash
+sudo bash tests/acceptance-record.sh <row>-sign -- omasecboot sign
+sudo bash tests/acceptance-record.sh <row>-again -- omasecboot status
+```
+
+Go on if that `status` exits 0. If it still exits 1, stop, and do not reboot with Secure Boot on.
 
 ## If the machine does not start
 
@@ -28,16 +37,17 @@ Read this now, not then.
   ```bash
   lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME
   mount /dev/<the EFI system partition> /mnt
-  tar -xOf /mnt/EFI/limine/limine_x64.bak limine_x64.efi > /mnt/EFI/limine/limine_x64.efi
+  tar -xf /mnt/EFI/limine/limine_x64.bak -C /mnt/EFI/limine limine_x64.efi
   umount /mnt
   ```
-  Where there is no `limine_x64.bak`, copy `/mnt/EFI/BOOT/BOOTX64.EFI` over `/mnt/EFI/limine/limine_x64.efi` instead. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go to "The way back".
+  If there is no `limine_x64.bak`, or tar reports an error, copy `/mnt/EFI/BOOT/BOOTX64.EFI` over `/mnt/EFI/limine/limine_x64.efi` instead. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go to "The way back".
 
 ## Before you start
 
 Nothing of the test is run yet. Settle each line first.
 
 - The machine runs Omarchy on x86_64 with Limine, unified kernel images and a vfat ESP, as Omarchy installs it.
+- Secure Boot is off and the firmware holds its factory keys: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key; report that line instead of testing. A machine on which you have enrolled Secure Boot keys of your own before is not one for this page: its way back would put the factory keys in their place.
 - It is on AC power, and you have about half an hour for level 1 and an hour for level 2.
 - You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `ls /boot/EFI/BOOT/BOOTX64.EFI` must list it; `sudo limine-install --fallback` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file in `/boot/EFI/Linux` as available.
@@ -59,18 +69,18 @@ git log --oneline -1
 make lint && make test && make package
 ```
 
-Expected: lint and the suites pass and one `omasecboot-<version>-1-any.pkg.tar.zst` exists. Note the commit line; the report asks for it. Stop if a suite fails, and report that with its output.
+Expected: lint and the suites pass and one `omasecboot-<version>-1-any.pkg.tar.zst` exists. Note the commit line; the report asks for it. If a suite fails, nothing has changed on the machine yet: report its `FAIL` lines, which name the case, and leave out lines that hold your paths.
 
-Every row from here on is recorded. The recorder writes the machine's state before, the full terminal transcript with the exit status, and the state after, into `~/omasecboot/acceptance-records/`. Without a command it records the state alone.
+Every row from here on is recorded. The recorder writes the machine's state before, the full terminal transcript with the exit status, and the state after, into `~/omasecboot/acceptance-records/`. Without a command it records the state alone. Its form, which the steps below fill in:
 
-```bash
+```text
 sudo bash tests/acceptance-record.sh <row> -- <command>
 ```
 
-Run it from `~/omasecboot`, from your own login with `sudo`, never from a root shell. Something only the screen shows, such as a message at boot, goes into a record of its own. Replace the text with what you saw:
+Run it from `~/omasecboot`, from your own login with `sudo`, never from a root shell. Something only the screen shows, such as a message at boot, goes into a record of its own, in your words, whenever it happens. Its form:
 
-```bash
-sudo bash tests/acceptance-record.sh 1-note -- echo "At boot Limine showed: ..."
+```text
+sudo bash tests/acceptance-record.sh 1-note -- echo "At boot Limine showed: <the text>"
 ```
 
 Record the machine before anything is installed, and take the first snapshot:
@@ -83,7 +93,7 @@ sudo snapper -c root create -d "omasecboot-test baseline"
 
 ## Level 1: boot files, Secure Boot off
 
-Before: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key: stop and report that line; this page assumes a machine with its factory keys.
+Before: "Before you start" and "Prepare" are done, and Secure Boot is still off.
 
 1. Install, and record the untouched machine.
    ```bash
@@ -93,7 +103,7 @@ Before: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, wi
    make test-contract
    ```
    Expected: "OmaSecBoot is not set up on this machine", exit status 0; the contract suites pass against your installed sbctl and Limine tools. Stop if a contract case fails: send its `FAIL` line, which names what changed upstream.
-2. Set up the boot files. On a machine with Windows, `setup` prints what to do about BitLocker and asks once whether Windows encryption is suspended or off, or its recovery key at hand. Answer yes only when that is true. With "no" it stops with "Cancelled", exit 1, after the boot files are set up: then run `status`, and go on or go to "The way back" as you prefer.
+2. Set up the boot files. On a machine with Windows, or where it cannot tell whether there is one, `setup` prints what to do about BitLocker and asks once whether Windows encryption is suspended or off, or its recovery key at hand. Answer yes only when that is true. With "no" it stops with "Cancelled", exit 1, after the boot files are set up: then run `status`, and go on or go to "The way back" as you prefer.
    ```bash
    sudo bash tests/acceptance-record.sh 1-setup -- omasecboot setup
    sudo bash tests/acceptance-record.sh 1-status -- omasecboot status
@@ -144,7 +154,7 @@ cd ~/omasecboot
 sudo bash tests/acceptance-record.sh 5-preflight -- omasecboot windows preflight
 ```
 
-Expected: it names the Windows volumes and whether BitLocker was found. Stop if it says that something could not be told.
+Expected: the BitLocker volumes it found with what to do in Windows first, or a line that none was found. Stop if it says that something could not be told.
 
 ```bash
 sudo bash tests/acceptance-record.sh 5-setup -- omasecboot windows setup
@@ -173,7 +183,7 @@ If you stop at level 1, go to "The way back".
 
 Before: level 1 is done and its last `status` exited 0; the firmware lines of "Before you start" are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone, and only ever adds to KEK and db. The README's "How your keys get into the firmware" says what happens and why.
 
-1. Let `setup` take a fresh backup and ask its Windows question again, right before the deletion.
+1. Let `setup` make sure its backup of the firmware's keys is current and ask its Windows question again, right before the deletion.
    ```bash
    cd ~/omasecboot
    sudo bash tests/acceptance-record.sh 2-before-pk-delete -- omasecboot setup
@@ -192,7 +202,7 @@ Before: level 1 is done and its last `status` exited 0; the firmware lines of "B
    ```bash
    sudo bash tests/acceptance-record.sh 2-enroll -- omasecboot setup
    ```
-   Expected: it says how many KEK and db entries it keeps, asks before it writes (on a machine with Windows also about the recovery key), writes db, KEK and the Platform Key one at a time and reads each back, and ends with "Reboot, then run sudo omasecboot setup once more". Stop if it refuses: its message lists what is gone from the firmware, and the report needs that list. Restore the factory keys in the firmware then.
+   Expected: it says how many KEK and db entries it keeps, asks before it writes (on a machine with Windows also about the recovery key), writes db, KEK and the Platform Key one at a time and reads each back, and ends with "Reboot, then run sudo omasecboot setup once more". If it says instead that the firmware's key menu cleared KEK and db together with the Platform Key, and offers to rebuild them, answer no: that path writes other lists and needs a report of its own. Stop then, and also if it refuses; its message lists what is gone from the firmware, and the report needs that list. The way back's step 3 restores the factory keys.
 4. Reboot, and let `setup` confirm.
    ```bash
    systemctl reboot
@@ -218,6 +228,10 @@ Before: level 1 is done and its last `status` exited 0; the firmware lines of "B
    ```bash
    cd ~/omasecboot
    kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
+   echo "$kernel"
+   ```
+   Expected: the package name again. Stop if the line is empty.
+   ```bash
    sudo bash tests/acceptance-record.sh 3-kernel -- pacman -S --noconfirm "$kernel"
    sudo bash tests/acceptance-record.sh 3-status-kernel -- omasecboot status
    sudo bash tests/acceptance-record.sh 3-limine -- pacman -S --noconfirm limine
@@ -234,7 +248,12 @@ Before: level 1 is done and its last `status` exited 0; the firmware lines of "B
    sudo bash tests/acceptance-record.sh 3-snapshot-boot -- echo "The snapshot entry taken after setup: started / was refused, with the text: ..."
    sudo bash tests/acceptance-record.sh 3-status-reboot -- omasecboot status
    ```
-   Expected: both entries start and `status` exits 0. A snapshot entry from before `setup` is refused with Secure Boot on; the README says why.
+   Expected: both entries start and `status` exits 0.
+8. Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on it must be refused; the README says why. Note the text, start the normal entry, and record:
+   ```bash
+   cd ~/omasecboot
+   sudo bash tests/acceptance-record.sh 3-old-snapshot -- echo "The snapshot entry from before setup: was refused with the text: ... / started"
+   ```
 
 ## Level 3: drills, on a spare machine only
 
@@ -258,19 +277,27 @@ In this order, whatever level you reached.
    sudo bash tests/acceptance-record.sh 6-factory-keys -- sbctl status
    ```
    Expected: Setup Mode disabled and the vendor keys listed.
-4. Remove what the test created. The `0-before-install` record shows whether sbctl and signing keys were there before. If they were not and you do not use sbctl yourself, remove the keys first and then the package, so that Limine's tools stop signing with them.
+4. Remove what the test created, the package first.
    ```bash
-   sudo rm -rf /var/lib/sbctl
    sudo pacman -R omasecboot
-   sudo pacman -Rns sbctl
    ```
-   If you keep sbctl, run only the middle line. Then delete the test's snapshots by number:
+   Then the test's snapshots, by number:
    ```bash
    sudo snapper -c root list | grep omasecboot-test
    sudo snapper -c root delete <numbers>
    ```
-   After level 1, `sudo rm -rf /var/lib/omasecboot` removes the rest. After level 2 keep that directory: its `firmware-backup` is the only record of what your firmware trusted before the test. The packages that "Prepare" installed stay; remove the ones you do not want.
-5. Reboot, see that the machine starts as it did before, and record the final state.
+   After level 1, `sudo rm -rf /var/lib/omasecboot` removes the tool's state. After level 2 keep that directory: its `firmware-backup` is the only record of what your firmware trusted before the test.
+5. Signing keys. `setup` created keys under `/var/lib/sbctl` only if there were none, and Limine's tools sign with whatever keys are there. After level 2, do this step only once step 3 matched its Expected: until then the firmware may still trust these keys. Look at what the machine had before the test:
+   ```bash
+   grep -h -A5 '^### sbctl status' ~/omasecboot/acceptance-records/*-0-before-install.md | head -n 8
+   grep -h -A3 '^### Related packages' ~/omasecboot/acceptance-records/*-0-before-install.md | grep -i sbctl
+   ```
+   If the first shows `Installed: ✓ sbctl is installed`, the keys were yours before the test and were never replaced: skip the rest of this step and go on to step 6. Only if it shows `Installed: ✗ sbctl is not installed`, or that the `sbctl` command was not found, were the keys made by this test, and this removes them:
+   ```bash
+   sudo rm -rf /var/lib/sbctl
+   ```
+   If the second says that the package sbctl was not found, the test also brought the package, and `sudo pacman -Rns sbctl` removes it. The other packages that came with the tool or with "Prepare" stay; remove the ones you do not want.
+6. Reboot, see that the machine starts as it did before, and record the final state.
    ```bash
    systemctl reboot
    ```
@@ -291,6 +318,6 @@ bash tests/acceptance-share.sh
 
 It writes `acceptance-records/share/` and `omasecboot-records.tgz` inside it. In the copies every such value is renamed (`uuid-1`, `id-1`, `user`, `host`), the same value the same way in every record, so nothing is lost for the review. What stays is what the review needs or no rule can know: the machine's model and firmware version, package versions, disk sizes, boot entry labels, the time zone of time stamps, hashes of boot files, and every text typed by hand, such as snapshot descriptions and your notes. The command's last lines say where your names still occur. Skim the copies before you share them; some firmware puts a disk's model or serial number into a boot entry's label.
 
-Then open a [field report](https://github.com/peregrinus879/omasecboot/issues/new?template=field-report.yml). The form asks for the machine, the firmware, the commit, how far you went, what happened at each step that no record can show (texts on the screen, firmware menu wording, whether Windows started), and the archive: drag `omasecboot-records.tgz` into the last field. Quote from the copies in `share/`, never from the records themselves. Attach only that archive, and never recovery keys, serial numbers or anything from `/var/lib/sbctl` or `/var/lib/omasecboot/firmware-backup`.
+Then open a [field report](https://github.com/peregrinus879/omasecboot/issues/new?template=field-report.yml). The form asks for the machine, the firmware, the commit, how far you went, what happened at each step that no record can show (texts on the screen, firmware menu wording, whether Windows started), and the archive: drag `omasecboot-records.tgz` into the last field, or write "none" there when the run ended in "Prepare". Quote from the copies in `share/`, never from the records themselves. Attach only that archive, and never recovery keys, serial numbers or anything from `/var/lib/sbctl` or `/var/lib/omasecboot/firmware-backup`.
 
 When the report is filed, `rm -rf ~/omasecboot` removes the checkout and the records.

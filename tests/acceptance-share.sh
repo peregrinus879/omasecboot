@@ -81,8 +81,9 @@ trap 'rm -f -- "$rules"' EXIT
 {
   # The session sequences sudo and systemd print, with or without their escape byte.
   printf 's/\\x1b\\?\\]3008;[^\\\\\\x07]*[\\\\\\x07]\\?//g\n'
-  printf '/^[[:space:]]*dp: /d\n'
-  printf 's/\\(\\.efi\\)[0-9a-fA-F]\\{16,\\}$/\\1 (optional data left out)/I\n'
+  # Records made before the recorder left these out itself.
+  printf '/^[[:space:]]*\\(dp\\|data\\): /d\n'
+  printf 's/\\()\\|\\.efi\\)[0-9a-fA-F]\\{8,\\}$/\\1 (optional data left out)/I\n'
   number=0
   while IFS= read -r value; do
     [[ -n $value && " $PUBLIC_UUIDS " != *" $value "* ]] || continue
@@ -121,8 +122,9 @@ printf 'Shareable copies: %s\nArchive to attach: %s\n' "$share_dir" "$share_dir/
 [[ -n $login_names ]] || printf 'No login name was found in the records, so none was renamed.\n'
 [[ -n $host_names ]] || printf 'No host name was found in the records, so none was renamed.\n'
 while IFS= read -r value; do
-  [[ -n $value && $value != root ]] || continue
+  # The placeholders themselves are in every copy.
+  [[ -n $value && $value != root && $value != user && $value != host ]] || continue
   left=$(grep -h -o -w -F -- "$value" "$share_dir"/*.md | wc -l)
-  (( left == 0 )) || printf 'The name "%s" still occurs %s times in the copies; look before you share: grep -n -w -F -- "%s" %s/*.md\n' "$value" "$left" "$value" "$share_dir"
+  (( left == 0 )) || printf 'The name "%s" still occurs in the copies, %s time(s); look before you share: grep -n -w -F -- "%s" %s/*.md\n' "$value" "$left" "$value" "$share_dir"
 done < <(printf '%s\n%s\n%s\n%s\n' "$login_names" "$host_names" "${SUDO_USER:-$(id -un)}" "$(uname -n)" | awk '!seen[$0]++')
 printf 'Text typed by hand, such as snapshot descriptions and your notes, is copied as it is. Skim the copies before you share them.\n'

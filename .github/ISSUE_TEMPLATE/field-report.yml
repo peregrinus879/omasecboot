@@ -109,6 +109,6 @@ body:
     id: records
     attributes:
       label: Records
-      description: "Drag `acceptance-records/share/omasecboot-records.tgz` into this field. If `acceptance-share.sh` said that your login or host name still occurs in the copies, read those places first."
+      description: "Drag `acceptance-records/share/omasecboot-records.tgz` into this field, or write \"none\" when the run ended in \"Prepare\". If `acceptance-share.sh` said that your login or host name still occurs in the copies, read those places first."
     validations:
       required: true

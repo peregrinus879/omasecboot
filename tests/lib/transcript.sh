@@ -12,9 +12,11 @@ strip_terminal_control() {
   LC_ALL=C sed 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g; s/\x1b\[[0-?]*[ -\/]*[@-~]//g; s/\r$//' "$@"
 }
 
-# efibootmgr -v prints each entry's device path a second time as raw bytes,
-# and the optional data after the file path as hex. Both can repeat a
-# partition's UUID in a form no later filter would recognise.
+# efibootmgr -v prints each entry's device path a second time as raw bytes
+# ("dp:"), and its optional data twice: as hex behind the path and as bytes
+# ("data:"). They can repeat a partition's UUID, and a legacy entry's optional
+# data holds the disk's model and serial number, in forms no later filter
+# would recognise.
 strip_boot_entry_bytes() {
-  grep -v '^ *dp: ' | sed -E 's/(\.efi)[0-9a-fA-F]{16,}$/\1 (optional data left out)/I; s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g'
+  grep -v -E '^ *(dp|data): ' | sed -E 's/(\)|\.efi)[0-9a-fA-F]{8,}$/\1 (optional data left out)/I; s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g'
 }
