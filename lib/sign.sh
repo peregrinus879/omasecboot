@@ -1,7 +1,7 @@
 #!/bin/bash
 # OmaSecBoot: converge and verify. One idempotent pass that people, the Limine
-# hook and the limine.conf watcher all run; an interrupted pass is finished by
-# the next one.
+# hook and the watchers all run; an interrupted pass is finished by the next
+# one.
 
 # Rows that make sbctl's pacman hook sign a history file or the fallback loader
 # in place. OmaSecBoot adds no rows; these come from an earlier version of this

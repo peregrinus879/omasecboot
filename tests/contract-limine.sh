@@ -158,6 +158,7 @@ our_hook_runs_between_upstreams() {
 # exits 0 on a flag it does not know, so a renamed flag would go unnoticed.
 upstream_still_offers_what_this_tool_uses() {
   grep -q -e '--no-efi-register' "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer knows --no-efi-register: recheck C2"
+  grep -q -e '--fallback' "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer knows --fallback, which this tool's advice names: recheck C2"
   shipped_files | grep -qx '/etc/boot/hooks/pre.d/10-limine-reset-enroll' ||
     fail_test "the package no longer ships pre.d/10-limine-reset-enroll, which puts the primary loader back before every operation: recheck C2"
   shipped_files | grep -qx '/usr/bin/limine-reset-enroll' || fail_test "the package no longer ships limine-reset-enroll: recheck C2"

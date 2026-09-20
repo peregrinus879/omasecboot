@@ -82,7 +82,7 @@ Every path that changes boot files takes `/run/lock/boot-partition.lock` on desc
 - Inside a Limine hook the calling tool already holds the lock on the descriptor the hook inherits; the tool locks that same descriptor, because a fresh open would deadlock against its own parent.
 - An inherited descriptor that cannot be locked at once means the calling tool timed out and someone else is at work on the boot files. The hook waits five seconds at most, because that time is spent inside a package transaction, then returns 75 and leaves the proof to the next Limine operation, `sign` or `status`.
 - Otherwise the tool opens the lock, waits up to 90 seconds, then exits 75 and names the lock. It never proceeds unlocked.
-- It does nothing while `/run/lock/limine-snapper-restore.lock` exists, because a full snapshot restore runs without the lock [C2].
+- While `/run/lock/limine-snapper-restore.lock` exists the pass does nothing, and `setup`, `remove`, `windows setup` and `windows remove` refuse, because a full snapshot restore works on the boot files without the lock [C2].
 - The Limine tools that `setup` and `remove` run as children take the lock themselves and carry on unlocked after their own timeout, so the lock is released around them and taken again afterwards, with a fresh proof.
 
 ## 5. Commands

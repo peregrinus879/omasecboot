@@ -48,7 +48,7 @@ sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
 | `sudo omasecboot remove` | Returns the Limine settings and boot files to stock and takes the Windows entry out. Refuses while Secure Boot is on. Your keys stay. |
 | `omasecboot windows preflight` | Looks for Windows and BitLocker volumes and prints what to do in Windows before Secure Boot changes. Read-only. |
 | `sudo omasecboot windows setup` | Adds a Windows entry to the boot menu; `windows remove` takes it out. |
-| `omasecboot windows status` | Shows the Windows target the firmware offers and the state of the entry. |
+| `sudo omasecboot windows status` | Shows the Windows target the firmware offers and the state of the entry. |
 | `sudo omasecboot windows bootnext` | Asks the firmware to start Windows at the next boot, once. Exit 0 means the firmware took the request, nothing more. |
 
 ## How your keys get into the firmware

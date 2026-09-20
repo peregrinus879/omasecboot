@@ -39,6 +39,7 @@ jq
 limine-mkinitcpio-hook>=1.38.0
 limine>=11.0.0
 pacman
+procps-ng
 sbctl>=0.18
 sed
 systemd

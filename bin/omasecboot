@@ -24,7 +24,7 @@ usage() {
   ${BOLD}omasecboot windows preflight${NC}  Look for Windows and BitLocker, and say what to do before Secure Boot changes
   ${BOLD}sudo omasecboot windows setup${NC}     Add a Windows entry to the boot menu     (${BOLD}windows remove${NC} takes it out)
   ${BOLD}sudo omasecboot windows bootnext${NC}  Ask the firmware to start Windows at the next boot, once
-  ${BOLD}omasecboot windows status${NC}     Show the Windows target and the entry's state
+  ${BOLD}sudo omasecboot windows status${NC}    Show the Windows target and the entry's state
   ${BOLD}omasecboot version${NC}
 
   ${BOLD}--quiet${NC} anywhere on the line keeps progress quiet; warnings and failures still print"
@@ -176,6 +176,8 @@ cmd_setup() {
   header "Setup"
   setup_preflight || exit 1
   require_terminal || exit 1
+  # A full snapshot restore works on the boot files without the lock (C2).
+  ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
   ! is_set_up || first_run=false
 
   if sbctl_keys_exist; then
@@ -193,8 +195,8 @@ cmd_setup() {
   remove_harmful_sbctl_rows || exit 1
   boot_lock_acquire || exit "$?"
   apply_managed_settings || die "Could not write $(limine_default_config)"
-  # From here on the hook and the watcher keep the boot files converged, also
-  # when this run is interrupted.
+  # From here on the Limine hook keeps the boot files converged, and enables
+  # the watchers, also when this run is interrupted.
   ensure_state_dir || die "Unsafe state directory $(state_dir)"
   : >"$(enabled_marker)"
   if os_entries_carry_hashes; then
@@ -251,9 +253,10 @@ cmd_remove() {
   # The stock boot files are unsigned, so an unreadable variable is no answer.
   secure_boot=$(read_mode_variable SecureBoot) || die "Could not read the firmware's SecureBoot variable"
   [[ $secure_boot == 0 ]] || die "Secure Boot is on. Turn it off in the firmware first: the stock boot files are unsigned."
+  ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
   confirm "returning to stock boot files" "Return the Limine settings and boot files to stock?" || exit 1
 
-  # The lock comes first: a busy lock must leave the hook and the watcher at
+  # The lock comes first: a busy lock must leave the hook and the watchers at
   # work on a loader that is still sealed.
   boot_lock_acquire || exit "$?"
   rm -f -- "$(enabled_marker)"

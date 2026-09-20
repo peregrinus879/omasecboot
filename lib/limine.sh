@@ -1,6 +1,6 @@
 #!/bin/bash
 # OmaSecBoot: Limine settings, limine.conf facts, the primary loader proof,
-# the fallback loader, the limine.conf watcher and the way back to stock.
+# the fallback loader, the watchers and the way back to stock.
 
 readonly LIMINE_CONFIG_MARKER='++CONFIG_B2SUM_SIGNATURE++'
 

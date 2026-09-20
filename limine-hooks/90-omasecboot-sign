@@ -3,9 +3,9 @@
 # files. The name sorts it after upstream's 90-limine-enroll-config, whose work
 # it checks, and before upstream's optional 91 hook that remounts the ESP
 # read-only. It must never fail its caller: the last hook's status becomes the
-# Limine tool's, and limine-mkinitcpio treats non-zero as a failed kernel
-# install. So there is no "set -e" and no "exec" here, and the exit is 0 even
-# when OmaSecBoot itself is broken; "sign" leaves a marker and a red line.
+# Limine tool's, and limine-mkinitcpio-install treats non-zero as a failed
+# kernel install. So there is no "set -e" and no "exec" here, and the exit is 0
+# even when OmaSecBoot itself is broken; "sign" leaves a marker and a red line.
 [[ -e /var/lib/omasecboot/enabled ]] || exit 0
 @BINDIR@/omasecboot sign --quiet || :
 exit 0

@@ -99,7 +99,7 @@ remove_returns_to_stock() {
   [[ -e $FIX/sbctl/keys ]] || fail_test "remove deleted the keys"
 }
 
-# A busy lock must leave the hook and the watcher at work on the sealed loader.
+# A busy lock must leave the hook and the watchers at work on the sealed loader.
 busy_remove_changes_nothing() {
   local rc=0
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
@@ -221,6 +221,23 @@ hook_never_fails_its_caller() {
   "$hook" 2>/dev/null || fail_test "a missing tool made the hook fail its caller"
 }
 
+# A full snapshot restore works on the boot files without the lock (C2), so
+# nothing that rewrites them starts beside it.
+setup_and_remove_wait_for_a_restore() {
+  : >"$(restore_marker_path)"
+  run_cli setup && fail_test "setup ran beside a snapshot restore"
+  [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
+  [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) ]] || fail_test "a refused setup left state behind"
+  ! grep -q '^limine-' "$FIX/run/calls" 2>/dev/null || fail_test "a refused setup ran a Limine tool: $(<"$FIX/run/calls")"
+  rm "$(restore_marker_path)"
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$(restore_marker_path)"
+  : >"$FIX/run/calls"
+  run_cli remove && fail_test "remove ran beside a snapshot restore"
+  [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
+  [[ -e $(enabled_marker) && -e $(settings_originals_file) && ! -s $FIX/run/calls ]] || fail_test "a refused remove changed something: $(<"$FIX/run/calls")"
+}
+
 # remove that stops half way leaves a machine that reads as neither set up
 # nor stock; the report says so instead of passing it as "not set up".
 unfinished_remove_is_reported() {
@@ -273,6 +290,7 @@ run_case hook-pass-works-under-the-callers-lock hook_pass_works_under_the_caller
 run_case usage-errors-exit-2 usage_errors_exit_2
 run_case status-quiet-prints-nothing status_quiet_prints_nothing
 run_case hook-never-fails-its-caller hook_never_fails_its_caller
+run_case setup-and-remove-wait-for-a-restore setup_and_remove_wait_for_a_restore
 run_case unfinished-remove-is-reported unfinished_remove_is_reported
 run_case watchers-pass-finishes-through-a-stop watchers_pass_finishes_through_a_stop
 finish_suite

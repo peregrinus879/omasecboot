@@ -299,8 +299,8 @@ boot_lock_release() {
   _boot_lock=false
 }
 
-# The Limine tools open the lock themselves and carry on unlocked after ten
-# seconds, so one that this tool runs gets our lock released and descriptor
+# The Limine tools open the lock themselves and carry on unlocked after their
+# own timeout (C2), so one that this tool runs gets our lock released and descriptor
 # 200 closed, and the lock is taken again afterwards. The caller proves state
 # anew.
 run_unlocked() {

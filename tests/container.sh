@@ -66,7 +66,7 @@ sed -i '/^NoExtract/d' /etc/pacman.conf
 # Arch provides every dependency except limine-mkinitcpio-hook, which comes
 # from the Omarchy repository and is assumed here.
 logged "$build/dependencies.log" "dependency install failed" \
-  pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep sed tar util-linux systemd pacman jq gum sbctl efibootmgr limine
+  pacman -S --noconfirm --needed bash coreutils diffutils findutils gawk grep sed tar util-linux procps-ng systemd pacman jq gum sbctl efibootmgr limine
 assume=(--assume-installed limine-mkinitcpio-hook=1.38.0-1.1)
 
 logged "$build/install.log" "package install failed" pacman -U --noconfirm "${assume[@]}" "$package"
@@ -76,7 +76,7 @@ logged "$build/integrity.log" "installed files differ from the package" pacman -
 [[ -z $(find /usr/share/libalpm/hooks /etc/pacman.d/hooks -name '*omasecboot*' 2>/dev/null) ]] ||
   fail_test "the package installed a pacman hook"
 [[ -f /usr/lib/systemd/system/omasecboot-watch@.path ]] || fail_test "watcher template missing"
-[[ -z $(find /etc/systemd/system -name 'omasecboot-watch@*') ]] || fail_test "installation enabled the watcher"
+[[ -z $(find /etc/systemd/system -name 'omasecboot-watch@*') ]] || fail_test "installation enabled a watcher"
 
 # Dormant: the hook exits 0 at once, and there is nothing to sign or remove.
 "$hook" || fail_test "the dormant hook failed"
