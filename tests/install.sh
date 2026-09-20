@@ -22,7 +22,7 @@ done
 make -s -C "$ROOT_DIR" install DESTDIR="$STAGE" PREFIX="$PREFIX" >/dev/null
 command_path=$STAGE$PREFIX/bin/omasecboot
 hook=$STAGE/etc/boot/hooks/post.d/90-omasecboot-sign
-[[ $("$command_path" version) == 'omasecboot 1.0.0' ]] || fail_test "the installed command does not run"
+[[ $("$command_path" version) == "omasecboot $(sed -n 's/^pkgver=//p' "$ROOT_DIR/PKGBUILD")" ]] || fail_test "the installed command does not run"
 "$command_path" help | grep -q 'sudo omasecboot setup' || fail_test "help"
 "$command_path" nonsense >/dev/null 2>&1 && fail_test "an unknown command succeeded"
 for module in common checks files firmware limine windows sign status; do

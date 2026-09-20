@@ -2,7 +2,7 @@
 # OmaSecBoot: constants, output, file safety, Limine settings lookup, the boot lock.
 
 # shellcheck disable=SC2034 # Read by the dispatcher and other modules.
-readonly OMASECBOOT_VERSION="1.0.0"
+readonly OMASECBOOT_VERSION="0.1.0"
 
 # Locations are functions so the test suites can point them at fixtures.
 state_dir() { printf '/var/lib/omasecboot\n'; }

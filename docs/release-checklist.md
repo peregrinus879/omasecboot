@@ -27,5 +27,6 @@ A release needs all seven stages on at least one machine, and every firmware ven
 
 ## Tag
 
+- [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release. They say `0.1.0` while no release exists; the first release is `1.0.0`.
 - [ ] The acceptance records for the candidate commit are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 - [ ] The Omarchy-side pieces in [omarchy-integration.md](omarchy-integration.md) are agreed with the maintainers, and the omarchy-pkgs recipe pins the tagged archive checksum.

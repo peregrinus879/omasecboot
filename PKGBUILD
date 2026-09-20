@@ -1,7 +1,7 @@
 # Maintainer: OmaSecBoot maintainers (https://github.com/peregrinus879/omasecboot)
 
 pkgname=omasecboot
-pkgver=1.0.0
+pkgver=0.1.0
 pkgrel=1
 pkgdesc='Secure Boot for Omarchy with your own keys: sbctl signing and Limine config enrollment'
 arch=('any')
