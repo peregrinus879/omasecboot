@@ -127,6 +127,16 @@ entry_is_written_once_and_taken_out_whole() {
   [[ $(entry_count) == 1 && $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "a doubled entry was not settled"
 }
 
+# Firmware may write the full form of a device path: the ACPI root, the PCI
+# function and the NVMe namespace stand before the hard-drive node.
+full_form_device_path_is_read() {
+  local acpi=02010c00d041030a00000000 pci=010106000002 nvme=03171000010000000000000000000000
+  write_boot_entry 0000 active 'Windows Boot Manager' "$WINDOWS_FILE" '' "${acpi}${pci}${nvme}"
+  write_boot_order 0001 0000
+  resolve_windows_target || fail_test "a full-form path was not read: status $?"
+  [[ $(windows_target_label) == 'Windows Boot Manager' && $(windows_target_number) == 0000 ]] || fail_test "target: $(windows_target_label) $(windows_target_number)"
+}
+
 # The entry is this tool's only when it is the header "/Windows" over nothing
 # but this tool's keys. Its comment anywhere else may stand in the user's own
 # entry, so nothing is deleted and the reason is given.
@@ -394,6 +404,7 @@ unknown_encryption_state_is_asked_about() {
 
 run_case boot-entries-are-read-from-the-firmware boot_entries_are_read_from_the_firmware
 run_case target-is-one-clear-entry-or-none target_is_one_clear_entry_or_none
+run_case full-form-device-path-is-read full_form_device_path_is_read
 run_case entry-is-written-once-and-taken-out-whole entry_is_written_once_and_taken_out_whole
 run_case misplaced-comment-is-never-deleted misplaced_comment_is_never_deleted
 run_case entry-survives-upstreams-rewrite entry_survives_upstreams_rewrite

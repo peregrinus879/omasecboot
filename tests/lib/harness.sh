@@ -141,16 +141,17 @@ file_path_node() {
   printf '0404%02x%02x%s' $(((${#file} / 2 + 4) & 255)) $(((${#file} / 2 + 4) >> 8)) "$file"
 }
 
-# write_boot_entry NUMBER active|inactive LABEL FILE [EXTRA-HEX]: a Boot####
-# variable as firmware writes it (UEFI 2.10, 3.1.3): attributes, the length of
-# the device path list, the label as UTF-16, then a hard-drive node, the file
-# path node and the end node. EXTRA-HEX follows the end node inside the list,
-# as a second device path does; Windows also appends optional data after the
-# list, which every entry here carries.
+# write_boot_entry NUMBER active|inactive LABEL FILE [EXTRA-HEX [LEADING-HEX]]:
+# a Boot#### variable as firmware writes it (UEFI 2.10, 3.1.3): attributes, the
+# length of the device path list, the label as UTF-16, then a hard-drive node,
+# the file path node and the end node. EXTRA-HEX follows the end node inside
+# the list, as a second device path does; LEADING-HEX stands before the
+# hard-drive node, as the controller nodes of a full-form path do. Windows also
+# appends optional data after the list, which every entry here carries.
 write_boot_entry() {
   local number=$1 attributes=01000000 path
   [[ $2 == active ]] || attributes=00000000
-  path=$(printf '04012a00%076d%s7fff0400%s' 0 "$(file_path_node "$4")" "${5:-}")
+  path=$(printf '%s04012a00%076d%s7fff0400%s' "${6:-}" 0 "$(file_path_node "$4")" "${5:-}")
   {
     printf '\x07\x00\x00\x00'
     hex_bytes "$attributes"
