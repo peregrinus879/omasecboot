@@ -11,10 +11,14 @@
 #   - every UUID reads uuid-1, uuid-2, ... and every 32-digit identifier id-1,
 #     id-2, ..., the same value under the same name in every record, so that
 #     entries can still be told apart and matched;
+#   - the short volume identifier of a FAT filesystem reads vol-1, vol-2, ...
+#     wherever it occurs, once a mount point of removable media or a UUID=
+#     has named it;
 #   - the UUIDs that are the same on every machine stay: the UEFI variable
 #     namespaces and Microsoft's signature owner;
-#   - the login name reads "user" in home paths and sudo's log lines, the host
-#     name "host" in journal lines;
+#   - the login name reads "user" in home paths, in the mount points of
+#     removable media and in sudo's log lines, the host name "host" in journal
+#     lines of either time stamp form;
 #   - the terminal's session sequences and efibootmgr's raw bytes, which
 #     repeat partition UUIDs in another form, are left out;
 #   - the archive's members belong to nobody: tar would otherwise write the
@@ -67,14 +71,21 @@ distinct() { grep -h -o -i -E -- "$1" "${records[@]}" | tr 'A-F' 'a-f' | awk '!s
 
 # Names are renamed only in the places the recorder is known to put them,
 # never as words: a login name such as "test" occurs in other text too. They
-# are found in home paths, in sudo's log lines and in the journal's host
-# column; this machine's own names join the closing check, because the copies
-# are usually made where the records were.
+# are found in home paths, in the mount points udisks gives removable media,
+# in sudo's log lines and in the journal's host column, which follows an ISO
+# time stamp in the recorder's own blocks and a syslog one in a journalctl
+# that was recorded as a command; this machine's own names join the closing
+# check, because the copies are usually made where the records were.
 login_names=$({
   grep -h -o -E '/home/[^/[:space:]'"'"'";]+' "${records[@]}" | cut -d/ -f3
+  grep -h -o -E '/run/media/[^/[:space:]'"'"'";]+' "${records[@]}" | cut -d/ -f4
   grep -h -o -E 'sudo\[[0-9]+\]: +[^[:space:]]+ :' "${records[@]}" | awk '{print $2}'
 } | awk '$0 != "root" && !seen[$0]++')
-host_names=$(grep -h -o -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+-]+ [^[:space:]]+ ' "${records[@]}" | cut -d' ' -f2 | awk '!seen[$0]++')
+readonly SYSLOG_STAMP='[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2}'
+host_names=$({
+  grep -h -o -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+-]+ [^[:space:]]+ ' "${records[@]}" | cut -d' ' -f2
+  grep -h -o -E "^${SYSLOG_STAMP} [^[:space:]]+ [^[:space:]]+\[[0-9]+\]:" "${records[@]}" | cut -c17- | cut -d' ' -f1
+} | awk '!seen[$0]++')
 
 rules=$(mktemp) || exit 2
 trap 'rm -f -- "$rules"' EXIT
@@ -96,10 +107,19 @@ trap 'rm -f -- "$rules"' EXIT
     number=$((number + 1))
     printf 's/\\b%s\\b/id-%s/gI\n' "$value" "$number"
   done < <(distinct '\b[0-9a-fA-F]{32}\b')
+  # A FAT volume identifier is too short to be told from other text by its
+  # form, so only the ones a mount point or a UUID= names are renamed.
+  number=0
+  while IFS= read -r value; do
+    [[ -n $value ]] || continue
+    number=$((number + 1))
+    printf 's/\\(^\\|[^-0-9A-Za-z]\\)%s\\($\\|[^-0-9A-Za-z]\\)/\\1vol-%s\\2/g\n' "$value" "$number"
+  done < <(grep -h -o -E '(/run/media/[^/[:space:]]+/|UUID=)[0-9A-F]{4}-[0-9A-F]{4}\b' "${records[@]}" | grep -o -E '[0-9A-F]{4}-[0-9A-F]{4}$' | awk '!seen[$0]++')
   while IFS= read -r value; do
     [[ -n $value ]] || continue
     escaped=$(sed 's/[][\\.*^$/]/\\&/g' <<<"$value")
     printf 's/\\/home\\/%s\\b/\\/home\\/user/g\n' "$escaped"
+    printf 's/\\/run\\/media\\/%s\\b/\\/run\\/media\\/user/g\n' "$escaped"
     printf 's/\\(sudo\\[[0-9]*\\]: *\\)%s :/\\1user :/g\n' "$escaped"
     printf 's/\\b\\(USER\\|LOGNAME\\|SUDO_USER\\)=%s\\b/\\1=user/g\n' "$escaped"
   done <<<"$login_names"
@@ -107,6 +127,7 @@ trap 'rm -f -- "$rules"' EXIT
     [[ -n $value ]] || continue
     escaped=$(sed 's/[][\\.*^$/]/\\&/g' <<<"$value")
     printf 's/^\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9:+-]* \\)%s /\\1host /\n' "$escaped"
+    printf 's/^\\([A-Z][a-z]\\{2\\} [ 0-9][0-9] [0-9:]\\{8\\} \\)%s /\\1host /\n' "$escaped"
     printf 's/\\bhostname=%s\\b/hostname=host/g\n' "$escaped"
   done <<<"$host_names"
 } >"$rules"

@@ -36,6 +36,9 @@ ${FILE_HASH}  /boot/${MACHINE_ID}/limine_history/omarchy_linux.efi_sha256_${FILE
 cmdline: cryptdevice=UUID=${LUKS}:omarchy_root
 2026-01-02T03:04:05+00:00 testhost sudo[12]:   te.ster : TTY=pts/0 ; PWD=/home/te.ster/omasecboot ; USER=root ; COMMAND=/usr/bin/omasecboot setup
 SUDO_USER=te.ster USER=teXster hostname=testhost
+sda  3.7G vfat  /run/media/te.ster/1A2B-3C4D
+fstab: UUID=1A2B-3C4D /mnt/stick vfat; years 2019-2025 and ${UEFI_GLOBAL^^} stay
+Jan  2 03:04:06 testhost omasecboot[77]: Config file BLAKE2B successfully enrolled.
 Boot0002* Windows Boot Manager	HD(1,GPT,${PARTITION},0x800,0x82000)/\\EFI\\Microsoft\\Boot\\bootmgfw.efi57494e444f5753000100000088000000
 ]3008;end=abc;hostname=testhost\\after a mark without its escape byte
       data: 57 49 4e 44 4f 57 53 00 53 45 52 49 41 4c
@@ -56,7 +59,7 @@ identifiers_are_renamed_and_the_rest_stays() {
   local first=$FIX/records/share/20260102T030405Z-1-setup.md second=$FIX/records/share/20260102T040506Z-1-status.md value
   write_records
   share || fail_test "the share step failed: $(<"$FIX/run/output")"
-  for value in "$PARTITION" "${PARTITION^^}" "$LUKS" "$MACHINE_ID" /home/te.ster 'testhost sudo' 'hostname=testhost' 'SUDO_USER=te.ster' '3008;' 'dp: 04' 'data: 57' 57494e44 4e4f5345; do
+  for value in "$PARTITION" "${PARTITION^^}" "$LUKS" "$MACHINE_ID" /home/te.ster /run/media/te.ster 1A2B-3C4D 'testhost omasecboot' 'testhost sudo' 'hostname=testhost' 'SUDO_USER=te.ster' '3008;' 'dp: 04' 'data: 57' 57494e44 4e4f5345; do
     ! grep -q -F -- "$value" "$first" "$second" || fail_test "still in the copies: ${value}"
   done
   grep -q -F "HD(6,GPT,uuid-1,0x800,0x400001)" "$first" || fail_test "the partition is not uuid-1: $(grep HD "$first")"
@@ -66,6 +69,9 @@ identifiers_are_renamed_and_the_rest_stays() {
   grep -q -F "SecureBoot-${UEFI_GLOBAL}" "$first" || fail_test "a UUID that every machine shares was renamed"
   [[ $(grep -c -F "$FILE_HASH" "$first") == 1 && $(grep -o -F "$FILE_HASH" "$first" | wc -l) == 2 ]] || fail_test "a file hash was changed"
   grep -q -F "2026-01-02T03:04:05+00:00 host sudo[12]:   user : TTY=pts/0 ; PWD=/home/user/omasecboot" "$first" || fail_test "the journal line: $(grep sudo "$first")"
+  grep -q -x 'sda  3.7G vfat  /run/media/user/vol-1' "$first" || fail_test "the mount point of removable media: $(grep -n media "$first")"
+  grep -q -x "fstab: UUID=vol-1 /mnt/stick vfat; years 2019-2025 and ${UEFI_GLOBAL^^} stay" "$first" || fail_test "a volume identifier, or text of the same form that is none: $(grep -n fstab "$first")"
+  grep -q -x 'Jan  2 03:04:06 host omasecboot\[77\]: Config file BLAKE2B successfully enrolled.' "$first" || fail_test "a journal line with a syslog time stamp: $(grep -n '^Jan' "$first")"
   grep -q -x 'Signing keys created' "$first" || fail_test "text beside a session sequence was lost"
   grep -q -x 'after a mark without its escape byte' "$first" || fail_test "a session mark without its escape byte: $(grep -n 'escape byte' "$first")"
   grep -q -x 'SUDO_USER=user USER=teXster hostname=host' "$first" || fail_test "the environment line, where the dot of the name must not match any character: $(grep -n SUDO_USER "$first")"
