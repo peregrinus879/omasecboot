@@ -45,7 +45,7 @@ sudo pacman -U omasecboot-*-any.pkg.tar.zst
 
 | Command | What it does |
 | --- | --- |
-| `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the watchers of `limine.conf` and the loader, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: enrolls your keys as described below. After a reboot it tells you to turn Secure Boot on. |
+| `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, offers to add the fallback loader when there is none, seals and signs the loader, signs anything that arrived unsigned, enables the watchers of `limine.conf` and the loader, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: enrolls your keys as described below. After a reboot it tells you to turn Secure Boot on. |
 | `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signable file, an ESP that is running out of space, stale hashes, harmful sbctl rows, the Windows entry, the hook and the watchers, and leftovers of an earlier install, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
 | `sudo omasecboot sign` | The same converge-and-verify pass the hook runs. Safe at any time; exits 75 when another tool is working on the boot files. |
 | `sudo omasecboot remove` | Returns the Limine settings and boot files to stock and takes the Windows entry out. Refuses while Secure Boot is on. Your keys stay. |
@@ -71,7 +71,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 ## What it never touches
 
 - **Snapshot images.** `limine-snapper-sync` keeps a hash of every snapshot image it stores. Signing one later would break that hash for good, so images from before setup stay as they are: they boot with Secure Boot off, `status` counts them, and snapshot rotation retires them.
-- **The fallback loader** `EFI/BOOT/BOOTX64.EFI`. It stays the raw copy upstream deploys. The firmware refuses it while Secure Boot is on, and with Secure Boot off it is your rescue loader (next section). The comments in upstream's `/etc/limine-entry-tool.conf` suggest signing it by hand; `sign` undoes that, because a fallback that is signed but not sealed would start under Secure Boot without enforcing `limine.conf`.
+- **The fallback loader** `EFI/BOOT/BOOTX64.EFI`. It stays the raw copy upstream deploys; where there is none, `setup` offers to add one through upstream's own tool. The firmware refuses it while Secure Boot is on, and with Secure Boot off it is your rescue loader (next section). The comments in upstream's `/etc/limine-entry-tool.conf` suggest signing it by hand; `sign` undoes that, because a fallback that is signed but not sealed would start under Secure Boot without enforcing `limine.conf`.
 - **sbctl's file list.** OmaSecBoot adds nothing to it. `setup` only removes rows for snapshot images and the fallback loader, which sbctl's own pacman hook would otherwise sign in place.
 
 ## If the machine does not boot
@@ -82,7 +82,7 @@ A sealed Limine loader refuses to start when `limine.conf` no longer matches its
 2. In the firmware's boot menu pick the fallback loader (`EFI/BOOT/BOOTX64.EFI`). It is not sealed and boots normally.
 3. Run `sudo omasecboot sign`, then turn Secure Boot back on.
 
-A machine without a fallback loader needs rescue media for step 2; `setup` warns about that, and `sudo limine-install --fallback` adds one. If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot off, then run `sudo omasecboot sign`.
+Omarchy installed beside another system starts without a fallback loader, and then step 2 needs rescue media. `setup` offers to add one through `limine-install --fallback`, only while nothing stands at that path, and warns while there is none or while another system's loader stands there. If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot off, then run `sudo omasecboot sign`.
 
 ## Troubleshooting
 
@@ -112,7 +112,7 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 
 ## Removing it
 
-Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecboot`. The state directory and your sbctl keys stay on disk.
+Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecboot`. The state directory and your sbctl keys stay on disk, and so does a fallback loader that `setup` added.
 
 ## Help test it
 

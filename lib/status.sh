@@ -102,10 +102,19 @@ show_loader_status() {
     [[ -z $shadow ]] || blocking_problem "A second limine.conf shadows the real one; remove it: ${shadow}"
   done < <(list_shadowing_configs)
   case $(fallback_state) in
-    absent) note "No fallback loader: after a limine.conf mistake only rescue media can boot this machine" ;;
-    raw) pass "The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off" ;;
+    absent) note "No fallback loader: after a limine.conf mistake only rescue media can boot this machine; ${BOLD}sudo omasecboot setup${NC} offers to add one" ;;
+    raw)
+      pass "The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off"
+      # Upstream refreshes it only where its settings say so (C3), and never
+      # on a machine that Omarchy installed beside another system (C7). While
+      # upstream holds a Limine major back, its step would refresh nothing (C2).
+      if raw_loader 2>/dev/null | cmp -s -- - "$(package_loader_path)" &&
+        ! cmp -s -- "$(package_loader_path)" "$(fallback_loader_path)"; then
+        note "The fallback loader is another Limine build than the primary; ${BOLD}sudo limine-install --fallback${NC} refreshes it"
+      fi
+      ;;
     altered) problem "The fallback loader is signed or sealed; it must stay upstream's raw copy" ;;
-    foreign) note "EFI/BOOT/BOOTX64.EFI is not Limine's and is left alone" ;;
+    foreign) note "EFI/BOOT/BOOTX64.EFI is not a Limine loader and is left alone: after a limine.conf mistake only rescue media can boot this machine" ;;
   esac
 }
 

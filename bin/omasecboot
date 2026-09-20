@@ -42,6 +42,14 @@ no_arguments() {
   (( $# == 0 )) || usage_error "Unexpected argument: $1"
 }
 
+# Asked whenever setup finds no fallback loader, because nothing else can
+# start the machine after a limine.conf mistake but rescue media (D2).
+offer_fallback_loader() {
+  [[ $(fallback_state) == absent ]] || return 0
+  confirm "adding the fallback loader" "There is no fallback loader, the rescue after a limine.conf mistake. Add it now through limine-install?" || return 0
+  add_fallback_loader || warn "limine-install did not add the packaged fallback loader; look at $(fallback_loader_path) and at the ESP's free space"
+}
+
 # Everything that must hold before anything on the machine changes.
 setup_preflight() {
   local leftovers shadows
@@ -207,11 +215,14 @@ cmd_setup() {
     regenerate_os_entries || die "The boot entries could not be regenerated without path hashes; run this again"
   fi
   boot_lock_release
+  offer_fallback_loader
   sign_boot_files || exit "$?"
 
   pass "This machine's boot files are ready for Secure Boot"
-  [[ $(fallback_state) != absent ]] ||
-    warn "There is no fallback loader. After a limine.conf mistake only rescue media could boot this machine; ${BOLD}sudo limine-install --fallback${NC} adds one."
+  case $(fallback_state) in
+    absent) warn "There is no fallback loader. After a limine.conf mistake only rescue media could boot this machine; ${BOLD}sudo limine-install --fallback${NC} adds one." ;;
+    foreign) warn "EFI/BOOT/BOOTX64.EFI is not a Limine loader and stays as it is, so there is no Limine fallback: after a limine.conf mistake only rescue media could boot this machine." ;;
+  esac
   [[ $first_run == false ]] ||
     act "Take a snapshot now, so a later restore brings the keys and this tool back with it"
   setup_firmware_step "$first_run"

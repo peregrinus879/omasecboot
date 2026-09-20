@@ -428,9 +428,14 @@ EOF
   # backup. limine-mkinitcpio rebuilds the UKI, signed at build when keys
   # exist, and rewrites the OS entry with a hash only while verification is on,
   # or reports success without doing either (run/uki-build-fails-silently).
-  # limine-install deploys the package's executable to the primary, its backup
-  # and an existing fallback unless it holds a new major back
-  # (run/upstream-holds-back). Then upstream's enroll hook seals and signs the
+  # limine-install deploys the package's executable to the primary and its
+  # backup unless it holds a new major back (run/upstream-holds-back), and to
+  # the fallback, over whatever stands there, when ENABLE_LIMINE_FALLBACK is
+  # yes, when --fallback is given, or when the setting is unset and the file
+  # is missing (C2, C3). Holding back spares a fallback that exists and still
+  # fills an empty place. A copy that fails does not fail the tool
+  # (run/fallback-copy-is-torn), and a flag it does not know makes it print
+  # its usage and exit 0 (run/limine-install-does-nothing). Then upstream's enroll hook seals and signs the
   # primary when enrollment is on, hiding its own failure
   # (run/upstream-hook-fails). limine-reset-enroll is the pre-hook alone.
   cat >"$FIX/bin/limine-tool" <<'EOF'
@@ -472,10 +477,21 @@ case $name in
     fi
     ;;
   limine-install)
+    [[ ! -e $FIX/run/limine-install-does-nothing ]] || exit 0
     if [[ ! -e $FIX/run/upstream-holds-back ]]; then
       cp "$FIX/share/BOOTX64.EFI" "$primary"
       tar -cf "$limine_dir/limine_x64.bak" -C "$limine_dir" limine_x64.efi
-      [[ ! -e $FIX/esp/EFI/BOOT/BOOTX64.EFI ]] || cp "$FIX/share/BOOTX64.EFI" "$FIX/esp/EFI/BOOT/BOOTX64.EFI"
+    fi
+    fallback=$FIX/esp/EFI/BOOT/BOOTX64.EFI
+    policy=$(setting ENABLE_LIMINE_FALLBACK)
+    if [[ $policy == yes || " $* " == *' --fallback '* || ( -z $policy && ! -e $fallback ) ]] &&
+      [[ ! -e $fallback || ! -e $FIX/run/upstream-holds-back ]]; then
+      mkdir -p "${fallback%/*}"
+      if [[ -e $FIX/run/fallback-copy-is-torn ]]; then
+        head -c 5 "$FIX/share/BOOTX64.EFI" >"$fallback"
+      else
+        cp "$FIX/share/BOOTX64.EFI" "$fallback"
+      fi
     fi
     ;;
   limine-reset-enroll) exit 0 ;;

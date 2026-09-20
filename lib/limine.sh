@@ -272,6 +272,20 @@ fallback_state() {
   fi
 }
 
+# Adds the fallback loader through upstream's own step. A machine that Omarchy
+# installed beside another system starts without one (C7), and it is the
+# rescue loader (docs/spec.md D2). Upstream's step copies over whatever stands
+# at that path (C2), so this runs only while nothing does: another system's
+# loader is never replaced. Upstream copies in place and hides a failed copy,
+# so there must be room first and the result is judged by its bytes.
+add_fallback_loader() {
+  [[ $(fallback_state) == absent ]] || return 1
+  esp_has_room || return 1
+  qact "Adding the fallback loader through limine-install"
+  run_unlocked run_visible limine-install --fallback --no-efi-register || return 1
+  cmp -s -- "$(package_loader_path)" "$(fallback_loader_path)"
+}
+
 # Puts upstream's raw copy back. A signed fallback that is not sealed would
 # boot under Secure Boot without enforcing limine.conf; a sealed one would
 # panic together with the primary and leave no rescue loader.

@@ -10,6 +10,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 ## Evidence owed
 
 - Two rows of the recorded machine (C6 of [upstream-contracts.md](upstream-contracts.md)), each as a record: in stage 1, the hook's own time against the budget of two seconds per installed kernel; in stage 3, what Limine and the firmware show for an entry that predates enrollment.
+- The fallback offer of `setup` on hardware, and its refusal on an ESP that holds another system's `bootx64.efi` in lower case. The recorded machine got its fallback from `limine-install --fallback` by hand.
 - The acceptance rows on the release candidate. The record is of commit `3b43368`, and later commits changed code.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The rebuild path of enrollment, which needs firmware that clears KEK and db together with the Platform Key, and the Windows rows on a machine with BitLocker on. Enrollment is recorded on the append path only.
@@ -20,7 +21,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 Decided after a second machine runs the tool from its package.
 
 - A note in `setup` on whether KEK and db already hold Microsoft's 2023 certificates before the Platform Key is replaced. It needs Microsoft's guidance and the set behind sbctl's `--microsoft` checked first.
-- How the Omarchy side is put to its maintainers, and with what evidence.
+- How the Omarchy side is put to its maintainers, and with what evidence. One ask belongs to it: on an install beside another system, deploy the fallback loader when the ESP is Omarchy's own and holds no `BOOTX64.EFI` (C7).
 - A notice from the package when it is removed from a machine that is still set up (the failure table's row on that).
 
 ## Recheck when something changes
@@ -28,11 +29,11 @@ Decided after a second machine runs the tool from its package.
 | What | Recheck |
 | --- | --- |
 | `limine` | C1: the checksum marker, the unconditional check, the lookup order of `limine.conf` |
-| `limine-mkinitcpio-hook` | C2 and C3: hook names 89, 90 and 91 (ours sorts between the last two), the loader backup `limine_x64.bak`, `limine-install --no-efi-register` and `--fallback`, the lock path and descriptor, the configuration layers |
+| `limine-mkinitcpio-hook` | C2 and C3: hook names 89, 90 and 91 (ours sorts between the last two), the loader backup `limine_x64.bak`, `limine-install --no-efi-register` and `--fallback`, when the fallback is deployed and that the step copies over whatever is there, the lock path and descriptor, the configuration layers |
 | `limine-snapper-sync` | C2 and C8: history file names, `snapshots.json`, the restore marker, what its rewrite of `limine.conf` keeps |
 | `sbctl` | C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, and `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin` |
 | `systemd` | C5: `PathChanged=` semantics, the start limit and `KillMode=mixed` |
 | `pacman` | C7: `db.lck` held until the post-transaction hooks are done |
 | `efibootmgr`, `limine`, `util-linux` | C8: `--bootnext`, the `efi_boot_entry` protocol and its `entry` option, `lsblk`'s `BitLocker` type |
-| `omarchy` and its installer | C7: the default settings, `omarchy-refresh-limine`, the security command pairs, the installer's `99-omarchy-limine.hook` |
+| `omarchy` and its installer | C7: the default settings, `omarchy-refresh-limine`, the security command pairs, the installer's `99-omarchy-limine.hook` and its fallback choice (`_boot_intent`) |
 | 60 days without activity in the repository | GitHub disables the scheduled contract workflow; re-enable it |

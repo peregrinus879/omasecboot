@@ -75,6 +75,46 @@ earlier_values_are_the_users() {
   cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "the user's own setting did not come back"
 }
 
+# A machine that Omarchy installed beside another system: the installer wrote
+# ENABLE_LIMINE_FALLBACK=no and there is no fallback loader (C7).
+fallback_is_offered_only_into_an_empty_place() {
+  local fallback
+  fallback=$(fallback_loader_path)
+  rm "$fallback"
+  printf 'ENABLE_LIMINE_FALLBACK=no\n' >>"$FIX/etc/default-limine"
+  CONFIRM_ANSWER=no run_cli setup || fail_test "a declined offer stopped setup: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Cancelled: adding the fallback loader'*'sudo limine-install --fallback'* ]] || fail_test "a declined offer: $(<"$FIX/run/output")"
+  [[ ! -e $fallback ]] || fail_test "a declined offer added the fallback"
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  grep -qx 'limine-install --fallback --no-efi-register' "$FIX/run/calls" || fail_test "upstream's step was not used: $(<"$FIX/run/calls")"
+  cmp -s "$fallback" "$FIX/share/BOOTX64.EFI" || fail_test "the fallback is not upstream's raw copy"
+  [[ $(<"$FIX/run/output") != *'only rescue media'* ]] || fail_test "the warning stayed after the fallback was added"
+  grep -qx 'ENABLE_LIMINE_FALLBACK=no' "$FIX/etc/default-limine" || fail_test "the installer's own setting was changed"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the primary is not sealed and signed after upstream's step and the pass"
+
+  # Another system's loader at that path is never asked about, let alone replaced.
+  printf 'another system' >"$fallback"
+  : >"$FIX/run/calls"
+  run_cli setup || fail_test "setup failed beside a foreign loader: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'QUESTION: There is no fallback'* ]] || fail_test "a foreign loader was offered for replacement"
+  ! grep -q -e '--fallback' "$FIX/run/calls" || fail_test "upstream's step ran over a foreign loader"
+  [[ $(<"$fallback") == 'another system' ]] || fail_test "a foreign loader was replaced"
+}
+
+# Upstream's step fails, does nothing (a flag it no longer knows) or leaves a
+# torn copy: setup says so, goes on, and still warns that there is no rescue.
+failed_fallback_step_is_reported() {
+  local switch
+  for switch in limine-install-fails limine-install-does-nothing fallback-copy-is-torn; do
+    rm -f "$(fallback_loader_path)"
+    : >"$FIX/run/$switch"
+    run_cli setup || fail_test "${switch}: setup stopped: $(<"$FIX/run/output")"
+    [[ $(<"$FIX/run/output") == *'did not add the packaged fallback loader'*'only rescue media'* ]] || fail_test "${switch}: $(<"$FIX/run/output")"
+    loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "${switch}: the primary is not sealed and signed"
+    rm "$FIX/run/$switch"
+  done
+}
+
 remove_returns_to_stock() {
   local secure_boot=$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
   cp "$FIX/etc/default-limine" "$FIX/run/default-limine-before"
@@ -280,6 +320,8 @@ run_case upstream-masked-failure-is-repaired upstream_masked_failure_is_repaired
 run_case unsigned-arrival-is-signed unsigned_arrival_is_signed
 run_case setup-refuses-before-changing-anything setup_refuses_before_changing_anything
 run_case earlier-values-are-the-users earlier_values_are_the_users
+run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
+run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept

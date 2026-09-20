@@ -184,6 +184,22 @@ full_esp_is_a_note() {
   [[ $output == *'less than its largest boot file'* ]] || fail_test "no note on a full ESP: ${output}"
 }
 
+# Upstream never refreshes the fallback of a machine installed beside another
+# system (C7); the note names the command that does.
+old_rescue_loader_is_a_note() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
+  [[ $output != *'another Limine build'* ]] || fail_test "a note on a clean machine: ${output}"
+  write_raw_loader "$(fallback_loader_path)" 12.5.2
+  output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
+  [[ $output == *'another Limine build than the primary'*'limine-install --fallback'* ]] || fail_test "no note on an old rescue loader: ${output}"
+  # While upstream holds the packaged Limine back, its step refreshes nothing (C2).
+  write_raw_loader "$FIX/share/BOOTX64.EFI" 13.0.0
+  output=$(show_status 2>&1) || fail_test "a held-back major changed the exit status: ${output}"
+  [[ $output != *'another Limine build'* ]] || fail_test "advice that upstream's step cannot follow: ${output}"
+}
+
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
 run_case clean-machine-names-the-firmware-step clean_machine_names_the_firmware_step
 run_case enrollment-state-chooses-the-next-step enrollment_state_chooses_the_next_step
@@ -198,4 +214,5 @@ run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
 run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
 run_case full-esp-is-a-note full_esp_is_a_note
+run_case old-rescue-loader-is-a-note old_rescue_loader_is_a_note
 finish_suite

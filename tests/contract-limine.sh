@@ -52,10 +52,13 @@ upstream_header() {
 # backup beside it, taken from the installed script. Its version checks
 # compare with a primary that is already there, so the cases deploy onto a
 # fresh ESP.
-source_upstream_deploy() {
+source_upstream_deploy() { source_installer_function update_limine_efi; }
+
+# source_installer_function NAME: one function of limine-install's own.
+source_installer_function() {
   # shellcheck source=/dev/null
-  source <(sed -n '/^update_limine_efi() {$/,/^}$/p' "$UPSTREAM_INSTALLER")
-  declare -F update_limine_efi >/dev/null || fail_test "limine-install no longer defines update_limine_efi this way: recheck C2"
+  source <(sed -n "/^$1() {\$/,/^}\$/p" "$UPSTREAM_INSTALLER")
+  declare -F "$1" >/dev/null || fail_test "limine-install no longer defines $1 this way: recheck C2"
 }
 
 # The sandbox has no pacman.conf; the defaults find the package database.
@@ -157,8 +160,16 @@ our_hook_runs_between_upstreams() {
 # What this tool asks of upstream by name. limine-install prints its usage and
 # exits 0 on a flag it does not know, so a renamed flag would go unnoticed.
 upstream_still_offers_what_this_tool_uses() {
+  local clause
   grep -q -e '--no-efi-register' "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer knows --no-efi-register: recheck C2"
-  grep -q -e '--fallback' "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer knows --fallback, which this tool's advice names: recheck C2"
+  grep -q -e '--fallback' "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer knows --fallback, which setup runs: recheck C2"
+  # When the fallback is deployed (C2, C3): the setting, the flag, or an empty place.
+  # shellcheck disable=SC2016 # The clauses are upstream's source text.
+  for clause in '[[ "${ENABLE_LIMINE_FALLBACK:-}" == "yes" ]] ||' \
+    '[[ "${SET_LIMINE_AS_FALLBACK:-}" == "yes" ]] ||' \
+    '[[ ! -f "${BINARY_FALLBACK_PATH}" && -z "${ENABLE_LIMINE_FALLBACK:-}" ]]; then'; do
+    grep -qF -- "$clause" "$UPSTREAM_INSTALLER" || fail_test "limine-install no longer decides the fallback by: ${clause} (recheck C2 and C3)"
+  done
   shipped_files | grep -qx '/etc/boot/hooks/pre.d/10-limine-reset-enroll' ||
     fail_test "the package no longer ships pre.d/10-limine-reset-enroll, which puts the primary loader back before every operation: recheck C2"
   shipped_files | grep -qx '/usr/bin/limine-reset-enroll' || fail_test "the package no longer ships limine-reset-enroll: recheck C2"
@@ -199,6 +210,24 @@ loader_paths_and_backup_are_upstreams() {
   printf 'altered' >>"$(primary_loader_path)"
   restore_limine_binary || fail_test "upstream's restore_limine_binary failed: recheck C2"
   cmp -s "$(primary_loader_path)" <(raw_loader) || fail_test "upstream restored something other than raw_loader reads"
+}
+
+# What the guard of add_fallback_loader rests on: upstream's fallback step
+# deploys the package's raw loader, reads a file that is not Limine as
+# version 0 and copies over it.
+fallback_step_copies_over_whatever_is_there() {
+  local name
+  sandbox_settings
+  fresh_esp
+  upstream_header
+  for name in check_limine_downgrade check_limine_upgrade update_limine_fallback; do
+    source_installer_function "$name"
+  done
+  update_limine_fallback >/dev/null || fail_test "upstream's update_limine_fallback failed: recheck C2"
+  cmp -s "$(fallback_loader_path)" "$(package_loader_path)" || fail_test "upstream's fallback is not the package's raw loader: recheck C2"
+  printf 'another system' >"$(fallback_loader_path)"
+  update_limine_fallback >/dev/null || fail_test "upstream's update_limine_fallback failed over a foreign file: recheck C2"
+  cmp -s "$(fallback_loader_path)" "$(package_loader_path)" || fail_test "upstream did not copy over a loader that is not Limine's: it spares one now, or does not know the packaged Limine's major (recheck C2 and the guard of add_fallback_loader)"
 }
 
 enrollment_is_read_back() {
@@ -244,6 +273,7 @@ run_case our-hook-runs-between-upstreams our_hook_runs_between_upstreams
 run_case upstream-still-offers-what-this-tool-uses upstream_still_offers_what_this_tool_uses
 run_case lock-is-the-one-upstream-holds lock_is_the_one_upstream_holds
 run_case loader-paths-and-backup-are-upstreams loader_paths_and_backup_are_upstreams
+run_case fallback-step-copies-over-whatever-is-there fallback_step_copies_over_whatever_is_there
 run_case enrollment-is-read-back enrollment_is_read_back
 run_case upstreams-enrollment-and-ours-prove-the-same-loader upstreams_enrollment_and_ours_prove_the_same_loader
 finish_suite "$(limine --version | head -n 1), $(pacman --config /dev/null -Q limine-mkinitcpio-hook 2>/dev/null), sbctl $(sbctl version 2>/dev/null | head -n 1)"

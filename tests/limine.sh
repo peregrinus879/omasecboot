@@ -155,8 +155,24 @@ fallback_states() {
   [[ $(fallback_state) == raw ]] || fail_test "an older raw Limine copy is upstream's business"
   printf 'Windows boot manager copy' >"$fallback"
   [[ $(fallback_state) == foreign ]] || fail_test "a foreign BOOTX64.EFI was not recognised"
+  # Upstream's step copies over whatever is there (C2), so it is used only
+  # while nothing is.
+  add_fallback_loader >/dev/null 2>&1 && fail_test "upstream's step was run over a foreign loader"
+  [[ $(<"$fallback") == 'Windows boot manager copy' ]] || fail_test "a foreign loader was replaced"
   rm "$fallback"
   [[ $(fallback_state) == absent ]] || fail_test "absent"
+  # Upstream copies in place and hides a failed copy (C2): no room, no attempt.
+  : >"$FIX/run/calls"
+  (
+    free_bytes() { printf '4096\n'; }
+    add_fallback_loader >/dev/null 2>&1
+  ) && fail_test "upstream's step was run on a full ESP"
+  [[ ! -e $fallback && ! -s $FIX/run/calls ]] || fail_test "a full ESP did not stop the step: $(<"$FIX/run/calls")"
+  : >"$FIX/run/fallback-copy-is-torn"
+  add_fallback_loader >/dev/null 2>&1 && fail_test "a torn copy was taken for the fallback"
+  rm "$fallback" "$FIX/run/fallback-copy-is-torn"
+  add_fallback_loader >/dev/null || fail_test "the fallback was not added"
+  cmp -s "$fallback" "$FIX/share/BOOTX64.EFI" || fail_test "the added fallback is not the packaged raw loader"
 }
 
 watch_units_are_template_instances() {
