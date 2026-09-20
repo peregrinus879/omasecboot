@@ -51,6 +51,10 @@ stale_os_hashes_are_found() {
   local stale
   [[ -z $(list_stale_os_hashes) ]] || fail_test "a fresh hash read as stale"
   os_entries_carry_hashes || fail_test "the hashed OS entry was not seen"
+  # What the pass asks before it signs a file in place; FAT names have no case.
+  file_has_path_hash "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "the hashed UKI was not recognised"
+  file_has_path_hash "$FIX/esp/efi/LINUX/OMARCHY_LINUX.EFI" || fail_test "the hashed UKI was not recognised under another case"
+  ! file_has_path_hash "$(primary_loader_path)" || fail_test "the primary loader read as hashed"
   printf 'changed' >>"$FIX/esp/EFI/Linux/omarchy_linux.efi"
   stale=$(list_stale_os_hashes)
   [[ $stale == *'path: boot():/EFI/Linux/omarchy_linux.efi#'* ]] || fail_test "the stale OS hash was not listed"

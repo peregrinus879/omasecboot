@@ -362,6 +362,9 @@ rebuild_plan_is_sound() {
   [[ ${_planned[PK]} == "${_local[PK]}" ]] || return 1
   for name in KEK db; do
     [[ -z $(entries_missing_from "${_local[$name]}" "${_planned[$name]}") ]] || return 1
+    # The local keys alone would be what empty never means (D4): an sbctl that
+    # stopped honouring --microsoft still exports without complaint.
+    [[ -n $(entries_missing_from "${_planned[$name]}" "${_local[$name]}") ]] || return 1
   done
 }
 

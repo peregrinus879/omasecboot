@@ -48,11 +48,18 @@ sign_unsigned_arrivals() {
     case $state in
       0) ;;
       1)
-        qact "Signing ${file}"
-        { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
-          fail "Could not sign ${file}"
+        if file_has_path_hash "$file"; then
+          # setup regenerates the entries without hashes before anything is
+          # signed; a build that failed without saying so (C2) leaves this.
+          fail "Not signing ${file}: limine.conf holds a path hash for it, which a signature would break. Run: sudo omasecboot setup"
           failed=1
-        }
+        else
+          qact "Signing ${file}"
+          { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
+            fail "Could not sign ${file}"
+            failed=1
+          }
+        fi
         ;;
       *)
         fail "Could not read the signature state of ${file}"
@@ -118,6 +125,10 @@ sign_boot_files() {
     fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run: sudo omasecboot status"
     return 1
   fi
-  clear_attention
+  # The watchers' pass judges the seal alone, so it clears only a marker
+  # about the seal; what a full pass found stays until a full pass is clean.
+  if [[ $scope == full ]] || grep -q '^the loader could not be sealed' "$(attention_marker)" 2>/dev/null; then
+    clear_attention
+  fi
   qpass "Boot files are sealed and signed"
 }

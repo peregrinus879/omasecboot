@@ -91,7 +91,12 @@ failure_leaves_the_marker() {
   output=$(sign_boot_files 2>&1) && fail_test "a failed signing reported success"
   [[ $output == *'Do not reboot with Secure Boot on'* ]] || fail_test "report: ${output}"
   rm "$FIX/run/sbctl-sign-fails"
+  # The watchers' pass looks at the seal alone and cannot vouch for the rest.
+  sign_boot_files seal-only || fail_test "seal-only pass"
+  [[ -s $(attention_marker) ]] || fail_test "a seal-only pass cleared what a full pass had found"
   sign_boot_files && [[ ! -e $(attention_marker) ]] || fail_test "a later clean pass kept the marker"
+  set_attention 'the loader could not be sealed on a day'
+  sign_boot_files seal-only && [[ ! -e $(attention_marker) ]] || fail_test "a clean seal-only pass kept a marker about the seal"
 }
 
 # What cannot be proved is a failure, never a pass: sbctl answers null for a

@@ -122,6 +122,22 @@ list_hashed_paths() {
   ' "$config"
 }
 
+# A file that limine.conf names with a "#hash", whoever wrote it. Signing such
+# a file in place would make its entry stale (D1), and Limine stops at a stale
+# hash under Secure Boot (C1). FAT names compare without case.
+file_has_path_hash() {
+  local paths line value path named
+  paths=$(list_hashed_paths) || return 1
+  while IFS= read -r line; do
+    value=${line#*: }
+    value=${value#*: }
+    path=${value%#*}
+    named="$(esp_path)/${path#boot():/}"
+    [[ -z $line || $path != 'boot():/'* || ${1,,} != "${named,,}" ]] || return 0
+  done <<<"$paths"
+  return 1
+}
+
 # A hashed path that belongs to a snapshot entry: upstream's stored hash of a
 # history file (spec D1).
 path_is_snapshot() { [[ ${1,,} == */limine_history/* ]]; }

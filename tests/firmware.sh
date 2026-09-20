@@ -138,6 +138,10 @@ plan_proofs_refuse_what_was_not_asked_for() {
   { read_enrollment_plan && read_rebuild_plan && rebuild_plan_is_sound; } || fail_test "a plain rebuild plan was judged unsound"
   _planned['PK']+=$'\n'"$(x509_row "$OEM_OWNER" 'second platform key')"
   ! rebuild_plan_is_sound || fail_test "a rebuild with two PK entries was accepted"
+  # An sbctl that no longer honours --microsoft exports the local keys alone.
+  { read_enrollment_plan && read_rebuild_plan; } || fail_test "plan"
+  _planned['KEK']=${_local['KEK']}
+  ! rebuild_plan_is_sound || fail_test "a rebuild of the local keys alone was accepted"
 }
 
 # Appending to an empty KEK or db would enroll the local keys alone, so empty

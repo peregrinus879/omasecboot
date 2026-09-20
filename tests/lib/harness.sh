@@ -202,7 +202,15 @@ load_library() {
     source "$ROOT_DIR/lib/${module}.sh"
   done
   fixture_overrides
-  : >"$FIX/bin/limine-hook" && chmod 755 "$FIX/bin/limine-hook"
+  # The installed hook (limine/90-omasecboot-sign): the opt-in test, then the
+  # pass through the dispatcher with this fixture's locations, status 0 always.
+  cat >"$FIX/bin/limine-hook" <<EOF
+#!/bin/bash
+[[ -e $FIX/state/enabled ]] || exit 0
+ROOT_DIR=$ROOT_DIR bash -c '$CLI_PROCESS' omasecboot sign --quiet || :
+exit 0
+EOF
+  chmod 755 "$FIX/bin/limine-hook"
 }
 
 # How many of the watchers' instances read as enabled: 2 after setup, 0 after remove.
@@ -509,6 +517,8 @@ if [[ ! -e $FIX/run/upstream-hook-fails ]]; then
     limine enroll-config "$primary" "$(b2sum <"$FIX/esp/limine.conf" | cut -d' ' -f1)"
   [[ ! -e $FIX/sbctl/keys ]] || sbctl sign "$primary"
 fi
+# The post.d chain ends with this tool's hook, which inherits the lock (C2).
+[[ $name == limine-reset-enroll || ! -x $FIX/bin/limine-hook ]] || "$FIX/bin/limine-hook"
 exit 0
 EOF
   local tool

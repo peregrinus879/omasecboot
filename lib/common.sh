@@ -222,6 +222,10 @@ esp_path() {
     done
     return 1
   fi
+  # Upstream accepts "/boot/" and "//boot" (C3). Paths are compared as text
+  # here, and a fallback loader that is not recognised would be signed.
+  while [[ $path == *//* ]]; do path=${path//\/\//\/}; done
+  [[ $path == / ]] || path=${path%/}
   printf '%s\n' "$path"
 }
 

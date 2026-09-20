@@ -157,6 +157,23 @@ in_sandbox_answer() {
     in_sandbox' guard "$ROOT_DIR/tests/lib/sandbox.sh"
 }
 
+# Upstream accepts ESP_PATH with a trailing or doubled slash (C3). This tool
+# compares paths as text, so it keeps one form: otherwise the fallback loader
+# is not recognised and the pass would sign it in place.
+esp_path_has_one_form() {
+  local value
+  # The library's own esp_path, which the fixture replaces with a location.
+  # shellcheck source=/dev/null
+  source <(sed -n '/^esp_path() {$/,/^}$/p' "$ROOT_DIR/lib/common.sh")
+  for value in "$FIX/esp/" "$FIX//esp" "$FIX/esp//"; do
+    printf 'ESP_PATH="%s"\n' "$value" >"$FIX/etc/default-limine"
+    [[ $(esp_path) == "$FIX/esp" ]] || fail_test "ESP_PATH=${value} read as $(esp_path)"
+    is_fallback_loader "$(find "$(esp_path)/" -name BOOTX64.EFI)" || fail_test "the fallback loader was not recognised under ESP_PATH=${value}"
+  done
+  printf 'ESP_PATH="/"\n' >"$FIX/etc/default-limine"
+  [[ $(esp_path) == / ]] || fail_test "the root was lost: $(esp_path)"
+}
+
 contract_cases_run_only_in_their_sandbox() {
   local token=$FIX/run/sandbox-token
   printf 'token\n' >"$token"
@@ -184,4 +201,5 @@ run_case inherited-descriptor-is-reused inherited_descriptor_is_reused
 run_case children-run-unlocked children_run_unlocked
 run_case prompts-need-a-terminal-and-name-what-was-cancelled prompts_need_a_terminal_and_name_what_was_cancelled
 run_case contract-cases-run-only-in-their-sandbox contract_cases_run_only_in_their_sandbox
+run_case esp-path-has-one-form esp_path_has_one_form
 finish_suite
