@@ -224,8 +224,15 @@ readonly CLI_PROCESS='
   fixture_overrides
   main "$@"'
 
+# A command that fails says why, in a line of fail or warn. Two are silent by
+# contract: anything with --quiet, and the menu row's guard.
 run_cli() {
-  ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c "$CLI_PROCESS" omasecboot "$@" >"$FIX/run/output" 2>&1
+  local status=0
+  ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c "$CLI_PROCESS" omasecboot "$@" >"$FIX/run/output" 2>&1 || status=$?
+  [[ $status == 0 || " $* " == *' --quiet '* || $* == 'windows available' ]] ||
+    grep -q -e '^  ✗ ' -e '^  ! ' "$FIX/run/output" ||
+    fail_test "omasecboot $* failed with status ${status} and gave no reason: $(<"$FIX/run/output")"
+  return "$status"
 }
 
 # The same process in the background, for a case that signals it: CLI_PID.
@@ -265,10 +272,6 @@ fixture_overrides() {
   check_architecture() { :; }
   check_uefi() { :; }
   require_terminal() { :; }
-  confirm() {
-    printf 'QUESTION: %s\n' "$2"
-    [[ ${CONFIRM_ANSWER:-yes} == yes ]]
-  }
 }
 
 # --- Stub tools --------------------------------------------------------------------
@@ -533,6 +536,13 @@ EOF
   cat >"$FIX/bin/pacman" <<'EOF'
 #!/bin/bash
 printf '%s\n' "pacman $*" >>"$FIX/run/calls"
+EOF
+  # gum confirm QUESTION exits 0 for yes and 1 for no (gum's README). The
+  # answer is CONFIRM_ANSWER, and the question is shown as asked.
+  cat >"$FIX/bin/gum" <<'EOF'
+#!/bin/bash
+printf 'QUESTION: %s\n' "${@: -1}"
+[[ ${CONFIRM_ANSWER:-yes} == yes ]]
 EOF
   chmod 755 "$FIX"/bin/*
   : >"$FIX/run/calls"

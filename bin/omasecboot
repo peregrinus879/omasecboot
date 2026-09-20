@@ -30,12 +30,16 @@ usage() {
   ${BOLD}--quiet${NC} anywhere on the line keeps progress quiet; warnings and failures still print"
 }
 
+# A usage error names what was not understood before it shows the usage text.
+usage_error() {
+  fail "$1"
+  usage >&2
+  exit 2
+}
+
 # Commands take no arguments beyond the ones they name.
 no_arguments() {
-  (( $# == 0 )) || {
-    usage >&2
-    exit 2
-  }
+  (( $# == 0 )) || usage_error "Unexpected argument: $1"
 }
 
 # Everything that must hold before anything on the machine changes.
@@ -371,10 +375,7 @@ cmd_windows() {
       request_windows_boot || die "BootNext does not read back as the Windows entry; check with: efibootmgr"
       qpass "The firmware holds the request to start $(windows_target_label) at the next boot, once"
       ;;
-    *)
-      usage >&2
-      exit 2
-      ;;
+    *) usage_error "Unknown windows command: ${action:-none given}" ;;
   esac
 }
 
@@ -399,10 +400,7 @@ main() {
     windows) cmd_windows "$@" ;;
     version) print_message "omasecboot ${OMASECBOOT_VERSION}" ;;
     help | -h | --help) usage ;;
-    *)
-      usage >&2
-      exit 2
-      ;;
+    *) usage_error "Unknown command: ${command}" ;;
   esac
 }
 

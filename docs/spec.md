@@ -91,7 +91,7 @@ Every path that changes boot files takes `/run/lock/boot-partition.lock` on desc
 
 ## 5. Commands
 
-Subcommands carry no `--` prefix. Exit status: 0 success, 1 failure or attention needed, 2 usage, 75 boot files busy.
+Subcommands carry no `--` prefix. Exit status: 0 success, 1 failure or attention needed, 2 usage, 75 boot files busy. A command that fails says why, a usage error by naming what it did not understand; only `--quiet` and `windows available` are silent.
 
 ### `setup`
 
@@ -209,7 +209,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 
 ## 10. Tests
 
-- Hermetic suites against a fixture machine with stub tools, with a case for every failure-table row that software can simulate. The commands run as processes of their own, so errexit behaves as installed. Every stub behaviour cites the section of upstream-contracts.md that records it; anything else is marked as an assumption in the stub. The whole run takes about a minute.
+- Hermetic suites against a fixture machine with stub tools, with a case for every failure-table row that software can simulate. The commands run as processes of their own, so errexit behaves as installed, through the tool's own prompt code, and a command that fails without a line that says why fails its case (section 5). Every stub behaviour cites the section of upstream-contracts.md that records it; anything else is marked as an assumption in the stub. The whole run takes about a minute.
 - Every safety predicate has a named case that fails when the predicate is disabled.
 - Real-tool contract suites, in a sandbox that hides the machine's own keys, firmware, settings and ESP. One runs the real sbctl with keys made for the run and a fixture firmware directory: the export in the forms D4 relies on, what a write produces, `--partial` with `--append`, the owner GUID, the signature and file-list answers. The other runs upstream's own Limine shell code from the installed package on fixture settings, hooks and an ESP: the configuration layers, hook order and exit statuses, the lock, the loader backup, the `limine-install` options and the hooks this tool relies on by name, and one loader through the whole exchange: enrolled and signed by upstream's code and proved by this tool, rebuilt by this tool after `limine.conf` changed, and still proved after upstream's next operation over it. A scheduled CI job reads the versions of sbctl, Limine and Omarchy's Limine tools every day and runs both suites when one of them or the contract code has changed, and at least once a week; a failure opens an issue instead of blocking users. The watchers' `PathChanged` units on vfat are left to stage 1 of acceptance, where systemd and the ESP are the real ones.
 - CI: lint, the hermetic suites, the package build, and installation, upgrade and removal in a container.

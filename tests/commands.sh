@@ -185,6 +185,7 @@ usage_errors_exit_2() {
     # shellcheck disable=SC2086 # The words are the command line.
     run_cli $arguments || rc=$?
     (( rc == 2 )) || fail_test "'${arguments}' returned ${rc}"
+    [[ $(<"$FIX/run/output") == *"${arguments##* }"*'omasecboot setup'* ]] || fail_test "'${arguments}' was not named before the usage text: $(<"$FIX/run/output")"
   done
   [[ ! -e $(enabled_marker) && ! -e $FIX/sbctl/keys ]] || fail_test "a usage error changed the machine"
   run_cli version || fail_test "version"
