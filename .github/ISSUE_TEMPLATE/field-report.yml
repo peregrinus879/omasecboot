@@ -101,7 +101,7 @@ body:
       label: The way back
       options:
         - Not done yet
-        - "`remove` exited 0 and the machine starts as before"
+        - "`remove` exited 0, or said \"Nothing to remove\", and the machine starts as before"
         - "`remove` failed or the machine did not start as before (say what happened under \"What differed\")"
     validations:
       required: true

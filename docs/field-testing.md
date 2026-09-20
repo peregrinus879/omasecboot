@@ -1,6 +1,6 @@
 # Field testing
 
-How to try OmaSecBoot on your own machine and report what happened, so that the report can be acted on. Hermetic tests cannot show what firmware and a real boot do; records from real machines can. Read the status note at the top of the [README](../README.md) first: it says how little has been proven on hardware so far, and that is the reason this page exists.
+How to try OmaSecBoot on your own machine and report what happened, so that the report can be acted on. Hermetic tests cannot show what firmware and a real boot do; records from real machines can. Read the status note at the top of the [README](../README.md) first: it says what has been proven on hardware so far.
 
 [release-checklist.md](release-checklist.md) owns what a release needs, on a dedicated machine, drills included. This page is a shorter procedure for anyone's machine. Every step names what must be true before its commands, then the commands, then what to expect. Do not run a block before the lines above it are settled, and keep this page open on a second device or on paper: a machine that does not start cannot show it.
 
@@ -54,7 +54,7 @@ Nothing of the test is run yet. Settle each line first.
 - You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file that `sudo ls -lSh /boot/EFI/Linux` lists as available.
 - The system is up to date and was rebooted since: run `omarchy update`, reboot, and start the test then. Do not update again, and do not run `pacman -Sy`, before "The way back" is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
-- No earlier, copied-in version of this tool is on the machine; its hooks would keep running the old tool, and `setup` refuses beside them. This must print nothing but "No such file":
+- No earlier install of this tool, copied into place without pacman, is on the machine; its hooks would keep running the old tool, and `setup` refuses beside them. This must print nothing but "No such file":
 
 ```bash
 ls -d /usr/local/bin/omasecboot /usr/local/lib/omasecboot /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign
@@ -129,11 +129,12 @@ echo "$kernel"
 Expected: one package name, such as `linux` or `linux-omarchy`. Stop if the line is empty: the running kernel is not the installed one, so reboot and come back to this step.
 
 ```bash
-sudo bash tests/acceptance-record.sh 1-kernel -- bash -c "time pacman -S --noconfirm $kernel"
+sudo bash tests/acceptance-record.sh 1-kernel -- pacman -S --noconfirm "$kernel"
+sudo bash tests/acceptance-record.sh 1-hook-time -- bash -c 'time /etc/boot/hooks/post.d/90-omasecboot-sign'
 sudo bash tests/acceptance-record.sh 1-status-kernel -- omasecboot status
 ```
 
-Expected: the same version is reinstalled, the new kernel image is signed while it is built, the Limine hooks run, `status` exits 0.
+Expected: the same version is reinstalled, the new kernel image is signed while it is built, the Limine hooks run, and `status` exits 0. The middle row runs the tool's hook alone, as the Limine tools run it; its budget is two seconds per installed kernel.
 
 **4.** Reinstall Limine. Omarchy's installer leaves a pacman hook that copies the raw loader over the sealed one after every Limine upgrade; the tool's watcher must rebuild it on its own, a moment after pacman ends.
 
@@ -230,6 +231,8 @@ cd ~/omasecboot
 sudo bash tests/acceptance-record.sh 2-after-pk-delete
 ```
 
+Expected: `SetupMode=1` under "Secure Boot variables", and `sbctl status` still lists the vendor keys without the builtin PK. Stop if the record shows that more than the Platform Key is gone, or that the Platform Key came back on its own.
+
 **3.** Enroll.
 
 ```bash
@@ -319,7 +322,7 @@ In this order, whatever level you reached.
 
 **1.** Level 2 only: turn Secure Boot off in the firmware and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
 
-**2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove", which is fine.
+**2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove" and exits 1, which is fine.
 
 ```bash
 cd ~/omasecboot
@@ -327,7 +330,7 @@ sudo bash tests/acceptance-record.sh 6-remove -- omasecboot remove
 sudo bash tests/acceptance-record.sh 6-status -- omasecboot status
 ```
 
-Expected: `remove` exits 0 and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
+Expected: `remove` exits 0, or said "Nothing to remove", and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
 
 **3.** Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, start Omarchy, and record.
 
@@ -357,7 +360,7 @@ After level 1, `sudo rm -rf /var/lib/omasecboot` removes the tool's state. After
 
 ```bash
 grep -h -A5 '^### sbctl status' ~/omasecboot/acceptance-records/*-0-before-install.md | head -n 8
-grep -h -A3 '^### Related packages' ~/omasecboot/acceptance-records/*-0-before-install.md | grep -i sbctl
+grep -h "package 'sbctl' was not found" ~/omasecboot/acceptance-records/*-0-before-install.md
 ```
 
 If the first shows `Installed: ✓ sbctl is installed`, the keys were yours before the test and were never replaced: skip the rest of this step and go on to step 6. Only if it shows `Installed: ✗ sbctl is not installed`, or that the `sbctl` command was not found, were the keys made by this test, and this removes them:
@@ -366,7 +369,7 @@ If the first shows `Installed: ✓ sbctl is installed`, the keys were yours befo
 sudo rm -rf /var/lib/sbctl
 ```
 
-If the second says that the package sbctl was not found, the test also brought the package, and `sudo pacman -Rns sbctl` removes it. The other packages that came with the tool or with "Prepare" stay; remove the ones you do not want.
+If the second prints a line, the test also brought the package, and `sudo pacman -Rns sbctl` removes it. The other packages that came with the tool or with "Prepare" stay; remove the ones you do not want.
 
 **6.** Reboot, see that the machine starts as it did before, and record the final state.
 

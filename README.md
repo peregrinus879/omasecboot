@@ -5,7 +5,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Development status, 2026-09-20:** no release exists. One machine, an ASUS Vivobook TP3402VA, has run the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) from `setup` to `remove`: enrollment beside the firmware's own keys, Secure Boot on, kernel and Limine reinstalls, snapshots, a restore, the Windows entry, and the stale-seal drill with the fallback loader. Two of its rows are still owed ([docs/maintenance.md](docs/maintenance.md)), and no other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how a second machine gets its record.
+> **Development status:** no release exists. One machine, an ASUS Vivobook TP3402VA, has run the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) from `setup` to `remove`, with Secure Boot on and Windows beside it. What it showed is in section C6 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the rows it still owes are in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
 
 ## Why
 
@@ -20,7 +20,7 @@ OmaSecBoot fills those gaps for this exact stack and leaves everything else to t
 ## How it works
 
 - sbctl signs each new kernel image while it is built, and Limine's own hook seals the loader: it writes a checksum of `limine.conf` into the Limine executable, so nobody can change your boot entries from outside the running system. OmaSecBoot turns those two upstream features on, proves after every change that they really happened, and repairs the loader when they did not.
-- It integrates in two places only. A small Limine hook runs at the end of every Limine operation (kernel updates, Limine upgrades, snapshots, restores), and a systemd path unit re-seals the loader when `limine.conf` is edited or the loader itself is replaced, which Omarchy's own pacman hook does after every Limine upgrade. It installs no pacman hooks and never blocks an update. On a machine where `setup` never ran, the hook exits on its first line.
+- It integrates in two places only. A small Limine hook runs at the end of every Limine operation (kernel updates, Limine upgrades, snapshots, restores), and a systemd path unit re-seals the loader when `limine.conf` is edited or the loader itself is replaced, which the pacman hook that Omarchy's installer leaves does after every Limine upgrade. It never blocks an update. On a machine where `setup` never ran, the hook exits on its first line.
 - It keeps a few small files under `/var/lib/omasecboot` and works out everything else from what it observes, so any interrupted step is finished by running the same command again. It rebuilds the loader from the raw Limine executable that upstream deployed, never from a newer one upstream is holding back.
 
 The design, every decision behind it and the failure table are in [docs/spec.md](docs/spec.md). The upstream behaviour it relies on, with sources, is in [docs/upstream-contracts.md](docs/upstream-contracts.md).
@@ -33,7 +33,7 @@ Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images and th
 
 ```bash
 make package
-sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
+sudo pacman -U omasecboot-*-any.pkg.tar.zst
 ```
 
 `make package` needs `base-devel` and git and builds from the files of the checkout that git does not ignore. `make install` only stages a package and refuses the live system.
@@ -42,8 +42,8 @@ sudo pacman -U omasecboot-1.0.0-1-any.pkg.tar.zst
 
 | Command | What it does |
 | --- | --- |
-| `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the `limine.conf` watcher, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: proves that nothing but the Platform Key is gone, asks once, and adds your certificates to the keys the firmware holds. After a reboot it tells you to turn Secure Boot on. On a machine coming from an earlier version it also removes the sbctl rows that would make sbctl sign a snapshot image or the fallback loader. |
-| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signed file, stale hashes, harmful sbctl rows, the Windows entry and leftovers of earlier installs, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
+| `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the watchers of `limine.conf` and the loader, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: enrolls your keys as described below. After a reboot it tells you to turn Secure Boot on. |
+| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signable file, stale hashes, harmful sbctl rows, the Windows entry, the hook and the watchers, and leftovers of an earlier install, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
 | `sudo omasecboot sign` | The same converge-and-verify pass the hook runs. Safe at any time; exits 75 when another tool is working on the boot files. |
 | `sudo omasecboot remove` | Returns the Limine settings and boot files to stock and takes the Windows entry out. Refuses while Secure Boot is on. Your keys stay. |
 | `omasecboot windows preflight` | Looks for Windows and BitLocker volumes and prints what to do in Windows before Secure Boot changes. Read-only. |
@@ -63,7 +63,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 
 `sudo omasecboot windows setup` adds a Windows entry to Limine's menu. It uses Limine's `efi_boot_entry` protocol, which restarts the machine into the firmware's own "Windows Boot Manager" entry instead of chainloading it, so Windows starts the way it does when you pick it in the firmware. The target is read from the firmware's boot entries every time: exactly one active Windows Boot Manager entry with a name no other entry shares, or the command refuses. `limine.conf` is only ever changed together with the loader's seal over it, or while the loader carries no seal at all, and the tool only ever deletes an entry that holds nothing but what it wrote. The tool never creates or renames firmware entries and never mounts or reads a Windows partition. When Omarchy replaces `limine.conf` from its template, the next `sign` pass puts the entry back.
 
-`sudo omasecboot windows bootnext` does the same without the menu. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into `~/.config/omarchy/extensions/omarchy-menu.jsonc` to use it. Neither way promises that Windows starts, that BitLocker stays quiet or that its measurements stay stable.
+`sudo omasecboot windows bootnext` does the same without the menu. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into your own Omarchy menu extensions to use it.
 
 ## What it never touches
 
@@ -73,7 +73,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 
 ## If the machine does not boot
 
-A sealed Limine loader refuses to start when `limine.conf` no longer matches its checksum, with Secure Boot on or off. The watcher and the hook keep them in step; if a change slipped through:
+A sealed Limine loader refuses to start when `limine.conf` no longer matches its checksum, with Secure Boot on or off. The watchers and the hook keep them in step; if a change slipped through:
 
 1. Turn Secure Boot off in the firmware.
 2. In the firmware's boot menu pick the fallback loader (`EFI/BOOT/BOOTX64.EFI`). It is not sealed and boots normally.
@@ -90,7 +90,7 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 | `The Limine loader is not sealed with the current limine.conf` | The loader would refuse to start, with Secure Boot on or off | `sudo omasecboot sign` before you reboot. If the machine is already down, see "If the machine does not boot" |
 | `Stale path hash in limine.conf` | An OS entry still carries a hash of a file that has changed since | `sudo omasecboot setup`, which regenerates the entries |
 | `An earlier setup or remove did not finish` | One of the two stopped half way, for example when a Limine tool failed | `sudo omasecboot remove` to return to stock, or `sudo omasecboot setup` to set up again |
-| `An earlier install of this tool is still present` | Files of a pre-package install remain, and their hooks keep running the old tool | Run the removal command that `setup` prints, then `setup` again |
+| `An earlier install of this tool is still present` | Files of an earlier install, copied into place without pacman, remain, and their hooks keep running the old tool | Run the removal command that `setup` prints, then `setup` again |
 | `The firmware's keys are in a state this tool will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `setup`, then delete only the Platform Key |
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
@@ -112,7 +112,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 
 ## Help test it
 
-Nothing about boot behaviour is proven until real machines have shown it. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
+Boot behaviour is proven only on the machines recorded, so every further machine counts. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
 
 ## Development
 
@@ -121,8 +121,6 @@ make lint            # bash -n, ShellCheck and the JSONC fragment
 make test            # hermetic suites and the package build, about a minute
 make test-contract   # the installed sbctl and Limine tools against the upstream contracts, in a sandbox
 ```
-
-The targets need `base-devel`, `git`, `shellcheck` and `jq`; `make test-contract` also needs `bubblewrap`.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).
 
