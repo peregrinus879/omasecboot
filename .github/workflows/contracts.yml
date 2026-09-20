@@ -1,11 +1,13 @@
 name: Upstream contracts
 
 # The contract suites run the real sbctl and Limine tools, so their result
-# follows those packages, not this repository. They run weekly instead of on
-# every push, and a failure opens an issue instead of blocking a change.
+# follows those packages, not this repository. A daily job reads the packages'
+# current versions and runs the suites only when one of them, or this
+# repository's own contract code, has changed since the last green run, and at
+# least once a week. A failure opens an issue instead of blocking a change.
 on:
   schedule:
-    - cron: "17 5 * * 1"
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -39,19 +41,46 @@ jobs:
           curl -fsSL "https://keys.openpgp.org/vks/v1/by-fingerprint/${OMARCHY_KEY}" | pacman-key --add -
           pacman-key --lsign-key "$OMARCHY_KEY"
           printf '\n[omarchy]\nServer = https://pkgs.omarchy.org/stable/$arch\n' >>/etc/pacman.conf
-      # Upstream's pacman hooks run its deploy tools here; they find no ESP in
-      # the container and stop before doing anything.
-      - name: Install the tools under test
-        run: pacman -Syu --noconfirm --needed git jq make bubblewrap sbctl limine limine-mkinitcpio-hook
+          pacman -Sy --noconfirm --needed git
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # -k: a failure in one suite does not hide the other's result for a week.
+      # What was tested: the versions of the tools under test, the ISO week as
+      # the weekly floor, and the code that tests them.
+      - name: Name what is under test
+        id: subject
+        run: |
+          versions=$(pacman -Si limine sbctl limine-mkinitcpio-hook | awk -F': ' '/^(Name|Version) /{print $2}' | paste -sd-)
+          printf 'Versions: %s\n' "$versions"
+          printf 'key=%s-%s\n' "$(date -u +%G-%V)" "$(sha256sum <<<"$versions" | cut -c1-16)" >>"$GITHUB_OUTPUT"
+      - name: Look for a green run of the same subject
+        id: green
+        uses: actions/cache/restore@v6
+        with:
+          path: .contracts-green
+          key: contracts-${{ steps.subject.outputs.key }}-${{ hashFiles('tests/contract-*.sh', 'tests/lib/sandbox.sh', 'tests/lib/esl.sh', 'lib/*.sh', 'limine-hooks/*') }}
+          lookup-only: true
+      # Upstream's pacman hooks run its deploy tools here; they find no ESP in
+      # the container and stop before doing anything.
+      - name: Install the tools under test
+        if: steps.green.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
+        run: pacman -Su --noconfirm --needed jq make bubblewrap sbctl limine limine-mkinitcpio-hook
+      # -k: a failure in one suite does not hide the other's result.
       - name: Run the contract suites
+        if: steps.green.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
         env:
           CONTRACT_REQUIRED: "1"
-        run: make -k test-contract
+        run: |
+          make -k test-contract
+          mkdir -p .contracts-green
+          date -u +%Y-%m-%dT%H:%M:%SZ >.contracts-green/when
+      - name: Remember the green run
+        if: steps.green.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .contracts-green
+          key: ${{ steps.green.outputs.cache-primary-key }}
 
   # On a clean runner, so the job that ran other people's packages as root
   # never holds a token that can write.
@@ -67,12 +96,12 @@ jobs:
       - uses: actions/github-script@v9
         with:
           script: |
-            const title = 'Weekly contract run failed'
+            const title = 'Contract run failed'
             const { owner, repo } = context.repo
             const open = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open' })
             if (!open.some(issue => issue.title === title)) {
               await github.rest.issues.create({
                 owner, repo, title,
-                body: `The weekly run of the contract suites failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}. A FAIL line names the section of docs/upstream-contracts.md to recheck. A SKIP line or a failed install step means the job's environment needs attention, not a contract.`,
+                body: `The scheduled run of the contract suites failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}. A FAIL line names the section of docs/upstream-contracts.md to recheck. A SKIP line or a failed install step means the job's environment needs attention, not a contract.`,
               })
             }
