@@ -53,6 +53,31 @@ sudo pacman -U omasecboot-*-any.pkg.tar.zst
 | `sudo omasecboot windows setup` | Adds a Windows entry to the boot menu; `windows remove` takes it out. |
 | `sudo omasecboot windows status` | Shows the Windows target the firmware offers and the state of the entry. |
 | `sudo omasecboot windows bootnext` | Asks the firmware to start Windows at the next boot, once. Exit 0 means the firmware took the request, nothing more. |
+| `omasecboot version` | Prints the version. `omasecboot help` prints the commands. |
+
+A healthy machine with Windows beside it reads like this:
+
+```text
+$ sudo omasecboot status
+
+OmaSecBoot - Status
+
+  ✓ Secure Boot is on
+  ✓ Your keys are enrolled in the firmware
+  ✓ ENABLE_VERIFICATION=no is in effect
+  ✓ ENABLE_ENROLL_LIMINE_CONFIG=yes is in effect
+  ✓ The Limine loader is sealed with the current limine.conf and signed
+  ✓ The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off
+  ✓ sbctl's signing keys exist
+  ✓ Signed: /boot/EFI/Linux/omarchy_linux-omarchy.efi
+  ✓ Signed: /boot/EFI/limine/limine_x64.efi
+  ✓ The Windows entry restarts the machine into Windows Boot Manager
+  ✓ The Limine hook is installed
+  ✓ The watchers of limine.conf and the loader are active
+  → Nothing to do
+```
+
+A line that starts with `✗` is a problem, and the `→` lines at the end say what to do next.
 
 ## How your keys get into the firmware
 
