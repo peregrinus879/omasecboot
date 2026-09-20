@@ -1,5 +1,8 @@
 # OmaSecBoot
 
+[![CI](https://github.com/peregrinus879/omasecboot/actions/workflows/ci.yml/badge.svg)](https://github.com/peregrinus879/omasecboot/actions/workflows/ci.yml)
+[![Upstream contracts](https://github.com/peregrinus879/omasecboot/actions/workflows/contracts.yml/badge.svg)](https://github.com/peregrinus879/omasecboot/actions/workflows/contracts.yml)
+
 **Secure Boot for [Omarchy](https://omarchy.com) with your own keys.**
 
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
@@ -68,7 +71,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 ## What it never touches
 
 - **Snapshot images.** `limine-snapper-sync` keeps a hash of every snapshot image it stores. Signing one later would break that hash for good, so images from before setup stay as they are: they boot with Secure Boot off, `status` counts them, and snapshot rotation retires them.
-- **The fallback loader** `EFI/BOOT/BOOTX64.EFI`. It stays the raw copy upstream deploys. The firmware refuses it while Secure Boot is on, and with Secure Boot off it is your rescue loader (next section).
+- **The fallback loader** `EFI/BOOT/BOOTX64.EFI`. It stays the raw copy upstream deploys. The firmware refuses it while Secure Boot is on, and with Secure Boot off it is your rescue loader (next section). The comments in upstream's `/etc/limine-entry-tool.conf` suggest signing it by hand; `sign` undoes that, because a fallback that is signed but not sealed would start under Secure Boot without enforcing `limine.conf`.
 - **sbctl's file list.** OmaSecBoot adds nothing to it. `setup` only removes rows for snapshot images and the fallback loader, which sbctl's own pacman hook would otherwise sign in place.
 
 ## If the machine does not boot

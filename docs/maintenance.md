@@ -13,7 +13,15 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 - The acceptance rows on the release candidate. The record is of commit `3b43368`, and later commits changed code.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The rebuild path of enrollment, which needs firmware that clears KEK and db together with the Platform Key, and the Windows rows on a machine with BitLocker on. Enrollment is recorded on the append path only.
-- The first scheduled run of the contract workflow on GitHub, which proves its container setup.
+- The contract workflow's issue on a failed scheduled run. Its suites have run green on GitHub, and no scheduled run has failed yet.
+
+## Deferred
+
+Decided after a second machine runs the tool from its package.
+
+- A note in `setup` on whether KEK and db already hold Microsoft's 2023 certificates before the Platform Key is replaced. It needs Microsoft's guidance and the set behind sbctl's `--microsoft` checked first.
+- How the Omarchy side is put to its maintainers, and with what evidence.
+- A notice from the package when it is removed from a machine that is still set up (the failure table's row on that).
 
 ## Recheck when something changes
 
