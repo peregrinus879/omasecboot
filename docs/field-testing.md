@@ -34,13 +34,15 @@ Read this now, not then.
 - With Secure Boot on: turn it off in the firmware first. A loader the firmware refuses for its signature starts again with Secure Boot off.
 - The primary loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in "Before you start", log in, and run `sudo omasecboot sign`.
 - Without a working fallback: boot the rescue media, mount the ESP, and put a raw loader over the primary. A raw loader checks nothing and starts.
-  ```bash
-  lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME
-  mount /dev/<the EFI system partition> /mnt
-  tar -xf /mnt/EFI/limine/limine_x64.bak -C /mnt/EFI/limine limine_x64.efi
-  umount /mnt
-  ```
-  If there is no `limine_x64.bak`, or tar reports an error, copy `/mnt/EFI/BOOT/BOOTX64.EFI` over `/mnt/EFI/limine/limine_x64.efi` instead. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go to "The way back".
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME
+mount /dev/<the EFI system partition> /mnt
+tar -xf /mnt/EFI/limine/limine_x64.bak -C /mnt/EFI/limine limine_x64.efi
+umount /mnt
+```
+
+If there is no `limine_x64.bak`, or tar reports an error, copy `/mnt/EFI/BOOT/BOOTX64.EFI` over `/mnt/EFI/limine/limine_x64.efi` instead. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go to "The way back".
 
 ## Before you start
 
@@ -49,13 +51,15 @@ Nothing of the test is run yet. Settle each line first.
 - The machine runs Omarchy on x86_64 with Limine, unified kernel images and a vfat ESP, as Omarchy installs it.
 - Secure Boot is off and the firmware holds its factory keys: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key; report that line instead of testing. A machine on which you have enrolled Secure Boot keys of your own before is not one for this page: its way back would put the factory keys in their place.
 - It is on AC power, and you have about half an hour for level 1 and an hour for level 2.
-- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `ls /boot/EFI/BOOT/BOOTX64.EFI` must list it; `sudo limine-install --fallback` adds it when it is missing.
-- The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file in `/boot/EFI/Linux` as available.
+- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback` adds it when it is missing.
+- The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file that `sudo ls -lSh /boot/EFI/Linux` lists as available.
 - The system is up to date and was rebooted since: run `omarchy update`, reboot, and start the test then. Do not update again, and do not run `pacman -Sy`, before "The way back" is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
 - No earlier, copied-in version of this tool is on the machine; its hooks would keep running the old tool, and `setup` refuses beside them. This must print nothing but "No such file":
-  ```bash
-  ls -d /usr/local/bin/omasecboot /usr/local/lib/omasecboot /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign
-  ```
+
+```bash
+ls -d /usr/local/bin/omasecboot /usr/local/lib/omasecboot /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign
+```
+
 - With Windows on the same machine, at any level: the BitLocker or Device Encryption recovery key is backed up and at hand. `setup` asks about it, and changing Secure Boot keys or its state can make Windows ask for the key.
 - Level 2: you know the firmware setup password if one is set. You have looked, without changing anything, for the firmware menu that deletes the Platform Key alone and the one that restores the factory keys, and written their wording down for the report. If the firmware offers only "clear all keys" or "reset to Setup Mode" with no choice of key, do not go to level 2; report that wording instead. Some firmware shows its key menu only while Secure Boot is set to enabled: there you set it to enabled, change the keys, and set it back to disabled before you save.
 
@@ -95,55 +99,76 @@ sudo snapper -c root create -d "omasecboot-test baseline"
 
 Before: "Before you start" and "Prepare" are done, and Secure Boot is still off.
 
-1. Install, and record the untouched machine.
-   ```bash
-   cd ~/omasecboot
-   sudo pacman -U "$(ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
-   sudo bash tests/acceptance-record.sh 0-baseline -- omasecboot status
-   make test-contract
-   ```
-   Expected: "OmaSecBoot is not set up on this machine", exit status 0; the contract suites pass against your installed sbctl and Limine tools. Stop if a contract case fails: send its `FAIL` line, which names what changed upstream.
-2. Set up the boot files. On a machine with Windows, or where it cannot tell whether there is one, `setup` prints what to do about BitLocker and asks once whether Windows encryption is suspended or off, or its recovery key at hand. Answer yes only when that is true. With "no" it stops with "Cancelled", exit 1, after the boot files are set up: then run `status`, and go on or go to "The way back" as you prefer.
-   ```bash
-   sudo bash tests/acceptance-record.sh 1-setup -- omasecboot setup
-   sudo bash tests/acceptance-record.sh 1-status -- omasecboot status
-   ```
-   Expected: keys created if you had none, two settings written, the loader sealed and signed, the watchers enabled, a backup of the firmware's keys, and at the end the instruction to delete the Platform Key. At level 1 do not follow that instruction. `status` exits 0 and says your keys are not enrolled yet. Stop if `setup` refuses or `status` exits 1.
-3. Reinstall the kernel you are running, which is what every kernel update does to the boot files.
-   ```bash
-   kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
-   echo "$kernel"
-   ```
-   Expected: one package name, such as `linux` or `linux-omarchy`. Stop if the line is empty: the running kernel is not the installed one, so reboot and come back to this step.
-   ```bash
-   sudo bash tests/acceptance-record.sh 1-kernel -- bash -c "time pacman -S --noconfirm $kernel"
-   sudo bash tests/acceptance-record.sh 1-status-kernel -- omasecboot status
-   ```
-   Expected: the same version is reinstalled, the new kernel image is signed while it is built, the Limine hooks run, `status` exits 0.
-4. Reinstall Limine. Omarchy's installer leaves a pacman hook that copies the raw loader over the sealed one after every Limine upgrade; the tool's watcher must rebuild it on its own, a moment after pacman ends.
-   ```bash
-   sudo bash tests/acceptance-record.sh 1-limine -- pacman -S --noconfirm limine
-   sleep 15
-   sudo bash tests/acceptance-record.sh 1-status-limine -- omasecboot status
-   ```
-   Expected: `status` exits 0 without your help.
-5. Take a snapshot, which makes limine-snapper-sync rewrite `limine.conf`.
-   ```bash
-   sudo bash tests/acceptance-record.sh 1-snapshot -- snapper -c root create -d "omasecboot-test level 1"
-   sleep 15
-   sudo bash tests/acceptance-record.sh 1-status-snapshot -- omasecboot status
-   ```
-   Expected: exit 0.
-6. Reboot, only when the last `status` exited 0. Secure Boot is still off. If the loader refuses to start, "If the machine does not start" says what to do; note the text it showed.
-   ```bash
-   systemctl reboot
-   ```
-   After the reboot:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 1-status-reboot -- omasecboot status
-   ```
-   Expected: the machine starts from the Limine menu as always, and `status` exits 0.
+**1.** Install, and record the untouched machine.
+
+```bash
+cd ~/omasecboot
+sudo pacman -U "$(ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
+sudo bash tests/acceptance-record.sh 0-baseline -- omasecboot status
+make test-contract
+```
+
+Expected: "OmaSecBoot is not set up on this machine", exit status 0; the contract suites pass against your installed sbctl and Limine tools. Stop if a contract case fails: send its `FAIL` line, which names what changed upstream.
+
+**2.** Set up the boot files. On a machine with Windows, or where it cannot tell whether there is one, `setup` prints what to do about BitLocker and asks once whether Windows encryption is suspended or off, or its recovery key at hand. Answer yes only when that is true. With "no" it stops with "Cancelled", exit 1, after the boot files are set up: then run `status`, and go on or go to "The way back" as you prefer.
+
+```bash
+sudo bash tests/acceptance-record.sh 1-setup -- omasecboot setup
+sudo bash tests/acceptance-record.sh 1-status -- omasecboot status
+```
+
+Expected: keys created if you had none, two settings written, the loader sealed and signed, the watchers enabled, a backup of the firmware's keys, and at the end the instruction to delete the Platform Key. At level 1 do not follow that instruction. `status` exits 0 and says your keys are not enrolled yet. Stop if `setup` refuses or `status` exits 1.
+
+**3.** Reinstall the kernel you are running, which is what every kernel update does to the boot files.
+
+```bash
+kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
+echo "$kernel"
+```
+
+Expected: one package name, such as `linux` or `linux-omarchy`. Stop if the line is empty: the running kernel is not the installed one, so reboot and come back to this step.
+
+```bash
+sudo bash tests/acceptance-record.sh 1-kernel -- bash -c "time pacman -S --noconfirm $kernel"
+sudo bash tests/acceptance-record.sh 1-status-kernel -- omasecboot status
+```
+
+Expected: the same version is reinstalled, the new kernel image is signed while it is built, the Limine hooks run, `status` exits 0.
+
+**4.** Reinstall Limine. Omarchy's installer leaves a pacman hook that copies the raw loader over the sealed one after every Limine upgrade; the tool's watcher must rebuild it on its own, a moment after pacman ends.
+
+```bash
+sudo bash tests/acceptance-record.sh 1-limine -- pacman -S --noconfirm limine
+sleep 15
+sudo bash tests/acceptance-record.sh 1-status-limine -- omasecboot status
+```
+
+Expected: `status` exits 0 without your help.
+
+**5.** Take a snapshot, which makes limine-snapper-sync rewrite `limine.conf`.
+
+```bash
+sudo bash tests/acceptance-record.sh 1-snapshot -- snapper -c root create -d "omasecboot-test level 1"
+sleep 15
+sudo bash tests/acceptance-record.sh 1-status-snapshot -- omasecboot status
+```
+
+Expected: exit 0.
+
+**6.** Reboot, only when the last `status` exited 0. Secure Boot is still off. If the loader refuses to start, "If the machine does not start" says what to do; note the text it showed.
+
+```bash
+systemctl reboot
+```
+
+After the reboot:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 1-status-reboot -- omasecboot status
+```
+
+Expected: the machine starts from the Limine menu as always, and `status` exits 0.
 
 ### Windows, optional at any level
 
@@ -183,77 +208,106 @@ If you stop at level 1, go to "The way back".
 
 Before: level 1 is done and its last `status` exited 0; the firmware lines of "Before you start" are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone, and only ever adds to KEK and db. The README's "How your keys get into the firmware" says what happens and why.
 
-1. Let `setup` make sure its backup of the firmware's keys is current and ask its Windows question again, right before the deletion.
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 2-before-pk-delete -- omasecboot setup
-   ```
-   Expected: the same instruction as at level 1: delete only the Platform Key.
-2. In the firmware: delete only the Platform Key, leave Secure Boot disabled when you save, and start Omarchy.
-   ```bash
-   systemctl reboot --firmware-setup
-   ```
-   After the reboot:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 2-after-pk-delete
-   ```
-3. Enroll.
-   ```bash
-   sudo bash tests/acceptance-record.sh 2-enroll -- omasecboot setup
-   ```
-   Expected: it says how many KEK and db entries it keeps, asks before it writes (on a machine with Windows also about the recovery key), writes db, KEK and the Platform Key one at a time and reads each back, and ends with "Reboot, then run sudo omasecboot setup once more". If it says instead that the firmware's key menu cleared KEK and db together with the Platform Key, and offers to rebuild them, answer no: that path writes other lists and needs a report of its own. Stop then, and also if it refuses; its message lists what is gone from the firmware, and the report needs that list. The way back's step 3 restores the factory keys.
-4. Reboot, and let `setup` confirm.
-   ```bash
-   systemctl reboot
-   ```
-   After the reboot:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 2-confirm -- omasecboot setup
-   ```
-   Expected: "Your keys are enrolled and every boot file is proved", exit 0, and the instruction to turn Secure Boot on. Stop on anything else, and leave Secure Boot off.
-5. Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, turn Secure Boot off again, boot, record `status`, and report.
-   ```bash
-   systemctl reboot --firmware-setup
-   ```
-   After the reboot:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 2-secure-boot-on -- omasecboot status
-   sudo bash tests/acceptance-record.sh 2-sbctl -- sbctl status
-   ```
-   Expected: Secure Boot on, your keys enrolled, exit 0.
-6. The same changes as at level 1, now with Secure Boot on.
-   ```bash
-   cd ~/omasecboot
-   kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
-   echo "$kernel"
-   ```
-   Expected: the package name again. Stop if the line is empty.
-   ```bash
-   sudo bash tests/acceptance-record.sh 3-kernel -- pacman -S --noconfirm "$kernel"
-   sudo bash tests/acceptance-record.sh 3-status-kernel -- omasecboot status
-   sudo bash tests/acceptance-record.sh 3-limine -- pacman -S --noconfirm limine
-   sleep 15
-   sudo bash tests/acceptance-record.sh 3-status-limine -- omasecboot status
-   sudo bash tests/acceptance-record.sh 3-snapshot -- snapper -c root create -d "omasecboot-test level 2"
-   sleep 15
-   sudo bash tests/acceptance-record.sh 3-status-snapshot -- omasecboot status
-   ```
-   Expected: all three `status` rows exit 0. Stop otherwise, as "What stop means" says: a reboot with Secure Boot on and a loader that is not proved ends at a firmware refusal.
-7. Only when the three rows exited 0: reboot, start the snapshot entry you have just taken from Limine's menu, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill. Reboot into the normal entry and record, with the words that do not apply taken out:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 3-snapshot-boot -- echo "The snapshot entry taken after setup: started / was refused, with the text: ..."
-   sudo bash tests/acceptance-record.sh 3-status-reboot -- omasecboot status
-   ```
-   Expected: both entries start and `status` exits 0.
-8. Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on it must be refused; the README says why. Note the text, start the normal entry, and record:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 3-old-snapshot -- echo "The snapshot entry from before setup: was refused with the text: ... / started"
-   ```
+**1.** Let `setup` make sure its backup of the firmware's keys is current and ask its Windows question again, right before the deletion.
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 2-before-pk-delete -- omasecboot setup
+```
+
+Expected: the same instruction as at level 1: delete only the Platform Key.
+
+**2.** In the firmware: delete only the Platform Key, leave Secure Boot disabled when you save, and start Omarchy.
+
+```bash
+systemctl reboot --firmware-setup
+```
+
+After the reboot:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 2-after-pk-delete
+```
+
+**3.** Enroll.
+
+```bash
+sudo bash tests/acceptance-record.sh 2-enroll -- omasecboot setup
+```
+
+Expected: it says how many KEK and db entries it keeps, asks before it writes (on a machine with Windows also about the recovery key), writes db, KEK and the Platform Key one at a time and reads each back, and ends with "Reboot, then run sudo omasecboot setup once more". If it says instead that the firmware's key menu cleared KEK and db together with the Platform Key, and offers to rebuild them, answer no: that path writes other lists and needs a report of its own. Stop then, and also if it refuses; its message lists what is gone from the firmware, and the report needs that list. The way back's step 3 restores the factory keys.
+
+**4.** Reboot, and let `setup` confirm.
+
+```bash
+systemctl reboot
+```
+
+After the reboot:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 2-confirm -- omasecboot setup
+```
+
+Expected: "Your keys are enrolled and every boot file is proved", exit 0, and the instruction to turn Secure Boot on. Stop on anything else, and leave Secure Boot off.
+
+**5.** Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, turn Secure Boot off again, boot, record `status`, and report.
+
+```bash
+systemctl reboot --firmware-setup
+```
+
+After the reboot:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 2-secure-boot-on -- omasecboot status
+sudo bash tests/acceptance-record.sh 2-sbctl -- sbctl status
+```
+
+Expected: Secure Boot on, your keys enrolled, exit 0.
+
+**6.** The same changes as at level 1, now with Secure Boot on.
+
+```bash
+cd ~/omasecboot
+kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
+echo "$kernel"
+```
+
+Expected: the package name again. Stop if the line is empty.
+
+```bash
+sudo bash tests/acceptance-record.sh 3-kernel -- pacman -S --noconfirm "$kernel"
+sudo bash tests/acceptance-record.sh 3-status-kernel -- omasecboot status
+sudo bash tests/acceptance-record.sh 3-limine -- pacman -S --noconfirm limine
+sleep 15
+sudo bash tests/acceptance-record.sh 3-status-limine -- omasecboot status
+sudo bash tests/acceptance-record.sh 3-snapshot -- snapper -c root create -d "omasecboot-test level 2"
+sleep 15
+sudo bash tests/acceptance-record.sh 3-status-snapshot -- omasecboot status
+```
+
+Expected: all three `status` rows exit 0. Stop otherwise, as "What stop means" says: a reboot with Secure Boot on and a loader that is not proved ends at a firmware refusal.
+
+**7.** Only when the three rows exited 0: reboot, start the snapshot entry you have just taken from Limine's menu, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill. Reboot into the normal entry and record, with the words that do not apply taken out:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 3-snapshot-boot -- echo "The snapshot entry taken after setup: started / was refused, with the text: ..."
+sudo bash tests/acceptance-record.sh 3-status-reboot -- omasecboot status
+```
+
+Expected: both entries start and `status` exits 0.
+
+**8.** Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on it must be refused; the README says why. Note the text, start the normal entry, and record:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 3-old-snapshot -- echo "The snapshot entry from before setup: was refused with the text: ... / started"
+```
 
 ## Level 3: drills, on a spare machine only
 
@@ -263,49 +317,69 @@ The rows are in [release-checklist.md](release-checklist.md), stages 1, 3 and 4:
 
 In this order, whatever level you reached.
 
-1. Level 2 only: turn Secure Boot off in the firmware and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
-2. Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove", which is fine.
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 6-remove -- omasecboot remove
-   sudo bash tests/acceptance-record.sh 6-status -- omasecboot status
-   ```
-   Expected: `remove` exits 0 and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
-3. Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, start Omarchy, and record.
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 6-factory-keys -- sbctl status
-   ```
-   Expected: Setup Mode disabled and the vendor keys listed.
-4. Remove what the test created, the package first.
-   ```bash
-   sudo pacman -R omasecboot
-   ```
-   Then the test's snapshots, by number:
-   ```bash
-   sudo snapper -c root list | grep omasecboot-test
-   sudo snapper -c root delete <numbers>
-   ```
-   After level 1, `sudo rm -rf /var/lib/omasecboot` removes the tool's state. After level 2 keep that directory: its `firmware-backup` is the only record of what your firmware trusted before the test.
-5. Signing keys. `setup` created keys under `/var/lib/sbctl` only if there were none, and Limine's tools sign with whatever keys are there. After level 2, do this step only once step 3 matched its Expected: until then the firmware may still trust these keys. Look at what the machine had before the test:
-   ```bash
-   grep -h -A5 '^### sbctl status' ~/omasecboot/acceptance-records/*-0-before-install.md | head -n 8
-   grep -h -A3 '^### Related packages' ~/omasecboot/acceptance-records/*-0-before-install.md | grep -i sbctl
-   ```
-   If the first shows `Installed: ✓ sbctl is installed`, the keys were yours before the test and were never replaced: skip the rest of this step and go on to step 6. Only if it shows `Installed: ✗ sbctl is not installed`, or that the `sbctl` command was not found, were the keys made by this test, and this removes them:
-   ```bash
-   sudo rm -rf /var/lib/sbctl
-   ```
-   If the second says that the package sbctl was not found, the test also brought the package, and `sudo pacman -Rns sbctl` removes it. The other packages that came with the tool or with "Prepare" stay; remove the ones you do not want.
-6. Reboot, see that the machine starts as it did before, and record the final state.
-   ```bash
-   systemctl reboot
-   ```
-   After the reboot:
-   ```bash
-   cd ~/omasecboot
-   sudo bash tests/acceptance-record.sh 7-final
-   ```
+**1.** Level 2 only: turn Secure Boot off in the firmware and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
+
+**2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove", which is fine.
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 6-remove -- omasecboot remove
+sudo bash tests/acceptance-record.sh 6-status -- omasecboot status
+```
+
+Expected: `remove` exits 0 and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
+
+**3.** Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, start Omarchy, and record.
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 6-factory-keys -- sbctl status
+```
+
+Expected: Setup Mode disabled and the vendor keys listed.
+
+**4.** Remove what the test created, the package first.
+
+```bash
+sudo pacman -R omasecboot
+```
+
+Then the test's snapshots, by number:
+
+```bash
+sudo snapper -c root list | grep omasecboot-test
+sudo snapper -c root delete <numbers>
+```
+
+After level 1, `sudo rm -rf /var/lib/omasecboot` removes the tool's state. After level 2 keep that directory: its `firmware-backup` is the only record of what your firmware trusted before the test.
+
+**5.** Signing keys. `setup` created keys under `/var/lib/sbctl` only if there were none, and Limine's tools sign with whatever keys are there. After level 2, do this step only once step 3 matched its Expected: until then the firmware may still trust these keys. Look at what the machine had before the test:
+
+```bash
+grep -h -A5 '^### sbctl status' ~/omasecboot/acceptance-records/*-0-before-install.md | head -n 8
+grep -h -A3 '^### Related packages' ~/omasecboot/acceptance-records/*-0-before-install.md | grep -i sbctl
+```
+
+If the first shows `Installed: ✓ sbctl is installed`, the keys were yours before the test and were never replaced: skip the rest of this step and go on to step 6. Only if it shows `Installed: ✗ sbctl is not installed`, or that the `sbctl` command was not found, were the keys made by this test, and this removes them:
+
+```bash
+sudo rm -rf /var/lib/sbctl
+```
+
+If the second says that the package sbctl was not found, the test also brought the package, and `sudo pacman -Rns sbctl` removes it. The other packages that came with the tool or with "Prepare" stay; remove the ones you do not want.
+
+**6.** Reboot, see that the machine starts as it did before, and record the final state.
+
+```bash
+systemctl reboot
+```
+
+After the reboot:
+
+```bash
+cd ~/omasecboot
+sudo bash tests/acceptance-record.sh 7-final
+```
 
 ## Report
 
