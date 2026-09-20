@@ -110,7 +110,7 @@ show_loader_status() {
 }
 
 show_files_status() {
-  local files file state rows stale line old_snapshots=0
+  local files file state rows stale line old_snapshots=0 size largest=0 available
   if sbctl_keys_exist; then
     pass "sbctl's signing keys exist"
   else
@@ -129,7 +129,16 @@ show_files_status() {
       1) problem "Not signed: ${file}" ;;
       *) blocking_problem "sbctl could not tell whether this file is signed: ${file}" ;;
     esac
+    size=$(stat -c %s -- "$file" 2>/dev/null) || size=0
+    (( size <= largest )) || largest=$size
   done <<<"$files"
+  # A kernel update writes a whole new image and upstream reports success when
+  # that fails; an image that is rebuilt and signed again never deduplicates
+  # against its predecessor in the snapshot history, so the ESP fills faster
+  # than it did before setup (C2).
+  if available=$(free_bytes "$(esp_path)" 2>/dev/null) && (( available < largest )); then
+    note "The ESP has $((available / 1048576)) MiB free, less than its largest boot file needs ($(((largest + 1048575) / 1048576)) MiB): the next kernel update may not fit. Deleting old snapshots frees space."
+  fi
 
   if rows=$(list_harmful_sbctl_rows); then
     while IFS= read -r file; do
@@ -152,7 +161,7 @@ show_files_status() {
     [[ -z $file ]] || signature_state "$file" || old_snapshots=$((old_snapshots + 1))
   done < <(list_history_files)
   (( old_snapshots == 0 )) ||
-    note "${old_snapshots} snapshot image(s) predate Secure Boot setup and are unsigned: those entries boot only with Secure Boot off and leave with snapshot rotation"
+    note "${old_snapshots} snapshot image(s) predate Secure Boot setup and are unsigned: those entries boot only with Secure Boot off. They leave with snapshot rotation, or within seconds when those snapshots are deleted (${BOLD}sudo snapper -c root delete NUMBER${NC})"
 }
 
 # The Windows entry is in limine.conf exactly when it is enabled; the pass

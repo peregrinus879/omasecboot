@@ -46,7 +46,7 @@ sudo pacman -U omasecboot-*-any.pkg.tar.zst
 | Command | What it does |
 | --- | --- |
 | `sudo omasecboot setup` | The one command you need; run it again after each step it asks for. First run: creates signing keys with sbctl if there are none, sets `ENABLE_ENROLL_LIMINE_CONFIG=yes` and `ENABLE_VERIFICATION=no` in `/etc/default/limine` (remembering what was there), regenerates the boot entries when they still carry path hashes, seals and signs the loader, signs anything that arrived unsigned, enables the watchers of `limine.conf` and the loader, backs up the firmware's keys and tells you to delete only the Platform Key in the firmware. Next run, in Setup Mode: enrolls your keys as described below. After a reboot it tells you to turn Secure Boot on. |
-| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signable file, stale hashes, harmful sbctl rows, the Windows entry, the hook and the watchers, and leftovers of an earlier install, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
+| `sudo omasecboot status` | Reports the firmware state, the settings, the loader proof, the fallback loader, the keys, every signable file, an ESP that is running out of space, stale hashes, harmful sbctl rows, the Windows entry, the hook and the watchers, and leftovers of an earlier install, and ends with the command that repairs what it found. Exit 0 healthy, 1 attention needed. `--quiet` prints nothing. |
 | `sudo omasecboot sign` | The same converge-and-verify pass the hook runs. Safe at any time; exits 75 when another tool is working on the boot files. |
 | `sudo omasecboot remove` | Returns the Limine settings and boot files to stock and takes the Windows entry out. Refuses while Secure Boot is on. Your keys stay. |
 | `omasecboot windows preflight` | Looks for Windows and BitLocker volumes and prints what to do in Windows before Secure Boot changes. Read-only. |
@@ -97,7 +97,7 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 | `The firmware's keys are in a state this tool will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `setup`, then delete only the Platform Key |
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
-| A snapshot entry does not boot with Secure Boot on | The snapshot image predates setup and is unsigned | Boot it with Secure Boot off, or let snapshot rotation retire it |
+| A snapshot entry does not boot with Secure Boot on | The snapshot image predates setup and is unsigned | Boot it with Secure Boot off, let snapshot rotation retire it, or delete that snapshot (`sudo snapper -c root delete NUMBER`), which removes the entry within seconds |
 | `limine.conf holds this tool's Windows comment in an entry this tool did not write that way` | The `/Windows` entry was edited by hand, or its comment line ended up in another entry | Remove that comment line, or the entry, then `sudo omasecboot sign` |
 
 ## Limits
@@ -107,6 +107,7 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 - The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.
 - A BootNext request is one boot. It does not prove that Windows started, keep BitLocker quiet or keep its measurements stable, and a clean `windows preflight` is an observation, not a clearance of the firmware.
 - A snapshot older than `setup` takes the tool, the keys and the settings with it when it is restored, while the ESP and the firmware keep the signed state. Keep Secure Boot off after such a restore until `setup` has run again.
+- A kernel image that is rebuilt and signed again never deduplicates against its predecessor in the snapshot history, because every signature differs, so the ESP fills faster than before. `status` says when less space is free than the largest boot file needs; deleting old snapshots frees it.
 - The Omarchy installer ISO does not boot under Secure Boot; OmaSecBoot is for installed systems.
 
 ## Removing it

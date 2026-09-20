@@ -170,7 +170,18 @@ old_snapshots_are_a_note_not_a_problem() {
   set_up_machine
   mkdir -p "${history%/*}" && printf 'unsigned snapshot image' >"$history"
   output=$(show_status 2>&1) || fail_test "an old snapshot image was a problem: ${output}"
-  [[ $output == *'1 snapshot image(s) predate'* ]] || fail_test "no note: ${output}"
+  [[ $output == *'1 snapshot image(s) predate'*'snapper -c root delete'* ]] || fail_test "no note: ${output}"
+}
+
+# Not a problem of the boot chain, so it leaves the exit status alone.
+full_esp_is_a_note() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
+  [[ $output != *'MiB free'* ]] || fail_test "a note on a clean machine: ${output}"
+  free_bytes() { printf '4\n'; }
+  output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
+  [[ $output == *'less than its largest boot file'* ]] || fail_test "no note on a full ESP: ${output}"
 }
 
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
@@ -186,4 +197,5 @@ run_case unreadable-firmware-is-a-problem unreadable_firmware_is_a_problem
 run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
 run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
+run_case full-esp-is-a-note full_esp_is_a_note
 finish_suite
