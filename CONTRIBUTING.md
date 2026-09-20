@@ -30,6 +30,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 - Locations are functions, so the suites can point them at a fixture. Libraries return a status; the commands decide to exit.
 - Output goes through `header`, `pass`, `note`, `act`, `warn`, `fail` and `die`; the `q`-prefixed forms drop in quiet mode. Progress goes to stdout, warnings and failures to stderr. The spec's Commands section owns the exit codes and the command grammar.
 - Prompts need a terminal and say what was cancelled.
+- Commands in the documents are pasted into Omarchy's interactive shell, which aliases `ls` to `eza` and `cd` to a function of its own. Where an option means something else there, as `ls -t` does, write `command ls`; try a documented command in that shell, not in a script.
 - Stubs in the harness cite the contract section they model, or are marked as an assumption. Results are asserted independently of the function under test. A safety predicate has a case that fails when the predicate is disabled.
 
 ## Verification

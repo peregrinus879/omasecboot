@@ -99,11 +99,11 @@ sudo snapper -c root create -d "omasecboot-test baseline"
 
 Before: "Before you start" and "Prepare" are done, and Secure Boot is still off.
 
-**1.** Install, and record the untouched machine.
+**1.** Install, and record the untouched machine. `command` goes past Omarchy's `ls` alias, which is another program with other options.
 
 ```bash
 cd ~/omasecboot
-sudo pacman -U "$(ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
+sudo pacman -U "$(command ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
 sudo bash tests/acceptance-record.sh 0-baseline -- omasecboot status
 make test-contract
 ```
