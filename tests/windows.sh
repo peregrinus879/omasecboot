@@ -206,7 +206,7 @@ entry_comes_back_after_limine_conf_is_replaced() {
   write_limine_conf unhashed
   run_cli status && fail_test "status passed without the entry"
   [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
-  run_cli sign --quiet --config-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
+  run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
   [[ $(entry_count) == 1 ]] || fail_test "the entry did not come back"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over the restored entry"
 }

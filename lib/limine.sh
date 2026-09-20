@@ -289,26 +289,51 @@ restore_raw_fallback() {
   return 1
 }
 
-# --- The limine.conf watcher -----------------------------------------------------------
+# --- The watchers ------------------------------------------------------------------------
 
-watch_unit() { systemd-escape --template=omasecboot-watch@.path -p "$(limine_config_path)"; }
+# The seal holds two files together, and either can change outside the Limine
+# tools, where no hook runs: limine.conf under an editor, the primary loader
+# under a plain copy, which Omarchy's installer leaves a pacman hook for (C7).
+# One instance of the path unit watches each.
+watch_units() {
+  local file
+  for file in "$(limine_config_path)" "$(primary_loader_path)"; do
+    systemd-escape --template=omasecboot-watch@.path -p "$file" || return 1
+  done
+}
 
 enable_watch() {
-  local unit
-  unit=$(watch_unit) || return 1
-  systemctl enable --now --quiet "$unit"
+  local units
+  units=$(watch_units) || return 1
+  # shellcheck disable=SC2086 # Unit names hold no spaces: systemd-escape wrote them.
+  systemctl enable --now --quiet $units
 }
 
 disable_watch() {
-  local unit
-  unit=$(watch_unit) || return 1
-  systemctl disable --now --quiet "$unit" 2>/dev/null || true
+  local units
+  units=$(watch_units) || return 1
+  # shellcheck disable=SC2086 # As above.
+  systemctl disable --now --quiet $units 2>/dev/null || true
 }
 
 watch_is_active() {
-  local unit
-  unit=$(watch_unit) || return 1
-  systemctl is-enabled --quiet "$unit" 2>/dev/null && systemctl is-active --quiet "$unit" 2>/dev/null
+  local units unit
+  units=$(watch_units) || return 1
+  for unit in $units; do
+    systemctl is-enabled --quiet "$unit" 2>/dev/null && systemctl is-active --quiet "$unit" 2>/dev/null || return 1
+  done
+}
+
+# The watcher's pass judges what a package transaction leaves behind, not a
+# state in the middle of it: its trigger can come from an earlier hook of the
+# same transaction, and systemd merges what arrives while the service runs
+# (C5). A lock file without a pacman process is a crashed pacman's and is not
+# waited for, because a limine.conf edit must be sealed at once.
+wait_for_pacman() {
+  local deadline=$((SECONDS + $(pacman_wait)))
+  while [[ -e $(pacman_lock_path) ]] && pgrep -x pacman >/dev/null 2>&1 && (( SECONDS < deadline )); do
+    sleep 1
+  done
 }
 
 # --- Upstream's tools ----------------------------------------------------------------------

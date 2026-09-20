@@ -204,15 +204,34 @@ load_library() {
   : >"$FIX/bin/limine-hook" && chmod 755 "$FIX/bin/limine-hook"
 }
 
+# How many of the watchers' instances read as enabled: 2 after setup, 0 after remove.
+enabled_watchers() {
+  local unit count=0
+  for unit in $(watch_units); do
+    [[ ! -e $FIX/systemd/$unit ]] || count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
 # Runs the dispatcher as a process of its own with the same overrides, so
 # errexit and every exit path behave as installed: inside a suite's "||" lists
 # bash ignores errexit, which would hide an abort on an unguarded failure.
+# shellcheck disable=SC2016 # The process expands its own variables.
+readonly CLI_PROCESS='
+  source "$ROOT_DIR/tests/lib/harness.sh"
+  source "$ROOT_DIR/bin/omasecboot"
+  fixture_overrides
+  main "$@"'
+
 run_cli() {
-  ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c '
-    source "$ROOT_DIR/tests/lib/harness.sh"
-    source "$ROOT_DIR/bin/omasecboot"
-    fixture_overrides
-    main "$@"' omasecboot "$@" >"$FIX/run/output" 2>&1
+  ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c "$CLI_PROCESS" omasecboot "$@" >"$FIX/run/output" 2>&1
+}
+
+# The same process in the background, for a case that signals it: CLI_PID.
+start_cli() {
+  ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c "$CLI_PROCESS" omasecboot "$@" >"$FIX/run/output" 2>&1 &
+  # shellcheck disable=SC2034 # The case that started it reads it.
+  CLI_PID=$!
 }
 
 fixture_overrides() {
@@ -223,6 +242,8 @@ fixture_overrides() {
   boot_lock_path() { printf '%s/run/boot-partition.lock\n' "$FIX"; }
   boot_lock_wait() { printf '1\n'; }
   hook_lock_wait() { printf '1\n'; }
+  pacman_lock_path() { printf '%s/run/db.lck\n' "$FIX"; }
+  pacman_wait() { printf '5\n'; }
   owner_uid() { printf '%s\n' "$EUID"; }
   limine_config_layers() {
     local file
@@ -382,6 +403,8 @@ printf '%s\n' "limine $*" >>"$FIX/run/calls"
 shift
 if [[ $1 == --reset ]]; then file=$2 sum=$(printf '0%.0s' {1..128}); else file=$1 sum=$2; fi
 [[ ! -e $FIX/run/limine-enroll-fails ]] || exit 1
+# A case that stops the pass half way needs the time to do it.
+[[ ! -e $FIX/run/limine-enroll-is-slow ]] || sleep 2
 # An editor saves limine.conf while the loader is being rebuilt, once.
 if [[ -e $FIX/run/config-changes-during-enroll ]]; then
   rm "$FIX/run/config-changes-during-enroll"
@@ -470,12 +493,24 @@ EOF
   cat >"$FIX/bin/systemctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "systemctl $*" >>"$FIX/run/calls"
-unit=${*: -1}
-case $1 in
-  enable) : >"$FIX/systemd/$unit" ;;
-  disable) rm -f "$FIX/systemd/$unit" ;;
-  is-enabled | is-active) [[ -e $FIX/systemd/$unit ]] ;;
-esac
+status=0
+for unit in "$@"; do
+  [[ $unit == *.path ]] || continue
+  case $1 in
+    enable) : >"$FIX/systemd/$unit" ;;
+    disable) rm -f "$FIX/systemd/$unit" ;;
+    is-enabled | is-active) [[ -e $FIX/systemd/$unit ]] || status=1 ;;
+  esac
+done
+exit "$status"
+EOF
+
+  # pacman holds db.lck from the start of a transaction until its last
+  # post-transaction hook is done, and a crashed pacman leaves the file
+  # behind (C7). A case says whether a pacman process is running.
+  cat >"$FIX/bin/pgrep" <<'EOF'
+#!/bin/bash
+[[ -e $FIX/run/pacman-is-running ]]
 EOF
   # lsblk --raw --noheadings --output PATH,FSTYPE: one "path type" line per
   # block device, the type as libblkid names it, "BitLocker" for such a volume

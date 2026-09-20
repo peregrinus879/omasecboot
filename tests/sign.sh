@@ -22,7 +22,7 @@ converges_and_is_idempotent() {
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "primary"
   file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "the unsigned UKI was not signed"
   [[ $(effective_setting ENABLE_VERIFICATION) == no && $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]] || fail_test "settings"
-  [[ -e $FIX/systemd/$(watch_unit) ]] || fail_test "the watcher was not enabled"
+  [[ $(enabled_watchers) == 2 ]] || fail_test "the watchers were not enabled: $(ls "$FIX/systemd")"
   [[ ! -e $(attention_marker) ]] || fail_test "a clean pass left the marker"
   : >"$FIX/run/calls"
   sign_boot_files || fail_test "second pass"
@@ -140,16 +140,65 @@ restore_in_progress_is_left_alone() {
   [[ ! -s $FIX/run/calls ]] || fail_test "sign worked during a restore"
 }
 
-config_only_reseals_and_stops() {
+seal_only_reseals_and_stops() {
   prepared_machine
   sign_boot_files || fail_test "prepare"
   printf 'unsigned again' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
   printf 'timeout: 1\n' >>"$FIX/esp/limine.conf"
-  sign_boot_files config-only || fail_test "config-only pass"
+  sign_boot_files seal-only || fail_test "seal-only pass"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader was not re-sealed"
-  ! file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "config-only signed a UKI"
+  ! file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "seal-only signed a UKI"
   : >"$FIX/run/esp-unmounted"
-  sign_boot_files config-only || fail_test "an unmounted ESP must be a quiet no-op for the watcher"
+  sign_boot_files seal-only || fail_test "an unmounted ESP must be a quiet no-op for the watchers"
+}
+
+# Omarchy's installer leaves a pacman hook that copies the raw executable over
+# the primary after upstream has sealed and signed it (C7). The loader's
+# watcher fires at some point of that transaction; its pass must judge what
+# the last hook left behind.
+seal_only_waits_for_pacman_to_finish() {
+  prepared_machine
+  sign_boot_files || fail_test "prepare"
+  : >"$(pacman_lock_path)"
+  : >"$FIX/run/pacman-is-running"
+  (
+    sleep 1
+    cp "$FIX/share/BOOTX64.EFI" "$(primary_loader_path)"
+    rm "$(pacman_lock_path)" "$FIX/run/pacman-is-running"
+  ) &
+  sign_boot_files seal-only || fail_test "seal-only pass"
+  wait
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the pass judged the loader before pacman's last hook replaced it"
+
+  # A crashed pacman's lock is nobody's: a limine.conf edit is sealed at once.
+  : >"$(pacman_lock_path)"
+  printf 'timeout: 2\n' >>"$FIX/esp/limine.conf"
+  SECONDS=0
+  sign_boot_files seal-only || fail_test "seal-only pass under a stale lock"
+  (( SECONDS < 3 )) || fail_test "the pass waited ${SECONDS}s for a lock without a pacman"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "not sealed under a stale lock"
+
+  # A pacman that never ends is waited for no longer than the bound, which is
+  # five seconds on the fixture. The pass runs as a process, so a wait without
+  # a bound fails this case instead of hanging it.
+  : >"$FIX/run/pacman-is-running"
+  : >"$(enabled_marker)"
+  printf 'timeout: 3\n' >>"$FIX/esp/limine.conf"
+  start_cli sign --quiet --seal-only
+  for _ in {1..12}; do
+    kill -0 "$CLI_PID" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$CLI_PID" 2>/dev/null; then
+    kill -KILL "$CLI_PID"
+    fail_test "the wait for pacman has no bound"
+  fi
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "not sealed after the bound: $(<"$FIX/run/output")"
+  # The hook's pass runs inside the transaction and never waits for it.
+  SECONDS=0
+  pacman_wait() { printf '30\n'; }
+  sign_boot_files || fail_test "full pass"
+  (( SECONDS < 3 )) || fail_test "the full pass waited for pacman"
 }
 
 run_case converges-and-is-idempotent converges_and_is_idempotent
@@ -162,5 +211,6 @@ run_case failure-leaves-the-marker failure_leaves_the_marker
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
 run_case busy-lock-writes-no-marker busy_lock_writes_no_marker
 run_case restore-in-progress-is-left-alone restore_in_progress_is_left_alone
-run_case config-only-reseals-and-stops config_only_reseals_and_stops
+run_case seal-only-reseals-and-stops seal_only_reseals_and_stops
+run_case seal-only-waits-for-pacman-to-finish seal_only_waits_for_pacman_to_finish
 finish_suite

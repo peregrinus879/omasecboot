@@ -213,9 +213,14 @@ cmd_setup() {
 
 cmd_sign() {
   local scope=full
-  if [[ ${1:-} == --config-only ]]; then
-    scope=config-only
+  if [[ ${1:-} == --seal-only ]]; then
+    scope=seal-only
     shift
+    # The watchers' pass takes a second or two and must not be cut off half
+    # way by the shutdown that follows an update: the machine would start a
+    # loader the firmware refuses. The service's KillMode leaves the tools it
+    # runs alone as well.
+    trap '' TERM
   fi
   no_arguments "$@"
   check_root sign
@@ -252,7 +257,7 @@ cmd_remove() {
   # work on a loader that is still sealed.
   boot_lock_acquire || exit "$?"
   rm -f -- "$(enabled_marker)"
-  disable_watch || warn "Could not disable the limine.conf watcher"
+  disable_watch || warn "Could not disable the watchers"
   restore_settings_originals || die "Could not restore $(limine_default_config)"
   restore_stock_boot_files || die "The boot files are not back to stock; run this again"
   # Only now: the loader is proved raw, so limine.conf may change under it.

@@ -18,7 +18,7 @@ setup_from_stock_and_again() {
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "primary"
   file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "UKI"
   cmp -s "$(fallback_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the fallback must stay raw"
-  [[ -e $(enabled_marker) && -e $FIX/systemd/$(watch_unit) ]] || fail_test "marker or watcher"
+  [[ -e $(enabled_marker) && $(enabled_watchers) == 2 ]] || fail_test "marker or watchers"
   [[ $(<"$FIX/run/output") == *'Take a snapshot now'* ]] || fail_test "no snapshot advice"
 
   : >"$FIX/run/calls"
@@ -95,7 +95,7 @@ remove_returns_to_stock() {
   run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
   cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "settings are not back to stock"
   cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not the raw executable"
-  [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) && ! -e $FIX/systemd/$(watch_unit) ]] || fail_test "state left behind"
+  [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) && $(enabled_watchers) == 0 ]] || fail_test "state left behind"
   [[ -e $FIX/sbctl/keys ]] || fail_test "remove deleted the keys"
 }
 
@@ -108,7 +108,7 @@ busy_remove_changes_nothing() {
   run_cli remove || rc=$?
   kill %1 2>/dev/null
   (( rc == 75 )) || fail_test "remove returned ${rc}"
-  [[ -e $(enabled_marker) && -e $FIX/systemd/$(watch_unit) ]] || fail_test "a busy remove switched the protection off"
+  [[ -e $(enabled_marker) && $(enabled_watchers) == 2 ]] || fail_test "a busy remove switched the protection off"
 }
 
 # Upstream can hold a new Limine major back (C2): stock is then the loader it
@@ -192,7 +192,7 @@ usage_errors_exit_2() {
   run_cli sign && fail_test "sign ran on a machine that was never set up"
   # --quiet is accepted anywhere on the line.
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  run_cli sign --config-only --quiet || fail_test "--quiet after an option: $(<"$FIX/run/output")"
+  run_cli sign --seal-only --quiet || fail_test "--quiet after an option: $(<"$FIX/run/output")"
   [[ ! -s $FIX/run/output ]] || fail_test "a quiet clean pass printed: $(<"$FIX/run/output")"
 }
 
@@ -221,6 +221,27 @@ hook_never_fails_its_caller() {
   "$hook" 2>/dev/null || fail_test "a missing tool made the hook fail its caller"
 }
 
+# A reboot straight after an update stops the watchers' service while its pass
+# is rebuilding the loader. The unit's KillMode signals the pass alone; cut off
+# between the raw loader and the sealed one it would leave a machine that does
+# not boot, so it finishes.
+watchers_pass_finishes_through_a_stop() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  cp "$FIX/share/BOOTX64.EFI" "$(primary_loader_path)"
+  : >"$FIX/run/limine-enroll-is-slow"
+  start_cli sign --quiet --seal-only
+  sleep 1
+  kill -TERM "$CLI_PID"
+  wait "$CLI_PID" || fail_test "the stopped pass failed: $(<"$FIX/run/output")"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "a stop cut the watchers' pass short and left the loader raw"
+  # Any other pass is an ordinary process and ends when it is told to.
+  cp "$FIX/share/BOOTX64.EFI" "$(primary_loader_path)"
+  start_cli sign --quiet
+  sleep 1
+  kill -TERM "$CLI_PID"
+  ! wait "$CLI_PID" || fail_test "a plain sign ignored the signal"
+}
+
 run_case setup-from-stock-and-again setup_from_stock_and_again
 run_case upstream-masked-failure-is-repaired upstream_masked_failure_is_repaired
 run_case unsigned-arrival-is-signed unsigned_arrival_is_signed
@@ -237,4 +258,5 @@ run_case hook-pass-works-under-the-callers-lock hook_pass_works_under_the_caller
 run_case usage-errors-exit-2 usage_errors_exit_2
 run_case status-quiet-prints-nothing status_quiet_prints_nothing
 run_case hook-never-fails-its-caller hook_never_fails_its_caller
+run_case watchers-pass-finishes-through-a-stop watchers_pass_finishes_through_a_stop
 finish_suite

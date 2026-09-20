@@ -76,8 +76,9 @@ check_os_path_hashes() {
   return "$failed"
 }
 
-# sign_boot_files [config-only]
-# config-only stops after the loader proof: the watcher's job is the seal.
+# sign_boot_files [seal-only]
+# seal-only is the watchers' pass: it starts when a running pacman is done and
+# stops after the loader proof, because the watchers' job is the seal.
 sign_boot_files() {
   local scope=${1:-full} rc=0 sealed=true
   if restore_in_progress; then
@@ -85,10 +86,11 @@ sign_boot_files() {
     return 0
   fi
   if ! esp_is_mounted_vfat; then
-    [[ $scope != config-only ]] || return 0
+    [[ $scope != seal-only ]] || return 0
     fail "The EFI system partition is not mounted"
     return 1
   fi
+  [[ $scope != seal-only ]] || wait_for_pacman
   boot_lock_acquire || return "$?"
 
   remove_stale_staging || rc=1

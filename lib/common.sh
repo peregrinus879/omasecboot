@@ -16,6 +16,9 @@ boot_lock_wait() { printf '90\n'; }
 # Seconds the Limine hook waits for it: that time is spent inside a package
 # transaction.
 hook_lock_wait() { printf '5\n'; }
+pacman_lock_path() { printf '/var/lib/pacman/db.lck\n'; }
+# Post-transaction hooks that build kernel images take a minute or two.
+pacman_wait() { printf '300\n'; }
 # Files under the state directory and the config layers belong to this user.
 owner_uid() { printf '0\n'; }
 

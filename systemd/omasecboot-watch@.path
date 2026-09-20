@@ -1,6 +1,7 @@
-# Watches one limine.conf: the instance name is its escaped path, enabled by
-# "omasecboot setup". Editing that file without re-enrolling its checksum
-# stops Limine from booting, with Secure Boot on or off.
+# Watches one file the seal depends on: the instance name is its escaped path.
+# "omasecboot setup" enables one instance for limine.conf and one for the
+# primary loader. Changing either without the other stops Limine from booting,
+# limine.conf with Secure Boot on or off, a raw loader with it on.
 [Unit]
 Description=Watch %f for OmaSecBoot
 

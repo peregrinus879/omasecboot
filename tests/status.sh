@@ -66,11 +66,12 @@ sign_repairs_these() {
   local output
   set_up_machine
   sbctl sign "$(fallback_loader_path)"
-  rm "$FIX/systemd/$(watch_unit)"
+  # One watcher of the two is not enough.
+  rm "$FIX/systemd/$(watch_units | tail -n 1)"
   sed -i 's/^ENABLE_VERIFICATION=no$/ENABLE_VERIFICATION=yes/' "$FIX/etc/default-limine"
   printf 'timeout: 9\n' >>"$FIX/esp/limine.conf"
   output=$(show_status 2>&1) && fail_test "four problems passed"
-  [[ $output == *'fallback loader is signed or sealed'* && $output == *'watcher is not active'* &&
+  [[ $output == *'fallback loader is signed or sealed'* && $output == *'are not both active'* &&
     $output == *'ENABLE_VERIFICATION=no is not in effect'* && $output == *'loader is not sealed'* ]] || fail_test "report: ${output}"
   [[ $output == *'Next: sudo omasecboot sign'* ]] || fail_test "next step: ${output}"
   # A loader that is not sealed over limine.conf does not start at all (C1).

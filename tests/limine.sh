@@ -1,6 +1,6 @@
 #!/bin/bash
 # Limine: managed settings and their originals, path hashes, the primary
-# loader proof and staged rebuild, the fallback loader, the watcher's unit name.
+# loader proof and staged rebuild, the fallback loader, the watchers' unit names.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
 set -uo pipefail
 ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -159,9 +159,9 @@ fallback_states() {
   [[ $(fallback_state) == absent ]] || fail_test "absent"
 }
 
-watch_unit_is_a_template_instance() {
+watch_units_are_template_instances() {
   esp_path() { printf '/boot\n'; }
-  [[ $(watch_unit) == 'omasecboot-watch@boot-limine.conf.path' ]] || fail_test "unit name $(watch_unit)"
+  [[ $(watch_units) == $'omasecboot-watch@boot-limine.conf.path\nomasecboot-watch@boot-EFI-limine-limine_x64.efi.path' ]] || fail_test "unit names: $(watch_units)"
 }
 
 shadowing_configs_are_listed() {
@@ -183,6 +183,6 @@ run_case corrupt-backup-publishes-nothing corrupt_backup_publishes_nothing
 run_case stale-staging-files-are-swept stale_staging_files_are_swept
 run_case change-during-the-rebuild-is-caught change_during_the_rebuild_is_caught
 run_case fallback-states fallback_states
-run_case watch-unit-is-a-template-instance watch_unit_is_a_template_instance
+run_case watch-units-are-template-instances watch_units_are_template_instances
 run_case shadowing-configs-are-listed shadowing_configs_are_listed
 finish_suite

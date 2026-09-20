@@ -195,9 +195,9 @@ show_integration_status() {
     blocking_problem "The Limine hook is missing; reinstall the package: ${hook}"
   fi
   if watch_is_active; then
-    pass "The limine.conf watcher is active"
+    pass "The watchers of limine.conf and the loader are active"
   else
-    problem "The limine.conf watcher is not active"
+    problem "The watchers of limine.conf and the loader are not both active"
   fi
   while IFS= read -r leftover; do
     [[ -z $leftover ]] || blocking_problem "Leftover of an earlier install; remove it: ${leftover}"
