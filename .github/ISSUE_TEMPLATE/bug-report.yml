@@ -1,0 +1,57 @@
+name: Bug report
+description: The tool did something wrong, or said something that is not true
+title: "<what went wrong, in a few words>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the machine does not start, do this first: turn Secure Boot off in the firmware, pick the fallback loader (`EFI/BOOT/BOOTX64.EFI`) in the firmware's boot menu, and run `sudo omasecboot sign`. The README's "If the machine does not boot" has the rest.
+
+        Something that could be abused before it is fixed goes through the **Security and quality** tab, as `SECURITY.md` says, not here. Never paste signing keys, recovery keys or anything from `/var/lib/sbctl` or `/var/lib/omasecboot/firmware-backup`. Output you paste may hold your host name, login name and UUIDs: replace them.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The command you ran and everything it printed, then what you expected instead.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Status
+      description: "The output of `sudo omasecboot status; echo exit=$?`."
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: "The output of `omasecboot version; pacman -Q omarchy limine limine-mkinitcpio-hook limine-snapper-sync sbctl`. For a build from a checkout, add the commit."
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine and firmware
+      description: "Manufacturer and model, then the output of `cat /sys/class/dmi/id/bios_vendor /sys/class/dmi/id/bios_version`."
+    validations:
+      required: true
+  - type: dropdown
+    id: secure-boot
+    attributes:
+      label: Secure Boot when it happened
+      options:
+        - "On"
+        - "Off"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Dual boot, an update or a snapshot restore shortly before, what you tried since.

@@ -28,6 +28,7 @@ A release needs all seven stages on at least one machine, and every firmware ven
 ## Tag
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
+- [ ] `CHANGELOG.md` has the release's section, with its date.
 - [ ] The acceptance records for the candidate commit are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 
 Delivery through Omarchy follows a tag and does not gate it: [omarchy-integration.md](omarchy-integration.md) owns that side, and its recipe pins the tagged archive's checksum.
