@@ -5,9 +5,10 @@ name: Upstream contracts
 # current versions and runs the suites only when one of them, or this
 # repository's own contract code, has changed since the last green run, and at
 # least once a week. A failure opens an issue instead of blocking a change.
+# Daily at 03:10 UTC: GitHub delays, and may drop, runs queued on the hour.
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "10 3 * * *"
   workflow_dispatch:
 
 permissions:
