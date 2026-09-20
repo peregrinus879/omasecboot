@@ -118,8 +118,10 @@ show_loader_status() {
   esac
 }
 
-show_files_status() {
-  local files file state rows stale line old_snapshots=0 size largest=0 available
+# The signing keys, every signable file, and room on the ESP for the next one.
+# Status 1 when the ESP cannot be listed: what follows reads the same files.
+show_signable_files_status() {
+  local files file state size largest=0 available
   if sbctl_keys_exist; then
     pass "sbctl's signing keys exist"
   else
@@ -127,7 +129,7 @@ show_files_status() {
   fi
   files=$(list_signable_files) || {
     blocking_problem "Could not list the EFI files on the ESP"
-    return
+    return 1
   }
   while IFS= read -r file; do
     [[ -n $file ]] || continue
@@ -148,7 +150,11 @@ show_files_status() {
   if available=$(free_bytes "$(esp_path)" 2>/dev/null) && (( available < largest )); then
     note "The ESP has $((available / 1048576)) MiB free, less than its largest boot file needs ($(((largest + 1048575) / 1048576)) MiB): the next kernel update may not fit. Deleting old snapshots frees space."
   fi
+}
 
+# Rows that would make sbctl sign a history file or the fallback in place.
+show_sbctl_rows_status() {
+  local rows file
   if rows=$(list_harmful_sbctl_rows); then
     while IFS= read -r file; do
       [[ -z $file ]] || setup_problem "sbctl would sign this file in place at the next update: ${file}"
@@ -156,7 +162,12 @@ show_files_status() {
   else
     blocking_problem "Could not read sbctl's file list"
   fi
+}
 
+# Path hashes of OS entries that no longer match, and the snapshot images
+# from before setup, which are upstream's and stay unsigned (D1).
+show_path_hash_status() {
+  local stale line file old_snapshots=0
   if stale=$(list_stale_os_hashes); then
     while IFS= read -r line; do
       [[ -z $line ]] ||
@@ -171,6 +182,12 @@ show_files_status() {
   done < <(list_history_files)
   (( old_snapshots == 0 )) ||
     note "${old_snapshots} snapshot image(s) predate Secure Boot setup and are unsigned: those entries boot only with Secure Boot off. They leave with snapshot rotation, or within seconds when those snapshots are deleted (${BOLD}sudo snapper -c root delete NUMBER${NC})"
+}
+
+show_files_status() {
+  show_signable_files_status || return 0
+  show_sbctl_rows_status
+  show_path_hash_status
 }
 
 # The Windows entry is in limine.conf exactly when it is enabled; the pass
