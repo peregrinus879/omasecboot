@@ -4,10 +4,9 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Open work before a release
 
-- Firmware enrollment ([spec.md](spec.md) D4 and the `setup` row) is written and covered by the hermetic suite, whose sbctl stub models C4. Done when stage 2 of [release-checklist.md](release-checklist.md) passes on hardware; until then nothing about a firmware write is proven.
-- The Windows entry, the BootNext request and the encryption acknowledgment are written and covered by the hermetic suite, whose fixtures model C8. Done when stage 5 passes on hardware.
 - The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers.
-- Hardware acceptance, stages 0 to 6, on at least one machine.
+- The two rows of stage 3 that the accepted machine still owes, each as a record: starting a snapshot entry taken after `setup` with Secure Boot on, and what Limine and the firmware show for an entry that predates enrollment.
+- A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 
 ## Remove when no longer needed
 
@@ -15,9 +14,10 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Evidence owed
 
-- This tool has no hardware record yet. Every claim about boot behaviour rests on [upstream-contracts.md](upstream-contracts.md) until stage 1 runs.
+- One machine has a record (C6 of [upstream-contracts.md](upstream-contracts.md)). For every other firmware, each claim about boot behaviour and firmware writes rests on the contracts alone.
+- Enrollment was proven on the append path only. The rebuild path, for firmware that clears KEK and db together with the Platform Key, has no hardware record, and neither has a machine with BitLocker on.
 - The weekly contract job has not run on GitHub yet; its first run proves the container setup, not the suites, which pass locally against the versions [upstream-contracts.md](upstream-contracts.md) names. GitHub disables scheduled workflows in a public repository after 60 days without activity, so the workflow needs re-enabling after a quiet period.
-- The budget of two seconds per installed kernel for the hook is unmeasured; stage 1 measures it.
+- The budget of two seconds per installed kernel for the hook is unmeasured: the recorded kernel reinstall took 19 seconds as a whole, and the hook's own share needs a row that times it alone.
 - How `sbctl enroll-keys --firmware-builtin` behaves on firmware without `KEKDefault` or `dbDefault` is unverified; the tool does not ask sbctl for it there. How firmware answers a write outside Setup Mode is an assumption of the test stub only, because the tool never attempts one.
 
 ## Recheck when a package changes

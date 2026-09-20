@@ -5,7 +5,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Development status, 2026-09-20:** no release exists and this build has not been accepted on hardware. Every command below is written and covered by the hermetic suites; none of it is proven on a real machine until the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) has passed. Until then, use it only on a machine you can afford to recover.
+> **Development status, 2026-09-20:** no release exists. One machine, an ASUS Vivobook TP3402VA, has run the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) from `setup` to `remove`: enrollment beside the firmware's own keys, Secure Boot on, kernel and Limine reinstalls, snapshots, a restore, the Windows entry, and the stale-seal drill with the fallback loader. Two of its rows are still owed ([docs/maintenance.md](docs/maintenance.md)), and no other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how a second machine gets its record.
 
 ## Why
 
