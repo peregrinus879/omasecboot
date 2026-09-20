@@ -15,13 +15,17 @@
 #     namespaces and Microsoft's signature owner;
 #   - the login name reads "user" in home paths and sudo's log lines, the host
 #     name "host" in journal lines;
-#   - the terminal's session sequences and efibootmgr's raw device-path bytes,
-#     which repeat the partition UUIDs in another form, are left out.
-# Hashes of files stay as they are: they say nothing about the machine.
+#   - the terminal's session sequences and efibootmgr's raw bytes, which
+#     repeat partition UUIDs in another form, are left out;
+#   - the archive's members belong to nobody: tar would otherwise write the
+#     login name into every header.
 #
-# What nobody can do for the tester: text typed by hand, such as snapshot
-# descriptions, stays as written. The last lines of the output say how often
-# the login and host names still occur, and where to look.
+# What stays, because the review needs it or no rule can know it: the machine's
+# model and firmware version, package versions, disk and partition sizes, boot
+# entry labels, the time zone of time stamps, hashes of boot files, and every
+# text typed by hand, such as snapshot descriptions. The last lines of the
+# output say where the login and host names still occur. Skim the copies
+# before they go anywhere public.
 set -uo pipefail
 
 records_dir=${1:-$PWD/acceptance-records}
@@ -35,8 +39,22 @@ records=("$records_dir"/*.md)
   printf 'No records in %s\n' "$records_dir" >&2
   exit 2
 }
+# Only records are copied, and only earlier copies are deleted: the directory
+# comes from the command line.
+for record in "${records[@]}"; do
+  [[ $(head -n 1 -- "$record") == '# Acceptance record '* ]] || {
+    printf 'Not an acceptance record: %s\n' "$record" >&2
+    exit 2
+  }
+done
 share_dir=$records_dir/share
-rm -rf -- "$share_dir"
+if [[ -e $share_dir ]]; then
+  [[ -d $share_dir && ! -L $share_dir && -z $(find "$share_dir" -mindepth 1 ! -name '*.md' ! -name 'omasecboot-records.tgz' -print -quit) ]] || {
+    printf 'Refusing to replace %s: it holds something other than earlier copies\n' "$share_dir" >&2
+    exit 2
+  }
+  rm -rf -- "$share_dir"
+fi
 mkdir -p "$share_dir" || exit 2
 
 readonly UUID='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
@@ -47,9 +65,15 @@ readonly PUBLIC_UUIDS='8be4df61-93ca-11d2-aa0d-00e098032b8c d719b2cb-3d3a-4596-a
 # appearance, so a value gets the same name whichever record is read first.
 distinct() { grep -h -o -i -E -- "$1" "${records[@]}" | tr 'A-F' 'a-f' | awk '!seen[$0]++'; }
 
-# Names from the places the recorder is known to put them, never from guesses
-# about words: a login name such as "test" occurs in other text too.
-login_names=$(grep -h -o -E '/home/[^/[:space:]'"'"'";]+' "${records[@]}" | cut -d/ -f3 | awk '!seen[$0]++')
+# Names are renamed only in the places the recorder is known to put them,
+# never as words: a login name such as "test" occurs in other text too. They
+# are found in home paths, in sudo's log lines and in the journal's host
+# column; this machine's own names join the closing check, because the copies
+# are usually made where the records were.
+login_names=$({
+  grep -h -o -E '/home/[^/[:space:]'"'"'";]+' "${records[@]}" | cut -d/ -f3
+  grep -h -o -E 'sudo\[[0-9]+\]: +[^[:space:]]+ :' "${records[@]}" | awk '{print $2}'
+} | awk '$0 != "root" && !seen[$0]++')
 host_names=$(grep -h -o -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+-]+ [^[:space:]]+ ' "${records[@]}" | cut -d' ' -f2 | awk '!seen[$0]++')
 
 rules=$(mktemp) || exit 2
@@ -58,6 +82,7 @@ trap 'rm -f -- "$rules"' EXIT
   # The session sequences sudo and systemd print, with or without their escape byte.
   printf 's/\\x1b\\?\\]3008;[^\\\\\\x07]*[\\\\\\x07]\\?//g\n'
   printf '/^[[:space:]]*dp: /d\n'
+  printf 's/\\(\\.efi\\)[0-9a-fA-F]\\{16,\\}$/\\1 (optional data left out)/I\n'
   number=0
   while IFS= read -r value; do
     [[ -n $value && " $PUBLIC_UUIDS " != *" $value "* ]] || continue
@@ -90,12 +115,14 @@ for record in "${records[@]}"; do
   sed -f "$rules" -- "$record" >"$share_dir/${record##*/}" || exit 1
   names+=("${record##*/}")
 done
-tar -czf "$share_dir/omasecboot-records.tgz" -C "$share_dir" -- "${names[@]}" || exit 1
+tar --owner=0 --group=0 --numeric-owner -czf "$share_dir/omasecboot-records.tgz" -C "$share_dir" -- "${names[@]}" || exit 1
 
 printf 'Shareable copies: %s\nArchive to attach: %s\n' "$share_dir" "$share_dir/omasecboot-records.tgz"
+[[ -n $login_names ]] || printf 'No login name was found in the records, so none was renamed.\n'
+[[ -n $host_names ]] || printf 'No host name was found in the records, so none was renamed.\n'
 while IFS= read -r value; do
-  [[ -n $value ]] || continue
+  [[ -n $value && $value != root ]] || continue
   left=$(grep -h -o -w -F -- "$value" "$share_dir"/*.md | wc -l)
   (( left == 0 )) || printf 'The name "%s" still occurs %s times in the copies; look before you share: grep -n -w -F -- "%s" %s/*.md\n' "$value" "$left" "$value" "$share_dir"
-done <<<"$login_names"$'\n'"$host_names"
-printf 'Text you typed yourself, such as snapshot descriptions, is copied as it is.\n'
+done < <(printf '%s\n%s\n%s\n%s\n' "$login_names" "$host_names" "${SUDO_USER:-$(id -un)}" "$(uname -n)" | awk '!seen[$0]++')
+printf 'Text typed by hand, such as snapshot descriptions and your notes, is copied as it is. Skim the copies before you share them.\n'

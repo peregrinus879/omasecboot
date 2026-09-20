@@ -112,7 +112,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 
 ## Help test it
 
-Nothing about boot behaviour is proven until real machines have shown it. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes nothing in the firmware and ends with everything returned to stock, records every step, and ends with a report you can file without giving away what identifies your machine.
+Nothing about boot behaviour is proven until real machines have shown it. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
 
 ## Development
 

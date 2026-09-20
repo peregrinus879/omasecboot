@@ -36,6 +36,7 @@ body:
     attributes:
       label: How far you went
       options:
+        - "Prepare only: a suite or the package build failed"
         - "Level 1: boot files, Secure Boot off"
         - "Level 2: your keys in the firmware, Secure Boot on"
         - "Level 3: drills on a spare machine"
@@ -55,7 +56,7 @@ body:
     id: differed
     attributes:
       label: What differed
-      description: "The row name (for example `1-status-limine`), what the guide expected and what happened instead. One entry per row. Write \"nothing\" when everything matched."
+      description: "The row name (for example `1-status-limine`), what the guide expected and what happened instead. One entry per row. Quote from the copies in `acceptance-records/share/`, never from the records themselves. Write \"nothing\" when everything matched."
     validations:
       required: true
   - type: textarea

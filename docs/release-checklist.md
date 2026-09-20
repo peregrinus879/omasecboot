@@ -11,7 +11,7 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 
 ## Hardware acceptance
 
-Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is the same procedure written for anyone's machine. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); the recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and bring the record back; never reboot with Secure Boot on while `omasecboot status` fails.
+Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); the recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and bring the record back; never reboot with Secure Boot on while `omasecboot status` fails.
 
 | Stage | Rows | STOP when |
 | --- | --- | --- |

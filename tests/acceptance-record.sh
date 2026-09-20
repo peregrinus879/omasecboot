@@ -50,11 +50,8 @@ state_dir=/var/lib/omasecboot
 # Omarchy mounts the ESP at /boot; another mount point is given in the environment.
 export esp=${OMASECBOOT_ESP:-/boot}
 
-# Terminal control out of a transcript: operating system commands, which sudo
-# and systemd use for session marks that name the host and the machine-id,
-# then control sequences, then the carriage returns. The patterns' byte ranges
-# only hold in the C locale.
-strip_colors() { LC_ALL=C sed 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g; s/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\r$//' "$@"; }
+# shellcheck source=tests/lib/transcript.sh
+source "$root_dir/tests/lib/transcript.sh"
 
 section() { printf '\n## %s\n\n' "$1" >>"$record"; }
 
@@ -64,7 +61,7 @@ block() {
   shift
   {
     printf '\n### %s\n\n```text\n$ %s\n' "$title" "$*"
-    "$@" 2>&1 | strip_colors
+    "$@" 2>&1 | strip_terminal_control
     printf '```\n'
   } >>"$record"
 }
@@ -75,7 +72,7 @@ file_block() {
     printf '\n### %s\n\n' "$1"
     if [[ -f $2 ]]; then
       printf '```text\n'
-      strip_colors "$2"
+      strip_terminal_control "$2"
       printf '```\n'
     else
       printf '_absent_\n'
@@ -108,6 +105,8 @@ compare_installed_files() {
   done
 }
 
+boot_entries() { efibootmgr -v 2>&1 | strip_boot_entry_bytes; }
+
 record_state() {
   section "State $1"
   block "Time (UTC)" date -u +%Y-%m-%dT%H:%M:%SZ
@@ -128,7 +127,7 @@ record_state() {
   block "omasecboot windows status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot windows status 2>&1; else echo "omasecboot is not installed"; fi'
   block "BootNext" bash -c 'p=$(ls /sys/firmware/efi/efivars/BootNext-* 2>/dev/null | head -1); if [[ -n $p ]]; then od -An -tx1 -j4 "$p"; else echo absent; fi'
   block "Watchers" bash -c 'systemctl list-units --all --no-pager "omasecboot-watch@*" 2>&1; systemctl list-unit-files --no-pager "omasecboot-watch@*" 2>&1'
-  block "Boot entries (MAC and NVMe nodes redacted, raw device-path bytes left out)" bash -c 'efibootmgr -v 2>&1 | grep -v "^ *dp: " | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
+  block "Boot entries (MAC and NVMe nodes redacted, raw bytes left out)" boot_entries
   block "ESP mount, free space and partitions" bash -c 'findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS $esp 2>&1; df -h $esp 2>&1; lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME,MOUNTPOINTS 2>&1'
   block "EFI files" bash -c 'find $esp/EFI -type f \( -iname "*.efi" -o -name "*.efi_*" \) -exec sha256sum {} + 2>/dev/null | sort -k2'
   block "Snapshot images kept by limine-snapper-sync" bash -c 'find $esp -path "*/limine_history/*" -type f -exec sha256sum {} + 2>/dev/null | sort -k2'
@@ -164,7 +163,7 @@ if (( ${#command_args[@]} > 0 )); then
   status=$?
   {
     printf '```text\n'
-    strip_colors "$transcript"
+    strip_terminal_control "$transcript"
     printf '```\n\nExit status: `%s`\n' "$status"
   } >>"$record"
   rm -f -- "$transcript"
