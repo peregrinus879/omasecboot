@@ -187,7 +187,7 @@ show_windows_status() {
 }
 
 show_integration_status() {
-  local hook leftover
+  local hook
   hook=$(limine_hook_path)
   if [[ -x $hook ]]; then
     pass "The Limine hook is installed"
@@ -199,6 +199,12 @@ show_integration_status() {
   else
     problem "The watchers of limine.conf and the loader are not both active"
   fi
+}
+
+# An earlier install's hooks keep running the old tool, set up or not, and
+# setup refuses beside them; the report names them either way.
+show_leftovers_status() {
+  local leftover
   while IFS= read -r leftover; do
     [[ -z $leftover ]] || blocking_problem "Leftover of an earlier install; remove it: ${leftover}"
   done < <(list_leftovers)
@@ -244,6 +250,7 @@ show_status() {
     else
       note "OmaSecBoot is not set up on this machine"
     fi
+    show_leftovers_status
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"
   else
@@ -252,6 +259,7 @@ show_status() {
     show_files_status
     show_windows_status
     show_integration_status
+    show_leftovers_status
     marker=$(attention_marker)
     [[ ! -e $marker ]] || problem "An earlier pass could not finish: $(<"$marker")"
   fi

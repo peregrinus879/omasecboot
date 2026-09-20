@@ -152,6 +152,19 @@ marker_and_leftovers_are_problems() {
   [[ $output != *'/old/omasecboot'* ]] || fail_test "an absent file was reported as a leftover"
 }
 
+# Before setup is where a leftover matters most: setup refuses beside it, and
+# the report is what tells the user why.
+leftovers_are_named_before_setup() {
+  local output
+  mkdir -p "$FIX/old/hooks"
+  ln -s /nonexistent "$FIX/old/hooks/zzz-omasecboot.hook"
+  output=$(show_status 2>&1) && fail_test "status passed over a leftover on a machine that is not set up"
+  [[ $output == *'is not set up on this machine'* && $output == *'/old/hooks/zzz-omasecboot.hook'* ]] || fail_test "report: ${output}"
+  rm "$FIX/old/hooks/zzz-omasecboot.hook"
+  output=$(show_status 2>&1) || fail_test "a stock machine does not pass: ${output}"
+  [[ $output == *'Next:'*'omasecboot setup'* ]] || fail_test "no next step on a stock machine: ${output}"
+}
+
 old_snapshots_are_a_note_not_a_problem() {
   local output history=$FIX/esp/machine/limine_history/old.efi_sha256_abc
   set_up_machine
@@ -171,5 +184,6 @@ run_case blocking-problems-name-no-repair-command blocking_problems_name_no_repa
 run_case unknown-states-block unknown_states_block
 run_case unreadable-firmware-is-a-problem unreadable_firmware_is_a_problem
 run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
+run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
 finish_suite

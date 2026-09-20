@@ -42,7 +42,7 @@ Nothing of the test is run yet. Settle each line first.
 - You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `ls /boot/EFI/BOOT/BOOTX64.EFI` must list it; `sudo limine-install --fallback` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file in `/boot/EFI/Linux` as available.
 - The system is up to date and was rebooted since: run `omarchy update`, reboot, and start the test then. Do not update again, and do not run `pacman -Sy`, before "The way back" is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
-- No earlier, copied-in version of this tool is on the machine. This must print nothing but "No such file":
+- No earlier, copied-in version of this tool is on the machine; its hooks would keep running the old tool, and `setup` refuses beside them. This must print nothing but "No such file":
   ```bash
   ls -d /usr/local/bin/omasecboot /usr/local/lib/omasecboot /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign
   ```
