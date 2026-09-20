@@ -9,9 +9,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Evidence owed
 
-- Two rows of the recorded machine (C6 of [upstream-contracts.md](upstream-contracts.md)), each as a record: in stage 1, the hook's own time against the budget of two seconds per installed kernel; in stage 3, what Limine and the firmware show for an entry that predates enrollment.
-- The fallback offer of `setup` on hardware, and its refusal on an ESP that holds another system's `bootx64.efi` in lower case. The recorded machine got its fallback from `limine-install --fallback` by hand.
-- The acceptance rows on the release candidate. The record is of commit `3b43368`, and later commits changed code.
+- The acceptance rows on the release candidate. The records are of commits `3b43368` and `5e98d09` (C6 of [upstream-contracts.md](upstream-contracts.md)), and a later commit that changes code asks for them again.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The rebuild path of enrollment, which needs firmware that clears KEK and db together with the Platform Key, and the Windows rows on a machine with BitLocker on. Enrollment is recorded on the append path only.
 - The contract workflow's issue on a failed scheduled run. Its suites have run green on GitHub, and no scheduled run has failed yet.

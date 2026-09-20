@@ -8,7 +8,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Development status:** no release exists. One machine, an ASUS Vivobook TP3402VA, has run the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) from `setup` to `remove`, with Secure Boot on and Windows beside it. What it showed is in section C6 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the rows it still owes are in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
+> **Development status:** no release exists. One machine, an ASUS Vivobook TP3402VA, has run the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md) from `setup` to `remove`, with Secure Boot on and Windows beside it. What it showed is in section C6 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence a release still needs is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
 
 ## Why
 
@@ -97,7 +97,7 @@ Omarchy installed beside another system starts without a fallback loader, and th
 | `The firmware's keys are in a state this tool will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `setup`, then delete only the Platform Key |
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
-| A snapshot entry does not boot with Secure Boot on | The snapshot image predates setup and is unsigned | Boot it with Secure Boot off, let snapshot rotation retire it, or delete that snapshot (`sudo snapper -c root delete NUMBER`), which removes the entry within seconds |
+| A snapshot entry stops at `PANIC: efi: LoadImage failure` with Secure Boot on | The snapshot image predates setup and is unsigned, so the firmware refuses it and Limine halts | Hold the power button, start again and pick another entry. Boot the old one with Secure Boot off, let snapshot rotation retire it, or delete that snapshot (`sudo snapper -c root delete NUMBER`), which removes the entry within seconds |
 | `limine.conf holds this tool's Windows comment in an entry this tool did not write that way` | The `/Windows` entry was edited by hand, or its comment line ended up in another entry | Remove that comment line, or the entry, then `sudo omasecboot sign` |
 
 ## Limits

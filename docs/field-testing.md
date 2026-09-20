@@ -32,6 +32,7 @@ Go on if that `status` exits 0. If it still exits 1, stop, and do not reboot wit
 Read this now, not then.
 
 - With Secure Boot on: turn it off in the firmware first. A loader the firmware refuses for its signature starts again with Secure Boot off.
+- A snapshot entry stops at `PANIC: efi: LoadImage failure` with Secure Boot on: that snapshot is older than `setup` and its kernel image is unsigned. Nothing is broken. Hold the power button, start again and pick the normal entry.
 - The primary loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in "Before you start", log in, and run `sudo omasecboot sign`.
 - Without a working fallback: boot the rescue media, mount the ESP, and put a raw loader over the primary. A raw loader checks nothing and starts.
 

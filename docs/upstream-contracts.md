@@ -56,14 +56,16 @@ Source: systemd 261 `src/core/path.c`, `systemd.path(5)`, `systemd.unit(5)`, `sy
 
 ## C6. Firmware and hardware findings
 
-ASUS TP3402VA, AMI BIOS 307, recorded on 2026-09-20 with commit `3b43368` and Omarchy 4.0.4 through the stages of [release-checklist.md](release-checklist.md), less the rows that [maintenance.md](maintenance.md) lists as owed.
+ASUS TP3402VA, AMI BIOS 307, recorded on 2026-09-20 with Omarchy 4.0.4 through the stages of [release-checklist.md](release-checklist.md): with commit `3b43368`, and with commit `5e98d09` for the hook's time, the entry that predates enrollment and the fallback offer.
 
 - The firmware exposes neither AuditMode nor DeployedMode (pre-UEFI 2.5 model). Its key menu appears only while Secure Boot is set to enabled. Deleting only the PK keeps KEK, db and dbx and enters Setup Mode.
 - Per-variable writes of db, KEK and PK over the immutable variables succeeded with `--ignore-immutable` and read back exactly. After the PK write, `SetupMode` kept reading 1 until the next boot, although the variables already held the new keys; enrollment must be judged by the variables.
 - A stock install carries path hashes of unsigned UKIs; after setup the OS entry was regenerated without a hash, while two snapshot entries older than enrollment stayed stale after their history files were signed in place, and `limine-snapper-sync` did not rewrite them.
 - `sbctl` refused to create keys into pre-created directories, and setup must accept the 755 `/var/lib/sbctl`. `gum confirm` without a terminal declines silently, so prompts need a TTY and must say what was cancelled. A Limine tool holding the boot lock for a minute is normal and must read as "busy".
 - Deleting only the PK kept all eight KEK and db entries; the append wrote db, KEK and PK, each read back, and the machine started with Secure Boot on. So did the entry of a snapshot taken after `setup`, from inside which the restore of stage 4 ran; `sign` and `status` passed after it.
-- The machine has two ESPs (Omarchy's and Windows'), `ENABLE_LIMINE_FALLBACK=no` and no fallback loader until `limine-install --fallback` added one. The firmware's boot menu lists that loader as "UEFI OS", and it started the machine with Secure Boot off while the sealed primary refused.
+- The machine has two ESPs (Omarchy's and Windows'), `ENABLE_LIMINE_FALLBACK=no` as the installer wrote it (C7) and no fallback loader until `limine-install --fallback` added one. The firmware's boot menu lists that loader as "UEFI OS", and it started the machine with Secure Boot off while the sealed primary refused. With nothing at the fallback path, `setup` asked, ran upstream's step and left the package's raw loader there and the installer's setting as it was. With a loader that is not Limine's at that path under the lower-case name `bootx64.efi`, as another system writes it, `setup` found it under the upper-case name, asked nothing and left it byte for byte.
+- An entry that predates enrollment does not start with Secure Boot on: the firmware refuses the unsigned image, and Limine reports `PANIC: efi: LoadImage failure (0x800000000000000f)`, which is the firmware's `EFI_ACCESS_DENIED` (UEFI 2.10, Appendix D), and halts, so the machine needs a power cycle. The entry of a snapshot taken after `setup` started.
+- The hook alone, run as the Limine tools run it, took 1.1 seconds with two kernels installed.
 - Limine's `efi_boot_entry` entry and a BootNext request each started Windows Boot Manager with Secure Boot on and the user's keys enrolled, and the boot after BootNext returned to Limine. The machine has no BitLocker: a BitLocker prompt has not been exercised on hardware.
 
 ## C7. Omarchy

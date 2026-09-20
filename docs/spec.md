@@ -18,7 +18,7 @@ What it promises:
 
 ### D1. Snapshot images are never touched
 
-limine-snapper-sync stores a hash of every snapshot image it keeps and never rewrites it [C2]. Signing such an image in place makes its menu entry stale for good [C6]. OmaSecBoot therefore never modifies, signs or registers a history file. Images from before setup stay unsigned with valid hashes: with Secure Boot on the firmware refuses that one entry, with Secure Boot off it boots normally. `status` counts them, and Omarchy's snapshot rotation (five to six entries) retires them.
+limine-snapper-sync stores a hash of every snapshot image it keeps and never rewrites it [C2]. Signing such an image in place makes its menu entry stale for good [C6]. OmaSecBoot therefore never modifies, signs or registers a history file. Images from before setup stay unsigned with valid hashes: with Secure Boot on the firmware refuses that one entry, which Limine reports as a panic before it halts [C6], and with Secure Boot off it boots normally. `status` counts them, and Omarchy's snapshot rotation (five to six entries) retires them.
 
 ### D2. The fallback loader stays raw
 
@@ -163,7 +163,7 @@ Two, and neither is a pacman hook.
 
 Every upstream operation that changes the boot chain (UKIs, the primary loader, `limine.conf`, snapshot entries) runs the Limine hook chain, including the firmware, microcode, dkms and systemd updates that rebuild the initramfs [C2]. The two changes that bypass it, an edit of `limine.conf` and the installer hook's copy over the loader [C7], belong to the watchers (D3). A pacman hook would only repeat that work later in the same transaction, and sbctl's own `zz-sbctl` hook has nothing to do, because OmaSecBoot registers nothing in sbctl's file list.
 
-Cost. The budget for what OmaSecBoot adds to one kernel transaction is two seconds per installed kernel; stage 1 of acceptance times it, because a breach would change the design. A full pass reads every current UKI once to check its signature; it never copies or re-signs one and never reads a history file. Hooks never prompt.
+Cost. The budget for what OmaSecBoot adds to one kernel transaction is two seconds per installed kernel; stage 1 of acceptance times it, because a breach would change the design, and the recorded machine took 1.1 seconds with two kernels [C6]. A full pass reads every current UKI once to check its signature; it never copies or re-signs one and never reads a history file. Hooks never prompt.
 
 Omarchy's update sequence has no step that can hold its restart prompt [C7]. The marker and the red line are the visible signal; the update step in [omarchy-integration.md](omarchy-integration.md) runs `omasecboot status --quiet`.
 
@@ -199,7 +199,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | A firmware update or CMOS reset restores the factory keys | Limine is refused; Windows boots | Boots | Secure Boot off, `setup` again | `status` error while Secure Boot is on without the local keys; with it off, `status` names the firmware step again |
 | Microsoft or firmware servicing changes db or dbx | Unaffected | Unaffected | None | Never refused |
 | BitLocker asks for its recovery key | Windows side only | n/a | Enter the key | Guidance and an acknowledgment before the two steps that cannot be taken back, deleting the PK and writing keys; a reminder before Secure Boot is turned on |
-| Snapshot entries older than setup | Those entries do not boot | Boot | They age out, or delete them | D1; `status` counts them |
+| Snapshot entries older than setup | Those entries do not boot: Limine panics on the firmware's refusal and halts [C6] | Boot | Power cycle and pick another entry; they age out, or delete them | D1; `status` counts them |
 | The ESP is full, sooner than before setup: an image that is rebuilt and signed again never deduplicates against its predecessor in the snapshot history [C2] | The next kernel image does not fit and a Limine tool's failure is masked upstream [C2] | Same | Delete old snapshots, rebuild with `limine-mkinitcpio`, `sign` | `status` notes an ESP with less free space than its largest boot file needs; a free-space check before every write to the ESP, also before upstream's fallback step; the proof after every Limine operation |
 | Another tool holds the lock | The command waits, then exits 75 | Same | Run it again | The lock is named, no marker; the hook waits five seconds at most |
 | `SetupMode` still reads 1 after the PK write | n/a | n/a | Reboot, `setup` | Judged by the variables [C6] |
