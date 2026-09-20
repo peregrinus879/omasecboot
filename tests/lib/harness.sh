@@ -5,7 +5,7 @@
 # test_harness_init, then runs cases with run_case.
 #
 # Rule for stubs: every behaviour a stub models cites the section of
-# docs/upstream-contracts.md (C1 to C8) that records it. Anything a stub does
+# docs/upstream-contracts.md (C1 to C9) that records it. Anything a stub does
 # without such a record is marked ASSUMPTION, because tests that share an
 # unchecked assumption with the code prove nothing about real machines.
 # shellcheck disable=SC2329 # Overrides and case functions are called indirectly.

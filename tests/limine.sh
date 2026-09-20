@@ -188,6 +188,9 @@ shadowing_configs_are_listed() {
   [[ -z $(list_shadowing_configs) ]] || fail_test "a clean ESP listed a shadow"
   cp "$FIX/esp/limine.conf" "$FIX/esp/EFI/limine/limine.conf"
   [[ $(list_shadowing_configs) == "$FIX/esp/EFI/limine/limine.conf" ]] || fail_test "the shadowing copy was not listed"
+  # The fallback, the rescue loader, reads a limine.conf beside itself first (C1).
+  : >"$FIX/esp/EFI/BOOT/limine.conf"
+  [[ $(list_shadowing_configs) == *"$FIX/esp/EFI/BOOT/limine.conf"* ]] || fail_test "a limine.conf beside the fallback was not listed"
 }
 
 run_case settings-round-trip-from-stock settings_round_trip_from_stock

@@ -75,6 +75,33 @@ earlier_values_are_the_users() {
   cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "the user's own setting did not come back"
 }
 
+# The commands work on the ESP and on two files of root's: an ESP that is not
+# mounted, or a file somebody else could write, stops them before any change.
+unmounted_esp_and_unsafe_files_stop_the_commands() {
+  : >"$FIX/run/esp-unmounted"
+  run_cli setup && fail_test "setup ran without the ESP"
+  [[ $(<"$FIX/run/output") == *'not mounted'* && ! -e $(enabled_marker) ]] || fail_test "setup without the ESP: $(<"$FIX/run/output")"
+  rm "$FIX/run/esp-unmounted"
+  chmod 666 "$FIX/etc/default-limine"
+  cp "$FIX/etc/default-limine" "$FIX/run/default-limine-before"
+  run_cli setup && fail_test "setup wrote settings into a file anybody can write"
+  cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "a file anybody can write was changed"
+  chmod 644 "$FIX/etc/default-limine"
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/esp-unmounted"
+  run_cli remove && fail_test "remove ran without the ESP"
+  [[ -e $(enabled_marker) ]] || fail_test "remove without the ESP changed state"
+  rm "$FIX/run/esp-unmounted"
+  chmod 666 "$(settings_originals_file)"
+  run_cli remove && fail_test "remove trusted originals anybody can write"
+  [[ -e $(enabled_marker) ]] || fail_test "remove with unsafe originals changed state"
+  [[ $(<"$FIX/run/output") == *'nothing was changed'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  # The record of the settings' originals lost on a machine that is set up.
+  rm -f "$(settings_originals_file)"
+  run_cli remove && fail_test "remove ran without its record of the original settings"
+  [[ $(<"$FIX/run/output") == *'is set up, but'* && $(<"$FIX/run/output") != *'Nothing to remove'* ]] || fail_test "a set-up machine was called not set up: $(<"$FIX/run/output")"
+}
+
 # A machine that Omarchy installed beside another system: the installer wrote
 # ENABLE_LIMINE_FALLBACK=no and there is no fallback loader (C7).
 fallback_is_offered_only_into_an_empty_place() {
@@ -319,6 +346,7 @@ run_case setup-from-stock-and-again setup_from_stock_and_again
 run_case upstream-masked-failure-is-repaired upstream_masked_failure_is_repaired
 run_case unsigned-arrival-is-signed unsigned_arrival_is_signed
 run_case setup-refuses-before-changing-anything setup_refuses_before_changing_anything
+run_case unmounted-esp-and-unsafe-files-stop-the-commands unmounted_esp_and_unsafe_files_stop_the_commands
 run_case earlier-values-are-the-users earlier_values_are_the_users
 run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
 run_case failed-fallback-step-is-reported failed_fallback_step_is_reported

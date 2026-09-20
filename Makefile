@@ -35,6 +35,7 @@ install:
 	install -Dm644 LICENSE "$(DESTDIR)$(LICENSEDIR)/LICENSE"
 	install -Dm644 README.md "$(DESTDIR)$(DOCDIR)/README.md"
 	install -Dm644 CHANGELOG.md "$(DESTDIR)$(DOCDIR)/CHANGELOG.md"
+	install -Dm644 CONTRIBUTING.md "$(DESTDIR)$(DOCDIR)/CONTRIBUTING.md"
 	install -Dm644 -t "$(DESTDIR)$(DOCDIR)/docs/" docs/*.md
 	install -Dm644 omarchy/omarchy-menu.jsonc "$(DESTDIR)$(DOCDIR)/omarchy-menu.jsonc"
 

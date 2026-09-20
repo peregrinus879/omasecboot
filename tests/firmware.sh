@@ -323,6 +323,13 @@ setup_asks_for_the_pk_then_enrolls_then_confirms() {
   [[ $(<"$FIX/run/output") == *'Reboot, then run'* ]] || fail_test "same boot: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "an enrolled firmware was written again"
   set_mode_variable SetupMode 0
+  # A machine that starts through the fallback path would stop with Secure
+  # Boot on, because the fallback stays raw (D2): no instruction without an
+  # active entry for the primary loader.
+  write_boot_entry 0001 inactive 'Limine' '\EFI\limine\limine_x64.efi'
+  run_cli setup && fail_test "setup told a machine without a Limine boot entry to turn Secure Boot on"
+  [[ $(<"$FIX/run/output") == *'no active boot entry for the Limine loader'* && $(<"$FIX/run/output") != *'turn Secure Boot on'* ]] || fail_test "without a boot entry: $(<"$FIX/run/output")"
+  write_boot_entry 0001 active 'Limine' '\efi\LIMINE\limine_x64.efi'
   run_cli setup || fail_test "setup after the reboot failed"
   [[ $(<"$FIX/run/output") == *'turn Secure Boot on'* ]] || fail_test "next boot: $(<"$FIX/run/output")"
   set_mode_variable SecureBoot 1

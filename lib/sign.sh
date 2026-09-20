@@ -101,9 +101,13 @@ sign_boot_files() {
   boot_lock_acquire || return "$?"
 
   remove_stale_staging || rc=1
-  apply_managed_settings || rc=1
+  apply_managed_settings || {
+    fail "Could not write the managed settings to $(limine_default_config)"
+    rc=1
+  }
   converge_windows_entry
-  converge_primary_loader || sealed=false
+  # Sealed but not signed starts with Secure Boot off; not sealed never does.
+  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false
   if [[ $scope == full ]]; then
     if [[ $(fallback_state) == altered ]]; then
       qact "Restoring the fallback loader to upstream's raw copy (it is the rescue loader)"
@@ -111,7 +115,10 @@ sign_boot_files() {
     fi
     sign_unsigned_arrivals || rc=1
     check_os_path_hashes || rc=1
-    watch_is_active || enable_watch || rc=1
+    watch_is_active || enable_watch || {
+      fail "Could not enable the watchers of limine.conf and the loader"
+      rc=1
+    }
   fi
   boot_lock_release
 

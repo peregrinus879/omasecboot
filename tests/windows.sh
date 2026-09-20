@@ -233,6 +233,8 @@ entry_is_only_taken_out_when_the_loader_follows() {
   (( rc == 75 )) || fail_test "busy: ${rc}"
   [[ -e $(windows_flag) && $(entry_count) == 1 ]] || fail_test "a busy windows remove changed something"
   : >"$(restore_marker_path)"
+  run_cli windows setup && fail_test "windows setup ran during a snapshot restore"
+  [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "report: $(<"$FIX/run/output")"
   run_cli windows remove && fail_test "windows remove ran during a snapshot restore"
   [[ $(entry_count) == 1 && -e $(windows_flag) ]] || fail_test "something changed during a restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "report: $(<"$FIX/run/output")"
@@ -299,7 +301,7 @@ entry_problems_are_reported_not_failed() {
   mv "$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c" "$FIX/run/BootOrder"
   output=$(show_windows_status 2>&1)
   [[ $output == *'boot entries could not be read'* ]] || fail_test "unreadable entries: ${output}"
-  run_cli windows status || fail_test "windows status failed"
+  run_cli windows status && fail_test "windows status succeeded without readable entries"
   [[ $(<"$FIX/run/output") == *"Could not read the firmware's boot entries"* ]] || fail_test "windows status: $(<"$FIX/run/output")"
   run_cli windows bootnext && fail_test "bootnext ran without readable entries"
   [[ $(<"$FIX/run/output") == *'Could not read'* ]] || fail_test "bootnext: $(<"$FIX/run/output")"

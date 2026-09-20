@@ -32,6 +32,21 @@ converges_and_is_idempotent() {
 # The pass runs inside package transactions: a history file is neither
 # changed nor read, whatever its name's case and whatever limine.conf says
 # about it (spec D1 and the hook's time budget).
+# Windows' own boot files and the 32-bit loader are no file of this tool's
+# (spec section 4): never listed, never signed, never handed to a tool.
+other_systems_files_are_never_touched() {
+  local windows=$FIX/esp/EFI/Microsoft/Boot/bootmgfw.efi odd=$FIX/esp/efi/MICROSOFT/Recovery/x.EFI ia32=$FIX/esp/EFI/BOOT/BOOTIA32.EFI file
+  prepared_machine
+  mkdir -p "${windows%/*}" "${odd%/*}"
+  for file in "$windows" "$odd" "$ia32"; do printf 'another system' >"$file"; done
+  [[ $(list_signable_files) != *[Mm][Ii][Cc][Rr][Oo]* && $(list_signable_files) != *BOOTIA32* ]] || fail_test "listed as signable: $(list_signable_files)"
+  sign_boot_files || fail_test "pass"
+  for file in "$windows" "$odd" "$ia32"; do
+    [[ $(<"$file") == 'another system' ]] || fail_test "${file} was changed"
+  done
+  ! grep -qi -e microsoft -e bootia32 "$FIX/run/calls" || fail_test "a tool was run on another system's file: $(grep -i -e microsoft -e bootia32 "$FIX/run/calls")"
+}
+
 history_files_are_never_touched() {
   local history=$FIX/esp/machine/limine_history/old.efi_sha256_abc
   local odd=$FIX/esp/machine/LIMINE_HISTORY/OLD.EFI_SHA256_DEF
@@ -208,6 +223,7 @@ seal_only_waits_for_pacman_to_finish() {
 
 run_case converges-and-is-idempotent converges_and_is_idempotent
 run_case history-files-are-never-touched history_files_are_never_touched
+run_case other-systems-files-are-never-touched other_systems_files_are_never_touched
 run_case fallback-is-returned-to-raw fallback_is_returned_to_raw
 run_case harmful-rows-are-found-and-removed harmful_rows_are_found_and_removed
 run_case unproved-state-fails-the-pass unproved_state_fails_the_pass

@@ -174,7 +174,7 @@ list_stale_os_hashes() {
 list_shadowing_configs() {
   local esp candidate
   esp=$(esp_path) || return 1
-  for candidate in "${esp}/EFI/limine/limine.conf" "${esp}/boot/limine/limine.conf" \
+  for candidate in "${esp}/EFI/limine/limine.conf" "${esp}/EFI/BOOT/limine.conf" "${esp}/boot/limine/limine.conf" \
     "${esp}/boot/limine.conf" "${esp}/limine/limine.conf"; do
     [[ ! -e $candidate && ! -L $candidate ]] || printf '%s\n' "$candidate"
   done
@@ -200,6 +200,14 @@ checksum_is_zero() { [[ $1 =~ ^0{128}$ ]]; }
 
 # Sealed with the current limine.conf and signed. Upstream's hook does both
 # but hides its failures, so this is checked after every Limine operation.
+# The seal alone: a loader sealed over another limine.conf does not start at
+# all (C1), which an unsigned one does while Secure Boot is off.
+primary_is_sealed() {
+  local primary checksum
+  primary=$(primary_loader_path)
+  [[ -f $primary ]] && checksum=$(config_checksum) && [[ $(embedded_checksum "$primary") == "$checksum" ]]
+}
+
 primary_is_proved() {
   local primary checksum
   primary=$(primary_loader_path)

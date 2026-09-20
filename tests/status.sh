@@ -173,6 +173,38 @@ old_snapshots_are_a_note_not_a_problem() {
   [[ $output == *'1 snapshot image(s) predate'*'snapper -c root delete'* ]] || fail_test "no note: ${output}"
 }
 
+# A loader sealed over another limine.conf does not start at all (C1); one
+# that is sealed and not signed starts while Secure Boot is off. Two warnings.
+sealed_but_unsigned_is_not_called_unsealed() {
+  local output
+  set_up_machine
+  write_raw_loader "$(primary_loader_path)"
+  limine enroll-config "$(primary_loader_path)" "$(config_checksum)"
+  output=$(show_status 2>&1) && fail_test "an unsigned loader read as healthy"
+  [[ $output == *'sealed with the current limine.conf but not signed'* && $output == *'Next: sudo omasecboot sign'* ]] || fail_test "report: ${output}"
+  [[ $output != *'with Secure Boot on or off'* ]] || fail_test "an unsigned loader got the warning of an unsealed one: ${output}"
+  printf 'timeout: 9\n' >>"$FIX/esp/limine.conf"
+  output=$(show_status 2>&1) && fail_test "a stale seal read as healthy"
+  [[ $output == *'is not sealed with the current limine.conf'*'with Secure Boot on or off'* ]] || fail_test "report: ${output}"
+}
+
+# Without an active entry for the primary loader the machine starts through
+# the fallback path, which stays raw (D2) and is refused with Secure Boot on.
+missing_limine_boot_entry_blocks() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
+  rm "$FIX/efivars/Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  output=$(show_status 2>&1) && fail_test "a machine without a Limine boot entry read as healthy"
+  [[ $output == *'no active boot entry for the Limine loader'*'resolve what is marked above'* ]] || fail_test "report: ${output}"
+  write_boot_entry 0001 active 'Limine' '\EFI\limine\limine_x64.efi'
+  printf 'garbage' >"$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  output=$(show_status 2>&1) || fail_test "boot entries outside a broken BootOrder were not read: ${output}"
+  printf 'x' >"$FIX/efivars/Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  output=$(show_status 2>&1) && fail_test "unreadable boot entries read as healthy"
+  [[ $output == *"Could not read the firmware's boot entries"* ]] || fail_test "report: ${output}"
+}
+
 # What Microsoft can still deliver to the machine, not what it boots (C9).
 missing_2023_certificates_are_notes() {
   local output
@@ -226,6 +258,8 @@ run_case unreadable-firmware-is-a-problem unreadable_firmware_is_a_problem
 run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
 run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
+run_case sealed-but-unsigned-is-not-called-unsealed sealed_but_unsigned_is_not_called_unsealed
+run_case missing-limine-boot-entry-blocks missing_limine_boot_entry_blocks
 run_case full-esp-is-a-note full_esp_is_a_note
 run_case missing-2023-certificates-are-notes missing_2023_certificates_are_notes
 run_case old-rescue-loader-is-a-note old_rescue_loader_is_a_note

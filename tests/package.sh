@@ -91,6 +91,7 @@ usr/share/
 usr/share/doc/
 usr/share/doc/omasecboot/
 usr/share/doc/omasecboot/CHANGELOG.md
+usr/share/doc/omasecboot/CONTRIBUTING.md
 usr/share/doc/omasecboot/README.md
 usr/share/doc/omasecboot/docs/
 usr/share/doc/omasecboot/docs/field-testing.md

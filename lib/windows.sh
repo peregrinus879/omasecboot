@@ -79,6 +79,26 @@ list_boot_entries() {
   done
 }
 
+# Whether the firmware holds an active entry whose file is the primary loader.
+# A machine without one starts through the fallback path (upstream's
+# --skip-uefi boards, or a registration that failed), and the fallback stays
+# raw (D2): turning Secure Boot on would stop it. Status 1: no such entry;
+# status 2: the entries could not be read.
+firmware_starts_primary() {
+  local LC_ALL=C entries entry rest state file wanted
+  entries=$(list_boot_entries) || return 2
+  wanted=$(primary_loader_path)
+  wanted=${wanted#"$(esp_path)"}
+  wanted=${wanted//\//\\}
+  while IFS= read -r entry; do
+    rest=${entry#*$'\x1f'}
+    state=${rest%%$'\x1f'*}
+    file=${rest##*$'\x1f'}
+    [[ $state != active || ${file,,} != "${wanted,,}" ]] || return 0
+  done <<<"$entries"
+  return 1
+}
+
 # Sets _windows_number and _windows_label when the firmware holds exactly one
 # active entry whose file is bootmgfw.efi and whose label no other entry
 # shares: Limine's efi_boot_entry protocol finds the entry by name (C8). The

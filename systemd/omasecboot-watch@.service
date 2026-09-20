@@ -2,7 +2,8 @@
 # state, because systemd merges changes that arrive while this runs; the start
 # limit is off so an editor that saves several times cannot fail the watcher.
 # A stop, as at shutdown, signals the pass alone, which ignores it and
-# finishes: a loader left half sealed does not boot.
+# finishes: a loader left half sealed does not boot. The pass needs the ESP,
+# /etc, its state and sbctl's keys, and neither a network nor anybody's home.
 [Unit]
 Description=Re-seal the Limine loader after %f changed
 StartLimitIntervalSec=0
@@ -10,4 +11,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 KillMode=mixed
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectHome=yes
 ExecStart=@BINDIR@/omasecboot sign --quiet --seal-only

@@ -40,6 +40,9 @@ for unit in omasecboot-watch@.path omasecboot-watch@.service; do
   ! grep -q '@BINDIR@' "$STAGE/usr/lib/systemd/system/$unit" || fail_test "unsubstituted path in ${unit}"
 done
 grep -qx 'KillMode=mixed' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "a stop would signal the tools the watchers' pass runs, not the pass alone"
+for hardening in NoNewPrivileges=yes PrivateNetwork=yes ProtectHome=yes; do
+  grep -qx "$hardening" "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watchers' service lost ${hardening}"
+done
 grep -qx "ExecStart=${PREFIX}/bin/omasecboot sign --quiet --seal-only" "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "watcher command"
 grep -qx 'StartLimitIntervalSec=0' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watcher's start limit is on"
 grep -qx 'PathChanged=%f' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.path" || fail_test "watch path"

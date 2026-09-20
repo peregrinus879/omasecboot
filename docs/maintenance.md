@@ -10,6 +10,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 ## Evidence owed
 
 - The acceptance rows on the release candidate. The records are of commits `3b43368` and `5e98d09` (C6 of [upstream-contracts.md](upstream-contracts.md)), and a later commit that changes code asks for them again.
+- The record of a stock single-boot Omarchy install, where the fallback loader and its `/EFI fallback` menu entry exist from the start. The recorded machine was installed beside Windows and had neither.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The rebuild path of enrollment, which needs firmware that clears KEK and db together with the Platform Key, and the Windows rows on a machine with BitLocker on. Enrollment is recorded on the append path only.
 - The contract workflow's issue on a failed scheduled run. Its suites have run green on GitHub, and no scheduled run has failed yet.

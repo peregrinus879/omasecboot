@@ -43,6 +43,10 @@ After the user deletes only the Platform Key, the tool writes db, then KEK, then
 - Appending to an empty KEK or db would enroll the local keys alone, without the certificates option ROMs and Windows need, so empty never means append. Only when the firmware's key menu cleared KEK and db together with the PK (each is empty, or already what an interrupted rebuild wrote) does the tool rebuild them with `--microsoft --firmware-builtin`, or `--microsoft` alone on firmware that does not expose both `KEKDefault` and `dbDefault`. That path has a confirmation of its own, which lists every backup entry the rebuild cannot bring back and names a changed dbx. Anything in between is refused.
 - Hardware record: [C6].
 
+### D5. Every EFI program on the ESP is signed, with four exceptions
+
+The pass signs every `.efi` file on the ESP that arrived unsigned, not only Omarchy's kernel images and loader. The exceptions are Microsoft's files, snapshot images (D1), the fallback loader (D2) and the 32-bit loader. A machine with Secure Boot on refuses whatever is unsigned, so a narrower rule would stop the firmware updater that fwupd places on the ESP, a memory tester or a second system's loader, and leave the user to sign each by hand after every update. The cost: such a file is signed in place, without staging, as a kernel image is, and one that sbctl cannot sign fails every pass until it is signed or removed. `status` names every file it signs. A file that `limine.conf` names with a path hash is never signed, whoever wrote the hash, because the signature would make that entry stale.
+
 ## 3. Non-goals and claim limits
 
 - No transaction journal, state machine, recovery chain, ownership proof, version pin or patched upstream package. An interrupted operation is finished by running the same command again.
@@ -113,6 +117,7 @@ Boot files, on every run:
 Then the firmware step:
 
 - **A Platform Key is in place and it is not the user's.** The keys are backed up. When KEK lacks Microsoft's 2023 KEK certificate the user is warned and asked, because after this step only the user can add it [C9]. Then the user is told to delete only the PK in the firmware.
+- **The keys are enrolled and Secure Boot is off.** The instruction to turn it on is given only when the firmware holds an active boot entry for the primary loader, because a machine that starts through the fallback path would stop (D2).
 - **Setup Mode.** Never in the run that created `enabled`, which ends with an instruction instead.
   - The local certificates are identified first: they are the entries sbctl owns in an export that does not read the firmware [C4], so they are known before, during and after an enrollment and beside an older certificate that rotated keys left behind.
   - Then the proofs of D4, one confirmation (default No) that says the PK is replaced, how many KEK and db entries are kept and where the backup is, and the writes.
@@ -129,7 +134,7 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 - Keeps the Windows entry in step with `windows-enabled`: written or replaced while the flag exists, taken out when it does not. Whatever keeps the entry from being written is said and left to `status`, never made the pass's failure.
 - Proves the primary loader or rebuilds it (section 4).
 - Restores a fallback that is Limine's (it contains the checksum marker) and is signed or sealed to the raw copy, and never touches any other `BOOTX64.EFI`.
-- Signs EFI files that arrived unsigned (D1 and D2 apply) and proves each signable file with one read.
+- Signs EFI files that arrived unsigned (D1, D2 and D5 apply), never one that `limine.conf` names with a path hash, and proves each signable file with one read.
 - Fails on a stale path hash of an OS entry, re-enables the watchers when either is inactive, and clears or writes `needs-attention`.
 - Writes nothing to an ESP with less than 2 MiB free.
 - Never asks sbctl for its file list, which would make sbctl read every tracked file [C4].
@@ -140,7 +145,7 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 
 Read-only.
 
-- It reports the firmware state and whether the user's keys are enrolled, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`.
+- It reports the firmware state and whether the user's keys are enrolled, whether the firmware has an active boot entry for the primary loader, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, leftovers and `needs-attention`.
 - On a machine that is not set up it still names leftovers of an earlier install, and it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it.
 - On a set-up machine it ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs; before `setup`, a problem's own line says what to do.
 - Anything that could not be read belongs to the last kind.
@@ -191,6 +196,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | A new UKI arrives unsigned, or a Limine tool masks a failed build | The new default entry is refused | Boots | Boot a snapshot entry or turn Secure Boot off, run `sign` | The pass in the Limine hook signs it; otherwise marker, red line, `status` exit 1 |
 | The primary loader is replaced outside the Limine tools: Omarchy's installer hook after a Limine upgrade [C7], or a copy by hand | The firmware refuses the raw loader | Boots, the loader is raw | Secure Boot off, run `sign` | The loader's watcher rebuilds it once pacman is done; `status` error until then |
 | `limine.conf` edited without a re-seal, or `omarchy-refresh-limine` interrupted | The primary refuses to start | The primary refuses to start [C1] | Secure Boot off, pick the fallback loader in the firmware's boot menu, run `sign`; rescue media on a machine without a fallback | The watcher (D3), the Limine hook, the raw fallback (D2); `setup` offers to add a fallback and warns while there is none |
+| The firmware never had a boot entry for the Limine loader: a board upstream installs with `--skip-uefi`, or a registration that failed [C2] | The machine starts through the fallback path, which is raw (D2) and refused | Boots | Secure Boot off, `limine-install`, check with `efibootmgr`, `setup` again | `status` blocks, and `setup` holds back the instruction to turn Secure Boot on, without an active firmware entry for the primary loader |
 | The firmware loses its Limine boot entry but keeps the keys (a firmware or Windows update) | The raw fallback is refused; the firmware boots Windows or stops | The fallback boots | Secure Boot off, boot, `limine-install`, Secure Boot on | Documented; the accepted cost of D2 |
 | A history file or the fallback has a row in sbctl's file list | sbctl's hook signs it in place: a stale snapshot hash, which Limine refuses, or a signed but unsealed fallback | Same, except that the stale entry starts once Limine's warning is answered with Y [C1] | `setup` | `setup` removes the rows, `sign` restores the fallback, `status` reports both; OmaSecBoot never adds rows |
 | Power is lost while upstream rewrites the primary in place | The primary may be raw or torn | A raw primary boots; a torn one does not | The fallback loader or rescue media, then `sign` | Upstream's window, which a post-hook cannot close |
@@ -216,7 +222,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | KEK lacks Microsoft's 2023 KEK certificate when the Platform Key becomes the user's [C9] | Boots | Boots | Install the pending Windows and firmware updates before the PK is deleted; afterwards only the user's own keys can add it | `setup` warns and asks before it tells the user to delete the PK; `status` notes every missing 2023 certificate |
 | BitLocker asks for its recovery key | Windows side only | n/a | Enter the key | Guidance and an acknowledgment before the two steps that cannot be taken back, deleting the PK and writing keys; a reminder before Secure Boot is turned on |
 | Snapshot entries older than setup | Those entries do not boot: Limine panics on the firmware's refusal and halts [C6] | Boot | Power cycle and pick another entry; they age out, or delete them | D1; `status` counts them |
-| The ESP is full, sooner than before setup: an image that is rebuilt and signed again never deduplicates against its predecessor in the snapshot history [C2] | The next kernel image does not fit and a Limine tool's failure is masked upstream [C2] | Same | Delete old snapshots, rebuild with `limine-mkinitcpio`, `sign` | `status` notes an ESP with less free space than its largest boot file needs; a free-space check before every write to the ESP, also before upstream's fallback step; the proof after every Limine operation |
+| The ESP is full, sooner than before setup: an image that is rebuilt and signed again never deduplicates against its predecessor in the snapshot history [C2] | The next kernel image does not fit and a Limine tool's failure is masked upstream [C2] | Same | Delete old snapshots, rebuild with `limine-mkinitcpio`, `sign` | `status` notes an ESP with less free space than its largest boot file needs; a free-space check before every write this tool makes to the ESP, and before upstream's fallback step; the proof after every Limine operation |
 | Another tool holds the lock | The command waits, then exits 75 | Same | Run it again | The lock is named, no marker; the hook waits five seconds at most |
 | `SetupMode` still reads 1 after the PK write | n/a | n/a | Reboot, `setup` | Judged by the variables [C6] |
 | The enrollment is interrupted between db, KEK and PK | Secure Boot cannot be turned on yet | Boots | `setup` again | A variable that already holds the local certificate is skipped |

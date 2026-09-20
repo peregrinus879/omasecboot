@@ -106,13 +106,20 @@ show_loader_status() {
   local shadow
   if primary_is_proved; then
     pass "The Limine loader is sealed with the current limine.conf and signed"
+  elif primary_is_sealed; then
+    problem "The Limine loader is sealed with the current limine.conf but not signed"
   else
-    problem "The Limine loader is not sealed with the current limine.conf and signed"
+    problem "The Limine loader is not sealed with the current limine.conf"
     _status_sealed=false
   fi
   while IFS= read -r shadow; do
     [[ -z $shadow ]] || blocking_problem "A second limine.conf shadows the real one; remove it: ${shadow}"
   done < <(list_shadowing_configs)
+  case $(firmware_starts_primary; printf '%s' "$?") in
+    0) ;;
+    1) blocking_problem "The firmware has no active boot entry for the Limine loader, so this machine starts through the fallback path, which the firmware refuses with Secure Boot on. Run ${BOLD}sudo limine-install${NC}, check with efibootmgr, and keep Secure Boot off until then" ;;
+    *) blocking_problem "Could not read the firmware's boot entries, so nothing shows that the firmware starts the Limine loader" ;;
+  esac
   case $(fallback_state) in
     absent) note "No fallback loader: after a limine.conf mistake only rescue media can boot this machine; ${BOLD}sudo omasecboot setup${NC} offers to add one" ;;
     raw)
