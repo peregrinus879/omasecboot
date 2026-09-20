@@ -110,6 +110,10 @@ A machine without a fallback loader needs rescue media for step 2; `setup` warns
 
 Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecboot`. The state directory and your sbctl keys stay on disk.
 
+## Help test it
+
+Nothing about boot behaviour is proven until real machines have shown it. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes nothing in the firmware and ends with everything returned to stock, records every step, and ends with a report you can file without giving away what identifies your machine.
+
 ## Development
 
 ```bash
@@ -117,6 +121,8 @@ make lint            # bash -n, ShellCheck and the JSONC fragment
 make test            # hermetic suites and the package build, about a minute
 make test-contract   # the installed sbctl and Limine tools against the upstream contracts, in a sandbox
 ```
+
+The targets need `base-devel`, `git`, `shellcheck` and `jq`; `make test-contract` also needs `bubblewrap`.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).
 

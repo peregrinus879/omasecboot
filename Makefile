@@ -11,7 +11,7 @@ UNITDIR     = /usr/lib/systemd/system
 HOOKDIR     = /etc/boot/hooks/post.d
 SCRIPTS = bin/omasecboot $(wildcard lib/*.sh) limine-hooks/90-omasecboot-sign \
           $(wildcard tests/*.sh) $(wildcard tests/lib/*.sh)
-TEST_SUITES = common limine sign status firmware windows commands install package
+TEST_SUITES = common limine sign status firmware windows commands records install package
 CONTRACT_SUITES = sbctl limine
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 CONTRACT_TARGETS = $(addprefix test-contract-,$(CONTRACT_SUITES))

@@ -79,6 +79,7 @@ usr/share/doc/
 usr/share/doc/omasecboot/
 usr/share/doc/omasecboot/README.md
 usr/share/doc/omasecboot/docs/
+usr/share/doc/omasecboot/docs/field-testing.md
 usr/share/doc/omasecboot/docs/maintenance.md
 usr/share/doc/omasecboot/docs/omarchy-integration.md
 usr/share/doc/omasecboot/docs/release-checklist.md

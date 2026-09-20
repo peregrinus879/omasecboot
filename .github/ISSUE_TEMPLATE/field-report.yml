@@ -1,0 +1,113 @@
+name: Field report
+description: What happened when you ran docs/field-testing.md on your machine, passed or not
+title: "Field report: <machine model>"
+labels: ["field report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing. A run that stopped half way is as useful as one that went through.
+
+        Attach only `omasecboot-records.tgz`, which `bash tests/acceptance-share.sh` writes: in it your host name, login name, machine-id and UUIDs are renamed. Never attach files from `acceptance-records/` itself, recovery keys, serial numbers, or anything from `/var/lib/sbctl` or `/var/lib/omasecboot/firmware-backup`.
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Manufacturer and model, as sold.
+      placeholder: "Manufacturer and model, for example: Framework Laptop 13 (AMD)"
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      description: "Vendor, version and date: the output of `cat /sys/class/dmi/id/bios_vendor /sys/class/dmi/id/bios_version /sys/class/dmi/id/bios_date`."
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit tested
+      description: "The line `git log --oneline -1` printed in `~/omasecboot`."
+    validations:
+      required: true
+  - type: dropdown
+    id: level
+    attributes:
+      label: How far you went
+      options:
+        - "Level 1: boot files, Secure Boot off"
+        - "Level 2: your keys in the firmware, Secure Boot on"
+        - "Level 3: drills on a spare machine"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Everything I ran matched what the guide expects
+        - Something differed, and the machine is fine
+        - Something differed, and I needed the fallback loader, rescue media or the firmware to recover
+    validations:
+      required: true
+  - type: textarea
+    id: differed
+    attributes:
+      label: What differed
+      description: "The row name (for example `1-status-limine`), what the guide expected and what happened instead. One entry per row. Write \"nothing\" when everything matched."
+    validations:
+      required: true
+  - type: textarea
+    id: screen
+    attributes:
+      label: What only the screen showed
+      description: "Texts that Limine or the firmware showed at boot, word for word, and at which step. The firmware's menu wording for deleting the Platform Key and for restoring the factory keys (level 2)."
+  - type: dropdown
+    id: windows-menu
+    attributes:
+      label: "Windows from Limine's menu"
+      options:
+        - Not tested, or no Windows on this machine
+        - Windows started
+        - Windows did not start
+    validations:
+      required: true
+  - type: dropdown
+    id: windows-bootnext
+    attributes:
+      label: "Windows through `omasecboot windows bootnext`"
+      options:
+        - Not tested, or no Windows on this machine
+        - Windows started, and the boot after it returned to Omarchy
+        - Windows started, and the machine kept booting Windows
+        - Windows did not start
+    validations:
+      required: true
+  - type: dropdown
+    id: bitlocker
+    attributes:
+      label: BitLocker or Device Encryption
+      options:
+        - Not tested, no Windows, or no encryption
+        - Encryption was on or suspended, and Windows never asked for the recovery key
+        - Windows asked for the recovery key
+    validations:
+      required: true
+  - type: dropdown
+    id: way-back
+    attributes:
+      label: The way back
+      options:
+        - Not done yet
+        - "`remove` exited 0 and the machine starts as before"
+        - "`remove` failed or the machine did not start as before (say what happened under \"What differed\")"
+    validations:
+      required: true
+  - type: textarea
+    id: records
+    attributes:
+      label: Records
+      description: "Drag `acceptance-records/share/omasecboot-records.tgz` into this field. If `acceptance-share.sh` said that your login or host name still occurs in the copies, read those places first."
+    validations:
+      required: true

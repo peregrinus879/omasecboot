@@ -11,7 +11,7 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 
 ## Hardware acceptance
 
-Run on a dedicated machine, never on a daily one. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); the recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and bring the record back; never reboot with Secure Boot on while `omasecboot status` fails.
+Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is the same procedure written for anyone's machine. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); the recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and bring the record back; never reboot with Secure Boot on while `omasecboot status` fails.
 
 | Stage | Rows | STOP when |
 | --- | --- | --- |
@@ -27,5 +27,5 @@ Stages 2 and 5 exist once their commands do; a release needs all seven stages on
 
 ## Tag
 
-- [ ] The acceptance records for the candidate commit are reviewed and their sanitized summary is published with the release; they contain no serial numbers, recovery keys or firmware backup payloads.
+- [ ] The acceptance records for the candidate commit are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 - [ ] The Omarchy-side pieces in [omarchy-integration.md](omarchy-integration.md) are agreed with the maintainers, and the omarchy-pkgs recipe pins the tagged archive checksum.

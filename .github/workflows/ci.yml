@@ -47,7 +47,7 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder .
-          runuser -u builder -- env HOME=/home/builder make test-common test-limine test-sign test-status test-firmware test-windows test-commands test-install
+          runuser -u builder -- env HOME=/home/builder make test-common test-limine test-sign test-status test-firmware test-windows test-commands test-records test-install
 
   package:
     name: Package build and privileged install

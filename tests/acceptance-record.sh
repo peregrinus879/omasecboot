@@ -50,7 +50,11 @@ state_dir=/var/lib/omasecboot
 # Omarchy mounts the ESP at /boot; another mount point is given in the environment.
 export esp=${OMASECBOOT_ESP:-/boot}
 
-strip_colors() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\r$//' "$@"; }
+# Terminal control out of a transcript: operating system commands, which sudo
+# and systemd use for session marks that name the host and the machine-id,
+# then control sequences, then the carriage returns. The patterns' byte ranges
+# only hold in the C locale.
+strip_colors() { LC_ALL=C sed 's/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g; s/\x1b\[[0-9;?]*[ -\/]*[@-~]//g; s/\r$//' "$@"; }
 
 section() { printf '\n## %s\n\n' "$1" >>"$record"; }
 
@@ -115,6 +119,7 @@ record_state() {
   block "Installed files versus the checkout" compare_installed_files
   block "Leftovers of an install made without pacman" bash -c 'ls -la /usr/local/bin/omasecboot /usr/local/lib/omasecboot /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign 2>&1'
   block "Limine hook directories" bash -c 'ls -la /etc/boot/hooks/pre.d /etc/boot/hooks/post.d 2>&1'
+  block "pacman hooks that name Limine or this tool" bash -c 'grep -l -i -E "limine|omasecboot" /etc/pacman.d/hooks/*.hook /usr/share/libalpm/hooks/*.hook 2>/dev/null | while IFS= read -r hook; do printf "%s (%s)\n" "$hook" "$(pacman -Qqo "$hook" 2>/dev/null || echo "owned by no package")"; grep -E "^(Operation|Target|When|Exec) *=" "$hook" | sed "s/^/    /"; done'
   block "Secure Boot variables" bash -c 'for v in SecureBoot SetupMode AuditMode DeployedMode; do p=$(ls /sys/firmware/efi/efivars/${v}-* 2>/dev/null | head -1); if [[ -n $p ]]; then printf "%s=%s\n" "$v" "$(od -An -tu1 -j4 -N1 "$p" | tr -d " ")"; else printf "%s=absent\n" "$v"; fi; done'
   block "sbctl status" sbctl status
   block "sbctl list-files" sbctl list-files
@@ -122,8 +127,8 @@ record_state() {
   block "omasecboot status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot status; printf "exit status: %s\n" "$?"; else echo "omasecboot is not installed"; fi'
   block "omasecboot windows status" bash -c 'if command -v omasecboot >/dev/null; then omasecboot windows status 2>&1; else echo "omasecboot is not installed"; fi'
   block "BootNext" bash -c 'p=$(ls /sys/firmware/efi/efivars/BootNext-* 2>/dev/null | head -1); if [[ -n $p ]]; then od -An -tx1 -j4 "$p"; else echo absent; fi'
-  block "limine.conf watcher" bash -c 'systemctl list-units --all --no-pager "omasecboot-watch@*" 2>&1; systemctl list-unit-files --no-pager "omasecboot-watch@*" 2>&1'
-  block "Boot entries (MAC and NVMe nodes redacted)" bash -c 'efibootmgr -v 2>&1 | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
+  block "Watchers" bash -c 'systemctl list-units --all --no-pager "omasecboot-watch@*" 2>&1; systemctl list-unit-files --no-pager "omasecboot-watch@*" 2>&1'
+  block "Boot entries (MAC and NVMe nodes redacted, raw device-path bytes left out)" bash -c 'efibootmgr -v 2>&1 | grep -v "^ *dp: " | sed -E "s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g"'
   block "ESP mount, free space and partitions" bash -c 'findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS $esp 2>&1; df -h $esp 2>&1; lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME,MOUNTPOINTS 2>&1'
   block "EFI files" bash -c 'find $esp/EFI -type f \( -iname "*.efi" -o -name "*.efi_*" \) -exec sha256sum {} + 2>/dev/null | sort -k2'
   block "Snapshot images kept by limine-snapper-sync" bash -c 'find $esp -path "*/limine_history/*" -type f -exec sha256sum {} + 2>/dev/null | sort -k2'
