@@ -16,7 +16,6 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Deferred
 
-- A notice from the package when it is removed from a machine that is still set up (the failure table's row on that). The package carries no install script by design, and `tests/package.sh` holds it to that, so the notice needs that rule weighed first.
 - A way to add Microsoft's 2023 KEK certificate with the user's own keys on a machine that lacks it after the Platform Key changed hands [C9 of [upstream-contracts.md](upstream-contracts.md)]. sbctl's append always adds the local certificate again (C4), so it needs a route of its own, and field reports that show the need.
 
 ## Recheck when something changes

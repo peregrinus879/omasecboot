@@ -30,6 +30,8 @@ depends=(
   'limine>=11.0.0'
   'limine-mkinitcpio-hook>=1.38.0'
 )
+# One message before removal from a machine that is still set up; see the file.
+install=omasecboot.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # An in-tree recipe cannot carry the checksum of the archive that contains it,
 # so the omarchy-pkgs release recipe pins the tagged archive checksum instead.

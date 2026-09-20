@@ -58,7 +58,7 @@ package:
 	tar --null -T "$$build/files" -cf "$$build/files.tar"; \
 	tar -C "$$build/$$pkgname-$$pkgver" -xf "$$build/files.tar"; \
 	tar -C "$$build" -czf "$$build/$$pkgname-$$pkgver.tar.gz" "$$pkgname-$$pkgver"; \
-	cp PKGBUILD "$$build/"; \
+	cp PKGBUILD omasecboot.install "$$build/"; \
 	cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
 	printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
@@ -68,12 +68,13 @@ package:
 
 # bash -n parses only its first operand, so every script gets its own call.
 lint:
-	@for script in $(SCRIPTS) PKGBUILD; do bash -n "$$script" || exit 1; done
+	@for script in $(SCRIPTS) PKGBUILD omasecboot.install; do bash -n "$$script" || exit 1; done
 	shellcheck -x $(SCRIPTS)
 	# JSONC is JSON with whole-line comments.
 	grep -v '^[[:space:]]*//' omarchy/omarchy-menu.jsonc | jq -e . >/dev/null
 	# makepkg consumes package metadata and supplies srcdir/pkgdir at execution.
 	shellcheck --shell=bash --exclude=SC2034,SC2154 PKGBUILD
+	shellcheck --shell=bash --exclude=SC2329 omasecboot.install
 
 test: $(TEST_TARGETS)
 

@@ -208,7 +208,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 | sbctl's keys are lost | Boots until the next update | Boots | New keys and another Setup Mode round trip | `status` error: no signing keys, which no command of this tool repairs |
 | An upgrade of Limine or its tools changes behaviour | Possibly unsigned files or stale hashes | Boots | `status`, `sign`, Secure Boot off if needed | Version floors, not pins; the contract suites (Tests) |
 | `setup` or `remove` stops half way, for example when a Limine tool fails | Depends on where it stopped; `status` exit 1 | Same | `remove`, or `setup` | `settings-originals` without `enabled`; `status` names both commands |
-| The package is removed while set up | sbctl and upstream keep signing the UKI and the primary; gaps are no longer repaired or reported | Harmless | Reinstall, or `remove` first | The documented removal order; Omarchy's remove wrapper runs `remove`; `setup` marks sbctl as explicitly installed |
+| The package is removed while set up | sbctl and upstream keep signing the UKI and the primary, but nothing repairs a change that bypasses them: after the next Limine upgrade the installer hook's raw loader [C7] is refused | Harmless | Reinstall, or `remove` first | The package warns before it goes, and never blocks the removal; the documented removal order; Omarchy's remove wrapper runs `remove`; `setup` marks sbctl as explicitly installed |
 | Leftovers of an earlier install (a `/usr/local` copy with hooks under `/etc/pacman.d/hooks` and `/etc/boot/hooks/post.d`) | The old hooks keep running the old tool, or fail the Limine tools once it is gone | Same | The printed removal command | `setup` preflight and `status` |
 | A configuration without UKIs | Entries without hashes are refused | Boots | Enable UKIs | `setup` preflight |
 | A firmware update or CMOS reset restores the factory keys | Limine is refused; Windows boots | Boots | Secure Boot off, `setup` again | `status` error while Secure Boot is on without the local keys; with it off, `status` names the firmware step again |
@@ -224,7 +224,7 @@ Any later finding or feature cites a row here or adds one with its evidence.
 
 ## 9. The package
 
-[CONTRIBUTING.md](../CONTRIBUTING.md) owns the layout of the code. The package also holds the Limine hook, the two unit templates, the menu fragment for Omarchy and its documentation. It carries version floors only, ships no state directory and no tmpfiles declaration, and has no install scriptlet.
+[CONTRIBUTING.md](../CONTRIBUTING.md) owns the layout of the code. The package also holds the Limine hook, the two unit templates, the menu fragment for Omarchy and its documentation. It carries version floors only and ships no state directory and no tmpfiles declaration. Its one install scriptlet prints a warning before the package is removed from a machine that is still set up; it never fails and changes nothing.
 
 ## 10. Tests
 

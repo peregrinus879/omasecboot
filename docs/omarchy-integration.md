@@ -6,7 +6,7 @@ What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. Th
 
 | Piece | Shape |
 | --- | --- |
-| Package recipe | One recipe in omarchy-pkgs for the tagged release, pinning the archive checksum. `arch=any`, no patched upstream packages, no version pins. |
+| Package recipe | One recipe in omarchy-pkgs for the tagged release, pinning the archive checksum and carrying `omasecboot.install`, which only prints a warning before removal from a set-up machine. `arch=any`, no patched upstream packages, no version pins. |
 | Setup command | `omarchy-setup-security-secure-boot`: installs the package, removes leftovers of an earlier install after asking, then runs `sudo omasecboot setup`. Follows the `omarchy-setup-security-fido2` pattern. |
 | Remove command | `omarchy-remove-security-secure-boot`: refuses while Secure Boot is on, runs `sudo omasecboot remove`, then removes the package. |
 | Menu rows | Setup > Security > Secure Boot and Remove > Security > Secure Boot; the remove row's guard is `omarchy-pkg-present omasecboot`. |

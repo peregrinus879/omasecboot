@@ -21,10 +21,22 @@ pkgver=$(sed -n 's/^pkgver=//p' "$pkgbuild")
 [[ $(bash "$ROOT_DIR/bin/omasecboot" version) == "omasecboot ${pkgver}" ]] || fail_test "PKGBUILD and the command disagree on the version"
 grep -Fxq "arch=('any')" "$pkgbuild" || fail_test "an interpreted package must be architecture any"
 grep -Fxq "license=('MIT')" "$pkgbuild" || fail_test "license"
-# No scriptlet, no backup files, no relations: everything outside the
-# package's own files is the work of the tool's commands.
-! grep -Eq '^(install|backup|conflicts|provides|replaces|makedepends|checkdepends|optdepends)=' "$pkgbuild" ||
-  fail_test "PKGBUILD declares a scriptlet or an unexpected relation"
+# No backup files, no relations: everything outside the package's own files
+# is the work of the tool's commands. The one scriptlet only prints, before a
+# removal from a machine that is still set up.
+! grep -Eq '^(backup|conflicts|provides|replaces|makedepends|checkdepends|optdepends)=' "$pkgbuild" ||
+  fail_test "PKGBUILD declares an unexpected relation"
+grep -Fxq 'install=omasecboot.install' "$pkgbuild" || fail_test "the PKGBUILD does not name the scriptlet"
+scriptlet=$ROOT_DIR/omasecboot.install
+{ [[ $(grep -c '^[a-z_]*() {$' "$scriptlet") == 1 ]] && grep -qx 'pre_remove() {' "$scriptlet"; } || fail_test "the scriptlet defines more than pre_remove"
+mkdir -p "$TEST_DIR/state"
+# shellcheck source=omasecboot.install
+notice() { (source <(sed "s|/var/lib/omasecboot|$TEST_DIR/state|" "$scriptlet") && pre_remove 1.0-1); }
+[[ -z $(notice) ]] || fail_test "the scriptlet spoke on a machine that is not set up"
+: >"$TEST_DIR/state/enabled"
+output=$(notice) || fail_test "the scriptlet failed, which would fail the removal"
+[[ $output == *'still set up'*'sudo omasecboot remove'* ]] || fail_test "the notice: ${output}"
+[[ $(find "$TEST_DIR/state" -type f | wc -l) == 1 ]] || fail_test "the scriptlet changed the state directory"
 
 expected_depends=$(sort <<'DEPENDS'
 bash
@@ -102,7 +114,7 @@ payload=$(bsdtar -tf "$package" | grep -v '^\.' | sort)
 pkginfo=$(bsdtar -xOf "$package" .PKGINFO)
 [[ $(sed -n 's/^depend = //p' <<<"$pkginfo" | sort) == "$expected_depends" ]] || fail_test "the built dependencies drifted"
 grep -Fxq 'arch = any' <<<"$pkginfo" || fail_test "built architecture"
-! bsdtar -tf "$package" | grep -Fxq '.INSTALL' || fail_test "the package carries an install scriptlet"
+cmp -s <(bsdtar -xOf "$package" .INSTALL) "$scriptlet" || fail_test "the built package does not carry the scriptlet as it is in the checkout"
 
 # Everything is root's; only the command and the hook are executable.
 while read -r mode owner group path; do

@@ -43,7 +43,7 @@ mkdir -p "$build/$pkgname-$pkgver"
 git -C "$ROOT_DIR" -c safe.directory="$ROOT_DIR" ls-files -z --cached --others --exclude-standard |
   tar -C "$ROOT_DIR" --null -T - -cf - | tar -C "$build/$pkgname-$pkgver" -xf -
 tar -C "$build" -czf "$build/$pkgname-$pkgver.tar.gz" "$pkgname-$pkgver"
-cp "$ROOT_DIR/PKGBUILD" "$build/PKGBUILD"
+cp "$ROOT_DIR/PKGBUILD" "$ROOT_DIR/omasecboot.install" "$build/"
 
 # build_release PKGREL: prints the path of the built package.
 build_release() {
@@ -89,10 +89,13 @@ logged "$build/unrelated.log" "an unrelated transaction failed" pacman -S --noco
 
 logged "$build/upgrade.log" "package upgrade failed" pacman -U --noconfirm "${assume[@]}" "$upgrade"
 
-# Removal leaves the state directory: it would hold the firmware backups.
+# Removal leaves the state directory: it would hold the firmware backups. From
+# a machine that is still set up it says what that means, and goes through.
 install -d "$state"
 : >"$state/keep-me"
+: >"$state/enabled"
 logged "$build/remove.log" "package removal failed" pacman -R --noconfirm "$pkgname"
+grep -q 'OmaSecBoot is still set up on this machine' "$build/remove.log" || fail_test "removal from a set-up machine said nothing"
 [[ -e $state/keep-me ]] || fail_test "removal deleted the state directory's content"
 [[ ! -e /usr/bin/omasecboot && ! -e $hook ]] || fail_test "removal left package files behind"
 printf 'container tests passed\n'

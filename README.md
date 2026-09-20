@@ -137,7 +137,7 @@ Omarchy installed beside another system starts without a fallback loader, and th
 
 ## Removing it
 
-Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecboot`. The state directory and your sbctl keys stay on disk, and so does a fallback loader that `setup` added.
+Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecboot`. In that order: pacman warns when the package goes while the machine is still set up, because nothing would then repair the loader after the next Limine upgrade, and with Secure Boot on the machine would not start. The state directory and your sbctl keys stay on disk, and so does a fallback loader that `setup` added.
 
 ## Help test it
 
