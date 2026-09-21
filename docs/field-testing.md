@@ -177,7 +177,7 @@ sudo bash tests/acceptance-record.sh 5-setup -- omasecboot windows setup
 sudo bash tests/acceptance-record.sh 5-status -- omasecboot status
 ```
 
-Expected: "Windows is in Limine's menu", and `status` exits 0. Stop otherwise. Then reboot, pick "Windows" in Limine's menu, and come back to Omarchy.
+Expected: "Windows is in Limine's menu", and `status` exits 0. Stop otherwise. If `limine.conf` also holds a chainload entry for Windows, as `limine-scan` writes it, and Windows is encrypted, both commands add a note: BitLocker can ask for the recovery key whenever the way of starting Windows changes, so start it through the firmware only, which this entry does. Then reboot, pick "Windows" in Limine's menu, and come back to Omarchy.
 
 ```bash
 systemctl reboot

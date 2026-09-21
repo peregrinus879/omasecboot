@@ -293,6 +293,7 @@ show_status() {
     show_loader_status
     show_files_status
     show_windows_status
+    note_windows_chainloads
     show_integration_status
     attention=$(attention_file)
     [[ ! -e $attention ]] || problem "An earlier pass could not finish: $(<"$attention")"

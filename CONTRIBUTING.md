@@ -28,7 +28,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
   - `checks.sh`: preconditions and prompts.
   - `files.sh`: the EFI files on the ESP, history and fallback classification, signature state, sbctl's file list.
   - `firmware.sh`: the firmware's mode variables, the signature-list reader, the backup, the enrollment plan with its proofs and the per-variable enrollment.
-  - `windows.sh`: the firmware's boot entries, the Windows target read from them, the managed entry in `limine.conf`, the BootNext request, the encryption acknowledgement.
+  - `windows.sh`: the firmware's boot entries, the Windows target read from them, the managed entry in `limine.conf`, the note about a chainload entry beside BitLocker, the BootNext request, the encryption acknowledgement and reminders.
   - `limine.sh`: managed settings and originals, `limine.conf` facts, the loader proof and staged rebuild, the fallback, the watchers, the way back to stock.
   - `sign.sh`: the converge-and-verify pass.
   - `status.sh`: the report.

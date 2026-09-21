@@ -161,7 +161,7 @@ setup_firmware_step() {
       # stop with Secure Boot on.
       firmware_starts_primary ||
         die "The firmware has no active boot entry for the Limine loader, so this machine may start through the fallback path, which the firmware refuses with Secure Boot on. Leave Secure Boot off, run ${BOLD}sudo limine-install${NC}, check with ${BOLD}efibootmgr${NC}, then run ${BOLD}sudo omasecboot setup${NC} again"
-      remind_of_windows_encryption
+      remind_of_windows_encryption on
       act "Restart into the firmware (${BOLD}systemctl reboot --firmware-setup${NC}) and turn Secure Boot on"
     fi
   elif platform_key_is_present; then
@@ -279,7 +279,10 @@ cmd_remove() {
     die "$(settings_originals_file) or $(limine_default_config) is not a plain file that only root can write; nothing was changed"
   # The stock boot files are unsigned, so an unreadable variable is no answer.
   secure_boot=$(read_mode_variable SecureBoot) || die "Could not read the firmware's SecureBoot variable"
-  [[ $secure_boot == 0 ]] || die "Secure Boot is on. Turn it off in the firmware first: the stock boot files are unsigned"
+  if [[ $secure_boot != 0 ]]; then
+    remind_of_windows_encryption off
+    die "Secure Boot is on. Turn it off in the firmware first: the stock boot files are unsigned"
+  fi
   ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
   confirm "the return to stock" "Return the Limine settings and boot files to stock?" || exit 1
 
@@ -353,6 +356,7 @@ cmd_windows_status() {
     *) fail "Could not read the firmware's boot entries" ;;
   esac
   if [[ -e $(windows_flag) ]]; then note "The Windows entry is enabled"; else note "The Windows entry is not enabled"; fi
+  note_windows_chainloads
   (( status < 2 ))
 }
 
@@ -372,6 +376,7 @@ cmd_windows_setup() {
   [[ $(windows_entry_state "$(windows_target_label)") == current ]] ||
     die "The Windows entry did not reach limine.conf. It stays enabled, and the next pass writes it; see ${BOLD}sudo omasecboot status${NC}"
   pass "Windows is in Limine's menu: the entry restarts the machine into $(windows_target_label)"
+  note_windows_chainloads
 }
 
 cmd_windows_remove() {

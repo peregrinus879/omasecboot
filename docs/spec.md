@@ -97,7 +97,9 @@ The Windows entry uses Limine's `efi_boot_entry` protocol, which reboots into th
 - With Secure Boot on, BitLocker seals its key to PCR 7 only when a single db entry, Microsoft's, verified the boot path. The firmware verifies Limine with the user's certificate first, so a chainload rules that binding out.
 - Without that binding BitLocker seals to PCR 0, 2, 4 and 11, and PCR 4 then holds the Limine loader, which is sealed again whenever `limine.conf` changes, by upstream's hook or this tool's watchers (D8). Every re-seal would change what Windows measures.
 
-After the restart the firmware starts Windows as it does from its own boot menu, and by the sources of C8 neither measurement holds anything of Limine's. The decision makes a stable binding possible and promises none (section 3). A chainload entry is upstream's or the user's: Limine starts it under Secure Boot, because a chainload needs no path hash [C1] and `bootmgfw.efi` carries Microsoft's signature, and without BitLocker it does no harm. So the tool neither writes nor removes one, and the two kinds of entry can stand side by side.
+After the restart the firmware starts Windows as it does from its own boot menu, and by the sources of C8 neither measurement holds anything of Limine's. On the recorded machine BitLocker did not tell the firmware's boot menu, the tool's entry and a BootNext request apart, through every re-seal of the loader in between, and asked for its recovery key at each change between them and a chainload entry, in both directions [C10]. The decision makes a stable binding possible and promises none (section 3).
+
+A chainload entry is upstream's or the user's: Limine starts it under Secure Boot, because a chainload needs no path hash [C1] and `bootmgfw.efi` carries Microsoft's signature, and without BitLocker it does no harm. So the tool neither writes nor removes one. Where one stands beside a BitLocker volume, `status`, `windows setup` and `windows status` say that the two ways of starting Windows do not mix, advise the firmware's way, the only one with a record of staying quiet while the loader is sealed again, and print upstream's command that takes the entry out [C2].
 
 ## 3. Threat model, non-goals and claim limits
 
@@ -235,7 +237,7 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 
 Read-only.
 
-- It reports the firmware state and whether the user's keys are enrolled, whether the firmware has an active boot entry for the primary loader, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary loader, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, the hook, the watchers, the restore lock while it stands, and `needs-attention`.
+- It reports the firmware state and whether the user's keys are enrolled, whether the firmware has an active boot entry for the primary loader, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary loader, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, a chainload entry for Windows beside a BitLocker volume (a note, D11), the hook, the watchers, the restore lock while it stands, and `needs-attention`.
 - On a machine that is not set up it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it.
 - On a machine that is set up it ends with one next step, chosen by what repairs the worst problem seen: `sign`, `setup`, or nothing this tool runs; before `setup`, a problem's own line says what to do.
 - Anything that could not be read belongs to the last kind.
@@ -245,7 +247,7 @@ Read-only.
 
 The way back to stock, named as Omarchy names the counterpart of a `setup` [C6]. On a machine that is not set up it says that there is nothing to remove and exits 0, as every command is idempotent, so a wrapper that goes on to remove the package does not stop there.
 
-- It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned, and asks once.
+- It refuses unless `SecureBoot` reads 0, because the stock boot files are unsigned, and asks once. Beside Windows the refusal comes with the reminder of the recovery key (section 7.7).
 - It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption:
   1. It takes the lock and deletes `enabled`, so the hook goes quiet.
   2. It disables the watchers and restores the settings.
@@ -261,6 +263,7 @@ The way back to stock, named as Omarchy names the counterpart of a `setup` [C6].
 - `preflight` looks for a Windows Boot Manager entry and for BitLocker volumes and prints what to do in Windows before Secure Boot changes. A clean result means that none was found, not that there is none.
 - `setup`, on a machine that is set up with one clear target, writes the flag and runs the pass, which writes the entry, using Limine's `efi_boot_entry` protocol, and seals the loader over it. `remove` deletes the flag and runs the pass the same way; on a machine that is not set up it takes the entry out only while the loader carries no checksum. Both refuse during a snapshot restore and report what `limine.conf` holds afterwards.
 - `status` shows the target and the entry's state in words: none, the entry for this target once, an entry for another target or several (stale), this tool's comment in an entry it did not write (misplaced), or a `limine.conf` that could not be read.
+- `setup` and `status` end with the note of D11 where a chainload entry for Windows, any entry with a path that ends in `bootmgfw.efi`, stands beside a BitLocker volume, also without a target in the firmware; where the volumes cannot be listed, the note names the condition. The printed command quotes the entry's name for the shell and carries its position where an earlier entry shares the name [C2]. The main `status` says it on a machine that is set up.
 - `bootnext` asks the firmware for one boot of the target and reads `BootNext` back. Exit 0 means the firmware holds the request, nothing more; a request for a loader that has gone missing falls through to the next boot entry [C7].
 - `available` is the silent, unprivileged guard of the menu row: the flag exists and the firmware still has one clear target.
 
@@ -336,7 +339,8 @@ A finding or a feature cites a row here, or adds one with its evidence.
 | Omarchy replaces `limine.conf` from its template (`omarchy-refresh-limine`, `omarchy-reinstall-configs`) | The Windows entry disappears | Same | `sign` | The `windows-enabled` flag; the pass puts the entry back |
 | The tool's Windows comment stands in an entry that is not as the tool writes it, `limine.conf` is not root's alone, or it changed while the entry was being written | Omarchy boots; the Windows entry may be missing or out of date | Same | Fix what the pass or `status` names, then `sign` | The pass says so and goes on; `status` error; a refused write never touches `limine.conf` |
 | Windows is removed, or a second Windows Boot Manager entry appears, while the entry is enabled | Omarchy boots; the menu entry may point nowhere | Same | `windows remove`, or fix the firmware's entries | The pass goes on quietly; `status` error that names `windows remove`; the menu guard hides the row |
-| BitLocker asks for its recovery key | Windows side only | n/a | Enter the key | Guidance and an acknowledgement before the two steps that cannot be taken back, deleting the PK and writing keys; a reminder before Secure Boot is turned on |
+| A chainload entry for Windows stands beside a BitLocker volume | Windows starts; on the recorded machine BitLocker asked for its recovery key at each change between that entry and the firmware's way [C10], and by C8 a chainload start is asked again after the loader is sealed anew, which has no record | No record | Start Windows through the firmware only and take the chainload entry out with `limine-remove-entry` [C2] | A note in `status`, `windows setup` and `windows status`; the entry is never written or removed (D11) |
+| BitLocker asks for its recovery key | Windows side only | n/a | Enter the key | Guidance and an acknowledgement before the two steps that cannot be taken back, deleting the PK and writing keys; a reminder before Secure Boot is turned on, and where `remove` asks for it to be turned off, the change at which BitLocker asked on the recorded machine [C10] |
 
 ### 7.8 The tool's state, the lock and the package
 

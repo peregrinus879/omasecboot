@@ -310,6 +310,63 @@ request_windows_boot() {
   [[ ${hex:10:2}${hex:8:2} == "${_windows_number,,}" ]]
 }
 
+# --- Chainload entries -----------------------------------------------------------------------
+
+# Entries of limine.conf that start Windows Boot Manager through Limine, as
+# limine-scan writes them (C2): any entry with a path that ends in
+# bootmgfw.efi. Each is printed as limine-remove-entry takes it, its position
+# among the entries of that name, a tab, and the name with its parents first;
+# of several chainloads under one name only the first, because taking it out
+# moves the others up. They are upstream's or the user's, so they are neither
+# written nor removed (D11).
+list_windows_chainloads() {
+  local config
+  config=$(limine_config_path)
+  [[ -f $config ]] || return 1
+  awk '
+    { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line) }
+    line ~ /^\/+[^\/]/ {
+      depth = match(line, /[^\/]/) - 1
+      names[depth] = substr(line, depth + 1)
+      sub(/^\+/, "", names[depth])
+      entry = names[1]
+      for (i = 2; i <= depth; i++) entry = entry "/" names[i]
+      position = ++count[entry]
+      next
+    }
+    depth > 0 && tolower(line) ~ /^(image_)?path:/ {
+      value = tolower(line)
+      sub(/#[0-9a-f]+$/, "", value)
+      if (value !~ /bootmgfw\.efi$/) next
+      if (!(entry in seen)) print position "\t" entry
+      seen[entry] = 1
+    }
+  ' "$config"
+}
+
+# BitLocker measures a start through such an entry differently from a start
+# through the firmware, and on the recorded machine it asked for the recovery
+# key at every change between the two (C10). Only the firmware's way has a
+# record of staying quiet while the loader is sealed again, so the advice
+# points there. Without BitLocker the entry does no harm and nothing is said;
+# where the volumes cannot be listed, the condition is said with it. The name
+# comes from limine.conf and is pasted into a shell, hence the single quotes.
+note_windows_chainloads() {
+  local entries volumes entry position removal lead=''
+  entries=$(list_windows_chainloads) || return 0
+  [[ -n $entries ]] || return 0
+  if volumes=$(list_bitlocker_volumes); then
+    [[ -n $volumes ]] || return 0
+  else
+    lead='If Windows is encrypted, '
+  fi
+  while IFS=$'\t' read -r position entry; do
+    removal="sudo limine-remove-entry '${entry//\'/\'\\\'\'}'"
+    (( position == 1 )) || removal+=" ${position}"
+    note "limine.conf holds a chainload entry for Windows, \"${entry}\". ${lead}BitLocker measures a start through it differently from a start through the firmware (OmaSecBoot's Windows entry, BootNext, the firmware's boot menu) and can ask for the recovery key whenever the way changes. Start Windows through the firmware only; ${BOLD}${removal}${NC} takes that entry out"
+  done <<<"$entries"
+}
+
 # --- Encryption ----------------------------------------------------------------------------
 
 # Volumes that carry a BitLocker signature; Device Encryption on Windows Home
@@ -370,8 +427,14 @@ acknowledge_windows_encryption() {
   confirm "the Secure Boot change" "Is the Windows recovery key at hand, or is there no encrypted Windows on this machine?"
 }
 
-# Turning Secure Boot on changes what Windows measures once more.
+# remind_of_windows_encryption on|off: Secure Boot's state is part of what
+# Windows measures. Turning it off was the change at which BitLocker asked on
+# the recorded machine (C10).
 remind_of_windows_encryption() {
-  [[ $(windows_encryption_state) == absent ]] ||
+  [[ $(windows_encryption_state) != absent ]] || return 0
+  if [[ $1 == on ]]; then
     warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot on; to avoid the prompt, leave its protectors disabled until Windows has started once (${BOLD}omasecboot windows preflight${NC} shows how)"
+  else
+    warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot off: BitLocker can ask for it then (${BOLD}omasecboot windows preflight${NC} shows how to avoid the prompt)"
+  fi
 }

@@ -69,7 +69,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 3. `windows bootnext`; `systemctl reboot`; return.
 4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`.
 5. With Windows encryption on: disable and enable the protectors once in Windows, then start Windows through the menu entry and through BootNext again.
-6. With Windows encryption on, the chainload comparison (spec D11): add a chainload entry with `limine-scan` beside the tool's, start Windows through each, remove the chainload entry with `limine-remove-entry`, and disable and enable the protectors once more.
+6. With Windows encryption on, the chainload comparison (spec D11): add a chainload entry with `limine-scan` beside the tool's; `status` and `windows status` carry the note. Start Windows through it, disable and enable the protectors there, start it again, change `limine.conf` so that the loader is sealed again, and start Windows through it once more. Then the command the note prints, `status`, Windows through the tool's entry, and the protectors disabled and enabled once more.
 
 ### Stage 6: remove
 

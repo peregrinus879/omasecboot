@@ -8,6 +8,7 @@ Versions read: Limine 12.9.0, limine-mkinitcpio-hook 1.38.0 (built from the limi
 
 Source: `limine-bootloader/limine` tag `v12.9.0`, `common/lib/config.c`, `common/lib/uri.c`, `common/protos/chainload.c`, `common/menu.c`; `USAGE.md`. The files cited are the same in `v12.8.0`, which the machine of C10 ran, except `uri.c`, whose mismatch behaviour and text are unchanged.
 
+- `config_get_value` compares a key with `strncasecmp`, so keys have no case: `PATH:` and `path:` are one key.
 - Both Limine executables carry the marker `++CONFIG_B2SUM_SIGNATURE++` followed by 128 hex digits, all zero until `limine enroll-config` writes the BLAKE2b of `limine.conf` there.
 - A non-zero enrolled checksum is checked unconditionally in `init_config`: on a mismatch Limine panics ("CHECKSUM MISMATCH FOR CONFIG FILE") whether firmware Secure Boot is on or off (seen with it off on the machine of C10), and the editor is disabled. An all-zero slot means no check and `secure_boot_active = false`.
 - `secure_boot_active` holds only while the firmware reports Secure Boot and the enrolled checksum matches. It forces `hash_mismatch_panic` to yes and makes a missing path hash fatal, except for `protocol: efi` chainloading, where `chainload()` waives a missing hash. A hash that is present is verified for every protocol. Without `secure_boot_active`, `hash_mismatch_panic: no` turns a mismatch into a warning that waits for a key: "Press Y to continue, press any other key to return to menu" (`uri.c`).
@@ -16,7 +17,7 @@ Source: `limine-bootloader/limine` tag `v12.9.0`, `common/lib/config.c`, `common
 
 ## C2. The Limine tools
 
-Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions`, `usr/bin/limine-install`, `limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install`, `README.md`); limine-snapper-sync 1.31.0 wrappers, README and `SnapshotManager.java`.
+Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions`, `usr/bin/limine-install`, `limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install`, `README.md`, `Main.java`, `EfiScanner.java`, `LimineManager.java`, `Limine.java`); limine-snapper-sync 1.31.0 wrappers, README and `SnapshotManager.java`.
 
 **The hook chain and the lock**
 
@@ -45,9 +46,10 @@ Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry
 - The limine package ships `BOOTIA32.EFI` beside `BOOTX64.EFI`. archinstall's Limine step copies both to `EFI/BOOT` on an x86 machine and registers the one that matches the firmware's bitness (`archinstall/lib/installer.py`), while upstream's tools deploy only the loader of the running machine (`limine_efi_arch` in `limine-common-functions`: `X64` on x86_64). UEFI firmware looks for the removable-media loader of its own machine type (UEFI 2.10, 3.5.1.1), so 64-bit firmware never starts `BOOTIA32.EFI`.
 - Linux compares names on a vfat ESP without case (kernel `Documentation/filesystems/vfat.rst`: `check=n`, the default, is case insensitive), which is how the tool finds a `bootx64.efi` that another system wrote in lower case.
 
-**`limine-scan`**
+**`limine-scan` and `limine-remove-entry`**
 
-- `limine-scan` runs `limine-entry-tool --scan`, which lists the EFI loaders it finds on FAT partitions and writes the one the user picks through the same `addEfi` (`Main.java`, `EfiScanner.java`): a `protocol: efi` chainload entry whose `path:` stands on `boot():`, or on `uuid(<partition>):` for a loader on another partition such as Windows' own ESP, without a hash. Omarchy's manual sends dual-boot users to it (C6).
+- `limine-scan` runs `limine-entry-tool --scan`, which lists the EFI loaders it finds on FAT partitions and writes the one the user picks through the same `addEfi` (`Main.java`, `EfiScanner.java`): a `protocol: efi` chainload entry whose `path:` stands on `boot():`, or on `uuid(<partition>):` for a loader on another partition such as Windows' own ESP, without a hash. The entry stands at the top level under the name the user confirms at a prompt, by default the firmware's label of that loader ("Windows Boot Manager" in C10), and its body is not indented: a `###` line, two `comment:` lines, `protocol: efi` and `path:`. Omarchy's manual sends dual-boot users to it (C6).
+- `limine-remove-entry` is `limine-entry-tool --remove-entry "<entry name/sub-entry name>" [position]`: it removes the first entry of that name, or the one at the given position, counted over the entries of that name in the order of the file, and matches names without their slashes and the `+` of an expanded directory (README, "Remove an entry from the boot menu"; `LimineManager.removeEntry`, `Limine.cleanName`). It runs inside the hook chain, so the loader is sealed over the result.
 
 **UKIs**
 
