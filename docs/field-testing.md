@@ -54,7 +54,7 @@ Nothing of the test is run yet. Settle each line first.
 - It is on AC power, and you have about half an hour for level 1 and an hour for level 2.
 - You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file that `sudo ls -lSh /boot/EFI/Linux` lists as available.
-- The system is up to date and was rebooted since: run `omarchy update`, reboot, and start the test then. Do not update again, and do not run `pacman -Sy`, before "The way back" is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
+- The system is up to date and was rebooted since: run `omarchy update`, restart with `systemctl reboot`, and start the test then. Do not update again, and do not run `pacman -Sy`, before "The way back" is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
 - No earlier install of this tool, copied into place without pacman, is on the machine; its hooks would keep running the old tool, and `setup` refuses beside them. This must print nothing but "No such file":
 
 ```bash
@@ -87,6 +87,8 @@ Run it from `~/omasecboot`, from your own login with `sudo`, never from a root s
 ```text
 sudo bash tests/acceptance-record.sh 1-note -- echo "At boot Limine showed: <the text>"
 ```
+
+Where a step restarts the machine, it gives the command: `systemctl reboot`, or `systemctl reboot --firmware-setup`, which opens the firmware's menus. If the firmware does not take that request, the command says so and does not restart: use `systemctl reboot` and the firmware's setup key.
 
 Record the machine before anything is installed, and take the first snapshot:
 
@@ -127,7 +129,7 @@ kernel=$(pacman -Qqo "/usr/lib/modules/$(uname -r)/vmlinuz")
 echo "$kernel"
 ```
 
-Expected: one package name, such as `linux` or `linux-omarchy`. Stop if the line is empty: the running kernel is not the installed one, so reboot and come back to this step.
+Expected: one package name, such as `linux` or `linux-omarchy`. Stop if the line is empty: the running kernel is not the installed one, so run `systemctl reboot` and come back to this step.
 
 ```bash
 sudo bash tests/acceptance-record.sh 1-kernel -- pacman -S --noconfirm "$kernel"
@@ -188,7 +190,13 @@ sudo bash tests/acceptance-record.sh 5-setup -- omasecboot windows setup
 sudo bash tests/acceptance-record.sh 5-status -- omasecboot status
 ```
 
-Expected: "Windows is in the boot menu", and `status` exits 0. Stop otherwise. Then reboot, pick "Windows" in Limine's menu, and come back to Omarchy. Record what you saw, with the words that do not apply taken out:
+Expected: "Windows is in the boot menu", and `status` exits 0. Stop otherwise. Then reboot, pick "Windows" in Limine's menu, and come back to Omarchy.
+
+```bash
+systemctl reboot
+```
+
+Record what you saw, with the words that do not apply taken out:
 
 ```bash
 cd ~/omasecboot
@@ -196,7 +204,13 @@ sudo bash tests/acceptance-record.sh 5-windows-menu -- echo "Windows from Limine
 sudo bash tests/acceptance-record.sh 5-bootnext -- omasecboot windows bootnext
 ```
 
-Expected: the firmware took the request. Reboot: Windows must start without the menu, and the boot after it must return to Omarchy. Then record, again with the words that do not apply taken out:
+Expected: the firmware took the request. Reboot: Windows must start without the menu, and the boot after it must return to Omarchy.
+
+```bash
+systemctl reboot
+```
+
+Then record, again with the words that do not apply taken out:
 
 ```bash
 cd ~/omasecboot
@@ -296,7 +310,13 @@ sudo bash tests/acceptance-record.sh 3-status-snapshot -- omasecboot status
 
 Expected: all three `status` rows exit 0. Stop otherwise, as "What stop means" says: a reboot with Secure Boot on and a loader that is not proved ends at a firmware refusal.
 
-**7.** Only when the three rows exited 0: reboot, start the snapshot entry you have just taken from Limine's menu, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill. Reboot into the normal entry and record, with the words that do not apply taken out:
+**7.** Only when the three rows exited 0: reboot, in Limine's menu start the entry of the snapshot you have just taken, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill.
+
+```bash
+systemctl reboot
+```
+
+When the snapshot has started, run the same command inside it; after a refusal, hold the power button. Start the normal entry, and record there, with the words that do not apply taken out:
 
 ```bash
 cd ~/omasecboot
@@ -306,7 +326,13 @@ sudo bash tests/acceptance-record.sh 3-status-reboot -- omasecboot status
 
 Expected: both entries start and `status` exits 0.
 
-**8.** Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on it must be refused; the README says why. Note the text, start the normal entry, and record:
+**8.** Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on the firmware must refuse it: Limine shows `PANIC: efi: LoadImage failure` and halts.
+
+```bash
+systemctl reboot
+```
+
+Note the text, hold the power button, start the normal entry, and record:
 
 ```bash
 cd ~/omasecboot
@@ -323,6 +349,10 @@ In this order, whatever level you reached.
 
 **1.** Level 2 only: turn Secure Boot off in the firmware and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
 
+```bash
+systemctl reboot --firmware-setup
+```
+
 **2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove" and exits 1, which is fine.
 
 ```bash
@@ -333,7 +363,13 @@ sudo bash tests/acceptance-record.sh 6-status -- omasecboot status
 
 Expected: `remove` exits 0, or said "Nothing to remove", and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
 
-**3.** Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, start Omarchy, and record.
+**3.** Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, and start Omarchy.
+
+```bash
+systemctl reboot --firmware-setup
+```
+
+After the reboot:
 
 ```bash
 cd ~/omasecboot
