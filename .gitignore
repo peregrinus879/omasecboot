@@ -1,2 +1,6 @@
 /acceptance-records/
 /*.pkg.tar.zst
+# What a bare makepkg leaves in the checkout.
+/src/
+/pkg/
+/omasecboot-*.tar.gz
