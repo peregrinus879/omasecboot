@@ -14,7 +14,7 @@ body:
     attributes:
       label: Machine
       description: Manufacturer and model, as sold.
-      placeholder: "Manufacturer and model, for example: Framework Laptop 13 (AMD)"
+      placeholder: "Manufacturer and model, for example: ASUS Vivobook TP3402VA"
     validations:
       required: true
   - type: input

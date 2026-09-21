@@ -22,9 +22,9 @@ OmaSecBoot fills those gaps for this exact stack and leaves everything else to t
 
 ## How it works
 
-- sbctl signs each new kernel image while it is built, and Limine's own hook seals the loader: it writes a checksum of `limine.conf` into the Limine executable, so nobody can change your boot entries from outside the running system. OmaSecBoot turns those two upstream features on, proves after every change that they really happened, and repairs the loader when they did not.
-- It integrates in two places only. A small Limine hook runs at the end of every Limine operation (kernel updates, Limine upgrades, snapshots, restores), and a systemd path unit re-seals the loader when `limine.conf` is edited or the loader itself is replaced, which the pacman hook that Omarchy's installer leaves does after every Limine upgrade. It never blocks an update. On a machine where `setup` never ran, the hook exits on its first line.
-- It keeps a few small files under `/var/lib/omasecboot` and works out everything else from what it observes, so any interrupted step is finished by running the same command again. It rebuilds the loader from the raw Limine executable that upstream deployed and keeps beside it, so never from a newer one that upstream is holding back.
+- sbctl signs each new kernel image while it is built, and Limine's own hook seals the loader: it writes a checksum of `limine.conf` into the Limine executable, so a `limine.conf` that was changed from outside the running system stops the loader instead of booting. OmaSecBoot turns those two upstream features on, proves after every change that they really happened, and repairs the loader when they did not.
+- It integrates in two places only. A small Limine hook runs at the end of every Limine operation (kernel updates, Limine upgrades, snapshots, restores). Two instances of one systemd path unit re-seal the loader when `limine.conf` is edited or the loader itself is replaced; the pacman hook that Omarchy's installer leaves replaces it after every Limine upgrade. It never blocks an update. On a machine where `setup` never ran, the hook exits on its first line.
+- It keeps a few small files under `/var/lib/omasecboot` and works out everything else from what it observes, so any interrupted step is finished by running the same command again. It rebuilds the loader from the raw Limine executable that upstream deployed and keeps beside the loader, so never from a newer one that upstream is holding back.
 
 The design, every decision behind it and the failure table are in [docs/spec.md](docs/spec.md). The upstream behaviour it relies on, with sources, is in [docs/upstream-contracts.md](docs/upstream-contracts.md).
 
@@ -35,11 +35,13 @@ Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images and th
 ## Install
 
 ```bash
+git clone --branch v0.1.0 https://github.com/peregrinus879/omasecboot
+cd omasecboot
 make package
-sudo pacman -U omasecboot-*-any.pkg.tar.zst
+sudo pacman -U omasecboot-0.1.0-1-any.pkg.tar.zst
 ```
 
-`make package` needs `base-devel` and git and builds from the files of the checkout that git does not ignore: `main` as cloned, the release after `git checkout v0.1.0`. `make install` only stages a package and refuses the live system.
+`make package` needs `base-devel` and `git` and builds from the files of the checkout that git does not ignore. `make install` only stages a package and refuses the live system.
 
 ## Commands
 
@@ -91,7 +93,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 
 `sudo omasecboot windows setup` adds a Windows entry to Limine's menu. It uses Limine's `efi_boot_entry` protocol, which restarts the machine into the firmware's own "Windows Boot Manager" entry instead of chainloading it, so Windows starts the way it does when you pick it in the firmware. The target is read from the firmware's boot entries every time: exactly one active Windows Boot Manager entry with a name no other entry shares, or the command refuses. `limine.conf` is only ever changed together with the loader's seal over it, or while the loader carries no seal at all, and the tool only ever deletes an entry that holds nothing but what it wrote. The tool never creates or renames firmware entries and never mounts or reads a Windows partition. When Omarchy replaces `limine.conf` from its template, the next `sign` pass puts the entry back.
 
-`sudo omasecboot windows bootnext` does the same without the menu. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into your own Omarchy menu extensions to use it.
+`sudo omasecboot windows bootnext` asks the firmware to start Windows at the next boot, once, without the menu; it does not restart the machine. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into your own Omarchy menu extensions to use it.
 
 ## What it never touches
 
@@ -105,7 +107,7 @@ A sealed Limine loader refuses to start when `limine.conf` no longer matches its
 
 1. Turn Secure Boot off in the firmware.
 2. In the firmware's boot menu pick the fallback loader (`EFI/BOOT/BOOTX64.EFI`). It is not sealed and boots normally.
-3. Run `sudo omasecboot sign`, then turn Secure Boot back on.
+3. If you did not change `limine.conf` yourself, read it first: `sign` seals the loader over whatever it holds. Then run `sudo omasecboot sign` and turn Secure Boot back on.
 
 Omarchy installed beside another system starts without a fallback loader, and then step 2 needs rescue media. `setup` offers to add one through `limine-install --fallback`, only while nothing stands at that path, and warns while there is none or while another system's loader stands there. If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot off, then run `sudo omasecboot sign`.
 
@@ -130,6 +132,7 @@ Omarchy installed beside another system starts without a fallback loader, and th
 
 ## Limits
 
+- Signing and sealing address changes made to the boot files while the system is off, as far as upstream's design allows. The raw loader that every Limine operation seals and signs comes from a backup on the ESP that nothing authenticates, and OmaSecBoot rebuilds from the same file: it adds no exposure and removes none. Root, and physical access with the firmware's credentials, are trusted ([docs/spec.md](docs/spec.md), section 3).
 - Your keys being enrolled does not mean Secure Boot is on; `status` reports both.
 - After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK entries stay, so the db and dbx updates that Microsoft signs can still be applied, as long as KEK holds Microsoft's 2023 certificate: the 2011 one expired in June 2026. `setup` warns before you delete the Platform Key when it is missing, because the manufacturer's updates are the easy way to get it, and `status` names any of Microsoft's 2023 certificates that KEK or db lack.
 - The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.
@@ -144,7 +147,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 
 ## Help test it
 
-Boot behaviour is proven only on the machines recorded, so every further machine counts. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
+Boot behaviour is proven only on the one machine recorded, so every further machine counts. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
 
 ## Development
 

@@ -5,8 +5,8 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 ## Open work
 
 - The Omarchy side in [omarchy-integration.md](omarchy-integration.md), agreed with the maintainers, including the request about the installer's `99-omarchy-limine.hook`. It follows a release and does not gate one.
-- Leftover detection covers installs of an earlier version that were copied into place without pacman. Drop it one release after the first: `leftover_candidates` and its report in `lib/status.sh`, the refusal in `setup`, the failure-table row and step 1 in [spec.md](spec.md), the README's troubleshooting row, the check in [field-testing.md](field-testing.md), the setup command's duty in omarchy-integration.md and the recorder's block in `tests/acceptance-record.sh`.
-- `status` words its note on a missing 2023 db certificate in the plural ("Microsoft delivers them") when one certificate is missing. Reword it in the next release that changes code; the release checklist then asks for the hardware rows again.
+- Leftover detection covers installs from before the first release, which were copied into place without pacman. Drop it one release after the first: `leftover_candidates` and its report in `lib/status.sh`, the refusal in `setup`, the failure-table row and step 1 in [spec.md](spec.md), the README's troubleshooting row, the check in [field-testing.md](field-testing.md), the setup command's duty in omarchy-integration.md and the recorder's block in `tests/acceptance-record.sh`.
+- For the next release that changes the tool or its recipe, which asks for the hardware rows again: `status` words its note on a missing 2023 db certificate in the plural ("Microsoft delivers them") when one certificate is missing; the recipe should pass `PREFIX=/usr` to `make install`, set `options=('docs' '!debug')` so that a builder without `docs` still ships `omarchy-menu.jsonc`, and keep `pkgdesc` within Arch's 80 characters.
 - Upstream's `89-warn-missing-file-hashes` warns during a snapshot restore that root starts on a set-up Omarchy machine, because `limine-snapper-restore` exports `/etc/default/limine` to the hooks but not the drop-in that holds `ENABLE_UKI=yes` (C2). Report it upstream: the hook is limine-entry-tool's, the restore command limine-snapper-sync's. The README's troubleshooting row covers it until then.
 
 ## Evidence owed
@@ -18,7 +18,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Deferred
 
-- A way to add Microsoft's 2023 KEK certificate with the user's own keys on a machine that lacks it after the Platform Key changed hands [C9 of [upstream-contracts.md](upstream-contracts.md)]. sbctl's append always adds the local certificate again (C4), so it needs a route of its own, and field reports that show the need.
+- A way to add Microsoft's 2023 KEK certificate with the user's own keys on a machine that lacks it after the Platform Key changed hands (C9 of [upstream-contracts.md](upstream-contracts.md)). sbctl's append always adds the local certificate again (C4), so it needs a route of its own, and field reports that show the need.
 
 ## Recheck when something changes
 

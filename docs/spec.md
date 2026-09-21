@@ -12,7 +12,7 @@ What it promises:
 - It never blocks pacman and never fails a Limine operation; its budget inside a kernel update is two seconds per installed kernel (section 7).
 - It delegates to sbctl and the stock Limine tools. It patches no package and pins no version.
 - `status` states the limits honestly, and the tool can undo itself: `remove` returns the boot files and settings to stock, and the firmware's own key menu restores the firmware's keys.
-- It is one small package. Omarchy's side is two thin wrappers, their menu rows and an update step ([omarchy-integration.md](omarchy-integration.md)).
+- It is one small package. Omarchy's side is a package recipe, two thin wrappers with their menu rows, an update step and a manual page ([omarchy-integration.md](omarchy-integration.md)).
 
 ## 2. Decisions
 
@@ -49,7 +49,7 @@ The pass signs every `.efi` file on the ESP that arrived unsigned, not only Omar
 
 ## 3. Non-goals and claim limits
 
-- No transaction journal, state machine, recovery chain, ownership proof, version pin or patched upstream package. An interrupted operation is finished by running the same command again.
+- No transaction journal, state machine, version pin or patched upstream package. An interrupted operation is finished by running the same command again.
 - No pacman hook of any kind, and no write to sbctl's file list beyond removing rows that would cause damage.
 - No crash-atomic publication of several files. A single file is replaced through a staging file in the same directory, a sync and a rename; FAT rename is not claimed to be atomic.
 - No dbx writer, no restoration of factory keys, no `sbctl reset`, no access to NTFS, no enforcement of module signatures.
