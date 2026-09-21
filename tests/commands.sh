@@ -92,6 +92,12 @@ unmounted_esp_and_unsafe_files_stop_the_commands() {
   run_cli remove && fail_test "remove ran without the ESP"
   [[ -e $(enabled_marker) ]] || fail_test "remove without the ESP changed state"
   rm "$FIX/run/esp-unmounted"
+  # remove hands the ESP to upstream's install, which copies in place (C2).
+  : >"$FIX/run/esp-is-full" && : >"$FIX/run/calls"
+  run_cli remove && fail_test "remove ran on a full ESP"
+  [[ $(<"$FIX/run/output") == *'Less than 2 MiB free'* && -e $(enabled_marker) ]] || fail_test "remove on a full ESP: $(<"$FIX/run/output")"
+  ! grep -q '^limine-install' "$FIX/run/calls" || fail_test "upstream's install ran on a full ESP"
+  rm "$FIX/run/esp-is-full"
   chmod 666 "$(settings_originals_file)"
   run_cli remove && fail_test "remove trusted originals anybody can write"
   [[ -e $(enabled_marker) ]] || fail_test "remove with unsafe originals changed state"
@@ -164,6 +170,16 @@ remove_returns_to_stock() {
   cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not the raw executable"
   [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) && $(enabled_watchers) == 0 ]] || fail_test "state left behind"
   [[ -e $FIX/sbctl/keys ]] || fail_test "remove deleted the keys"
+}
+
+# Watchers that systemd would not disable are said, and remove still returns
+# the boot files to stock: a watcher without `enabled` finds nothing to do.
+failed_disable_is_said() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/systemctl-fails"
+  run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Could not disable the watchers'*'back to stock'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not the raw executable"
 }
 
 # A busy lock must leave the hook and the watchers at work on the sealed loader.
@@ -351,6 +367,7 @@ run_case earlier-values-are-the-users earlier_values_are_the_users
 run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
 run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
+run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept
 run_case remove-can-be-run-again remove_can_be_run_again

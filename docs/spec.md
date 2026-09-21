@@ -30,7 +30,7 @@ A machine that Omarchy installed beside another system starts without a fallback
 
 The seal holds two files together, and either can change where no Limine hook runs: `limine.conf` under an editor, which stops Limine from booting [C1], and the primary loader under a plain copy, which the pacman hook that Omarchy's installer leaves makes after every Limine upgrade [C7] and which the firmware refuses once Secure Boot is on. One path unit template, enabled by the pass for each of the two files and disabled by `remove`, starts `sign --seal-only` (section 7); nothing is generated and nothing stays resident. That pass:
 
-- waits for a running pacman, five minutes at most, so it judges what the transaction's last hook left behind; a lock file without a pacman process is a crashed pacman's and is not waited for;
+- waits for a running pacman, five minutes at most, so it judges what the transaction's last hook left behind; a lock file without a pacman process is a crashed pacman's and is not waited for. The lock is a plain file with no owner to ask, so a package front end that runs no process named pacman looks the same and is not waited for either; the result is still right, because every later change of the loader or of `limine.conf` starts the pass again;
 - rebuilds the loader only when the proof fails, and repeats, three rounds at most, until `limine.conf` held still across a round, because systemd merges changes that arrive while the service runs [C5]; the service's start rate limit is off, so a burst of saves cannot disable a watcher;
 - ignores the stop signal of a shutdown, which `KillMode=mixed` sends to it alone, because a loader left raw does not boot.
 

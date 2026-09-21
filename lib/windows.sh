@@ -238,7 +238,11 @@ write_windows_entry() {
     warn "${config} is not a plain file that only root can write"
     return 1
   }
-  esp_has_room || return 1
+  # A warning, as every refusal here: the pass goes on without the entry.
+  esp_room_is_enough || {
+    warn "Less than 2 MiB free on the ESP, so the Windows entry in ${config} stays as it is"
+    return 1
+  }
   mode=$(stat -Lc '%a' "$config") || return 1
   before=$(config_checksum) || return 1
   content=$(scan_windows_entries without && printf x) || return 1

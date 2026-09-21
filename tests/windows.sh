@@ -187,6 +187,12 @@ unsafe_writes_are_refused() {
     free_bytes() { printf '4096\n'; }
     ! write_windows_entry 'Windows Boot Manager' 2>/dev/null
   ) || fail_test "limine.conf was rewritten on a full ESP"
+  # The pass goes on without the entry, so this is a warning: a failure line
+  # above a pass that ends well would say two things at once.
+  (
+    free_bytes() { printf '4096\n'; }
+    [[ $(write_windows_entry 'Windows Boot Manager' 2>&1) == '  ! '*'Windows entry'*'stays as it is'* ]]
+  ) || fail_test "a full ESP was not a warning about the entry"
   (
     scan_windows_entries() {
       cat "$FIX/esp/limine.conf"

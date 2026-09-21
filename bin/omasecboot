@@ -272,7 +272,7 @@ cmd_remove() {
     ! is_set_up || die "OmaSecBoot is set up, but $(settings_originals_file) is gone, and with it what the settings were before. Run ${BOLD}sudo omasecboot setup${NC}, which records them as they are now, then remove"
     die "Nothing to remove: OmaSecBoot is not set up"
   fi
-  check_uefi && check_esp && check_tools || exit 1
+  check_uefi && check_esp && check_tools && esp_has_room || exit 1
   # Both are read and one is rewritten further down, after the hook and the
   # watchers have been stopped: a file somebody else can write stops it here.
   { is_safe_file "$(settings_originals_file)" && is_safe_file "$(limine_default_config)"; } ||

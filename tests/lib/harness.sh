@@ -277,6 +277,7 @@ fixture_overrides() {
   }
   esp_path() { printf '%s/esp\n' "$FIX"; }
   esp_is_mounted_vfat() { [[ ! -e $FIX/run/esp-unmounted ]]; }
+  [[ ! -e $FIX/run/esp-is-full ]] || free_bytes() { printf '4096\n'; }
   package_loader_path() { printf '%s/share/BOOTX64.EFI\n' "$FIX"; }
   limine_hook_path() { printf '%s/bin/limine-hook\n' "$FIX"; }
   # The firmware's entries cannot be read at the moment the pass looks: the
@@ -531,6 +532,7 @@ EOF
   cat >"$FIX/bin/systemctl" <<'EOF'
 #!/bin/bash
 printf '%s\n' "systemctl $*" >>"$FIX/run/calls"
+[[ ! -e $FIX/run/systemctl-fails ]] || exit 1
 status=0
 for unit in "$@"; do
   [[ $unit == *.path ]] || continue

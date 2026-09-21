@@ -243,12 +243,15 @@ free_bytes() { df --output=avail -B1 -- "$1" | tail -n 1; }
 # written to a nearly full ESP. A Limine executable is well under a megabyte
 # and a signature a few kilobytes.
 esp_has_room() {
-  local available
-  available=$(free_bytes "$(esp_path)") || return 1
-  (( available > 2 * 1024 * 1024 )) || {
+  esp_room_is_enough || {
     fail "Less than 2 MiB free on the ESP; free some space first"
     return 1
   }
+}
+
+esp_room_is_enough() {
+  local available
+  available=$(free_bytes "$(esp_path)") && (( available > 2 * 1024 * 1024 ))
 }
 
 # --- The boot lock ---------------------------------------------------------------

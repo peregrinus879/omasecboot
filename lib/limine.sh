@@ -350,8 +350,9 @@ enable_watch() {
 disable_watch() {
   local units
   units=$(watch_units) || return 1
+  # An instance whose unit file is gone is still disabled without an error (C5).
   # shellcheck disable=SC2086 # As above.
-  systemctl disable --now --quiet $units 2>/dev/null || true
+  systemctl disable --now --quiet $units
 }
 
 watch_is_active() {
