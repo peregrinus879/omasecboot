@@ -2,7 +2,7 @@
 
 What changed for someone who runs the tool. Git history holds the rest.
 
-## 0.1.0, not yet released
+## 0.1.0, 2026-09-21
 
 The first release.
 
@@ -14,4 +14,4 @@ The first release.
 - pacman warns when the package is removed from a machine that is still set up; it never blocks the removal.
 - Snapshot images and the fallback loader are never signed or sealed, sbctl's file list is never added to, the hook never fails a Limine tool, and nothing blocks pacman.
 - `tests/acceptance-record.sh` records a hardware run, and `tests/acceptance-share.sh` makes the copies that are fit for a public issue.
-- Hardware record: ASUS Vivobook TP3402VA, AMI BIOS 307, Omarchy 4.0.4, every stage of `docs/release-checklist.md`.
+- Hardware record: ASUS Vivobook TP3402VA, AMI BIOS 307, Omarchy 4.0.4, every stage of `docs/release-checklist.md` with this release's code.

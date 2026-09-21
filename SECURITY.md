@@ -21,4 +21,4 @@ Defects in sbctl, Limine, the Limine tools, Omarchy or a firmware belong to thos
 
 ## Supported versions
 
-The latest release and `main`. Before the first release, `main` alone.
+The latest release and `main`.
