@@ -28,7 +28,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 
 ### Stage 0: baseline
 
-1. Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`.
+1. Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`. The clock is right and synchronised (`timedatectl`), here and before every snapshot of the run: a snapshot taken while the clock runs ahead, as after a Windows session that wrote local time to the hardware clock, keeps later snapshots out of Limine's menu (C2 of [upstream-contracts.md](upstream-contracts.md)).
 2. Record the state before the package is installed, take a snapshot, install the package.
 3. `status` reports "not set up".
 
@@ -51,14 +51,14 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 
 1. Reinstall the kernel; `status`.
 2. Reinstall `limine`: Omarchy's installer hook puts the raw loader back, and the loader's watcher must have rebuilt it a few seconds after pacman ended; `status`.
-3. Create a snapshot; `status`; `systemctl reboot` and start the snapshot's entry, then the normal entry, which starts the reinstalled kernel.
+3. Create a snapshot and see its entry in `limine.conf`; `status`; `systemctl reboot` and start the snapshot's entry, then the normal entry, which starts the reinstalled kernel.
 4. Start an entry that predates enrollment and record what Limine and the firmware show.
 5. `omarchy refresh limine`, `status`.
 6. An interrupted `sign`: stop the watchers, add a comment line to `limine.conf` so the pass has a loader to rebuild, run `sudo timeout -s TERM 0.5 omasecboot sign`, with a shorter time until `timeout` exits 124, then `sign`, `status`, `systemctl reboot`, `status`.
 
 ### Stage 4: restore
 
-1. Start the entry of a snapshot taken after setup and run `limine-snapper-restore` from inside it, under the recorder. The restore command offers that snapshot itself; `snapper list` fails inside a booted snapshot (C10 of [upstream-contracts.md](upstream-contracts.md)). The records survive because `/home` is a subvolume of its own.
+1. Start the entry of a snapshot taken after setup and run `limine-snapper-restore` from inside it, under the recorder. The restore command offers that snapshot itself; `snapper list` fails inside a booted snapshot (C10). The records survive because `/home` is a subvolume of its own.
 2. Answer no to its reboot offer, so the state after is written; `systemctl reboot`.
 3. `sign`; `status`.
 

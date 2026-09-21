@@ -16,7 +16,7 @@ Source: `limine-bootloader/limine` tag `v12.9.0`, `common/lib/config.c`, `common
 
 ## C2. The Limine tools
 
-Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions`, `usr/bin/limine-install`, `limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install`, `README.md`); limine-snapper-sync 1.31.0 wrappers and README.
+Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry-tool/usr/lib/limine/limine-common-functions`, `usr/bin/limine-install`, `limine-mkinitcpio-hook/usr/share/libalpm/scripts/limine-mkinitcpio-install`, `README.md`); limine-snapper-sync 1.31.0 wrappers, README and `SnapshotManager.java`.
 
 **The hook chain and the lock**
 
@@ -57,7 +57,7 @@ Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry
 **limine-snapper-sync**
 
 - limine-snapper-sync copies the current UKI into `<ESP>/<machine-id>/limine_history/` with the content hash in the filename (`.efi_` followed by `sha1`, `sha256`, `b3`, `blake3`, `xxh` or `xxhash`, an underscore and the hash; that suffix is not a path hash), stores each entry's path hash in `snapshots.json`, reuses it on every sync and has no verification switch. Signing a history file in place therefore leaves its entry stale for good; a snapshot taken after signing copies an already-signed UKI and stays consistent.
-- `limine-snapper-watcher`, the process of `limine-snapper-sync.service`, follows creations and deletions under `/.snapshots` and syncs after each, so deleting a snapshot retires its entry. A backup of `snapshots.json` lives on the root filesystem at `/var/lib/limine/snapshots.json`, so a restore rolls it back. sbctl's signatures are not reproducible, so a UKI that was rebuilt and signed again never deduplicates against its predecessor (README, "Why does my boot partition usage grow too fast?").
+- `limine-snapper-watcher`, the process of `limine-snapper-sync.service`, follows creations and deletions under `/.snapshots` and syncs after each, so deleting a snapshot retires its entry. A sync adds an entry for Snapper's newest snapshot only when that snapshot's UTC time is later than the `lastUTCTime` its `snapshots.json` holds, or equal with a higher number (`SnapshotManager.sync`, the same at 1.31.0 and 1.32.0): after a snapshot taken while the clock ran ahead, no new snapshot gets an entry until real time has passed that stamp (C10). A backup of `snapshots.json` lives on the root filesystem at `/var/lib/limine/snapshots.json`, so a restore rolls it back. sbctl's signatures are not reproducible, so a UKI that was rebuilt and signed again never deduplicates against its predecessor (README, "Why does my boot partition usage grow too fast?").
 - A full restore (`limine-snapper-sync --restore`, which `limine-snapper-restore` runs without the boot lock) creates `/run/lock/limine-snapper-restore.lock` when it starts and removes it in its exit trap, so the lock is gone when the command returns; it runs the post-hooks while the lock stands, then offers a reboot (`/usr/bin/limine-snapper-sync`, 1.31.0).
 
 ## C3. Configuration layers
@@ -140,7 +140,7 @@ Hardware: the entry, the BootNext request and upstream's rewrites are recorded o
 
 Source: Microsoft Learn, "BitLocker drive encryption in Windows 11 for OEMs" (updated 2025-08-12), "Configure BitLocker" (updated 2025-07-29) and "manage-bde protectors" (updated 2026-02-16); the TCG PC Client Platform Firmware Profile; util-linux's libblkid.
 
-Hardware: a BitLocker volume has no record.
+Hardware: C10 holds what BitLocker did on one machine, Windows Home with device encryption.
 
 - libblkid names a BitLocker volume's type `BitLocker`, which Device Encryption on Windows Home uses too; `lsblk --raw --noheadings --output PATH,FSTYPE` prints it from the udev database and needs no privileges.
 - BitLocker's TPM binding, in Microsoft's words: "When Secure Boot State (PCR7) support is available, the default platform validation profile secures the encryption key using Secure Boot State (PCR 7) and the BitLocker access control (PCR 11)"; otherwise the UEFI default is PCR 0, 2, 4 and 11, where PCR 4 is the "Boot Manager".
@@ -166,7 +166,7 @@ Source: Microsoft's support article "Windows Secure Boot certificate expiration 
 
 ## C10. Hardware record
 
-ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4, through stages 0 to 6 of [release-checklist.md](release-checklist.md) with commit `d567e1f` on 2026-09-21, Windows beside it and its encryption off.
+ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4, through stages 0 to 6 of [release-checklist.md](release-checklist.md) with commit `d567e1f` on 2026-09-21, Windows beside it and its encryption off. A second run the same day with commit `ccc6e8a`, with Windows Home's device encryption on and nothing suspended, went through stages 0 to 7 except the rows that need a snapshot entry (checklist 3.3, 3.4, stage 4 and part of 5.4); what it added is marked with its commit.
 
 - Boot files and the tools:
   - A stock install carries path hashes of unsigned UKIs; after setup the OS entry was regenerated without a hash, while two snapshot entries older than enrollment stayed stale once their history files had been signed in place, as a trial, and limine-snapper-sync did not rewrite them (seen with commit `3b43368`).
@@ -179,12 +179,20 @@ ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4, through stages 0 to 6 
   - The firmware exposes neither AuditMode nor DeployedMode (pre-UEFI 2.5 model). Its key menu appears only while Secure Boot is set to enabled. Deleting only the PK keeps KEK, db and dbx and enters Setup Mode.
   - Per-variable writes of db, KEK and PK over the immutable variables succeeded with `--ignore-immutable` and read back exactly. After the PK write, `SetupMode` kept reading 1 until the next boot, although the variables already held the new keys; enrollment must be judged by the variables.
   - Deleting only the PK kept all eight KEK and db entries; the append wrote db, KEK and PK, each read back, and the machine started with Secure Boot on.
+  - The key menu's "clear every key" emptied PK, KEK, db and dbx. `setup` said so, found every KEK and db entry of the backup in what sbctl can put back, warned that dbx differed, asked, and wrote db, KEK and PK, each read back; the machine and Windows started with Secure Boot on (seen with commit `ccc6e8a`).
   - KEK held Microsoft Corporation KEK 2K CA 2023, and db held Windows UEFI CA 2023 and Microsoft UEFI CA 2023 but not Microsoft Option ROM UEFI CA 2023 (C9): a firmware can carry a part of the 2023 set.
 - Snapshots:
   - An entry that predates enrollment does not start with Secure Boot on: the firmware refuses the unsigned image, and Limine reports `PANIC: efi: LoadImage failure (0x800000000000000f)`, which is the firmware's `EFI_ACCESS_DENIED` (UEFI 2.10, Appendix D), and halts, so the machine needs a power cycle. The entry of a snapshot taken after `setup` started.
   - The restore of stage 4 ran from inside that entry; `sign` and `status` passed after it.
+  - Three snapshots got no menu entry although Snapper made them and the watcher synced: `snapshots.json` held a `lastUTCTime` four hours in the future, from a snapshot taken while the clock ran ahead by the machine's UTC offset, as it does when Windows has written local time to the hardware clock (C2; seen with commit `ccc6e8a`).
   - Inside the booted snapshot `snapper list` failed ("subvolume is not a btrfs subvolume"), and `limine-snapper-restore` offered the snapshot it ran in, with a list on request. During the restore upstream printed its verification-hash warning (C2). The restored system started with Secure Boot on, `ENABLE_VERIFICATION=no` still in place.
 - Windows:
-  - Limine's `efi_boot_entry` entry and a BootNext request each started Windows Boot Manager with Secure Boot on and the user's keys enrolled, and the boot after BootNext returned to Limine. The run had no BitLocker volume: a BitLocker prompt has no record.
+  - Limine's `efi_boot_entry` entry and a BootNext request each started Windows Boot Manager with Secure Boot on and the user's keys enrolled, and the boot after BootNext returned to Limine.
+- BitLocker (device encryption on Windows Home, the recovery key at hand, nothing suspended; seen with commit `ccc6e8a`):
+  - It asked for the recovery key when Secure Boot went from on to off while the protector was bound to PCR 7 and 11, twice; after the first, Windows also asked for a new sign-in PIN. Afterwards the profile read 0, 2, 4, 11.
+  - With Secure Boot off and that profile it asked at none of the key changes: factory keys restored, the PK deleted, the user's keys written, every key cleared and rebuilt. It did not ask when Secure Boot went on with the user's keys, at the first or the second start, and the profile stayed 0, 2, 4, 11.
+  - After `manage-bde -protectors -disable C:` and `-enable C:` the profile read 7, 11 with the user's keys in the firmware, and Windows stayed quiet. Windows Home accepted the command with and without `-RebootCount 0` (seen on screen, outside the records).
+  - It did not tell the firmware's boot menu, the tool's `efi_boot_entry` entry and a BootNext request apart, under either profile, while `limine.conf` was rewritten and the loader sealed again several times in between.
+  - With Secure Boot on and the profile 7, 11, the first start through a `limine-scan` chainload entry asked for the key and a new PIN, the second did not, and the next start through the tool's entry asked again. Whether a chainload start survives a re-seal of the loader has no record.
 - The package:
   - pacman printed the package's removal warning while the machine was set up and removed the package. After a reinstall the two watchers were still active and `status` passed; after `remove`, a second removal printed nothing.
