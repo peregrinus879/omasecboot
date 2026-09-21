@@ -78,10 +78,13 @@ logged "$build/integrity.log" "installed files differ from the package" pacman -
 [[ -f /usr/lib/systemd/system/omasecboot-watch@.path ]] || fail_test "watcher template missing"
 [[ -z $(find /etc/systemd/system -name 'omasecboot-watch@*') ]] || fail_test "installation enabled a watcher"
 
-# Dormant: the hook exits 0 at once, and there is nothing to sign or remove.
+# Dormant: the hook exits 0 at once, sign refuses, and remove says that it has
+# nothing to take back and leaves no state.
 "$hook" || fail_test "the dormant hook failed"
 ! omasecboot sign >/dev/null 2>&1 || fail_test "sign ran on a machine that was never set up"
-! omasecboot remove >/dev/null 2>&1 || fail_test "remove ran on a machine that was never set up"
+output=$(omasecboot remove 2>&1) || fail_test "remove failed on a machine that was never set up: ${output}"
+[[ $output == *'Nothing to remove'* ]] || fail_test "remove did not say that there is nothing to remove: ${output}"
+[[ ! -e $state ]] || fail_test "remove wrote state on a machine that was never set up"
 
 # Another package's transaction never involves this one.
 logged "$build/unrelated.log" "an unrelated transaction failed" pacman -S --noconfirm --needed which
