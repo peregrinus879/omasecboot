@@ -13,22 +13,88 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 
 Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); a record counts only when its checkout is clean and the installed files equal it, both of which it states. The recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and review the record before going on; never reboot with Secure Boot on while `omasecboot status` fails.
 
-| Stage | Rows | STOP when |
+| Stage | Proves | STOP when |
 | --- | --- | --- |
-| 0 Baseline | Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`, no earlier install. `status` reports "not set up". | Setup Mode is on, the factory PK is missing, or leftovers are reported |
-| 1 Boot files, no firmware write | `setup`, which offers the fallback loader on a machine without one: accept it; the rebuilt UKI was already signed before `sign` touched it; the hook's own time right after the kernel reinstall, `time /etc/boot/hooks/post.d/90-omasecboot-sign` (budget: two seconds per installed kernel); stale-checksum drill with Secure Boot off and rescue media at hand (stop the watchers, edit `limine.conf`, confirm the primary refuses, confirm the firmware boot menu offers the fallback, boot it, `sign`); the same edit with the watchers running; reboot | `setup` refuses, a transcript ends at a prompt, the timing budget is exceeded, or the fallback cannot be booted |
-| 2 Enrollment | Delete only the PK in firmware; `setup` enrolls; reboot; `setup` confirms; enable Secure Boot; `status` | KEK or db changed when the PK was deleted, the PK came back on its own, any variable misses the local certificate after enrollment, or a backup entry is gone |
-| 3 Secure Boot on | Kernel reinstall and reboot; snapshot create and boot its entry; boot an entry that predates enrollment and record what Limine and the firmware show; `omarchy refresh limine`, `status`, reboot; `limine` reinstall, where Omarchy's installer hook puts the raw loader back and the loader's watcher must have rebuilt it a few seconds after pacman ended; an interrupted `sign` followed by `sign`: stop the watchers, add a comment line to `limine.conf` so the pass has a loader to rebuild, run `sudo timeout -s TERM 0.5 omasecboot sign`, with a shorter time until `timeout` exits 124, then `sign` | `status` fails after any step |
-| 4 Restore | Start the entry of a snapshot taken after setup and run `limine-snapper-restore` from inside it, under the recorder. The restore command offers that snapshot itself; `snapper list` fails inside a booted snapshot (C6). Answer no to its reboot offer so the state after is written; reboot; `sign`; update. The records survive because `/home` is a subvolume of its own | The restored system does not boot with Secure Boot on |
-| 5 Windows | `windows preflight`; `windows setup`; pick the entry in Limine's menu; return to Omarchy; `windows bootnext`; reboot; return; a kernel reinstall and a snapshot, then `status` (the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds recorded); `omarchy refresh limine`, `status` | The preflight reports an unknown, an entry does not reach Windows Boot Manager, or the entry is doubled, lost or no longer recognised (`windows status` says "stale" or "misplaced") after upstream's rewrites |
-| 6 Remove | Secure Boot off; `remove`; the primary loader equals the raw executable in upstream's backup; remove the package; the state directory remains | The primary loader is still sealed, or a managed setting is still in `/etc/default/limine` |
+| 0 Baseline | The machine is stock before anything is installed | Setup Mode is on, or the factory PK is missing |
+| 1 Boot files | The boot files are sealed and signed and stay so, with no firmware write | `setup` refuses, a transcript ends at a prompt, the timing budget is exceeded, or the fallback cannot be booted |
+| 2 Enrollment | The user's keys enter the firmware beside the ones it holds | KEK or db changed when the PK was deleted, the PK came back on its own, any variable misses the local certificate after enrollment, or a backup entry is gone |
+| 3 Secure Boot on | The machine keeps starting through updates, snapshots and an interrupted pass | `status` fails after any step |
+| 4 Restore | A snapshot restore leaves a machine that starts | The restored system does not boot with Secure Boot on |
+| 5 Windows | Windows starts from Limine's menu and through BootNext, and the entry survives upstream's rewrites | The preflight reports an unknown, an entry does not reach Windows Boot Manager, or the tool's entry is doubled, lost or no longer recognised (`windows status` says it holds an entry for another target, more than one, or this tool's comment in an entry it did not write) after upstream's rewrites |
+| 6 Remove | pacman's warning when the package goes from a machine that is set up, and the way back to stock | pacman prints no warning or does not remove the package, the primary loader is still sealed, or a managed setting is still in `/etc/default/limine` |
+| 7 Rebuild | Enrollment on firmware whose key menu clears KEK and db together with the Platform Key | The tool appends to an empty list, the confirmation does not name what cannot come back, a variable misses the local or Microsoft's certificates after the rebuild, or Windows no longer starts |
 
-A release needs all seven stages on at least one machine, and every firmware vendor named in public text needs its own record.
+A release needs stages 0 to 6 on at least one machine and stage 7 on one whose key menu can clear every key, and every firmware vendor named in public text needs its own record. Rows that begin "With Windows encryption on" apply to a machine with BitLocker or Device Encryption on, the recovery key on paper and nothing suspended; a Windows start there records whether BitLocker asked for the key at the first and at a second start, and the PCR validation profile that `manage-bde -protectors -get C:` names.
+
+### Stage 0: baseline
+
+1. Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`.
+2. Record the state before the package is installed, take a snapshot, install the package.
+3. `status` reports "not set up".
+
+### Stage 1: boot files, no firmware write
+
+1. With Windows on the machine: `windows preflight`. Then `setup`; accept the fallback loader where it offers one. On a machine whose fallback an earlier run added, remove `EFI/BOOT/BOOTX64.EFI` first, so that the offer is recorded.
+2. Reinstall the kernel: the rebuilt UKI is signed before `sign` touches it.
+3. Time the hook alone, right after the kernel reinstall: `time /etc/boot/hooks/post.d/90-omasecboot-sign`. Budget: two seconds per installed kernel.
+4. Edit `limine.conf` with the watchers running: `status` passes within seconds.
+5. The stale-checksum drill, with Secure Boot off and rescue media at hand: stop the watchers, edit `limine.conf`, confirm that the primary loader refuses, confirm that the firmware's boot menu offers the fallback, start it, `sign`.
+6. `systemctl reboot`; `status`.
+
+### Stage 2: enrollment
+
+1. `setup`; `systemctl reboot --firmware-setup` and delete only the PK.
+2. `setup` enrolls; `systemctl reboot`; `setup` confirms; `systemctl reboot --firmware-setup` and turn Secure Boot on; `status`; `sbctl status`.
+3. With Windows encryption on: start Windows from the firmware's boot menu after the PK is deleted, after the keys are written and after Secure Boot is on.
+
+### Stage 3: Secure Boot on
+
+1. Reinstall the kernel; `status`.
+2. Reinstall `limine`: Omarchy's installer hook puts the raw loader back, and the loader's watcher must have rebuilt it a few seconds after pacman ended; `status`.
+3. Create a snapshot; `status`; `systemctl reboot` and start the snapshot's entry, then the normal entry, which starts the reinstalled kernel.
+4. Start an entry that predates enrollment and record what Limine and the firmware show.
+5. `omarchy refresh limine`, `status`.
+6. An interrupted `sign`: stop the watchers, add a comment line to `limine.conf` so the pass has a loader to rebuild, run `sudo timeout -s TERM 0.5 omasecboot sign`, with a shorter time until `timeout` exits 124, then `sign`, `status`, `systemctl reboot`, `status`.
+
+### Stage 4: restore
+
+1. Start the entry of a snapshot taken after setup and run `limine-snapper-restore` from inside it, under the recorder. The restore command offers that snapshot itself; `snapper list` fails inside a booted snapshot (C10 of [upstream-contracts.md](upstream-contracts.md)). The records survive because `/home` is a subvolume of its own.
+2. Answer no to its reboot offer, so the state after is written; `systemctl reboot`.
+3. `sign`; `status`.
+
+### Stage 5: Windows
+
+1. `windows preflight`; `windows setup`; `status`.
+2. Pick the entry in Limine's menu; return to Omarchy.
+3. `windows bootnext`; `systemctl reboot`; return.
+4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`.
+5. With Windows encryption on: disable and enable the protectors once in Windows, then start Windows through the menu entry and through BootNext again.
+6. With Windows encryption on, the chainload comparison (spec D11): add a chainload entry with `limine-scan` beside the tool's, start Windows through each, remove the chainload entry with `limine-remove-entry`, and disable and enable the protectors once more.
+
+### Stage 6: remove
+
+1. Remove the package while set up: pacman prints the warning and goes through. Reinstall; `status`.
+2. Secure Boot off. With Windows encryption on: start Windows once.
+3. `remove`; `status`; the primary loader equals the raw executable in upstream's backup.
+4. Remove the package; the state directory remains.
+
+### Stage 7: rebuild
+
+1. Restore the factory keys in the firmware; `setup`.
+2. `systemctl reboot --firmware-setup` and clear every Secure Boot key, instead of deleting the PK alone.
+3. `setup`: it says that the key menu cleared KEK and db with the PK, lists the backup entries the rebuild cannot bring back, and asks. Answer yes; it writes db, KEK and PK and reads each back.
+4. `systemctl reboot`; `setup` confirms; `systemctl reboot --firmware-setup` and turn Secure Boot on; `status`; `sbctl status`.
+5. With Windows on the machine: start it.
+6. Secure Boot off; `remove`; restore the factory keys.
 
 ## Tag
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
 - [ ] `CHANGELOG.md` has the release's section, with its date, and the README's status note and install line name the release.
-- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile`, `omasecboot.install` and `.gitattributes`; the hardware rows above are the ones the records ran; and `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit. The recipe builds from an archive made as the tag's will be: `git archive --prefix=omasecboot-<version>/`, with the same payload as `make package`. The records are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
+- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile`, `omasecboot.install` and `.gitattributes`.
+- [ ] The rows above are the rows the records ran.
+- [ ] `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit.
+- [ ] The recipe builds from an archive made as the tag's will be, `git archive --prefix=omasecboot-<version>/`, with the same payload as `make package`.
+- [ ] The records are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 
 Delivery through Omarchy follows a tag and does not gate it: [omarchy-integration.md](omarchy-integration.md) owns that side, and its recipe pins the tagged archive's checksum.
