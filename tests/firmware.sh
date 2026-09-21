@@ -298,7 +298,7 @@ missing_2023_kek_is_asked_about_before_the_pk_goes() {
 setup_asks_for_the_pk_then_enrolls_then_confirms() {
   local backup
   prepared_machine
-  [[ $(<"$FIX/run/output") == *'delete only the Platform Key (PK)'* ]] || fail_test "no firmware instruction: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'delete only the Platform Key (PK)'*'leave Secure Boot disabled when you save'*'set it back to disabled'* ]] || fail_test "no firmware instruction, or it lets Secure Boot come on by itself: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "a machine without Windows was asked about it: $(<"$FIX/run/output")"
   backup=$(latest_firmware_backup) || fail_test "no backup before the firmware instruction"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "the first run wrote to the firmware"
@@ -310,21 +310,21 @@ setup_asks_for_the_pk_then_enrolls_then_confirms() {
   [[ $(<"$FIX/run/output") == *'does not report Setup Mode'* && $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "report: $(<"$FIX/run/output")"
   set_mode_variable SetupMode 1
   CONFIRM_ANSWER=no run_cli setup && fail_test "a declined enrollment went on"
-  grep -q '^QUESTION: Write your keys to the firmware' "$FIX/run/output" || fail_test "question: $(<"$FIX/run/output")"
+  grep -q '^QUESTION: The Platform Key becomes yours. Write your keys to the firmware?' "$FIX/run/output" || fail_test "question: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a declined enrollment wrote to the firmware"
   run_cli setup || fail_test "enrollment failed: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'Your keys are enrolled'* && $(<"$FIX/run/output") == *"$backup"* ]] || fail_test "report: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'Reboot, then run'* ]] || fail_test "no reboot instruction"
+  [[ $(<"$FIX/run/output") == *'systemctl reboot'*'then run'* ]] || fail_test "no reboot instruction"
   [[ $(latest_firmware_backup) == "$backup" ]] || fail_test "the backup from before the delete was replaced"
 
-  # Same boot: SetupMode still reads 1 (C6). Nothing is written again.
+  # Same boot: SetupMode still reads 1 (C10). Nothing is written again.
   : >"$FIX/run/calls"
   run_cli setup || fail_test "setup in the enrollment's boot failed"
-  [[ $(<"$FIX/run/output") == *'Reboot, then run'* ]] || fail_test "same boot: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'systemctl reboot'*'then run'* ]] || fail_test "same boot: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "an enrolled firmware was written again"
   set_mode_variable SetupMode 0
   # A machine that starts through the fallback path would stop with Secure
-  # Boot on, because the fallback stays raw (D2): no instruction without an
+  # Boot on, because the fallback stays raw (D6): no instruction without an
   # active entry for the primary loader.
   write_boot_entry 0001 inactive 'Limine' '\EFI\limine\limine_x64.efi'
   run_cli setup && fail_test "setup told a machine without a Limine boot entry to turn Secure Boot on"

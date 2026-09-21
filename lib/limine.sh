@@ -6,7 +6,7 @@ readonly LIMINE_CONFIG_MARKER='++CONFIG_B2SUM_SIGNATURE++'
 
 # Written to /etc/default/limine, the only layer that honours enrollment.
 # Without path hashes a later signature repair cannot make an entry stale, and
-# under Secure Boot the firmware verifies the UKI itself (upstream-contracts C1).
+# under Secure Boot the firmware verifies the UKI itself (C1).
 readonly -a MANAGED_SETTINGS=(ENABLE_VERIFICATION=no ENABLE_ENROLL_LIMINE_CONFIG=yes)
 
 # --- Managed settings and their originals ----------------------------------------
@@ -123,8 +123,8 @@ list_hashed_paths() {
 }
 
 # A file that limine.conf names with a "#hash", whoever wrote it. Signing such
-# a file in place would make its entry stale (D1), and Limine stops at a stale
-# hash under Secure Boot (C1). FAT names compare without case.
+# a file in place would make its entry stale (D4, D5), and Limine stops at a
+# stale hash under Secure Boot (C1). FAT names compare without case.
 file_has_path_hash() {
   local paths line value path named
   paths=$(list_hashed_paths) || return 1
@@ -139,7 +139,7 @@ file_has_path_hash() {
 }
 
 # A hashed path that belongs to a snapshot entry: upstream's stored hash of a
-# history file (spec D1).
+# history file (D5).
 path_is_snapshot() { [[ ${1,,} == */limine_history/* ]]; }
 
 # Hashed paths of OS entries whose file no longer matches its hash, or that
@@ -198,7 +198,7 @@ embedded_checksum() {
 
 checksum_is_zero() { [[ $1 =~ ^0{128}$ ]]; }
 
-# Sealed with the current limine.conf and signed. Upstream's hook does both
+# Sealed over the current limine.conf and signed. Upstream's hook does both
 # but hides its failures, so this is checked after every Limine operation.
 # The seal alone: a loader sealed over another limine.conf does not start at
 # all (C1), which an unsigned one does while Secure Boot is off.
@@ -261,9 +261,9 @@ ensure_primary_loader() {
   install_sealed_loader "$(primary_loader_path)" "$checksum" && primary_is_proved
 }
 
-# systemd merges changes that arrive while the watcher's service runs
-# (upstream-contracts C5), so the proof is repeated until limine.conf held
-# still across it. Only the last round counts.
+# systemd merges changes that arrive while the watcher's service runs (C5),
+# so the proof is repeated until limine.conf held still across it. Only the
+# last round counts.
 converge_primary_loader() {
   local before after sealed
   for _ in 1 2 3; do
@@ -279,7 +279,7 @@ converge_primary_loader() {
 # --- The fallback loader -------------------------------------------------------------
 
 # absent, raw (Limine's executable, neither sealed nor locally signed: what
-# upstream deploys and spec D2 wants), altered (Limine's executable, sealed or
+# upstream deploys and D6 wants), altered (Limine's executable, sealed or
 # locally signed) or foreign (someone else's BOOTX64.EFI, never touched). A
 # signature that cannot be read counts as raw: nothing is rewritten on a guess.
 fallback_state() {
@@ -297,11 +297,11 @@ fallback_state() {
 }
 
 # Adds the fallback loader through upstream's own step. A machine that Omarchy
-# installed beside another system starts without one (C7), and it is the
-# rescue loader (docs/spec.md D2). Upstream's step copies over whatever stands
-# at that path (C2), so this runs only while nothing does: another system's
-# loader is never replaced. Upstream copies in place and hides a failed copy,
-# so there must be room first and the result is judged by its bytes.
+# installed beside another system starts without one (C6), and it is the
+# rescue loader (D6). Upstream's step copies over whatever stands at that path
+# (C2), so this runs only while nothing does: another system's loader is never
+# replaced. Upstream copies in place and hides a failed copy, so there must be
+# room first and the result is judged by its bytes.
 add_fallback_loader() {
   [[ $(fallback_state) == absent ]] || return 1
   esp_has_room || return 1
@@ -312,7 +312,7 @@ add_fallback_loader() {
 
 # Puts upstream's raw copy back. A signed fallback that is not sealed would
 # boot under Secure Boot without enforcing limine.conf; a sealed one would
-# panic together with the primary and leave no rescue loader.
+# panic together with the primary loader and leave no rescue loader.
 restore_raw_fallback() {
   local fallback parent staging
   esp_has_room || return 1
@@ -331,7 +331,7 @@ restore_raw_fallback() {
 
 # The seal holds two files together, and either can change outside the Limine
 # tools, where no hook runs: limine.conf under an editor, the primary loader
-# under a plain copy, which Omarchy's installer leaves a pacman hook for (C7).
+# under a plain copy, which Omarchy's installer leaves a pacman hook for (C6).
 # One instance of the path unit watches each.
 watch_units() {
   local file
@@ -381,20 +381,27 @@ wait_for_pacman() {
 # settings applied and must be regenerated before anything is signed in place:
 # signing a hashed file makes its entry stale.
 os_entries_carry_hashes() {
+  local paths
+  paths=$(list_os_hashed_paths) || return 1
+  [[ -n $paths ]]
+}
+
+# The hashed paths outside the snapshot entries, as list_hashed_paths prints
+# them.
+list_os_hashed_paths() {
   local line paths
   paths=$(list_hashed_paths) || return 1
   while IFS= read -r line; do
-    [[ -z $line ]] || path_is_snapshot "$line" || return 0
+    [[ -z $line ]] || path_is_snapshot "$line" || printf '%s\n' "$line"
   done <<<"$paths"
-  return 1
 }
 
 # Rebuilds the UKIs and their menu entries under the current settings.
-# limine-mkinitcpio takes the boot lock itself, so ours is released around
-# it, and it reports success after a failed build (C2), so the result is
-# judged by the entries.
+# limine-mkinitcpio takes the boot lock itself, so the lock is released
+# around it, and it reports success after a failed build (C2), so the result
+# is judged by the entries.
 regenerate_os_entries() {
-  qact "Regenerating the boot entries through limine-mkinitcpio"
+  qact "Regenerating the menu entries through limine-mkinitcpio"
   run_unlocked run_visible limine-mkinitcpio || return 1
   ! os_entries_carry_hashes
 }

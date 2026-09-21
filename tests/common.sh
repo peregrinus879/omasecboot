@@ -1,6 +1,6 @@
 #!/bin/bash
 # Foundation: settings lookup exactly as upstream reads it, file writes, the
-# attention marker, the boot lock, the prompts, and the guard that keeps the
+# needs-attention file, the boot lock, the prompts, and the guard that keeps the
 # contract suites' cases inside their sandbox.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
 set -uo pipefail
@@ -35,11 +35,11 @@ atomic_write_replaces_whole_files() {
   ! printf 'x' | atomic_write "$FIX/missing/file" 600 2>/dev/null || fail_test "wrote into a missing directory"
 }
 
-attention_marker_round_trip() {
+needs_attention_round_trip() {
   set_attention "reason one" || fail_test "set"
-  [[ $(<"$(attention_marker)") == "reason one" ]] || fail_test "content"
+  [[ $(<"$(attention_file)") == "reason one" ]] || fail_test "content"
   clear_attention
-  [[ ! -e $(attention_marker) ]] || fail_test "clear"
+  [[ ! -e $(attention_file) ]] || fail_test "clear"
 }
 
 file_safety_refuses_what_others_can_change() {
@@ -130,7 +130,7 @@ children_run_unlocked() {
 }
 
 # Without a terminal gum declines silently, which reads as a refusal nobody
-# gave (C6); and a declined prompt says what was cancelled.
+# gave (C10); and a declined prompt says what was cancelled.
 prompts_need_a_terminal_and_name_what_was_cancelled() {
   local output
   # shellcheck source=lib/checks.sh
@@ -191,7 +191,7 @@ contract_cases_run_only_in_their_sandbox() {
 run_case settings-follow-upstream-layers settings_follow_upstream_layers
 run_case enrollment-counts-only-in-the-default-file enrollment_counts_only_in_the_default_file
 run_case atomic-write-replaces-whole-files atomic_write_replaces_whole_files
-run_case attention-marker-round-trip attention_marker_round_trip
+run_case needs-attention-round-trip needs_attention_round_trip
 run_case file-safety-refuses-what-others-can-change file_safety_refuses_what_others_can_change
 run_case lock-is-taken-and-released lock_is_taken_and_released
 run_case replaced-lock-file-is-not-a-lock replaced_lock_file_is_not_a_lock

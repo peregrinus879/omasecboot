@@ -5,7 +5,7 @@
 # test_harness_init, then runs cases with run_case.
 #
 # Rule for stubs: every behaviour a stub models cites the section of
-# docs/upstream-contracts.md (C1 to C9) that records it. Anything a stub does
+# docs/upstream-contracts.md (C1 to C10) that records it. Anything a stub does
 # without such a record is marked ASSUMPTION, because tests that share an
 # unchecked assumption with the code prove nothing about real machines.
 # shellcheck disable=SC2329 # Overrides and case functions are called indirectly.
@@ -70,7 +70,7 @@ fixture_machine() {
   write_loader_backup
   write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" unsigned
   # Stock Omarchy: UKIs on, verification on by upstream default, an
-  # /etc/default/limine with only ESP_PATH and the command line (C3, C7).
+  # /etc/default/limine with only ESP_PATH and the command line (C3, C6).
   printf 'ENABLE_VERIFICATION=yes\nENABLE_UKI=no\n' >"$FIX/etc/layers/10-upstream.conf"
   printf 'ENABLE_UKI=yes\nENABLE_LIMINE_FALLBACK=yes\n' >"$FIX/etc/layers/20-omarchy.conf"
   printf 'ESP_PATH="/boot"\nKERNEL_CMDLINE[default]+="quiet splash"\n' >"$FIX/etc/default-limine"
@@ -126,7 +126,7 @@ write_key_variable() {
 }
 
 # What the firmware's key menu does on the reference machine: only the PK
-# goes, and the firmware enters Setup Mode (C6).
+# goes, and the firmware enters Setup Mode (C10).
 delete_platform_key() {
   rm "$(key_variable_path PK)"
   set_mode_variable SetupMode 1
@@ -262,7 +262,7 @@ fixture_overrides() {
   }
   efivars_dir() { printf '%s/efivars\n' "$FIX"; }
   limine_default_config() { printf '%s/etc/default-limine\n' "$FIX"; }
-  restore_marker_path() { printf '%s/run/restore.lock\n' "$FIX"; }
+  restore_lock_path() { printf '%s/run/restore.lock\n' "$FIX"; }
   boot_lock_path() { printf '%s/run/boot-partition.lock\n' "$FIX"; }
   boot_lock_wait() { printf '1\n'; }
   hook_lock_wait() { printf '1\n'; }
@@ -283,12 +283,12 @@ fixture_overrides() {
   # The firmware's entries cannot be read at the moment the pass looks: the
   # pass goes on without the Windows entry, as converge_windows_entry does then.
   [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_entry() { :; }
-  leftover_candidates() { printf '%s\n' "$FIX/old/omasecboot" "$FIX"/old/hooks/*omasecboot*; }
   durable_sync() { :; }
   check_root() { :; }
   check_architecture() { :; }
   check_uefi() { :; }
-  require_terminal() { :; }
+  # The suites have no terminal; a case that wants the real refusal asks for it.
+  [[ -e $FIX/run/no-terminal ]] || require_terminal() { :; }
 }
 
 # --- Stub tools --------------------------------------------------------------------
@@ -407,7 +407,10 @@ case $1 in
     while IFS= read -r file; do [[ ! -e $file ]] || printf '%s\n' "$file"; done <"$FIX/sbctl/files" |
       jq -Rn '[inputs | {file: ., output_file: .}]'
     ;;
-  remove-file) grep -vxF -- "$2" "$FIX/sbctl/files" >"$FIX/sbctl/files.new"; mv "$FIX/sbctl/files.new" "$FIX/sbctl/files" ;;
+  remove-file)
+    [[ ! -e $FIX/run/sbctl-cannot-remove-rows ]] || exit 1
+    grep -vxF -- "$2" "$FIX/sbctl/files" >"$FIX/sbctl/files.new"; mv "$FIX/sbctl/files.new" "$FIX/sbctl/files"
+    ;;
   *) exit 64 ;;
 esac
 EOF
@@ -480,7 +483,7 @@ case $name in
       [[ $(setting ENABLE_VERIFICATION) == no ]] || hash="#$(b2sum <"$FIX/esp/EFI/Linux/omarchy_linux.efi" | cut -d' ' -f1)"
       sed -i "s|^\(    path: boot():/EFI/Linux/omarchy_linux.efi\).*|\1${hash}|" "$FIX/esp/limine.conf"
       # The rewrite keeps a foreign top-level entry with its body and drops a
-      # comment line that stands right above it, after upstream's own (C8).
+      # comment line that stands right above it, after upstream's own (C7).
       awk '{ lines[NR] = $0 }
         END {
           for (i = 1; i <= NR; i++) {
@@ -547,7 +550,7 @@ EOF
 
   # pacman holds db.lck from the start of a transaction until its last
   # post-transaction hook is done, and a crashed pacman leaves the file
-  # behind (C7). A case says whether a pacman process is running.
+  # behind (C6). A case says whether a pacman process is running.
   cat >"$FIX/bin/pgrep" <<'EOF'
 #!/bin/bash
 [[ -e $FIX/run/pacman-is-running ]]

@@ -8,7 +8,7 @@ readonly OMASECBOOT_VERSION="0.1.0"
 state_dir() { printf '/var/lib/omasecboot\n'; }
 efivars_dir() { printf '/sys/firmware/efi/efivars\n'; }
 limine_default_config() { printf '/etc/default/limine\n'; }
-restore_marker_path() { printf '/run/lock/limine-snapper-restore.lock\n'; }
+restore_lock_path() { printf '/run/lock/limine-snapper-restore.lock\n'; }
 # Shared with limine-entry-tool and limine-snapper-sync, which own this mutex.
 boot_lock_path() { printf '/run/lock/boot-partition.lock\n'; }
 # Seconds a command waits for the lock; a kernel install holds it for a minute.
@@ -145,25 +145,24 @@ ensure_state_dir() {
   is_safe_directory "$dir"
 }
 
-# --- The needs-attention marker -------------------------------------------------
+# --- needs-attention ----------------------------------------------------------------
 
-attention_marker() { printf '%s/needs-attention\n' "$(state_dir)"; }
+attention_file() { printf '%s/needs-attention\n' "$(state_dir)"; }
 
 set_attention() {
   ensure_state_dir || return 1
-  printf '%s\n' "$*" | atomic_write "$(attention_marker)" 644
+  printf '%s\n' "$*" | atomic_write "$(attention_file)" 644
 }
 
 clear_attention() {
-  local marker
-  marker=$(attention_marker)
-  [[ ! -e $marker ]] || rm -f -- "$marker"
+  local file
+  file=$(attention_file)
+  [[ ! -e $file ]] || rm -f -- "$file"
 }
 
 # --- Limine settings lookup ------------------------------------------------------
 
-# limine-entry-tool reads four layers, a later assignment winning
-# (docs/upstream-contracts.md C3).
+# limine-entry-tool reads four layers, a later assignment winning (C3).
 limine_config_layers() {
   local file
   for file in /usr/share/limine-entry-tool.d/*.conf; do
@@ -267,11 +266,12 @@ fd_is_lock_file() {
 }
 
 # Takes the lock. Inside a Limine hook the calling tool already holds it on the
-# descriptor we inherited; locking that descriptor again succeeds at once,
-# while a fresh open would deadlock against our own parent. The tools carry on
-# unlocked after their own timeout, so an inherited descriptor that is not
-# ours at once means someone else is at work on the boot files, and the wait
-# is the hook's short one. Status 75 means busy, as sysexits defines it.
+# descriptor the hook inherited; locking that descriptor again succeeds at
+# once, while a fresh open would deadlock against the hook's own parent. The
+# tools carry on unlocked after their own timeout, so an inherited descriptor
+# that cannot be locked at once means someone else is at work on the boot
+# files, and the wait is the hook's short one. Status 75 means busy, as
+# sysexits defines it.
 boot_lock_acquire() {
   local lock rc=0
   [[ $_boot_lock == false ]] || return 0
@@ -281,7 +281,10 @@ boot_lock_acquire() {
     (( rc == 0 )) && _boot_lock=inherited
   else
     exec 200>&-
-    exec 200>>"$lock" || return 1
+    if ! exec 200>>"$lock"; then
+      fail "Could not open the boot lock ${lock}; look at the owner and mode of its directory"
+      return 1
+    fi
     flock -E 75 -w "$(boot_lock_wait)" 200 || rc=$?
     if (( rc == 0 )) && fd_is_lock_file; then
       _boot_lock=local
@@ -291,9 +294,9 @@ boot_lock_acquire() {
     fi
   fi
   if (( rc == 75 )); then
-    warn "Boot files are busy: another tool holds $(boot_lock_path). Run this again when it has finished."
+    warn "Boot files are busy: another tool holds $(boot_lock_path). When it has finished, run this command again; after an update that is ${BOLD}sudo omasecboot sign${NC}"
   elif (( rc != 0 )); then
-    fail "Could not take the boot lock ${lock}"
+    fail "Could not take the boot lock ${lock}; look at the owner and mode of its directory"
   fi
   return "$rc"
 }
@@ -307,9 +310,9 @@ boot_lock_release() {
 }
 
 # The Limine tools open the lock themselves and carry on unlocked after their
-# own timeout (C2), so one that this tool runs gets our lock released and descriptor
-# 200 closed, and the lock is taken again afterwards. The caller proves state
-# anew.
+# own timeout (C2), so one that this tool runs gets the lock released and
+# descriptor 200 closed, and the lock is taken again afterwards. The caller
+# proves state anew.
 run_unlocked() {
   local held=$_boot_lock rc=0
   [[ $held != inherited ]] || return 1
@@ -319,9 +322,10 @@ run_unlocked() {
   return "$rc"
 }
 
-# A full limine-snapper-restore runs without the lock and holds this marker.
+# A full limine-snapper-restore works without the boot lock and holds one of
+# its own (C2).
 restore_in_progress() {
-  local marker
-  marker=$(restore_marker_path)
-  [[ -e $marker || -L $marker ]]
+  local lock
+  lock=$(restore_lock_path)
+  [[ -e $lock || -L $lock ]]
 }

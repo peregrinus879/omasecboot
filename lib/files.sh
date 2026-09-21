@@ -8,10 +8,10 @@ package_loader_path() { printf '/usr/share/limine/BOOTX64.EFI\n'; }
 
 # Writes the raw Limine executable, neither sealed nor signed, to stdout.
 # limine-install keeps the one it deployed as a one-member tar beside the
-# primary and restores the primary from it before every operation; that can
+# primary loader and restores it from there before every operation; that can
 # be an older Limine than the package holds, because upstream refuses majors
-# it does not know (upstream-contracts C2). A machine without that backup
-# gets the package's executable.
+# it does not know (C2). A machine without that backup gets the package's
+# executable.
 raw_loader() {
   local backup
   backup=$(loader_backup_path)
@@ -39,8 +39,8 @@ list_efi_files() {
 }
 
 # limine-snapper-sync owns these and stores their hashes; they are never
-# modified (docs/spec.md D1). FAT names are case-insensitive, and the listing
-# above matches them that way, so this does too.
+# modified (D5). FAT names are case-insensitive, and the listing above matches
+# them that way, so this does too.
 is_history_file() {
   local path=${1,,}
   [[ $path == */limine_history/* || ${path##*/} =~ \.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_ ]]
@@ -89,7 +89,7 @@ sbctl_keys_exist() {
 # 0 signed with the local db key, 1 not, 2 could not tell. sbctl exits 0
 # whatever it found and answers with an array of one entry whose is_signed is
 # 1, 0 or -1 (no such file), or with null for a file it may not read
-# (upstream-contracts C4).
+# (C4).
 signature_state() {
   local file=$1 output state
   output=$(run_sbctl verify --json "$file" 2>/dev/null) || return 2

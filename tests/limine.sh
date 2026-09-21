@@ -62,7 +62,7 @@ stale_os_hashes_are_found() {
   [[ -n $(list_stale_os_hashes) ]] || fail_test "a path that leaves the ESP read as current"
 }
 
-# Snapshot entries carry upstream's hashes of history files (D1): they are
+# Snapshot entries carry upstream's hashes of history files (D5): they are
 # neither an OS entry's hashes nor read, whatever they say.
 snapshot_hashes_are_upstreams() {
   local history=$FIX/esp/machine/limine_history/snap.efi_sha256_abc

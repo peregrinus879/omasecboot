@@ -1,8 +1,8 @@
 #!/bin/bash
 # OmaSecBoot: the firmware's Secure Boot variables, read from efivarfs directly
-# (sbctl's status output hides read errors, upstream-contracts C4); the backup
-# taken before any firmware instruction; and the enrollment of the local keys
-# by appending, which removes nothing the machine trusted (docs/spec.md D4).
+# (sbctl's status output hides read errors, C4); the backup taken before any
+# firmware instruction; and the enrollment of the local keys by appending,
+# which removes nothing the machine trusted (D9).
 
 readonly EFI_GLOBAL_GUID="8be4df61-93ca-11d2-aa0d-00e098032b8c"
 readonly EFI_SECURITY_DATABASE_GUID="d719b2cb-3d3a-4596-a3bc-dad00e67656f"
@@ -118,7 +118,7 @@ acknowledge_missing_microsoft_kek() {
     return 1
   }
   [[ -n $missing ]] || return 0
-  warn "KEK does not hold ${missing}. Microsoft signs its db and dbx updates with it from 2026 on, and once the Platform Key is yours the manufacturer can no longer add it. Install the pending Windows and firmware updates first, then run setup again."
+  warn "KEK does not hold ${missing}. Microsoft signs its db and dbx updates with it from 2026 on, and once the Platform Key is yours the manufacturer can no longer add it. Install the pending Windows and firmware updates first, then run ${BOLD}sudo omasecboot setup${NC} again"
   confirm "the firmware step" "Go on without Microsoft's 2023 KEK certificate?"
 }
 
@@ -290,7 +290,7 @@ variable_holds_local_certificate() {
 }
 
 # Judged by the variables, never by SetupMode, which keeps reading 1 in the
-# boot that wrote the PK (C6).
+# boot that wrote the PK (C10).
 firmware_is_enrolled() {
   local name
   for name in "${KEY_VARIABLES[@]}"; do
@@ -362,7 +362,7 @@ rebuild_plan_is_sound() {
   [[ ${_planned[PK]} == "${_local[PK]}" ]] || return 1
   for name in KEK db; do
     [[ -z $(entries_missing_from "${_local[$name]}" "${_planned[$name]}") ]] || return 1
-    # The local keys alone would be what empty never means (D4): an sbctl that
+    # The local keys alone would be what empty never means (D9): an sbctl that
     # stopped honouring --microsoft still exports without complaint.
     [[ -n $(entries_missing_from "${_planned[$name]}" "${_local[$name]}") ]] || return 1
   done

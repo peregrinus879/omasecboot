@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Windows entry: the target read from the firmware's boot entries, the
 # managed entry in limine.conf and when it may be touched, the BootNext
-# request, and the encryption acknowledgment before anything changes what
+# request, and the encryption acknowledgement before anything changes what
 # Windows measures at boot.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
 set -uo pipefail
@@ -158,7 +158,7 @@ misplaced_comment_is_never_deleted() {
   done
 }
 
-# What the hardware showed (C8): when upstream rewrites limine.conf it drops a
+# What the hardware showed (C7): when upstream rewrites limine.conf it drops a
 # comment line that stands between its own entries and a foreign one, and keeps
 # the foreign entry. The entry must still be this tool's afterwards, for the
 # report and for taking it out.
@@ -176,7 +176,7 @@ entry_survives_upstreams_rewrite() {
 
 # limine.conf is only written when that is safe: by root alone, with room on
 # the ESP, and still the file that was read (Omarchy replaces it outside any
-# lock, C7).
+# lock, C6).
 unsafe_writes_are_refused() {
   local before=$FIX/run/limine-before
   cp "$FIX/esp/limine.conf" "$before"
@@ -206,7 +206,7 @@ unsafe_writes_are_refused() {
   [[ $(windows_entry_state x) == unknown ]] || fail_test "a missing limine.conf: $(windows_entry_state x)"
 }
 
-# Omarchy replaces limine.conf from its template (C7); the opt-in brings the
+# Omarchy replaces limine.conf from its template (C6); the opt-in brings the
 # entry back with the next pass, and the loader is sealed over the result.
 entry_comes_back_after_limine_conf_is_replaced() {
   set_up_with_windows
@@ -215,11 +215,13 @@ entry_comes_back_after_limine_conf_is_replaced() {
   run_cli windows available || fail_test "the menu guard refuses a working entry"
   [[ ! -s $FIX/run/output ]] || fail_test "the guard printed: $(<"$FIX/run/output")"
   run_cli windows status || fail_test "windows status failed"
-  [[ $(<"$FIX/run/output") == *'Target: Boot0000, Windows Boot Manager'* && $(<"$FIX/run/output") == *'is current'* ]] || fail_test "windows status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Target: Boot0000, Windows Boot Manager'* && $(<"$FIX/run/output") == *'holds the entry for this target, once'* ]] || fail_test "windows status: $(<"$FIX/run/output")"
   run_cli status || fail_test "status: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'restarts the machine into Windows Boot Manager'* ]] || fail_test "status does not show the entry"
 
   write_limine_conf unhashed
+  run_cli windows status || fail_test "windows status failed without the entry"
+  [[ $(<"$FIX/run/output") == *"holds no Windows entry of OmaSecBoot's"* ]] || fail_test "windows status without the entry: $(<"$FIX/run/output")"
   run_cli status && fail_test "status passed without the entry"
   [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
@@ -238,19 +240,19 @@ entry_is_only_taken_out_when_the_loader_follows() {
   kill %1 2>/dev/null
   (( rc == 75 )) || fail_test "busy: ${rc}"
   [[ -e $(windows_flag) && $(entry_count) == 1 ]] || fail_test "a busy windows remove changed something"
-  : >"$(restore_marker_path)"
+  : >"$(restore_lock_path)"
   run_cli windows setup && fail_test "windows setup ran during a snapshot restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "report: $(<"$FIX/run/output")"
   run_cli windows remove && fail_test "windows remove ran during a snapshot restore"
   [[ $(entry_count) == 1 && -e $(windows_flag) ]] || fail_test "something changed during a restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "report: $(<"$FIX/run/output")"
-  rm "$(restore_marker_path)"
+  rm "$(restore_lock_path)"
 
   # Not set up, but the loader is still sealed (a remove that stopped half way).
-  rm "$(enabled_marker)"
+  rm "$(enabled_file)"
   run_cli windows remove && fail_test "limine.conf was edited under a sealed loader nobody re-seals"
   [[ $(<"$FIX/run/output") == *'sealed over the current limine.conf'* && $(entry_count) == 1 ]] || fail_test "report: $(<"$FIX/run/output")"
-  : >"$(enabled_marker)"
+  : >"$(enabled_file)"
   run_cli windows remove || fail_test "windows remove failed: $(<"$FIX/run/output")"
   [[ ! -e $(windows_flag) && $(entry_count) == 0 ]] || fail_test "flag or entry left"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed after the removal"
@@ -286,7 +288,7 @@ entry_problems_are_reported_not_failed() {
   # This tool's comment in somebody's entry, on a machine that never enabled ours.
   printf '    %s\n' "$WINDOWS_ENTRY_COMMENT" >>"$FIX/esp/limine.conf"
   run_cli sign --quiet || fail_test "a misplaced comment failed the pass: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'by hand'* && ! -e $(attention_marker) ]] || fail_test "pass: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'by hand'* && ! -e $(attention_file) ]] || fail_test "pass: $(<"$FIX/run/output")"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over limine.conf as it stands"
   run_cli status && fail_test "status passed over a misplaced comment"
   [[ $(<"$FIX/run/output") == *'by hand'* && $(<"$FIX/run/output") == *'Next: resolve what is marked above'* ]] || fail_test "status: $(<"$FIX/run/output")"
@@ -324,7 +326,7 @@ lost_target_is_left_to_the_report() {
   rm "$FIX/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   write_limine_conf unhashed
   run_cli sign --quiet || fail_test "a lost Windows target failed the pass: $(<"$FIX/run/output")"
-  [[ ! -s $FIX/run/output && ! -e $(attention_marker) ]] || fail_test "the quiet pass spoke or left the marker: $(<"$FIX/run/output")"
+  [[ ! -s $FIX/run/output && ! -e $(attention_file) ]] || fail_test "the quiet pass spoke or left needs-attention: $(<"$FIX/run/output")"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed"
   run_cli windows available && fail_test "the guard accepts an entry without a target"
   run_cli status && fail_test "status passed"
@@ -349,6 +351,13 @@ setup_without_a_target_changes_nothing() {
   [[ $(<"$FIX/run/output") == *'never creates or renames firmware entries'* ]] || fail_test "report: $(<"$FIX/run/output")"
   [[ ! -e $(windows_flag) ]] || fail_test "a refused windows setup left the flag"
   cmp -s "$FIX/esp/limine.conf" "$FIX/run/limine-before" || fail_test "a refused windows setup changed limine.conf"
+  # Limine looks for its entry among the numbers of BootOrder alone (C7): an
+  # active Windows entry outside it is no target, and it is one inside.
+  write_boot_entry 0000 active 'Windows Boot Manager' '\EFI\Microsoft\Boot\bootmgfw.efi'
+  run_cli windows setup && fail_test "an entry outside BootOrder was taken as the target"
+  [[ $(<"$FIX/run/output") == *'that BootOrder lists'*'one that BootOrder does not list'* ]] || fail_test "the refusal does not name BootOrder: $(<"$FIX/run/output")"
+  write_boot_order 0001 0000
+  run_cli windows setup || fail_test "an entry in BootOrder was refused: $(<"$FIX/run/output")"
   local rc=0
   run_cli windows nonsense || rc=$?
   (( rc == 2 )) || fail_test "an unknown windows command is not a usage error"
@@ -377,23 +386,23 @@ bootnext_is_judged_by_reading_back() {
 # machine without Windows is asked nothing, and what cannot be told is said.
 encryption_is_acknowledged_before_the_firmware_changes() {
   add_windows
-  CONFIRM_ANSWER=no run_cli setup && fail_test "setup went on although the acknowledgment was declined"
-  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Suspend-BitLocker'* ]] || fail_test "guidance: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") != *nvme0n1p5* && $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "the instruction was given without the acknowledgment, or another volume was listed"
+  CONFIRM_ANSWER=no run_cli setup && fail_test "setup went on although the acknowledgement was declined"
+  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Required where Windows is encrypted'*'To avoid the prompt, on every edition'*'manage-bde -protectors -disable C: -RebootCount 0'*'manage-bde -protectors -enable C:'* ]] || fail_test "guidance, the key first and suspension as the way to avoid the prompt: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *nvme0n1p5* && $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "the instruction was given without the acknowledgement, or another volume was listed"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  [[ $(grep -c '^QUESTION: Is Windows encryption' "$FIX/run/output") == 1 ]] || fail_test "asked more than once in a run"
-  grep -n 'QUESTION: Is Windows\|delete only' "$FIX/run/output" | head -1 | grep -q QUESTION || fail_test "the question came after the instruction"
+  [[ $(grep -c '^QUESTION: Is the Windows recovery key at hand' "$FIX/run/output") == 1 ]] || fail_test "asked more than once in a run"
+  grep -n 'QUESTION: Is the Windows\|delete only' "$FIX/run/output" | head -1 | grep -q QUESTION || fail_test "the question came after the instruction"
 
   delete_platform_key
   : >"$FIX/run/calls"
   run_cli setup || fail_test "enrollment failed: $(<"$FIX/run/output")"
-  grep -n 'QUESTION: Is Windows\|QUESTION: Write your keys' "$FIX/run/output" | head -1 | grep -q 'Is Windows' || fail_test "keys were written without the question: $(<"$FIX/run/output")"
+  grep -n 'QUESTION: Is the Windows\|QUESTION: The Platform Key becomes yours' "$FIX/run/output" | head -1 | grep -q 'Is the Windows' || fail_test "keys were written without the question: $(<"$FIX/run/output")"
   set_mode_variable SetupMode 0
   run_cli setup || fail_test "setup after the reboot failed"
-  grep -n 'suspend BitLocker\|turn Secure Boot on' "$FIX/run/output" | head -1 | grep -q 'suspend BitLocker' || fail_test "no reminder before turning Secure Boot on: $(<"$FIX/run/output")"
+  grep -n 'keep its recovery key at hand\|and turn Secure Boot on' "$FIX/run/output" | head -1 | grep -q 'recovery key' || fail_test "no reminder before turning Secure Boot on: $(<"$FIX/run/output")"
 
   run_cli windows preflight || fail_test "preflight failed on a machine it could read"
-  [[ $(<"$FIX/run/output") == *'Windows Home'* ]] || fail_test "preflight guidance"
+  [[ $(<"$FIX/run/output") == *'on every edition'*'manage-bde -protectors -disable'* ]] || fail_test "preflight guidance"
   : >"$FIX/run/lsblk-fails"
   run_cli windows preflight && fail_test "preflight passed although the volumes could not be listed"
   [[ $(<"$FIX/run/output") == *'Could not tell'* ]] || fail_test "unknown: $(<"$FIX/run/output")"
@@ -405,7 +414,7 @@ unknown_encryption_state_is_asked_about() {
   [[ $(<"$FIX/run/output") == *'Could not tell'* && $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "unknown at setup: $(<"$FIX/run/output")"
   rm "$FIX/run/lsblk-fails"
   run_cli windows preflight || fail_test "preflight failed on a machine without Windows"
-  [[ $(<"$FIX/run/output") == *'not a clearance'* ]] || fail_test "absent: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'does not prove that there is none'* ]] || fail_test "absent: $(<"$FIX/run/output")"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "a machine without Windows was asked about it"
 }

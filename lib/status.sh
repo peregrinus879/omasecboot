@@ -20,25 +20,10 @@ blocking_problem() {
   _status_next=blocked
 }
 
-enabled_marker() { printf '%s/enabled\n' "$(state_dir)"; }
-is_set_up() { [[ -e $(enabled_marker) ]]; }
+enabled_file() { printf '%s/enabled\n' "$(state_dir)"; }
+is_set_up() { [[ -e $(enabled_file) ]]; }
 
 limine_hook_path() { printf '/etc/boot/hooks/post.d/90-omasecboot-sign\n'; }
-
-# Where an earlier install that was copied into place without pacman put its
-# files. Its hooks keep running the old tool, and its Limine hook fails the
-# Limine tools once the old command is gone.
-leftover_candidates() {
-  printf '%s\n' /usr/local/bin/omasecboot /usr/local/lib/omasecboot \
-    /etc/pacman.d/hooks/*omasecboot* /etc/boot/hooks/post.d/zzz-omasecboot-sign
-}
-
-list_leftovers() {
-  local path
-  while IFS= read -r path; do
-    [[ ! -e $path && ! -L $path ]] || printf '%s\n' "$path"
-  done < <(leftover_candidates)
-}
 
 # The menu entry that owns a limine.conf line: the nearest entry line above it.
 entry_title_for_line() {
@@ -53,7 +38,7 @@ entry_title_for_line() {
 show_firmware_status() {
   local secure_boot setup_mode
   if ! secure_boot=$(read_mode_variable SecureBoot) || ! setup_mode=$(read_mode_variable SetupMode); then
-    blocking_problem "Could not read the firmware's Secure Boot variables"
+    blocking_problem "Could not read the firmware's Secure Boot variables; is efivarfs mounted at /sys/firmware/efi/efivars?"
     return
   fi
   if [[ $secure_boot == 1 ]]; then
@@ -65,15 +50,15 @@ show_firmware_status() {
   # Without keys there is no certificate to look for; the files section says so.
   is_set_up && sbctl_keys_exist || return 0
   if ! read_enrollment_plan 2>/dev/null || ! local_certificates_are_identified; then
-    blocking_problem "Could not tell from sbctl which certificates are yours, so the firmware's keys cannot be judged"
+    blocking_problem "Could not tell from sbctl which certificates are yours, so the firmware's keys cannot be judged; look at the keys with ${BOLD}sudo sbctl status${NC}"
   elif firmware_is_enrolled; then
     pass "Your keys are enrolled in the firmware"
     _status_firmware=enrolled
-    # SetupMode keeps reading 1 in the boot that wrote the PK (C6).
+    # SetupMode keeps reading 1 in the boot that wrote the PK (C10).
     [[ $setup_mode == 0 ]] || _status_firmware=reboot
     [[ $secure_boot == 0 ]] || _status_firmware=complete
   elif [[ $secure_boot == 1 ]]; then
-    blocking_problem "Secure Boot is on, but the firmware does not hold your keys: it will refuse these boot files. Turn Secure Boot off, then run setup."
+    blocking_problem "Secure Boot is on, but the firmware does not hold your keys: it will refuse these boot files. Turn Secure Boot off, then run ${BOLD}sudo omasecboot setup${NC}"
   else
     note "Your keys are not enrolled in the firmware yet"
   fi
@@ -87,7 +72,7 @@ show_microsoft_2023_status() {
     note "KEK does not hold ${missing}, which signs Microsoft's db and dbx updates from 2026 on: they cannot reach this machine"
   fi
   if missing=$(missing_microsoft_2023 db | paste -sd, -) && [[ -n $missing ]]; then
-    note "db does not hold ${missing//,/, }: Microsoft delivers them as db updates, which need its 2023 certificate in KEK"
+    note "db does not hold ${missing//,/, }: Microsoft's db updates deliver what is missing, and those need Microsoft's 2023 certificate in KEK"
   fi
 }
 
@@ -105,11 +90,11 @@ show_settings_status() {
 show_loader_status() {
   local shadow
   if primary_is_proved; then
-    pass "The Limine loader is sealed with the current limine.conf and signed"
+    pass "The Limine loader is sealed over the current limine.conf and signed"
   elif primary_is_sealed; then
-    problem "The Limine loader is sealed with the current limine.conf but not signed"
+    problem "The Limine loader is sealed over the current limine.conf but not signed"
   else
-    problem "The Limine loader is not sealed with the current limine.conf"
+    problem "The Limine loader is not sealed over the current limine.conf"
     _status_sealed=false
   fi
   while IFS= read -r shadow; do
@@ -117,19 +102,19 @@ show_loader_status() {
   done < <(list_shadowing_configs)
   case $(firmware_starts_primary; printf '%s' "$?") in
     0) ;;
-    1) blocking_problem "The firmware has no active boot entry for the Limine loader, so this machine starts through the fallback path, which the firmware refuses with Secure Boot on. Run ${BOLD}sudo limine-install${NC}, check with efibootmgr, and keep Secure Boot off until then" ;;
-    *) blocking_problem "Could not read the firmware's boot entries, so nothing shows that the firmware starts the Limine loader" ;;
+    1) blocking_problem "The firmware has no active boot entry for the Limine loader, so this machine starts through the fallback path, which the firmware refuses with Secure Boot on. Run ${BOLD}sudo limine-install${NC}, check with ${BOLD}efibootmgr${NC}, and keep Secure Boot off until then" ;;
+    *) blocking_problem "Could not read the firmware's boot entries, so nothing shows that the firmware starts the Limine loader; check with ${BOLD}efibootmgr${NC}" ;;
   esac
   case $(fallback_state) in
     absent) note "No fallback loader: after a limine.conf mistake only rescue media can boot this machine; ${BOLD}sudo omasecboot setup${NC} offers to add one" ;;
     raw)
       pass "The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off"
       # Upstream refreshes it only where its settings say so (C3), and never
-      # on a machine that Omarchy installed beside another system (C7). While
+      # on a machine that Omarchy installed beside another system (C6). While
       # upstream holds a Limine major back, its step would refresh nothing (C2).
       if raw_loader 2>/dev/null | cmp -s -- - "$(package_loader_path)" &&
         ! cmp -s -- "$(package_loader_path)" "$(fallback_loader_path)"; then
-        note "The fallback loader is another Limine build than the primary; ${BOLD}sudo limine-install --fallback${NC} refreshes it"
+        note "The fallback loader is another Limine build than the primary loader; ${BOLD}sudo limine-install --fallback${NC} refreshes it"
       fi
       ;;
     altered) problem "The fallback loader is signed or sealed; it must stay upstream's raw copy" ;;
@@ -167,7 +152,7 @@ show_signable_files_status() {
   # against its predecessor in the snapshot history, so the ESP fills faster
   # than it did before setup (C2).
   if available=$(free_bytes "$(esp_path)" 2>/dev/null) && (( available < largest )); then
-    note "The ESP has $((available / 1048576)) MiB free, less than its largest boot file needs ($(((largest + 1048575) / 1048576)) MiB): the next kernel update may not fit. Deleting old snapshots frees space."
+    note "The ESP has $((available / 1048576)) MiB free, less than its largest boot file needs ($(((largest + 1048575) / 1048576)) MiB): the next kernel update may not fit. Deleting old snapshots frees space"
   fi
 }
 
@@ -184,7 +169,7 @@ show_sbctl_rows_status() {
 }
 
 # Path hashes of OS entries that no longer match, and the snapshot images
-# from before setup, which are upstream's and stay unsigned (D1).
+# from before setup, which are upstream's and stay unsigned (D5).
 show_path_hash_status() {
   local stale line file old_snapshots=0
   if stale=$(list_stale_os_hashes); then
@@ -218,7 +203,7 @@ show_windows_status() {
       absent) ;;
       misplaced) blocking_problem "$WINDOWS_ENTRY_MISPLACED" ;;
       unknown) blocking_problem "Could not read $(limine_config_path)" ;;
-      *) problem "limine.conf holds a Windows entry of this tool although the entry is not enabled" ;;
+      *) problem "limine.conf holds a Windows entry of OmaSecBoot's although the entry is not enabled" ;;
     esac
     return
   fi
@@ -227,7 +212,7 @@ show_windows_status() {
     blocking_problem "The Windows entry is enabled, but the firmware's boot entries could not be read"
     return
   elif (( status != 0 )); then
-    blocking_problem "The Windows entry is enabled, but the firmware has no single active Windows Boot Manager entry with a name of its own. Take the entry out with: sudo omasecboot windows remove"
+    blocking_problem "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares. Take the entry out with ${BOLD}sudo omasecboot windows remove${NC}"
     return
   fi
   state=$(windows_entry_state "$(windows_target_label)")
@@ -246,22 +231,18 @@ show_integration_status() {
   if [[ -x $hook ]]; then
     pass "The Limine hook is installed"
   else
-    blocking_problem "The Limine hook is missing; reinstall the package: ${hook}"
+    blocking_problem "The Limine hook ${hook} is missing; reinstall the package"
   fi
   if watch_is_active; then
     pass "The watchers of limine.conf and the loader are active"
   else
     problem "The watchers of limine.conf and the loader are not both active"
   fi
-}
-
-# An earlier install's hooks keep running the old tool, set up or not, and
-# setup refuses beside them; the report names them either way.
-show_leftovers_status() {
-  local leftover
-  while IFS= read -r leftover; do
-    [[ -z $leftover ]] || blocking_problem "Leftover of an earlier install; remove it: ${leftover}"
-  done < <(list_leftovers)
+  # The pass does nothing beside a snapshot restore (C2), and nothing starts
+  # one when the restore ends, so a restore lock that stays is said.
+  if restore_in_progress; then
+    problem "A snapshot restore is running or was cut short: the hook and the watchers stay quiet while $(restore_lock_path) exists. When the restore has finished, run ${BOLD}sudo omasecboot sign${NC}. If no restore is running, the lock was left behind: remove it with ${BOLD}sudo rm $(restore_lock_path)${NC} first"
+  fi
 }
 
 show_next_step() {
@@ -270,8 +251,8 @@ show_next_step() {
   elif (( _status_problems == 0 )); then
     case $_status_firmware in
       complete) act "Nothing to do" ;;
-      reboot) act "Next: reboot, then run ${BOLD}sudo omasecboot setup${NC} once more" ;;
-      enrolled) act "Next: turn Secure Boot on in the firmware, or run ${BOLD}sudo omasecboot setup${NC} for the steps" ;;
+      reboot) act "Next: restart (${BOLD}systemctl reboot${NC}), then run ${BOLD}sudo omasecboot setup${NC} once more" ;;
+      enrolled) act "Next: ${BOLD}sudo omasecboot setup${NC} for the last step, turning Secure Boot on" ;;
       pending) act "Next: ${BOLD}sudo omasecboot setup${NC} for the firmware step" ;;
     esac
   else
@@ -291,7 +272,7 @@ show_next_step() {
 
 # Exit 0 when nothing needs attention, 1 otherwise.
 show_status() {
-  local marker
+  local attention
   _status_problems=0 _status_next=sign _status_firmware=pending _status_sealed=true
   header "Status"
   show_firmware_status
@@ -304,7 +285,6 @@ show_status() {
     else
       note "OmaSecBoot is not set up on this machine"
     fi
-    show_leftovers_status
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"
   else
@@ -314,9 +294,8 @@ show_status() {
     show_files_status
     show_windows_status
     show_integration_status
-    show_leftovers_status
-    marker=$(attention_marker)
-    [[ ! -e $marker ]] || problem "An earlier pass could not finish: $(<"$marker")"
+    attention=$(attention_file)
+    [[ ! -e $attention ]] || problem "An earlier pass could not finish: $(<"$attention")"
   fi
   show_next_step
   (( _status_problems == 0 ))

@@ -9,7 +9,7 @@ readonly WINDOWS_LOADER='\efi\microsoft\boot\bootmgfw.efi'
 readonly WINDOWS_ENTRY_COMMENT='comment: Windows Boot Manager through the firmware, managed by OmaSecBoot'
 
 # The zero-byte opt-in: Omarchy replaces limine.conf from its template, and
-# this is how "sign" knows the entry belongs back (upstream-contracts C7).
+# this is how "sign" knows the entry belongs back (C6).
 windows_flag() { printf '%s/windows-enabled\n' "$(state_dir)"; }
 
 # --- The firmware's boot entries ---------------------------------------------------
@@ -58,7 +58,7 @@ read_boot_entry() {
 # order. Firmware leaves numbers in BootOrder whose variable is gone, after a
 # USB stick was removed for instance; those are skipped. An entry that exists
 # and cannot be read fails the listing. The names carry the number in
-# upper-case hex (C8); lower case is looked for as well, because a firmware
+# upper-case hex (C7); lower case is looked for as well, because a firmware
 # that writes it would otherwise hide a Windows entry from the encryption check.
 list_boot_entries() {
   local hex position number name path listed=' '
@@ -79,10 +79,22 @@ list_boot_entries() {
   done
 }
 
+# Limine's efi_boot_entry looks for its entry among the numbers of BootOrder
+# alone (C7), so a target outside it would end in Limine's panic.
+boot_order_holds() {
+  local wanted=${1,,} hex position
+  hex=$(od -An -v -tx1 -- "$(firmware_variable_path BootOrder)" 2>/dev/null) || return 1
+  hex=${hex//[[:space:]]/}
+  for ((position = 8; position + 4 <= ${#hex}; position += 4)); do
+    [[ ${hex:$((position + 2)):2}${hex:position:2} != "$wanted" ]] || return 0
+  done
+  return 1
+}
+
 # Whether the firmware holds an active entry whose file is the primary loader.
 # A machine without one starts through the fallback path (upstream's
 # --skip-uefi boards, or a registration that failed), and the fallback stays
-# raw (D2): turning Secure Boot on would stop it. Status 1: no such entry;
+# raw (D6): turning Secure Boot on would stop it. Status 1: no such entry;
 # status 2: the entries could not be read.
 firmware_starts_primary() {
   local LC_ALL=C entries entry rest state file wanted
@@ -100,9 +112,10 @@ firmware_starts_primary() {
 }
 
 # Sets _windows_number and _windows_label when the firmware holds exactly one
-# active entry whose file is bootmgfw.efi and whose label no other entry
-# shares: Limine's efi_boot_entry protocol finds the entry by name (C8). The
-# label must fit one line of limine.conf. Status 1: no such entry; status 2:
+# active entry whose file is bootmgfw.efi, whose label no other entry shares
+# and whose number stands in BootOrder: Limine's efi_boot_entry protocol finds
+# the entry by name, among the entries of BootOrder (C7). The label must fit
+# one line of limine.conf. Status 1: no such entry; status 2:
 # the entries could not be read. Case is folded for ASCII only, in every
 # locale, so a pass inside a package transaction decides as a terminal does.
 _windows_number='' _windows_label=''
@@ -125,6 +138,7 @@ resolve_windows_target() {
     [[ ${label,,} != "${target_label,,}" ]] || same=$((same + 1))
   done <<<"$entries"
   [[ $same == 1 && -n $target_label && $target_label != *'#'* ]] || return 1
+  boot_order_holds "$target_number" || return 1
   _windows_number=$target_number _windows_label=$target_label
 }
 
@@ -146,7 +160,7 @@ firmware_lists_windows() {
 # or while the loader carries no checksum at all, because a loader sealed over
 # another limine.conf does not boot (C1). Upstream's tools keep a foreign
 # top-level entry and its body through their rewrites and drop comment lines
-# beside it (C8), so nothing but the entry itself says that it is this tool's:
+# beside it (C7), so nothing but the entry itself says that it is this tool's:
 # the header "/Windows" and a body of this tool's three keys, its comment
 # among them.
 
@@ -213,11 +227,11 @@ windows_entry_state() {
   fi
 }
 
-readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds this tool's Windows comment in an entry this tool did not write that way; remove that comment line, or the entry, by hand"
+readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds OmaSecBoot's Windows comment in an entry that is not as OmaSecBoot writes it; remove that comment line, or the entry, by hand"
 
 # write_windows_entry [LABEL]: limine.conf with exactly the entry for LABEL,
 # or with none. Nothing is touched when it already reads that way. Omarchy
-# replaces limine.conf outside any lock (C7), so the file must still be what
+# replaces limine.conf outside any lock (C6), so the file must still be what
 # was read when the new content goes in.
 write_windows_entry() {
   local label=${1:-} config mode content before
@@ -274,7 +288,7 @@ converge_windows_entry() {
   resolve_windows_target || status=$?
   case $status in
     0) ;;
-    1) qnote "The Windows entry is enabled, but the firmware has no single active Windows Boot Manager entry with a name of its own; see: sudo omasecboot status" ;;
+    1) qnote "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares; see ${BOLD}sudo omasecboot status${NC}" ;;
     *) qnote "The Windows entry is enabled, but the firmware's boot entries cannot be read right now" ;;
   esac
   (( status == 0 )) || return 0
@@ -308,7 +322,7 @@ list_bitlocker_volumes() {
 
 # windows_encryption_state: prints absent, present or unknown. "absent" is a
 # bounded observation (no Windows Boot Manager entry and no BitLocker volume),
-# never a clearance of the firmware.
+# never proof that there is none.
 windows_encryption_state() {
   local volumes listed=0
   volumes=$(list_bitlocker_volumes) || {
@@ -333,15 +347,14 @@ print_encryption_guidance() {
   done <<<"$1"
   warn "Changing Secure Boot keys or its state can make Windows ask for the BitLocker recovery key"
   print_message "
-    ${BOLD}Windows Pro, Enterprise or Education${NC}
-      1. Back up and verify every recovery key (account.microsoft.com/devices/recoverykey, or your organisation).
-      2. In an administrator PowerShell: Suspend-BitLocker -MountPoint \$env:SystemDrive -RebootCount 0
-      3. After Secure Boot is on and Windows has started once: Resume-BitLocker -MountPoint \$env:SystemDrive
-    ${BOLD}Windows Home${NC}
-      1. Back up and verify the recovery key if Device Encryption is on.
-      2. Settings > Privacy & security > Device encryption: turn it off and wait until decryption has finished.
-      3. Turn it on again after Secure Boot is on and Windows has started once.
-    A device managed by an organisation needs its administrator's approval first.
+    ${BOLD}Required where Windows is encrypted, on every edition${NC}
+      Back up and verify every recovery key (account.microsoft.com/devices/recoverykey, or your organisation)
+      With the key a prompt is an inconvenience; without it, a lockout
+    ${BOLD}To avoid the prompt, on every edition, in an administrator terminal in Windows${NC}
+      1. Before the change: manage-bde -protectors -disable C: -RebootCount 0
+      2. After Secure Boot is on and Windows has started once: manage-bde -protectors -enable C:
+      While the protectors are disabled the key lies unprotected on the drive, so do not skip step 2
+    A device managed by an organisation needs its administrator's approval first
 "
 }
 
@@ -354,11 +367,11 @@ acknowledge_windows_encryption() {
     unknown) warn "Could not tell whether Windows or a BitLocker volume is on this machine" ;;
   esac
   print_encryption_guidance "$(list_bitlocker_volumes)"
-  confirm "the Secure Boot change" "Is Windows encryption suspended or off, or its recovery key at hand?"
+  confirm "the Secure Boot change" "Is the Windows recovery key at hand, or is there no encrypted Windows on this machine?"
 }
 
 # Turning Secure Boot on changes what Windows measures once more.
 remind_of_windows_encryption() {
   [[ $(windows_encryption_state) == absent ]] ||
-    warn "If Windows is encrypted, suspend BitLocker or Device Encryption again before you turn Secure Boot on (omasecboot windows preflight shows how)"
+    warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot on; to avoid the prompt, leave its protectors disabled until Windows has started once (${BOLD}omasecboot windows preflight${NC} shows how)"
 }

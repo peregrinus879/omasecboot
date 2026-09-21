@@ -4,9 +4,9 @@
 # one.
 
 # Rows that make sbctl's pacman hook sign a history file or the fallback loader
-# in place. OmaSecBoot adds no rows; these come from an earlier version of this
-# tool or from the user. Listing them makes sbctl read every tracked file, so
-# this belongs to setup and status, never to the hook's pass.
+# in place. OmaSecBoot adds no rows; these come from the user, from
+# `sbctl sign -s` for example. Listing them makes sbctl read every tracked
+# file, so this belongs to setup and status, never to the hook's pass.
 list_harmful_sbctl_rows() {
   local esp tracked file
   esp=$(esp_path) || return 1
@@ -28,12 +28,16 @@ remove_harmful_sbctl_rows() {
   while IFS= read -r file; do
     [[ -n $file ]] || continue
     qnote "Removing ${file} from sbctl's list, so sbctl never signs it in place"
-    run_sbctl remove-file "$file" >/dev/null || return 1
+    run_sbctl remove-file "$file" >/dev/null || {
+      warn "sbctl could not remove ${file} from its list; its pacman hook would sign that file in place"
+      return 1
+    }
   done <<<"$rows"
 }
 
 # UKIs normally arrive signed by sbctl's mkinitcpio hook. One that did not is
-# signed where it is: staging a copy of a 267 MB image can exhaust a small ESP.
+# signed where it is: staging a copy of an image of a few hundred megabytes
+# can exhaust a small ESP.
 # sbctl truncates the file and writes it back with the signature (C4), so
 # room is checked first. Every file is read once, and a pass that returns 0
 # has proved each of them signed.
@@ -50,13 +54,14 @@ sign_unsigned_arrivals() {
       1)
         if file_has_path_hash "$file"; then
           # setup regenerates the entries without hashes before anything is
-          # signed; a build that failed without saying so (C2) leaves this.
-          fail "Not signing ${file}: limine.conf holds a path hash for it, which a signature would break. Run: sudo omasecboot setup"
+          # signed. A build that failed without saying so (C2) leaves this, and
+          # so does an entry written by hand; setup names the way out of both.
+          fail "Not signing ${file}: limine.conf holds a path hash for it, which a signature would break. Run ${BOLD}sudo omasecboot setup${NC}"
           failed=1
         else
           qact "Signing ${file}"
           { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
-            fail "Could not sign ${file}"
+            fail "Could not sign ${file}; a file that stays unsigned fails every pass, so sign it by hand with sbctl or take it off the ESP"
             failed=1
           }
         fi
@@ -125,16 +130,17 @@ sign_boot_files() {
   if [[ $sealed == false ]]; then
     # A loader sealed over another limine.conf does not start at all (C1).
     set_attention "the loader could not be sealed on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
-    fail "The Limine loader is not sealed with the current limine.conf. Do not reboot, with Secure Boot on or off; run: sudo omasecboot status"
+    fail "The Limine loader is not sealed over the current limine.conf. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     return 1
   elif (( rc != 0 )); then
     set_attention "sign could not finish on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
-    fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run: sudo omasecboot status"
+    fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run ${BOLD}sudo omasecboot status${NC}"
     return 1
   fi
-  # The watchers' pass judges the seal alone, so it clears only a marker
-  # about the seal; what a full pass found stays until a full pass is clean.
-  if [[ $scope == full ]] || grep -q '^the loader could not be sealed' "$(attention_marker)" 2>/dev/null; then
+  # The watchers' pass judges the seal alone, so it clears needs-attention only
+  # when it is about the seal; what a full pass found stays until a full pass
+  # is clean.
+  if [[ $scope == full ]] || grep -q '^the loader could not be sealed' "$(attention_file)" 2>/dev/null; then
     clear_attention
   fi
   qpass "Boot files are sealed and signed"

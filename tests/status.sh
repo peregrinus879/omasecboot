@@ -11,7 +11,7 @@ test_harness_init status
 set_up_machine() {
   : >"$FIX/sbctl/keys"
   write_limine_conf unhashed
-  { save_settings_originals && QUIET=true sign_boot_files && : >"$(enabled_marker)"; } || fail_test "fixture setup"
+  { save_settings_originals && QUIET=true sign_boot_files && : >"$(enabled_file)"; } || fail_test "fixture setup"
 }
 
 not_set_up_is_not_a_problem() {
@@ -35,10 +35,10 @@ enrollment_state_chooses_the_next_step() {
   delete_platform_key
   { read_enrollment_plan && enroll_local_keys append; } >/dev/null || fail_test "fixture enrollment"
   output=$(show_status 2>&1) || fail_test "a freshly enrolled machine reported problems: ${output}"
-  [[ $output == *'Next: reboot, then run'* ]] || fail_test "the enrollment's own boot: ${output}"
+  [[ $output == *'Next: restart (systemctl reboot), then run'* ]] || fail_test "the enrollment's own boot: ${output}"
   set_mode_variable SetupMode 0
   output=$(show_status 2>&1) || fail_test "an enrolled machine reported problems: ${output}"
-  [[ $output == *'Your keys are enrolled in the firmware'* && $output == *'Next: turn Secure Boot on'* ]] || fail_test "report: ${output}"
+  [[ $output == *'Your keys are enrolled in the firmware'* && $output == *'Next: sudo omasecboot setup for the last step'* ]] || fail_test "report: ${output}"
   set_mode_variable SecureBoot 1
   output=$(show_status 2>&1) || fail_test "a complete machine reported problems: ${output}"
   [[ $output == *'Secure Boot is on'* && $output == *'Nothing to do'* ]] || fail_test "report: ${output}"
@@ -112,7 +112,7 @@ blocking_problems_name_no_repair_command() {
   set_up_machine
   rm "$FIX/sbctl/keys" "$FIX/bin/limine-hook"
   output=$(show_status 2>&1) && fail_test "lost keys and a missing hook passed"
-  [[ $output == *'sbctl has no signing keys'* && $output == *'Limine hook is missing'* ]] || fail_test "report: ${output}"
+  [[ $output == *'sbctl has no signing keys'* && $output == *'The Limine hook '*' is missing'* ]] || fail_test "report: ${output}"
   [[ $output == *'Next: resolve what is marked above'* ]] || fail_test "next step: ${output}"
 
   : >"$FIX/run/esp-unmounted"
@@ -141,28 +141,19 @@ unreadable_firmware_is_a_problem() {
   [[ $output == *"Could not read the firmware's Secure Boot variables"* ]] || fail_test "report: ${output}"
 }
 
-marker_and_leftovers_are_problems() {
+needs_attention_is_a_problem() {
   local output
   set_up_machine
   set_attention "hook failed"
-  mkdir -p "$FIX/old/hooks"
-  ln -s /nonexistent "$FIX/old/hooks/zzz-omasecboot.hook"
-  output=$(show_status 2>&1) && fail_test "marker and leftovers were not problems"
-  [[ $output == *'hook failed'* && $output == *'/old/hooks/zzz-omasecboot.hook'* ]] || fail_test "report: ${output}"
-  [[ $output != *'/old/omasecboot'* ]] || fail_test "an absent file was reported as a leftover"
+  output=$(show_status 2>&1) && fail_test "a pass that could not finish was not a problem"
+  [[ $output == *'hook failed'* ]] || fail_test "report: ${output}"
 }
 
-# Before setup is where a leftover matters most: setup refuses beside it, and
-# the report is what tells the user why.
-leftovers_are_named_before_setup() {
+# A stock machine passes, and the report names the command that starts.
+stock_machine_is_sent_to_setup() {
   local output
-  mkdir -p "$FIX/old/hooks"
-  ln -s /nonexistent "$FIX/old/hooks/zzz-omasecboot.hook"
-  output=$(show_status 2>&1) && fail_test "status passed over a leftover on a machine that is not set up"
-  [[ $output == *'is not set up on this machine'* && $output == *'/old/hooks/zzz-omasecboot.hook'* ]] || fail_test "report: ${output}"
-  rm "$FIX/old/hooks/zzz-omasecboot.hook"
   output=$(show_status 2>&1) || fail_test "a stock machine does not pass: ${output}"
-  [[ $output == *'Next:'*'omasecboot setup'* ]] || fail_test "no next step on a stock machine: ${output}"
+  [[ $output == *'is not set up on this machine'* && $output == *'Next:'*'omasecboot setup'* ]] || fail_test "no next step on a stock machine: ${output}"
 }
 
 old_snapshots_are_a_note_not_a_problem() {
@@ -181,15 +172,15 @@ sealed_but_unsigned_is_not_called_unsealed() {
   write_raw_loader "$(primary_loader_path)"
   limine enroll-config "$(primary_loader_path)" "$(config_checksum)"
   output=$(show_status 2>&1) && fail_test "an unsigned loader read as healthy"
-  [[ $output == *'sealed with the current limine.conf but not signed'* && $output == *'Next: sudo omasecboot sign'* ]] || fail_test "report: ${output}"
+  [[ $output == *'sealed over the current limine.conf but not signed'* && $output == *'Next: sudo omasecboot sign'* ]] || fail_test "report: ${output}"
   [[ $output != *'with Secure Boot on or off'* ]] || fail_test "an unsigned loader got the warning of an unsealed one: ${output}"
   printf 'timeout: 9\n' >>"$FIX/esp/limine.conf"
   output=$(show_status 2>&1) && fail_test "a stale seal read as healthy"
-  [[ $output == *'is not sealed with the current limine.conf'*'with Secure Boot on or off'* ]] || fail_test "report: ${output}"
+  [[ $output == *'is not sealed over the current limine.conf'*'with Secure Boot on or off'* ]] || fail_test "report: ${output}"
 }
 
 # Without an active entry for the primary loader the machine starts through
-# the fallback path, which stays raw (D2) and is refused with Secure Boot on.
+# the fallback path, which stays raw (D6) and is refused with Secure Boot on.
 missing_limine_boot_entry_blocks() {
   local output
   set_up_machine
@@ -229,8 +220,23 @@ full_esp_is_a_note() {
   [[ $output == *'less than its largest boot file'* ]] || fail_test "no note on a full ESP: ${output}"
 }
 
+# The pass stays quiet beside a snapshot restore, so the report names a restore
+# lock that is there, whether the restore runs or was cut short.
+restore_lock_is_said() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
+  [[ $output != *'snapshot restore'* ]] || fail_test "the restore lock was reported on a clean machine: ${output}"
+  : >"$(restore_lock_path)"
+  output=$(show_status 2>&1) && fail_test "a present restore lock left the report clean"
+  [[ $output == *'snapshot restore is running or was cut short'*'sudo rm'*'Next: sudo omasecboot sign'* ]] || fail_test "the lock, the way to remove one left behind, or the next step is missing: ${output}"
+  # The next step must repair: with the lock gone, the report is clean again.
+  rm "$(restore_lock_path)"
+  output=$(show_status 2>&1) || fail_test "the report stayed unclean after the lock went: ${output}"
+}
+
 # Upstream never refreshes the fallback of a machine installed beside another
-# system (C7); the note names the command that does.
+# system (C6); the note names the command that does.
 old_rescue_loader_is_a_note() {
   local output
   set_up_machine
@@ -238,7 +244,7 @@ old_rescue_loader_is_a_note() {
   [[ $output != *'another Limine build'* ]] || fail_test "a note on a clean machine: ${output}"
   write_raw_loader "$(fallback_loader_path)" 12.5.2
   output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
-  [[ $output == *'another Limine build than the primary'*'limine-install --fallback'* ]] || fail_test "no note on an old rescue loader: ${output}"
+  [[ $output == *'another Limine build than the primary loader'*'limine-install --fallback'* ]] || fail_test "no note on an old rescue loader: ${output}"
   # While upstream holds the packaged Limine back, its step refreshes nothing (C2).
   write_raw_loader "$FIX/share/BOOTX64.EFI" 13.0.0
   output=$(show_status 2>&1) || fail_test "a held-back major changed the exit status: ${output}"
@@ -255,12 +261,13 @@ run_case harmful-sbctl-rows-need-setup harmful_sbctl_rows_need_setup
 run_case blocking-problems-name-no-repair-command blocking_problems_name_no_repair_command
 run_case unknown-states-block unknown_states_block
 run_case unreadable-firmware-is-a-problem unreadable_firmware_is_a_problem
-run_case marker-and-leftovers-are-problems marker_and_leftovers_are_problems
-run_case leftovers-are-named-before-setup leftovers_are_named_before_setup
+run_case needs-attention-is-a-problem needs_attention_is_a_problem
+run_case stock-machine-is-sent-to-setup stock_machine_is_sent_to_setup
 run_case old-snapshots-are-a-note-not-a-problem old_snapshots_are_a_note_not_a_problem
 run_case sealed-but-unsigned-is-not-called-unsealed sealed_but_unsigned_is_not_called_unsealed
 run_case missing-limine-boot-entry-blocks missing_limine_boot_entry_blocks
 run_case full-esp-is-a-note full_esp_is_a_note
 run_case missing-2023-certificates-are-notes missing_2023_certificates_are_notes
 run_case old-rescue-loader-is-a-note old_rescue_loader_is_a_note
+run_case restore-lock-is-said restore_lock_is_said
 finish_suite

@@ -41,7 +41,7 @@ check_tools() {
 }
 
 # Prompts need a terminal on both ends: without one gum declines silently,
-# which reads as a refusal nobody gave (upstream-contracts.md C6).
+# which reads as a refusal nobody gave (C10).
 require_terminal() {
   [[ -t 0 && -t 2 ]] || {
     fail "This step asks for confirmation and needs a terminal"
@@ -56,11 +56,14 @@ require_terminal() {
 # confirm WHAT QUESTION: default No; a declined prompt says what was cancelled.
 confirm() {
   local what=$1 question=$2
-  require_terminal || return 1
+  require_terminal || {
+    warn "Cancelled: ${what}. Nothing was changed by this step"
+    return 1
+  }
   if gum confirm --default=false "$question"; then
     return 0
   else
-    warn "Cancelled: ${what}. Nothing was changed by this step."
+    warn "Cancelled: ${what}. Nothing was changed by this step"
     return 1
   fi
 }

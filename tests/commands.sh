@@ -18,7 +18,7 @@ setup_from_stock_and_again() {
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "primary"
   file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "UKI"
   cmp -s "$(fallback_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the fallback must stay raw"
-  [[ -e $(enabled_marker) && $(enabled_watchers) == 2 ]] || fail_test "marker or watchers"
+  [[ -e $(enabled_file) && $(enabled_watchers) == 2 ]] || fail_test "enabled or watchers"
   [[ $(<"$FIX/run/output") == *'Take a snapshot now'* ]] || fail_test "no snapshot advice"
 
   : >"$FIX/run/calls"
@@ -44,11 +44,6 @@ unsigned_arrival_is_signed() {
 setup_refuses_before_changing_anything() {
   local before
   before=$(find "$FIX/esp" "$FIX/etc" "$FIX/state" -type f -exec sha256sum {} + | sort)
-  mkdir -p "$FIX/old"
-  : >"$FIX/old/omasecboot"
-  run_cli setup && fail_test "setup ran beside an earlier install"
-  grep -qF "sudo rm -rf $FIX/old/omasecboot" "$FIX/run/output" || fail_test "the removal command was not printed"
-  rm "$FIX/old/omasecboot"
   printf 'ENABLE_UKI=no\n' >"$FIX/etc/layers/90-no-uki.conf"
   run_cli setup && fail_test "setup ran without UKIs"
   rm "$FIX/etc/layers/90-no-uki.conf"
@@ -80,7 +75,7 @@ earlier_values_are_the_users() {
 unmounted_esp_and_unsafe_files_stop_the_commands() {
   : >"$FIX/run/esp-unmounted"
   run_cli setup && fail_test "setup ran without the ESP"
-  [[ $(<"$FIX/run/output") == *'not mounted'* && ! -e $(enabled_marker) ]] || fail_test "setup without the ESP: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'not mounted'* && ! -e $(enabled_file) ]] || fail_test "setup without the ESP: $(<"$FIX/run/output")"
   rm "$FIX/run/esp-unmounted"
   chmod 666 "$FIX/etc/default-limine"
   cp "$FIX/etc/default-limine" "$FIX/run/default-limine-before"
@@ -90,17 +85,17 @@ unmounted_esp_and_unsafe_files_stop_the_commands() {
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   : >"$FIX/run/esp-unmounted"
   run_cli remove && fail_test "remove ran without the ESP"
-  [[ -e $(enabled_marker) ]] || fail_test "remove without the ESP changed state"
+  [[ -e $(enabled_file) ]] || fail_test "remove without the ESP changed state"
   rm "$FIX/run/esp-unmounted"
   # remove hands the ESP to upstream's install, which copies in place (C2).
   : >"$FIX/run/esp-is-full" && : >"$FIX/run/calls"
   run_cli remove && fail_test "remove ran on a full ESP"
-  [[ $(<"$FIX/run/output") == *'Less than 2 MiB free'* && -e $(enabled_marker) ]] || fail_test "remove on a full ESP: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Less than 2 MiB free'* && -e $(enabled_file) ]] || fail_test "remove on a full ESP: $(<"$FIX/run/output")"
   ! grep -q '^limine-install' "$FIX/run/calls" || fail_test "upstream's install ran on a full ESP"
   rm "$FIX/run/esp-is-full"
   chmod 666 "$(settings_originals_file)"
   run_cli remove && fail_test "remove trusted originals anybody can write"
-  [[ -e $(enabled_marker) ]] || fail_test "remove with unsafe originals changed state"
+  [[ -e $(enabled_file) ]] || fail_test "remove with unsafe originals changed state"
   [[ $(<"$FIX/run/output") == *'nothing was changed'* ]] || fail_test "report: $(<"$FIX/run/output")"
   # The record of the settings' originals lost on a machine that is set up.
   rm -f "$(settings_originals_file)"
@@ -109,14 +104,14 @@ unmounted_esp_and_unsafe_files_stop_the_commands() {
 }
 
 # A machine that Omarchy installed beside another system: the installer wrote
-# ENABLE_LIMINE_FALLBACK=no and there is no fallback loader (C7).
+# ENABLE_LIMINE_FALLBACK=no and there is no fallback loader (C6).
 fallback_is_offered_only_into_an_empty_place() {
   local fallback
   fallback=$(fallback_loader_path)
   rm "$fallback"
   printf 'ENABLE_LIMINE_FALLBACK=no\n' >>"$FIX/etc/default-limine"
   CONFIRM_ANSWER=no run_cli setup || fail_test "a declined offer stopped setup: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'Cancelled: adding the fallback loader'*'sudo limine-install --fallback'* ]] || fail_test "a declined offer: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Cancelled: the fallback loader'*'sudo omasecboot setup offers to add one again'* ]] || fail_test "a declined offer: $(<"$FIX/run/output")"
   [[ ! -e $fallback ]] || fail_test "a declined offer added the fallback"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   grep -qx 'limine-install --fallback --no-efi-register' "$FIX/run/calls" || fail_test "upstream's step was not used: $(<"$FIX/run/calls")"
@@ -129,7 +124,7 @@ fallback_is_offered_only_into_an_empty_place() {
   printf 'another system' >"$fallback"
   : >"$FIX/run/calls"
   run_cli setup || fail_test "setup failed beside a foreign loader: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") != *'QUESTION: There is no fallback'* ]] || fail_test "a foreign loader was offered for replacement"
+  [[ $(<"$FIX/run/output") != *'QUESTION: This machine has no fallback loader'* ]] || fail_test "a foreign loader was offered for replacement"
   ! grep -q -e '--fallback' "$FIX/run/calls" || fail_test "upstream's step ran over a foreign loader"
   [[ $(<"$fallback") == 'another system' ]] || fail_test "a foreign loader was replaced"
 }
@@ -151,8 +146,10 @@ failed_fallback_step_is_reported() {
 remove_returns_to_stock() {
   local secure_boot=$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
   cp "$FIX/etc/default-limine" "$FIX/run/default-limine-before"
-  run_cli remove && fail_test "remove ran on a machine that was never set up"
-  [[ $(<"$FIX/run/output") == *'Nothing to remove'* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  # Every command is idempotent: with nothing to take back, remove says so, changes nothing and succeeds.
+  run_cli remove || fail_test "remove failed on a machine that was never set up: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Nothing to remove'* ]] || fail_test "no word about it: $(<"$FIX/run/output")"
+  cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "remove changed the settings of a machine that was never set up"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   # The stock boot files are unsigned: on, unreadable and absent all refuse.
   set_mode_variable SecureBoot 1
@@ -161,14 +158,14 @@ remove_returns_to_stock() {
   run_cli remove && fail_test "remove ran with an unreadable SecureBoot variable"
   rm "$secure_boot"
   run_cli remove && fail_test "remove ran without a SecureBoot variable"
-  [[ -e $(enabled_marker) ]] || fail_test "a refused remove changed state"
+  [[ -e $(enabled_file) ]] || fail_test "a refused remove changed state"
   set_mode_variable SecureBoot 0
   CONFIRM_ANSWER=no run_cli remove && fail_test "a declined remove went on"
-  [[ -e $(enabled_marker) ]] || fail_test "a declined remove changed state"
+  [[ -e $(enabled_file) ]] || fail_test "a declined remove changed state"
   run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
   cmp -s "$FIX/etc/default-limine" "$FIX/run/default-limine-before" || fail_test "settings are not back to stock"
   cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not the raw executable"
-  [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) && $(enabled_watchers) == 0 ]] || fail_test "state left behind"
+  [[ ! -e $(enabled_file) && ! -e $(settings_originals_file) && $(enabled_watchers) == 0 ]] || fail_test "state left behind"
   [[ -e $FIX/sbctl/keys ]] || fail_test "remove deleted the keys"
 }
 
@@ -191,7 +188,31 @@ busy_remove_changes_nothing() {
   run_cli remove || rc=$?
   kill %1 2>/dev/null
   (( rc == 75 )) || fail_test "remove returned ${rc}"
-  [[ -e $(enabled_marker) && $(enabled_watchers) == 2 ]] || fail_test "a busy remove switched the protection off"
+  [[ -e $(enabled_file) && $(enabled_watchers) == 2 ]] || fail_test "a busy remove switched the protection off"
+  # The advice must fit the command that met the lock, not only the pass.
+  [[ $(<"$FIX/run/output") == *'Boot files are busy'*'run this command again'* ]] || fail_test "the busy advice: $(<"$FIX/run/output")"
+}
+
+# A lock that cannot be opened, a state directory that is not safe and a prompt
+# without a terminal each stop the command with a line that says why.
+refusals_say_why() {
+  local lock
+  chmod 777 "$FIX/state"
+  run_cli setup && fail_test "setup ran with a state directory that others can write"
+  [[ $(<"$FIX/run/output") == *'Unsafe state directory'*'writable by others'* ]] || fail_test "unsafe state directory: $(<"$FIX/run/output")"
+  [[ ! -e $(settings_originals_file) ]] || fail_test "something was recorded in an unsafe state directory"
+  chmod 755 "$FIX/state"
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  lock=$(boot_lock_path)
+  rm -f "$lock"
+  mkdir "$lock"
+  run_cli sign && fail_test "sign ran without the boot lock"
+  [[ $(<"$FIX/run/output") == *'Could not open the boot lock'* ]] || fail_test "unopenable lock: $(<"$FIX/run/output")"
+  rmdir "$lock"
+  : >"$FIX/run/no-terminal"
+  run_cli remove && fail_test "remove went on without a terminal"
+  [[ $(<"$FIX/run/output") == *'Cancelled: the return to stock'* ]] || fail_test "no word on what was cancelled: $(<"$FIX/run/output")"
+  [[ -e $(enabled_file) ]] || fail_test "a remove without a terminal changed the machine"
 }
 
 # Upstream can hold a new Limine major back (C2): stock is then the loader it
@@ -220,19 +241,40 @@ silent_build_failure_stops_setup() {
   cp "$FIX/esp/EFI/Linux/omarchy_linux.efi" "$FIX/run/uki-before"
   : >"$FIX/run/uki-build-fails-silently"
   run_cli setup && fail_test "setup passed although the entries still carry hashes"
-  [[ $(<"$FIX/run/output") == *'could not be regenerated without path hashes'* ]] || fail_test "message: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'still holds path hashes after limine-mkinitcpio ran'*'boot():/EFI/Linux/omarchy_linux.efi#'*'run sudo omasecboot setup again'* ]] || fail_test "message: $(<"$FIX/run/output")"
   cmp -s "$FIX/esp/EFI/Linux/omarchy_linux.efi" "$FIX/run/uki-before" || fail_test "a hashed UKI was signed in place"
   rm "$FIX/run/uki-build-fails-silently"
   run_cli setup || fail_test "setup after the repair failed: $(<"$FIX/run/output")"
 }
 
-# A machine coming from an earlier version of this tool.
+# limine-mkinitcpio keeps a foreign entry as it stands (C7), its hash included,
+# and a signature would make that entry stale (D4): setup names the path and
+# the way out, and goes on once the hash is off.
+hand_written_hash_stops_setup_with_the_way_out() {
+  local other=$FIX/esp/EFI/other/loader.efi
+  mkdir -p "${other%/*}" && printf 'another loader' | tee "$other" "$FIX/run/other-before" >/dev/null
+  printf '\n/Other\n    protocol: efi\n    path: boot():/EFI/other/loader.efi#%s\n' "$(b2sum <"$other" | cut -d' ' -f1)" >>"$FIX/esp/limine.conf"
+  run_cli setup && fail_test "setup passed beside an entry that keeps its hash"
+  [[ $(<"$FIX/run/output") == *'still holds path hashes'*'boot():/EFI/other/loader.efi#'*'take the #hash off its path'* ]] || fail_test "message: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'omarchy_linux.efi#'* ]] || fail_test "an entry that lost its hash was listed: $(<"$FIX/run/output")"
+  cmp -s "$other" "$FIX/run/other-before" || fail_test "a hashed file was signed in place"
+  sed -i 's|^\(    path: boot():/EFI/other/loader.efi\)#.*|\1|' "$FIX/esp/limine.conf"
+  run_cli setup || fail_test "setup after the hash was taken off failed: $(<"$FIX/run/output")"
+  file_is_fixture_signed "$other" || fail_test "the file stayed unsigned once its hash was gone"
+}
+
+# A machine whose sbctl file list holds rows that would do damage (D7).
 setup_removes_harmful_sbctl_rows() {
   local history=$FIX/esp/machine/limine_history/old.efi_sha256_abc
   mkdir -p "${history%/*}" && printf 'snapshot image' | tee "$history" "$FIX/run/history-before" >/dev/null
   printf '%s\n' "$history" "$(fallback_loader_path)" >"$FIX/sbctl/files"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   [[ ! -s $FIX/sbctl/files ]] || fail_test "rows left: $(<"$FIX/sbctl/files")"
+  # A row that sbctl will not give up stops setup, with the reason.
+  printf '%s\n' "$history" >"$FIX/sbctl/files"
+  : >"$FIX/run/sbctl-cannot-remove-rows"
+  run_cli setup && fail_test "setup went on beside a row that makes sbctl sign a history file in place"
+  [[ $(<"$FIX/run/output") == *'sbctl could not remove'*'would sign that file in place'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
   cmp -s "$history" "$FIX/run/history-before" || fail_test "setup changed a history file"
 }
 
@@ -270,7 +312,7 @@ usage_errors_exit_2() {
     (( rc == 2 )) || fail_test "'${arguments}' returned ${rc}"
     [[ $(<"$FIX/run/output") == *"${arguments##* }"*'omasecboot setup'* ]] || fail_test "'${arguments}' was not named before the usage text: $(<"$FIX/run/output")"
   done
-  [[ ! -e $(enabled_marker) && ! -e $FIX/sbctl/keys ]] || fail_test "a usage error changed the machine"
+  [[ ! -e $(enabled_file) && ! -e $FIX/sbctl/keys ]] || fail_test "a usage error changed the machine"
   run_cli version || fail_test "version"
   [[ $(<"$FIX/run/output") =~ ^omasecboot\ [0-9]+\.[0-9]+\.[0-9]+$ ]] || fail_test "version output"
   run_cli sign && fail_test "sign ran on a machine that was never set up"
@@ -308,18 +350,18 @@ hook_never_fails_its_caller() {
 # A full snapshot restore works on the boot files without the lock (C2), so
 # nothing that rewrites them starts beside it.
 setup_and_remove_wait_for_a_restore() {
-  : >"$(restore_marker_path)"
+  : >"$(restore_lock_path)"
   run_cli setup && fail_test "setup ran beside a snapshot restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
-  [[ ! -e $(enabled_marker) && ! -e $(settings_originals_file) ]] || fail_test "a refused setup left state behind"
+  [[ ! -e $(enabled_file) && ! -e $(settings_originals_file) ]] || fail_test "a refused setup left state behind"
   ! grep -q '^limine-' "$FIX/run/calls" 2>/dev/null || fail_test "a refused setup ran a Limine tool: $(<"$FIX/run/calls")"
-  rm "$(restore_marker_path)"
+  rm "$(restore_lock_path)"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
-  : >"$(restore_marker_path)"
+  : >"$(restore_lock_path)"
   : >"$FIX/run/calls"
   run_cli remove && fail_test "remove ran beside a snapshot restore"
   [[ $(<"$FIX/run/output") == *'snapshot restore is running'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
-  [[ -e $(enabled_marker) && -e $(settings_originals_file) && ! -s $FIX/run/calls ]] || fail_test "a refused remove changed something: $(<"$FIX/run/calls")"
+  [[ -e $(enabled_file) && -e $(settings_originals_file) && ! -s $FIX/run/calls ]] || fail_test "a refused remove changed something: $(<"$FIX/run/calls")"
 }
 
 # remove that stops half way leaves a machine that reads as neither set up
@@ -328,7 +370,7 @@ unfinished_remove_is_reported() {
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   : >"$FIX/run/limine-install-fails"
   run_cli remove && fail_test "a failed Limine tool went unnoticed"
-  [[ ! -e $(enabled_marker) && -e $(settings_originals_file) ]] || fail_test "the fixture is not a remove that stopped half way"
+  [[ ! -e $(enabled_file) && -e $(settings_originals_file) ]] || fail_test "the fixture is not a remove that stopped half way"
   run_cli status && fail_test "status passed over a remove that did not finish"
   [[ $(<"$FIX/run/output") == *'did not finish'* && $(<"$FIX/run/output") != *'Next:'* ]] || fail_test "report: $(<"$FIX/run/output")"
   rm "$FIX/run/limine-install-fails"
@@ -369,9 +411,11 @@ run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
 run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
+run_case refusals-say-why refusals_say_why
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept
 run_case remove-can-be-run-again remove_can_be_run_again
 run_case silent-build-failure-stops-setup silent_build_failure_stops_setup
+run_case hand-written-hash-stops-setup-with-the-way-out hand_written_hash_stops_setup_with_the_way_out
 run_case setup-removes-harmful-sbctl-rows setup_removes_harmful_sbctl_rows
 run_case busy-boot-files-exit-75 busy_boot_files_exit_75
 run_case hook-pass-works-under-the-callers-lock hook_pass_works_under_the_callers_lock

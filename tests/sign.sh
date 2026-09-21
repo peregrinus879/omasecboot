@@ -23,7 +23,7 @@ converges_and_is_idempotent() {
   file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "the unsigned UKI was not signed"
   [[ $(effective_setting ENABLE_VERIFICATION) == no && $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]] || fail_test "settings"
   [[ $(enabled_watchers) == 2 ]] || fail_test "the watchers were not enabled: $(ls "$FIX/systemd")"
-  [[ ! -e $(attention_marker) ]] || fail_test "a clean pass left the marker"
+  [[ ! -e $(attention_file) ]] || fail_test "a clean pass left needs-attention"
   : >"$FIX/run/calls"
   sign_boot_files || fail_test "second pass"
   ! grep -qE '^(sbctl sign|limine enroll-config|systemctl enable)' "$FIX/run/calls" || fail_test "a second pass changed something: $(<"$FIX/run/calls")"
@@ -31,9 +31,9 @@ converges_and_is_idempotent() {
 
 # The pass runs inside package transactions: a history file is neither
 # changed nor read, whatever its name's case and whatever limine.conf says
-# about it (spec D1 and the hook's time budget).
+# about it (D5 and the hook's time budget).
 # Windows' own boot files and the 32-bit loader are no file of this tool's
-# (spec section 4): never listed, never signed, never handed to a tool.
+# (D4): never listed, never signed, never handed to a tool.
 other_systems_files_are_never_touched() {
   local windows=$FIX/esp/EFI/Microsoft/Boot/bootmgfw.efi odd=$FIX/esp/efi/MICROSOFT/Recovery/x.EFI ia32=$FIX/esp/EFI/BOOT/BOOTIA32.EFI file
   prepared_machine
@@ -69,8 +69,8 @@ fallback_is_returned_to_raw() {
   cmp -s "$fallback" "$FIX/share/BOOTX64.EFI" || fail_test "the signed fallback was not restored to raw"
 }
 
-# Rows from an earlier version of this tool: sbctl's pacman hook would sign
-# these files in place. Rows outside the ESP are the user's.
+# Rows that someone registered with sbctl sign -s: sbctl's pacman hook would
+# sign these files in place (D7). Rows outside the ESP are the user's.
 harmful_rows_are_found_and_removed() {
   local history=$FIX/esp/machine/limine_history/old.efi_sha256_abc uki=$FIX/esp/EFI/Linux/omarchy_linux.efi
   prepared_machine
@@ -90,12 +90,12 @@ foreign_fallback_is_left_alone() {
   [[ $(<"$(fallback_loader_path)") == 'someone else' ]] || fail_test "a foreign BOOTX64.EFI was replaced"
 }
 
-failure_leaves_the_marker() {
+failure_writes_needs_attention() {
   local output
   prepared_machine
   : >"$FIX/run/sbctl-sign-fails"
   output=$(sign_boot_files 2>&1) && fail_test "a failed pass reported success"
-  [[ -s $(attention_marker) ]] || fail_test "no marker after a failed pass"
+  [[ -s $(attention_file) ]] || fail_test "no needs-attention after a failed pass"
   # A loader that is not sealed over limine.conf does not start at all (C1),
   # which is a different warning from an unsigned file.
   [[ $output == *'Do not reboot, with Secure Boot on or off'* ]] || fail_test "an unsealed loader was reported like any failure: ${output}"
@@ -108,10 +108,10 @@ failure_leaves_the_marker() {
   rm "$FIX/run/sbctl-sign-fails"
   # The watchers' pass looks at the seal alone and cannot vouch for the rest.
   sign_boot_files seal-only || fail_test "seal-only pass"
-  [[ -s $(attention_marker) ]] || fail_test "a seal-only pass cleared what a full pass had found"
-  sign_boot_files && [[ ! -e $(attention_marker) ]] || fail_test "a later clean pass kept the marker"
+  [[ -s $(attention_file) ]] || fail_test "a seal-only pass cleared what a full pass had found"
+  sign_boot_files && [[ ! -e $(attention_file) ]] || fail_test "a later clean pass kept needs-attention"
   set_attention 'the loader could not be sealed on a day'
-  sign_boot_files seal-only && [[ ! -e $(attention_marker) ]] || fail_test "a clean seal-only pass kept a marker about the seal"
+  sign_boot_files seal-only && [[ ! -e $(attention_file) ]] || fail_test "a clean seal-only pass kept a needs-attention about the seal"
 }
 
 # What cannot be proved is a failure, never a pass: sbctl answers null for a
@@ -125,7 +125,7 @@ unproved_state_fails_the_pass() {
   write_limine_conf hashed
   printf 'changed' >>"$FIX/esp/EFI/Linux/omarchy_linux.efi"
   ! sign_boot_files 2>/dev/null || fail_test "a stale OS hash passed"
-  [[ -s $(attention_marker) ]] || fail_test "no marker"
+  [[ -s $(attention_file) ]] || fail_test "no needs-attention"
 }
 
 # sbctl rewrites a file in place, which a full ESP would tear (C4).
@@ -141,7 +141,7 @@ full_esp_is_not_written_to() {
   [[ $(find "$FIX/esp" -type f -exec sha256sum {} + | sort) == "$before" ]] || fail_test "a full ESP was written to"
 }
 
-busy_lock_writes_no_marker() {
+busy_lock_writes_no_needs_attention() {
   local rc=0
   prepared_machine
   flock -o "$(boot_lock_path)" sleep 5 &
@@ -149,12 +149,12 @@ busy_lock_writes_no_marker() {
   sign_boot_files 2>/dev/null || rc=$?
   kill %1 2>/dev/null
   (( rc == 75 )) || fail_test "busy returned ${rc}"
-  [[ ! -e $(attention_marker) ]] || fail_test "a busy lock wrote the marker"
+  [[ ! -e $(attention_file) ]] || fail_test "a busy lock wrote needs-attention"
 }
 
 restore_in_progress_is_left_alone() {
   prepared_machine
-  : >"$(restore_marker_path)"
+  : >"$(restore_lock_path)"
   : >"$FIX/run/calls"
   sign_boot_files || fail_test "status"
   [[ ! -s $FIX/run/calls ]] || fail_test "sign worked during a restore"
@@ -173,7 +173,7 @@ seal_only_reseals_and_stops() {
 }
 
 # Omarchy's installer leaves a pacman hook that copies the raw executable over
-# the primary after upstream has sealed and signed it (C7). The loader's
+# the primary loader after upstream has sealed and signed it (C6). The loader's
 # watcher fires at some point of that transaction; its pass must judge what
 # the last hook left behind.
 seal_only_waits_for_pacman_to_finish() {
@@ -202,7 +202,7 @@ seal_only_waits_for_pacman_to_finish() {
   # five seconds on the fixture. The pass runs as a process, so a wait without
   # a bound fails this case instead of hanging it.
   : >"$FIX/run/pacman-is-running"
-  : >"$(enabled_marker)"
+  : >"$(enabled_file)"
   printf 'timeout: 3\n' >>"$FIX/esp/limine.conf"
   start_cli sign --quiet --seal-only
   for _ in {1..12}; do
@@ -228,9 +228,9 @@ run_case fallback-is-returned-to-raw fallback_is_returned_to_raw
 run_case harmful-rows-are-found-and-removed harmful_rows_are_found_and_removed
 run_case unproved-state-fails-the-pass unproved_state_fails_the_pass
 run_case foreign-fallback-is-left-alone foreign_fallback_is_left_alone
-run_case failure-leaves-the-marker failure_leaves_the_marker
+run_case failure-writes-needs-attention failure_writes_needs_attention
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
-run_case busy-lock-writes-no-marker busy_lock_writes_no_marker
+run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention
 run_case restore-in-progress-is-left-alone restore_in_progress_is_left_alone
 run_case seal-only-reseals-and-stops seal_only_reseals_and_stops
 run_case seal-only-waits-for-pacman-to-finish seal_only_waits_for_pacman_to_finish
