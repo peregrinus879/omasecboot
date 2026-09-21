@@ -3,7 +3,7 @@
 [![CI](https://github.com/peregrinus879/omasecboot/actions/workflows/ci.yml/badge.svg)](https://github.com/peregrinus879/omasecboot/actions/workflows/ci.yml)
 [![Upstream contracts](https://github.com/peregrinus879/omasecboot/actions/workflows/contracts.yml/badge.svg)](https://github.com/peregrinus879/omasecboot/actions/workflows/contracts.yml)
 
-**Secure Boot for [Omarchy](https://omarchy.com) with your own keys.**
+**Secure Boot for [Omarchy](https://omarchy.org) with your own keys.**
 
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tooling, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
@@ -158,4 +158,4 @@ make test-contract   # the installed sbctl and Limine tools against the upstream
 
 ## License and credits
 
-[MIT](LICENSE). Created by [peregrinus879](https://github.com/peregrinus879). OmaSecBoot builds on [sbctl](https://github.com/Foxboron/sbctl), [Limine](https://github.com/limine-bootloader/limine), Zesko's limine-entry-tool and limine-snapper-sync, and [Omarchy](https://omarchy.com).
+[MIT](LICENSE). Created by [peregrinus879](https://github.com/peregrinus879). OmaSecBoot builds on [sbctl](https://github.com/Foxboron/sbctl), [Limine](https://github.com/limine-bootloader/limine), Zesko's limine-entry-tool and limine-snapper-sync, and [Omarchy](https://omarchy.org).
