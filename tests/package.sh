@@ -27,6 +27,10 @@ grep -Fxq "license=('MIT')" "$pkgbuild" || fail_test "license"
 ! grep -Eq '^(backup|conflicts|provides|replaces|makedepends|checkdepends|optdepends)=' "$pkgbuild" ||
   fail_test "PKGBUILD declares an unexpected relation"
 grep -Fxq 'install=omasecboot.install' "$pkgbuild" || fail_test "the PKGBUILD does not name the scriptlet"
+# A builder without docs would drop the menu fragment the README points to.
+grep -Fxq "options=('docs' '!debug')" "$pkgbuild" || fail_test "the recipe no longer keeps its documentation"
+pkgdesc=$(sed -n "s/^pkgdesc='\\(.*\\)'\$/\\1/p" "$pkgbuild")
+{ [[ -n $pkgdesc ]] && (( ${#pkgdesc} <= 80 )); } || fail_test "pkgdesc is missing or longer than 80 characters: ${#pkgdesc}"
 scriptlet=$ROOT_DIR/omasecboot.install
 { [[ $(grep -c '^[a-z_]*() {$' "$scriptlet") == 1 ]] && grep -qx 'pre_remove() {' "$scriptlet"; } || fail_test "the scriptlet defines more than pre_remove"
 mkdir -p "$TEST_DIR/state"
@@ -35,7 +39,7 @@ notice() { (source <(sed "s|/var/lib/omasecboot|$TEST_DIR/state|" "$scriptlet") 
 [[ -z $(notice) ]] || fail_test "the scriptlet spoke on a machine that is not set up"
 : >"$TEST_DIR/state/enabled"
 output=$(notice) || fail_test "the scriptlet failed, which would fail the removal"
-[[ $output == *'still set up'*'sudo omasecboot remove'* ]] || fail_test "the notice: ${output}"
+[[ $output == *'still set up'*'with Secure Boot on'*'or off'*'sudo omasecboot remove'* ]] || fail_test "the notice: ${output}"
 [[ $(find "$TEST_DIR/state" -type f | wc -l) == 1 ]] || fail_test "the scriptlet changed the state directory"
 
 expected_depends=$(sort <<'DEPENDS'

@@ -61,7 +61,7 @@ package:
 	tar -C "$$build" -czf "$$build/$$pkgname-$$pkgver.tar.gz" "$$pkgname-$$pkgver"; \
 	cp PKGBUILD omasecboot.install "$$build/"; \
 	cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
-	printf 'OPTIONS+=(docs !debug)\nPKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
+	printf 'PKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
 	  LOGDEST="$$build" BUILDDIR="$$build/build" \
 	  makepkg --config "$$build/makepkg.conf" --force --nodeps --noconfirm --noprogressbar --nosign 1>&2; \

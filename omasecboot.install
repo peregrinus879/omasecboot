@@ -5,8 +5,9 @@ pre_remove() {
   [[ ! -e /var/lib/omasecboot/enabled ]] || cat <<'NOTICE'
 ==> OmaSecBoot is still set up on this machine.
     Removing the package takes away what keeps the boot files sealed and
-    signed. With Secure Boot on, the next Limine upgrade can leave a loader
-    that the firmware refuses, and the machine does not start.
+    signed. An edit of limine.conf then stops the loader, with Secure Boot on
+    or off, and with Secure Boot on the next Limine upgrade can leave a loader
+    that the firmware refuses.
     Reinstall the package. To return to stock, turn Secure Boot off and run
     "sudo omasecboot remove" before you remove the package.
 NOTICE
