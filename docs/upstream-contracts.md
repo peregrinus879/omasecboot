@@ -2,11 +2,11 @@
 
 What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C9]. Recheck a section when its package changes version. `tests/contract-limine.sh` and `tests/contract-sbctl.sh` check parts of C1 to C4 and C9 against the installed packages.
 
-Versions read: Limine 12.8.0, limine-mkinitcpio-hook 1.38.0 (built from the limine-entry-tool sources), limine-snapper-sync 1.31.0, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, pacman 7, efibootmgr 18, util-linux 2.41, Omarchy 4.0.x (`quattro` branch) and its installer, Linux 7.2.
+Versions read: Limine 12.8.0 and what 12.9.0 changed, limine-mkinitcpio-hook 1.38.0 (built from the limine-entry-tool sources), limine-snapper-sync 1.31.0, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, pacman 7, efibootmgr 18, util-linux 2.41, Omarchy 4.0.x (`quattro` branch) and its installer, Linux 7.2.
 
 ## C1. Limine at boot
 
-Source: `limine-bootloader/limine` tag `v12.8.0`, `common/lib/config.c`, `common/lib/uri.c`, `common/protos/chainload.c`, `common/menu.c`; `USAGE.md`.
+Source: `limine-bootloader/limine` tag `v12.8.0`, `common/lib/config.c`, `common/lib/uri.c`, `common/protos/chainload.c`, `common/menu.c`; `USAGE.md`. Tag `v12.9.0` leaves `config.c`, `chainload.c` and `USAGE.md` as they were, keeps the mismatch behaviour and its text in `uri.c`, and changes nothing below in `menu.c` or the `limine` host tool; the machine of C6 ran 12.8.0, and the contract suites pass against 12.9.0.
 
 - Both Limine executables carry the marker `++CONFIG_B2SUM_SIGNATURE++` followed by 128 hex digits, all zero until `limine enroll-config` writes the BLAKE2B of `limine.conf` there.
 - A non-zero enrolled checksum is checked unconditionally in `init_config`: on a mismatch Limine panics ("CHECKSUM MISMATCH FOR CONFIG FILE") whether firmware Secure Boot is on or off (seen with it off on the machine of C6), and the editor is disabled. An all-zero slot means no check and `secure_boot_active = false`.
@@ -111,7 +111,7 @@ Source: `omacom/omarchy`, `quattro` branch; `omacom/omarchy-iso` for the install
 
 ## C8. Firmware boot entries, Limine's `efi_boot_entry` and efibootmgr 18
 
-Source: UEFI 2.10 sections 3.1.1 to 3.1.3, Limine's `CONFIG.md` and `ChangeLog` at v12.8.0, efibootmgr 18's usage text, util-linux's libblkid, Linux 7.2 `fs/efivarfs/vars.c`. Hardware: the entry, the BootNext request and upstream's rewrites are recorded on the machine of C6; a BitLocker volume has no record.
+Source: UEFI 2.10 sections 3.1.1 to 3.1.3, Limine's `CONFIG.md` and `ChangeLog` at v12.8.0 (v12.9.0 changes nothing about `efi_boot_entry`), efibootmgr 18's usage text, util-linux's libblkid, Linux 7.2 `fs/efivarfs/vars.c`. Hardware: the entry, the BootNext request and upstream's rewrites are recorded on the machine of C6; a BitLocker volume has no record.
 
 - `BootOrder` is a list of little-endian uint16 numbers; `Boot####` (upper-case hex) is an `EFI_LOAD_OPTION`: uint32 attributes with bit 0 for active, the uint16 length of the device path, the description as NUL-terminated UTF-16, then device path nodes of type, subtype and uint16 length. A file path node is type 4, subtype 4, its text UTF-16. efivarfs puts four attribute bytes before every variable's data and lets any user read these variables. The kernel lists `Boot*`, `BootOrder` and `BootNext` as removable (`fs/efivarfs/vars.c`, `variable_validate`), so they never carry the immutable flag that PK, KEK and db do (C4).
 - Windows registers `\EFI\Microsoft\Boot\bootmgfw.efi` as "Windows Boot Manager"; firmware compares such paths without case, and so does Linux on a vfat ESP (kernel `Documentation/filesystems/vfat.rst`: `check=n`, the default, is case insensitive), which is how the tool finds a `bootx64.efi` that another system wrote in lower case.
