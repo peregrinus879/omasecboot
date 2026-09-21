@@ -95,18 +95,21 @@ trap 'rm -f -- "$rules"' EXIT
   # Records made before the recorder left these out itself.
   printf '/^[[:space:]]*\\(dp\\|data\\): /d\n'
   printf 's/\\()\\|\\.efi\\)[0-9a-fA-F]\\{8,\\}$/\\1 (optional data left out)/I\n'
+  # An identifier is renamed wherever it stands, inside a longer word too: a
+  # machine-id names a UKI as <id>_linux.efi, and systemd writes the dash before
+  # a UUID as \x2d. A longer run of digits is a hash and stays.
   number=0
   while IFS= read -r value; do
     [[ -n $value && " $PUBLIC_UUIDS " != *" $value "* ]] || continue
     number=$((number + 1))
-    printf 's/\\b%s\\b/uuid-%s/gI\n' "$value" "$number"
-  done < <(distinct "\\b${UUID}\\b")
+    printf 's/%s/uuid-%s/gI\n' "$value" "$number"
+  done < <(distinct "$UUID")
   number=0
   while IFS= read -r value; do
     [[ -n $value ]] || continue
     number=$((number + 1))
-    printf 's/\\b%s\\b/id-%s/gI\n' "$value" "$number"
-  done < <(distinct '\b[0-9a-fA-F]{32}\b')
+    printf 's/%s/id-%s/gI\n' "$value" "$number"
+  done < <(distinct '[0-9a-fA-F]{32,}' | awk 'length($0) == 32')
   # A FAT volume identifier is too short to be told from other text by its
   # form, so only the ones a mount point or a UUID= names are renamed.
   number=0
