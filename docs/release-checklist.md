@@ -67,7 +67,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 1. `windows preflight`; `windows setup`; `status`.
 2. Pick the entry in Limine's menu; return to Omarchy.
 3. `windows bootnext`; `systemctl reboot`; return.
-4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`.
+4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`: the entry must stand after Omarchy's entries, and Limine's timeout must still start Omarchy's kernel at the next restart.
 5. With Windows encryption on: disable and enable the protectors once in Windows, then start Windows through the menu entry and through BootNext again.
 6. With Windows encryption on, the chainload comparison (spec D11): add a chainload entry with `limine-scan` beside the tool's; `status` and `windows status` carry the note. Start Windows through it, disable and enable the protectors there, start it again, change `limine.conf` so that the loader is sealed again, and start Windows through it once more. Then the command the note prints, `status`, Windows through the tool's entry, and the protectors disabled and enabled once more.
 
@@ -91,7 +91,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
 - [ ] `CHANGELOG.md` has the release's section, with its date, and the README's status note and install line name the release.
-- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile`, `omasecboot.install` and `.gitattributes`.
+- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile`, `omasecboot.install` and `.gitattributes`. Where the tool changed after the records, C10 of [upstream-contracts.md](upstream-contracts.md) names the change, what proves it without hardware (its hermetic cases, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured), and the row of the next run that records it, which [maintenance.md](maintenance.md) lists as owed.
 - [ ] The rows above are the rows the records ran.
 - [ ] `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit.
 - [ ] The recipe builds from an archive made as the tag's will be, `git archive --prefix=omasecboot-<version>/`, with the same payload as `make package`.

@@ -511,6 +511,88 @@ remove_reminds_of_the_recovery_key() {
   [[ $(<"$FIX/run/output") == *'recovery key at hand when you turn Secure Boot off'*'Secure Boot is on. Turn it off'* ]] || fail_test "no reminder: $(<"$FIX/run/output")"
 }
 
+# Omarchy's refresh copies a template without entries over limine.conf and
+# only then runs limine-update, which fills it (C6). The watcher fires on the
+# copy: a pass that wrote the entry into the template would put it first, and
+# Omarchy's default_entry, counted from the top, would then start the wrong
+# entry. So the pass writes nothing into a limine.conf without entries, and the
+# pass after limine-update appends the entry behind Omarchy's.
+entry_waits_for_upstreams_entries() {
+  local output
+  set_up_with_windows
+  write_omarchy_limine_template
+  output=$(sign_boot_files seal-only 2>&1) || fail_test "the pass failed on the template: ${output}"
+  [[ $(entry_count) == 0 ]] || fail_test "the entry was written into the bare template"
+  [[ $output == *'holds no menu entries yet'* ]] || fail_test "the pass did not say why it waited: ${output}"
+  run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
+  [[ ! -s $FIX/run/output ]] || fail_test "the quiet pass spoke: $(<"$FIX/run/output")"
+  run_cli status && fail_test "status passed with the entry missing"
+  [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  run_cli windows setup && fail_test "windows setup reported an entry on the bare template"
+  [[ $(<"$FIX/run/output") == *'holds no menu entries yet'*'did not reach limine.conf'* ]] || fail_test "windows setup on the template: $(<"$FIX/run/output")"
+  # A file that cannot be read is no template: the pass says so.
+  rm "$FIX/esp/limine.conf"
+  output=$(sign_boot_files seal-only 2>&1)
+  [[ $output == *"Could not read $(limine_config_path)"* && $output != *'holds no menu entries yet'* ]] || fail_test "an unreadable limine.conf was taken for the template: ${output}"
+  # limine-update filled the file, snapshot block and all.
+  write_omarchy_limine_conf
+  sign_boot_files seal-only >/dev/null || fail_test "the pass after limine-update failed"
+  [[ $(entry_count) == 1 ]] || fail_test "the entry was not written once upstream's entries were there"
+  [[ $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the entry is not behind Omarchy's: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "state: $(windows_entry_state 'Windows Boot Manager')"
+  run_cli status || fail_test "status: $(<"$FIX/run/output")"
+}
+
+# An entry that ended up before Omarchy's is displaced: the report says so and
+# names the pass, which moves it behind them. An entry of the user's after this
+# tool's is no displacement.
+displaced_entry_is_moved_behind_upstreams() {
+  local before
+  set_up_with_windows
+  # This tool's entry first, then upstream's OS entry alone, as the refresh
+  # leaves it on a machine without a fallback entry.
+  write_limine_conf unhashed
+  { windows_entry 'Windows Boot Manager'; printf '\n'; cat "$FIX/esp/limine.conf"; } >"$FIX/run/displaced"
+  cp "$FIX/run/displaced" "$FIX/esp/limine.conf"
+  [[ $(windows_entry_state 'Windows Boot Manager') == displaced ]] || fail_test "state: $(windows_entry_state 'Windows Boot Manager')"
+  run_cli status && fail_test "status passed with the entry before Omarchy's"
+  [[ $(<"$FIX/run/output") == *'stands before the entries Omarchy orders'*'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  run_cli windows status || fail_test "windows status failed"
+  [[ $(<"$FIX/run/output") == *'before the entries Omarchy orders'* ]] || fail_test "windows status: $(<"$FIX/run/output")"
+  run_cli sign --quiet --seal-only || fail_test "the pass failed: $(<"$FIX/run/output")"
+  [[ $(entry_count) == 1 && $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "the entry was not moved: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+  [[ $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the entry is not behind Omarchy's"
+  # A user's entry after this tool's: no displacement, and nothing is rewritten.
+  printf '\n/Mine\n    protocol: efi\n    path: boot():/EFI/mine.efi\n' >>"$FIX/esp/limine.conf"
+  before=$(stat -c %i "$FIX/esp/limine.conf")
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "a user's entry after this tool's read as $(windows_entry_state 'Windows Boot Manager')"
+  sign_boot_files seal-only >/dev/null || fail_test "pass"
+  [[ $(stat -c %i "$FIX/esp/limine.conf") == "$before" ]] || fail_test "limine.conf was rewritten for a user's entry"
+}
+
+# The readers over limine.conf as an Omarchy machine has it, with a snapshot
+# history long enough to fill a pipe several times over: a reader that stopped
+# early would have killed the scan and read the file as empty (SIGPIPE under
+# pipefail), which is what the pass must never do.
+real_shape_file_reads_right() {
+  write_omarchy_limine_conf 400
+  (( $(stat -c %s "$FIX/esp/limine.conf") > 200000 )) || fail_test "the file is not long: $(stat -c %s "$FIX/esp/limine.conf") bytes"
+  limine_conf_lacks_entries && fail_test "a full limine.conf read as holding no entries"
+  [[ $(windows_entry_state 'Windows Boot Manager') == absent ]] || fail_test "state without the entry: $(windows_entry_state 'Windows Boot Manager')"
+  [[ $(list_windows_chainloads) == $'1\tWindows Boot Manager' ]] || fail_test "chainloads: $(list_windows_chainloads)"
+  { windows_entry 'Windows Boot Manager'; printf '\n'; cat "$FIX/esp/limine.conf"; } >"$FIX/run/first" && cp "$FIX/run/first" "$FIX/esp/limine.conf"
+  [[ $(windows_entry_state 'Windows Boot Manager') == displaced ]] || fail_test "the entry first read as $(windows_entry_state 'Windows Boot Manager')"
+  write_windows_entry 'Windows Boot Manager' || fail_test "move"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current && $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "after the move: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+  [[ $(grep -c '^     ///[0-9]' "$FIX/esp/limine.conf") == 400 ]] || fail_test "the move lost snapshot entries: $(grep -c '^     ///[0-9]' "$FIX/esp/limine.conf")"
+  write_omarchy_limine_template
+  limine_conf_lacks_entries || fail_test "the template read as holding entries"
+  [[ $(windows_entry_state 'Windows Boot Manager') == absent ]] || fail_test "state on the template: $(windows_entry_state 'Windows Boot Manager')"
+  rm "$FIX/esp/limine.conf"
+  limine_conf_lacks_entries && fail_test "a limine.conf that cannot be read passed for the template"
+  return 0
+}
+
 run_case boot-entries-are-read-from-the-firmware boot_entries_are_read_from_the_firmware
 run_case target-is-one-clear-entry-or-none target_is_one_clear_entry_or_none
 run_case full-form-device-path-is-read full_form_device_path_is_read
@@ -532,4 +614,7 @@ run_case chainloads-are-listed-as-upstream-names-them chainloads_are_listed_as_u
 run_case chainload-beside-bitlocker-is-noted chainload_beside_bitlocker_is_noted
 run_case printed-command-survives-the-shell printed_command_survives_the_shell
 run_case remove-reminds-of-the-recovery-key remove_reminds_of_the_recovery_key
+run_case entry-waits-for-upstreams-entries entry_waits_for_upstreams_entries
+run_case displaced-entry-is-moved-behind-upstreams displaced_entry_is_moved_behind_upstreams
+run_case real-shape-file-reads-right real_shape_file_reads_right
 finish_suite

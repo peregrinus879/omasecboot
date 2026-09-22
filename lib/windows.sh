@@ -208,9 +208,45 @@ scan_windows_entries() {
   ' "$(limine_config_path)"
 }
 
-# absent, current (exactly the entry for LABEL, once), stale (another entry of
-# this tool, or several), misplaced (see scan_windows_entries) or unknown
-# (limine.conf unreadable).
+# windows_config_with [LABEL]: limine.conf as the pass writes it, with exactly
+# the entry for LABEL at the end, or with none.
+windows_config_with() {
+  local content
+  content=$(scan_windows_entries without && printf x) || return 1
+  content=${content%x}
+  if [[ -n $1 ]]; then
+    [[ -z $content || $content == *$'\n\n' ]] || content+=$'\n'
+    content+=$(windows_entry "$1")$'\n'
+  fi
+  printf '%s' "$content"
+}
+
+# limine.conf without a single menu entry is Omarchy's template on its way to
+# limine-update, which fills it (C6); an entry written into it would come first.
+# The scan's whole output is read: a reader that stops early would kill the
+# scan with SIGPIPE, and under pipefail a full file would then read as empty.
+limine_conf_lacks_entries() {
+  local content
+  content=$(scan_windows_entries without 2>/dev/null) || return 1
+  ! grep -q '^/[^/]' <<<"$content"
+}
+
+# The entry stands after the entries upstream orders, the ones that carry
+# order-priority (C2), because Omarchy's default_entry counts the menu from the
+# top (C6): an entry before them would move what the timeout starts. A user's
+# entry after it is left where it is.
+windows_entry_is_displaced() {
+  awk -v signature="$WINDOWS_ENTRY_COMMENT" '
+    /^\/[^\/]/ { n++; header = $0; next }
+    n > 0 && /^[ \t]*comment:.*order-priority=/ { upstream = n }
+    n > 0 && header == "/Windows" { line = $0; sub(/^[ \t]+/, "", line); if (line == signature) ours = n }
+    END { exit !(ours && upstream > ours) }
+  ' "$(limine_config_path)"
+}
+
+# absent, current (exactly the entry for LABEL, once), displaced (that entry
+# before upstream's), stale (another entry of this tool, or several),
+# misplaced (see scan_windows_entries) or unknown (limine.conf unreadable).
 windows_entry_state() {
   local entries status=0
   entries=$(scan_windows_entries entries 2>/dev/null) || status=$?
@@ -220,10 +256,12 @@ windows_entry_state() {
     printf 'unknown\n'
   elif [[ -z $entries ]]; then
     printf 'absent\n'
-  elif [[ $entries == "$(windows_entry "$1")" ]]; then
-    printf 'current\n'
-  else
+  elif [[ $entries != "$(windows_entry "$1")" ]]; then
     printf 'stale\n'
+  elif windows_entry_is_displaced; then
+    printf 'displaced\n'
+  else
+    printf 'current\n'
   fi
 }
 
@@ -259,12 +297,8 @@ write_windows_entry() {
   }
   mode=$(stat -Lc '%a' "$config") || return 1
   before=$(config_checksum) || return 1
-  content=$(scan_windows_entries without && printf x) || return 1
+  content=$(windows_config_with "$label" && printf x) || return 1
   content=${content%x}
-  if [[ -n $label ]]; then
-    [[ -z $content || $content == *$'\n\n' ]] || content+=$'\n'
-    content+=$(windows_entry "$label")$'\n'
-  fi
   [[ $(config_checksum) == "$before" ]] || {
     warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
     return 1
@@ -292,7 +326,17 @@ converge_windows_entry() {
     *) qnote "The Windows entry is enabled, but the firmware's boot entries cannot be read right now" ;;
   esac
   (( status == 0 )) || return 0
-  [[ $(windows_entry_state "$(windows_target_label)") == current ]] || qact "Writing the Windows entry to limine.conf"
+  case $(windows_entry_state "$(windows_target_label)") in
+    current) return 0 ;;
+    displaced) qact "Moving the Windows entry after the entries Omarchy orders in limine.conf" ;;
+    absent | stale)
+      if limine_conf_lacks_entries; then
+        qnote "limine.conf holds no menu entries yet, as Omarchy's template does before limine-update fills it; the pass after that writes the Windows entry"
+        return 0
+      fi
+      qact "Writing the Windows entry to limine.conf"
+      ;;
+  esac
   write_windows_entry "$(windows_target_label)" || :
 }
 

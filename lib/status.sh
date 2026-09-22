@@ -220,6 +220,7 @@ show_windows_status() {
     current) pass "The Windows entry restarts the machine into $(windows_target_label)" ;;
     absent) problem "The Windows entry is missing from limine.conf" ;;
     stale) problem "The Windows entry in limine.conf is not the one for $(windows_target_label)" ;;
+    displaced) problem "The Windows entry in limine.conf stands before the entries Omarchy orders, which shifts the entry Limine starts by default; ${BOLD}sudo omasecboot sign${NC} moves it after them" ;;
     misplaced) blocking_problem "$WINDOWS_ENTRY_MISPLACED" ;;
     unknown) blocking_problem "Could not read $(limine_config_path)" ;;
   esac

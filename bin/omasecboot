@@ -348,6 +348,7 @@ cmd_windows_status() {
         absent) note "limine.conf holds no Windows entry of OmaSecBoot's" ;;
         current) pass "limine.conf holds the entry for this target, once" ;;
         stale) note "limine.conf holds an entry of OmaSecBoot's for another target, or more than one; ${BOLD}sudo omasecboot sign${NC} rewrites it" ;;
+        displaced) note "limine.conf holds the entry for this target before the entries Omarchy orders; ${BOLD}sudo omasecboot sign${NC} moves it after them" ;;
         misplaced) note "OmaSecBoot's Windows comment stands in an entry it did not write; remove that comment line, then run ${BOLD}sudo omasecboot sign${NC}" ;;
         *) note "limine.conf could not be read" ;;
       esac

@@ -90,7 +90,7 @@ stale_os_hash_needs_setup() {
   sbctl sign "$FIX/esp/EFI/Linux/omarchy_linux.efi"
   QUIET=true ensure_primary_loader || fail_test "fixture reseal"
   output=$(show_status 2>&1) && fail_test "a stale OS hash passed"
-  [[ $output == *'Stale path hash in limine.conf line 7 (entry: linux)'* ]] || fail_test "stale hash line: ${output}"
+  [[ $output == *'Stale path hash in limine.conf line 10 (entry: linux)'* ]] || fail_test "stale hash line: ${output}"
   [[ $output == *'Next: sudo omasecboot setup'* ]] || fail_test "next step: ${output}"
 }
 
