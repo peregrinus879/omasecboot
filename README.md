@@ -8,7 +8,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tools, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Status:** no release exists yet. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 6 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from `setup` to `remove`, on commit `d567e1f`, with Secure Boot on and an unencrypted Windows beside it, and stages 0 to 7 on commit `ccc6e8a` with Windows' device encryption on, except the rows that need a snapshot entry. The tool has changed since, so the release's own record is still owed. What it showed is in section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence still owed is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
+> **Status:** no release exists yet. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 7 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from a stock baseline through `remove` and back to set up, on commit `2a8d324`, with Secure Boot on and Windows Home's device encryption on beside it. What it showed is in section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence still owed is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
 
 ## Why
 

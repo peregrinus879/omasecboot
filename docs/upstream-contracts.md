@@ -168,7 +168,7 @@ Source: Microsoft's support article "Windows Secure Boot certificate expiration 
 
 ## C10. Hardware record
 
-ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4, through stages 0 to 6 of [release-checklist.md](release-checklist.md) with commit `d567e1f` on 2026-09-21, Windows beside it and its encryption off. A second run the same day with commit `ccc6e8a`, with Windows Home's device encryption on and nothing suspended, went through stages 0 to 7 except the rows that need a snapshot entry (checklist 3.3, 3.4, stage 4 and part of 5.4); what it added is marked with its commit.
+ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4. The release's record: stages 0 to 7 of [release-checklist.md](release-checklist.md) with commit `2a8d324` on 2026-09-22, Windows Home beside it with device encryption on, the recovery key at hand and nothing suspended, 88 rows, every one as the checklist expects. Two earlier runs on the same machine, `d567e1f` (stages 0 to 6, encryption off) and `ccc6e8a` (stages 0 to 7 without the rows that need a snapshot entry, encryption on), are the source of the observations marked with their commit.
 
 - Boot files and the tools:
   - A stock install carries path hashes of unsigned UKIs; after setup the OS entry was regenerated without a hash, while two snapshot entries older than enrollment stayed stale once their history files had been signed in place, as a trial, and limine-snapper-sync did not rewrite them (seen with commit `3b43368`).
@@ -190,7 +190,7 @@ ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4, through stages 0 to 6 
   - Inside the booted snapshot `snapper list` failed ("subvolume is not a btrfs subvolume"), and `limine-snapper-restore` offered the snapshot it ran in, with a list on request. During the restore upstream printed its verification-hash warning (C2). The restored system started with Secure Boot on, `ENABLE_VERIFICATION=no` still in place.
 - Windows:
   - Limine's `efi_boot_entry` entry and a BootNext request each started Windows Boot Manager with Secure Boot on and the user's keys enrolled, and the boot after BootNext returned to Limine.
-- BitLocker (device encryption on Windows Home, the recovery key at hand, nothing suspended; seen with commit `ccc6e8a`):
+- BitLocker (device encryption on Windows Home, the recovery key at hand, nothing suspended; seen with commits `ccc6e8a` and `2a8d324`):
   - It asked for the recovery key when Secure Boot went from on to off while the protector was bound to PCR 7 and 11, twice; after the first, Windows also asked for a new sign-in PIN. Afterwards the profile read 0, 2, 4, 11.
   - With Secure Boot off and that profile it asked at none of the key changes: factory keys restored, the PK deleted, the user's keys written, every key cleared and rebuilt. It did not ask when Secure Boot went on with the user's keys, at the first or the second start, and the profile stayed 0, 2, 4, 11.
   - After `manage-bde -protectors -disable C:` and `-enable C:` the profile read 7, 11 with the user's keys in the firmware, and Windows stayed quiet. Windows Home accepted the command with and without `-RebootCount 0` (seen on screen, outside the records).

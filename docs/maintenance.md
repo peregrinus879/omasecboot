@@ -12,7 +12,6 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Evidence owed
 
-- The acceptance rows on the code to be released. The records are of commits `d567e1f` and `ccc6e8a` (C10), the second lacks the rows that need a snapshot entry, and the tool has changed since; a release's records must be of the tagged tool ([release-checklist.md](release-checklist.md), Tag).
 - Whether BitLocker stays quiet when Windows is started through a chainload entry alone and the loader is sealed again in between (checklist, stage 5): Microsoft's pages say it cannot (C8), and no machine has a record.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The record of a stock single-boot Omarchy install, where the fallback loader and its `/EFI fallback` menu entry exist from the start. The recorded machine (C10) was installed beside Windows and had neither.
