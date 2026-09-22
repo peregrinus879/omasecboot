@@ -57,13 +57,13 @@ require_terminal() {
 confirm() {
   local what=$1 question=$2
   require_terminal || {
-    warn "Cancelled: ${what}. Nothing was changed by this step"
+    warn "Cancelled: ${what}. The step it guarded did not run"
     return 1
   }
   if gum confirm --default=false "$question"; then
     return 0
   else
-    warn "Cancelled: ${what}. Nothing was changed by this step"
+    warn "Cancelled: ${what}. The step it guarded did not run"
     return 1
   fi
 }

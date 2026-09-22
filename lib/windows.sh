@@ -68,14 +68,20 @@ list_boot_entries() {
     number=${hex:$((position + 2)):2}${hex:position:2}
     for name in "${number^^}" "$number"; do
       [[ -e $(firmware_variable_path "Boot${name}") && $listed != *" ${name^^} "* ]] || continue
-      read_boot_entry "$name" || return 1
+      read_boot_entry "$name" || {
+        warn "The firmware's boot entry Boot${name} cannot be read as a load option"
+        return 1
+      }
       listed+="${name^^} "
     done
   done
   for path in "$(efivars_dir)"/Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]-"$EFI_GLOBAL_GUID"; do
     name=${path##*/Boot}
     name=${name%%-*}
-    [[ ! -e $path || $listed == *" ${name^^} "* ]] || read_boot_entry "$name" || return 1
+    [[ ! -e $path || $listed == *" ${name^^} "* ]] || read_boot_entry "$name" || {
+      warn "The firmware's boot entry Boot${name} cannot be read as a load option"
+      return 1
+    }
   done
 }
 
@@ -139,8 +145,14 @@ resolve_windows_target() {
   done <<<"$entries"
   [[ $same == 1 && -n $target_label && $target_label != *'#'* ]] || return 1
   boot_order_holds "$target_number" || return 1
+  # Status 3: a name that Limine is not proved to match, blanks at its ends or
+  # characters outside ASCII (C7 records the ASCII case fold, nothing more);
+  # an entry Limine cannot find stops at its panic.
+  [[ $target_label == "${target_label#[[:space:]]}" && $target_label == "${target_label%[[:space:]]}" && $target_label != *[![:ascii:]]* ]] || return 3
   _windows_number=$target_number _windows_label=$target_label
 }
+
+readonly WINDOWS_TARGET_NAME="the firmware's Windows Boot Manager entry has a name with blanks at its ends or characters outside ASCII, which OmaSecBoot cannot prove Limine matches; give it a plain name with efibootmgr, or leave the Windows entry out"
 
 windows_target_label() { printf '%s\n' "$_windows_label"; }
 windows_target_number() { printf '%s\n' "$_windows_number"; }
@@ -175,45 +187,48 @@ windows_entry() {
 # Such an entry is never deleted, because it may be the user's own.
 scan_windows_entries() {
   awk -v mode="$1" -v signature="$WINDOWS_ENTRY_COMMENT" '
-    function finish_entry(   i, ours) {
-      ours = (count > 0 && entry[1] == "/Windows" && signed && !foreign)
+    # Taking the entry out leaves the blank line the pass put before it, or
+    # the one after it, never both and never one at the end of the file.
+    function finish_entry(at_end,   i, ours) {
+      ours = (count > 0 && header == "/Windows" && signed && !foreign)
       if (signed && !ours) misplaced = 1
-      if (ours && mode == "without" && kept > 0 && out[kept] == "") kept--
+      if (ours && mode == "without") {
+        if (at_end) { if (kept > 0 && out[kept] == "") kept-- }
+        else if (entry[count] == "" && !(kept > 0 && out[kept] == "")) out[++kept] = ""
+      }
       for (i = 1; i <= count; i++) {
         if (ours && mode == "entries") print entry[i]
         if (!ours) out[++kept] = entry[i]
       }
       count = 0; signed = 0; foreign = 0
     }
-    /^\/[^\/]/ { finish_entry(); entry[++count] = $0; next }
-    count > 0 && /^[ \t]+[^ \t]/ {
+    # Limine strips leading blanks, and an entry runs to the next top-level
+    # header (C1): a blank line inside the entry is part of it.
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    line ~ /^\/[^\/]/ { finish_entry(0); header = line; entry[++count] = $0; next }
+    count > 0 {
       entry[++count] = $0
-      line = $0; sub(/^[ \t]+/, "", line)
       if (line == signature) signed = 1
-      else if (line !~ /^(protocol|entry): /) foreign = 1
+      else if (line != "" && line !~ /^(protocol|entry): /) foreign = 1
       next
     }
     {
-      if (count > 0 && /^\/\//) foreign = 1
-      finish_entry()
-      line = $0; sub(/^[ \t]+/, "", line)
       if (line == signature) misplaced = 1
       out[++kept] = $0
     }
     END {
-      finish_entry()
+      finish_entry(1)
       if (mode == "without") for (i = 1; i <= kept; i++) print out[i]
       exit misplaced
     }
   ' "$(limine_config_path)"
 }
 
-# windows_config_with [LABEL]: limine.conf as the pass writes it, with exactly
-# the entry for LABEL at the end, or with none.
+# windows_config_with [LABEL] CONTENT: CONTENT, limine.conf as the scan reads
+# it without the managed entries, with exactly the entry for LABEL at the end,
+# or with none.
 windows_config_with() {
-  local content
-  content=$(scan_windows_entries without && printf x) || return 1
-  content=${content%x}
+  local content=$2
   if [[ -n $1 ]]; then
     [[ -z $content || $content == *$'\n\n' ]] || content+=$'\n'
     content+=$(windows_entry "$1")$'\n'
@@ -221,14 +236,17 @@ windows_config_with() {
   printf '%s' "$content"
 }
 
-# limine.conf without a single menu entry is Omarchy's template on its way to
-# limine-update, which fills it (C6); an entry written into it would come first.
+# lacks_menu_entries CONTENT: not a single top-level entry. A limine.conf
+# without one is Omarchy's template on its way to limine-update, which fills
+# it (C6); an entry written into it would come first.
+lacks_menu_entries() { ! grep -q '^[[:space:]]*/[^/]' <<<"$1"; }
+
 # The scan's whole output is read: a reader that stops early would kill the
 # scan with SIGPIPE, and under pipefail a full file would then read as empty.
 limine_conf_lacks_entries() {
   local content
   content=$(scan_windows_entries without 2>/dev/null) || return 1
-  ! grep -q '^/[^/]' <<<"$content"
+  lacks_menu_entries "$content"
 }
 
 # The entry stands after the entries upstream orders, the ones that carry
@@ -237,9 +255,10 @@ limine_conf_lacks_entries() {
 # entry after it is left where it is.
 windows_entry_is_displaced() {
   awk -v signature="$WINDOWS_ENTRY_COMMENT" '
-    /^\/[^\/]/ { n++; header = $0; next }
-    n > 0 && /^[ \t]*comment:.*order-priority=/ { upstream = n }
-    n > 0 && header == "/Windows" { line = $0; sub(/^[ \t]+/, "", line); if (line == signature) ours = n }
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    line ~ /^\/[^\/]/ { n++; header = line; next }
+    n > 0 && line ~ /^comment:.*order-priority=/ { upstream = n }
+    n > 0 && header == "/Windows" && line == signature { ours = n }
     END { exit !(ours && upstream > ours) }
   ' "$(limine_config_path)"
 }
@@ -266,6 +285,7 @@ windows_entry_state() {
 }
 
 readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds OmaSecBoot's Windows comment in an entry that is not as OmaSecBoot writes it; remove that comment line, or the entry, by hand"
+readonly WINDOWS_ENTRY_WAITS="limine.conf holds no menu entries yet, as Omarchy's template does before limine-update fills it; the pass after that writes the Windows entry"
 
 # config_is_still CHECKSUM: limine.conf still reads as it did.
 config_is_still() { [[ $(config_checksum) == "$1" ]]; }
@@ -300,7 +320,15 @@ write_windows_entry() {
   }
   mode=$(stat -Lc '%a' "$config") || return 1
   before=$(config_checksum) || return 1
-  content=$(windows_config_with "$label" && printf x) || return 1
+  content=$(scan_windows_entries without && printf x) || return 1
+  content=${content%x}
+  # Judged on the content the write is built from, not on an earlier look at
+  # the file: Omarchy's refresh can have put its template there since (C6).
+  if [[ -n $label ]] && lacks_menu_entries "$content"; then
+    qnote "$WINDOWS_ENTRY_WAITS"
+    return 1
+  fi
+  content=$(windows_config_with "$label" "$content" && printf x) || return 1
   content=${content%x}
   # Checked once here and again right before the rename: Omarchy's refresh
   # replaces limine.conf outside the lock (C6), and a rename over its newer
@@ -325,7 +353,9 @@ write_windows_entry() {
 converge_windows_entry() {
   local status=0
   if [[ ! -e $(windows_flag) ]]; then
-    [[ $(windows_entry_state '') == absent ]] || qact "Taking the Windows entry out of limine.conf"
+    case $(windows_entry_state '') in
+      current | stale | displaced) qact "Taking the Windows entry out of limine.conf" ;;
+    esac
     write_windows_entry || :
     return 0
   fi
@@ -333,6 +363,7 @@ converge_windows_entry() {
   case $status in
     0) ;;
     1) qnote "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares; see ${BOLD}sudo omasecboot status${NC}" ;;
+    3) qnote "The Windows entry is enabled, but ${WINDOWS_TARGET_NAME}" ;;
     *) qnote "The Windows entry is enabled, but the firmware's boot entries cannot be read right now" ;;
   esac
   (( status == 0 )) || return 0
@@ -341,7 +372,7 @@ converge_windows_entry() {
     displaced) qact "Moving the Windows entry after the entries Omarchy orders in limine.conf" ;;
     absent | stale)
       if limine_conf_lacks_entries; then
-        qnote "limine.conf holds no menu entries yet, as Omarchy's template does before limine-update fills it; the pass after that writes the Windows entry"
+        qnote "$WINDOWS_ENTRY_WAITS"
         return 0
       fi
       qact "Writing the Windows entry to limine.conf"
@@ -458,10 +489,10 @@ print_encryption_guidance() {
   done <<<"$1"
   warn "Changing Secure Boot keys or its state can make Windows ask for the BitLocker recovery key"
   print_message "
-    ${BOLD}Required where Windows is encrypted, on every edition${NC}
+    ${BOLD}Required where Windows is encrypted${NC}
       Back up and verify every recovery key (account.microsoft.com/devices/recoverykey, or your organisation)
       With the key a prompt is an inconvenience; without it, a lockout
-    ${BOLD}To avoid the prompt, on every edition, in an administrator terminal in Windows${NC}
+    ${BOLD}To avoid the prompt, in an administrator terminal in Windows (Microsoft documents this without naming an edition; Windows Home accepted it on the recorded machine)${NC}
       1. Before the change: manage-bde -protectors -disable C: -RebootCount 0
       2. After Secure Boot is on and Windows has started once: manage-bde -protectors -enable C:
       While the protectors are disabled the key lies unprotected on the drive, so do not skip step 2
@@ -487,7 +518,7 @@ acknowledge_windows_encryption() {
 remind_of_windows_encryption() {
   [[ $(windows_encryption_state) != absent ]] || return 0
   if [[ $1 == on ]]; then
-    warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot on; to avoid the prompt, leave its protectors disabled until Windows has started once (${BOLD}omasecboot windows preflight${NC} shows how)"
+    warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot on; to avoid the prompt, leave its protectors disabled until Windows has started once, while the key lies unprotected on the drive (${BOLD}omasecboot windows preflight${NC} shows how)"
   else
     warn "If Windows is encrypted, keep its recovery key at hand when you turn Secure Boot off: BitLocker can ask for it then (${BOLD}omasecboot windows preflight${NC} shows how to avoid the prompt)"
   fi

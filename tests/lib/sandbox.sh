@@ -115,4 +115,7 @@ run_case() {
 }
 
 # finish_suite VERSIONS: the versions that were checked belong in the record.
-finish_suite() { printf '%s tests passed (%s cases, %s)\n' "$SUITE_NAME" "$CASES_RUN" "$1"; }
+finish_suite() {
+  (( CASES_RUN > 0 )) || fail_test "no case ran"
+  printf '%s tests passed (%s cases, %s)\n' "$SUITE_NAME" "$CASES_RUN" "$1"
+}

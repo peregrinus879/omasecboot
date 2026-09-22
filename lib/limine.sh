@@ -31,7 +31,7 @@ default_setting_line() {
 # interpret backslashes in a -v assignment, and the trailing "x" keeps the
 # blank lines at the end that a command substitution would drop.
 write_default_setting() {
-  local key=$1 line=$2 file mode=644 content
+  local key=$1 line=$2 file mode=644 content before
   file=$(limine_default_config)
   if [[ -e $file ]]; then
     is_safe_file "$file" || return 1
@@ -39,14 +39,23 @@ write_default_setting() {
   else
     : | atomic_write "$file" "$mode" || return 1
   fi
+  before=$(b2sum_file "$file") || return 1
   content=$(LINE=$line awk -v key="$key" '
     BEGIN { pattern = "^[[:space:]]*" key "[[:space:]]*="; line = ENVIRON["LINE"] }
     $0 ~ pattern { if (line != "" && !written) { print line; written = 1 }; next }
     { print }
     END { if (line != "" && !written) print line }
   ' "$file" && printf x) || return 1
-  printf '%s' "${content%x}" | atomic_write "$file" "$mode"
+  # The file holds the kernel command line: an edit saved since it was read
+  # is never renamed over (section 7.1).
+  printf '%s' "${content%x}" | atomic_write "$file" "$mode" default_config_is_still "$before" || {
+    fail "${file} changed while a managed setting was being written; nothing was written, run this again"
+    return 1
+  }
 }
+
+# default_config_is_still CHECKSUM: /etc/default/limine still reads as it did.
+default_config_is_still() { [[ $(b2sum_file "$(limine_default_config)") == "$1" ]]; }
 
 # Records, once, what /etc/default/limine said before the first change: one
 # line per key, "KEY<TAB>absent" or "KEY<TAB>present<TAB><original line>".
@@ -98,7 +107,8 @@ restore_settings_originals() {
 
 # Prints "line: key: value" for every path in limine.conf that carries a
 # "#hash" suffix. Limine strips leading whitespace and generated sub-entries
-# are indented, so lines are trimmed.
+# are indented, so lines are trimmed. Status 1: there is no limine.conf;
+# status 2: it cannot be read.
 list_hashed_paths() {
   local config
   config=$(limine_config_path)
@@ -119,24 +129,30 @@ list_hashed_paths() {
       sub(/^[[:space:]]+/, "", value)
       if (key in path_key && index(value, "#") > 0) print NR ": " key ": " value
     }
-  ' "$config"
+  ' "$config" || return 2
 }
 
 # A file that limine.conf names with a "#hash", whoever wrote it. Signing such
 # a file in place would make its entry stale (D4, D5), and Limine stops at a
-# stale hash under Secure Boot (C1). Both spellings are resolved the same way
+# stale hash under Secure Boot (C1). The path is compared under whatever
+# resource the entry names, boot(), guid(), fslabel() or another (C1): which
+# volume the firmware resolves it to is not known here, and a file the entry
+# may mean is not signed on a guess. Both spellings are resolved the same way
 # before they compare, so "./", "//" or ".." in the entry name the same file;
-# FAT names compare without case.
+# FAT names compare without case. Status 2: limine.conf cannot be read, so
+# nothing shows what it names.
 file_has_path_hash() {
-  local paths line value path named file
-  paths=$(list_hashed_paths) || return 1
-  file=$(realpath -m -- "$1") || return 1
+  local paths line value path named file status=0 resource='^[^(]*\(.*\):(.*)$'
+  paths=$(list_hashed_paths) || status=$?
+  (( status == 0 )) || return "$status"
+  file=$(realpath -m -- "$1") || return 2
   while IFS= read -r line; do
+    [[ -n $line ]] || continue
     value=${line#*: }
     value=${value#*: }
     path=${value%#*}
-    [[ -n $line && $path == 'boot():/'* ]] || continue
-    named=$(realpath -m -- "$(esp_path)/${path#boot():/}") || return 1
+    [[ ! $path =~ $resource ]] || path=${BASH_REMATCH[1]}
+    named=$(realpath -m -- "$(esp_path)/${path#/}") || return 2
     [[ ${file,,} != "${named,,}" ]] || return 0
   done <<<"$paths"
   return 1
@@ -146,11 +162,12 @@ file_has_path_hash() {
 # history file (D5).
 path_is_snapshot() { [[ ${1,,} == */limine_history/* ]]; }
 
-# Hashed paths of OS entries whose file no longer matches its hash, or that
-# cannot be resolved (only boot():/ resolves, against the ESP), in the same
-# format. Snapshot entries are left out before anything is hashed: their
-# hashes are upstream's, their images are large, and the Limine hook must
-# stay quick.
+# Hashed paths of OS entries that are not proved, one per line, as
+# "stale<TAB>line: key: value" where the file under boot():/ is missing,
+# outside the ESP or no longer matches its hash, and as "unchecked<TAB>..."
+# where the path is under another resource, which only the firmware resolves
+# (C1). Snapshot entries are left out before anything is hashed: their hashes
+# are upstream's, their images are large, and the Limine hook must stay quick.
 list_stale_os_hashes() {
   local paths line value hash path file esp actual
   paths=$(list_hashed_paths) || return 1
@@ -162,14 +179,17 @@ list_stale_os_hashes() {
     value=${value#*: }
     hash=${value##*#}
     path=${value%#*}
-    file=''
-    [[ $path != 'boot():/'* ]] || file="${esp}/${path#boot():/}"
-    if [[ $hash =~ ^[0-9A-Fa-f]{128}$ && -n $file && -f $file ]] &&
+    if [[ $path != 'boot():/'* ]]; then
+      printf 'unchecked\t%s\n' "$line"
+      continue
+    fi
+    file="${esp}/${path#boot():/}"
+    if [[ $hash =~ ^[0-9A-Fa-f]{128}$ && -f $file ]] &&
       file=$(realpath -e -- "$file") && [[ $file == "${esp}/"* ]] &&
       actual=$(b2sum_file "$file") && [[ $actual == "${hash,,}" ]]; then
       continue
     fi
-    printf '%s\n' "$line"
+    printf 'stale\t%s\n' "$line"
   done <<<"$paths"
 }
 
@@ -400,34 +420,87 @@ list_os_hashed_paths() {
   done <<<"$paths"
 }
 
+# Prints "line: value" for every path of the OS entries limine-entry-tool
+# writes, which its order-priority comment after the machine id marks (C2),
+# hashed or not, without the snapshot block nested under them (D5).
+list_generated_os_paths() {
+  local config
+  config=$(limine_config_path)
+  [[ -f $config ]] || return 1
+  awk '
+    BEGIN {
+      split("path kernel_path module_path image_path dtb_path global_dtb", names, " ")
+      for (i in names) path_key[names[i]] = 1
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^\/[^\/]/) { os = 0; next }
+      if (line ~ /^comment:.*machine-id=.*order-priority=/) { os = 1; next }
+      colon = index(line, ":")
+      if (!os || line ~ /^[#\/]/ || colon == 0) next
+      key = tolower(substr(line, 1, colon - 1))
+      value = substr(line, colon + 1)
+      sub(/^[[:space:]]+/, "", value)
+      if (key in path_key && tolower(value) !~ /\/limine_history\//) print NR ": " value
+    }
+  ' "$config"
+}
+
+# The rebuild remove asks of limine-mkinitcpio, proved by what it writes:
+# under the stock settings each path of its OS entries carries a hash, and a
+# build that failed without saying so (C2) leaves the entries from before,
+# unhashed. A hash on some other entry proves nothing about them.
+generated_os_entries_carry_hashes() {
+  local paths line
+  paths=$(list_generated_os_paths) || return 1
+  [[ -n $paths ]] || return 1
+  while IFS= read -r line; do
+    [[ ${line#*: } == *'#'* ]] || return 1
+  done <<<"$paths"
+}
+
 # Rebuilds the UKIs and their menu entries under the current settings.
 # limine-mkinitcpio takes the boot lock itself, so the lock is released
 # around it, and it reports success after a failed build (C2), so the result
 # is judged by the entries.
 regenerate_os_entries() {
+  local status=0
   qact "Regenerating the menu entries through limine-mkinitcpio"
-  run_unlocked run_visible limine-mkinitcpio || return 1
-  ! os_entries_carry_hashes
+  # The tool's own status, 75 when the lock could not be taken again, and 3
+  # when it reported success and hashes remain.
+  run_unlocked run_visible limine-mkinitcpio || status=$?
+  (( status == 0 )) || return "$status"
+  ! os_entries_carry_hashes || return 3
 }
 
 # The way back to stock boot files: upstream's install and entry generation
 # under the restored settings, then upstream's reset last, because the
 # install's own post-hook signs the loader while sbctl keys exist.
 restore_stock_boot_files() {
-  local primary
+  local primary verification
   primary=$(primary_loader_path)
   run_unlocked run_visible limine-install --no-efi-register || return 1
   run_unlocked run_visible limine-mkinitcpio || return 1
-  # limine-mkinitcpio reports success after a failed build (C2): the entries
-  # are judged, as setup judges them, against the settings now in effect.
-  [[ $(effective_setting ENABLE_VERIFICATION) == no ]] || os_entries_carry_hashes || {
-    fail "The menu entries carry no path hashes although the restored settings ask for them: limine-mkinitcpio did not rebuild them"
+  # limine-mkinitcpio reports success after a failed build (C2): its OS
+  # entries are judged against the settings now in effect, and upstream
+  # writes hashes only for a value of yes, in any case (C2).
+  verification=$(effective_setting ENABLE_VERIFICATION)
+  [[ ${verification,,} != yes ]] || generated_os_entries_carry_hashes || {
+    fail "limine-mkinitcpio did not rebuild the OS entries: none of its own was found, or not every one of them carries a path hash, although the restored settings ask for them"
     return 1
   }
   run_visible limine-reset-enroll || return 1
   durable_sync "$primary" || return 1
   raw_loader | cmp -s -- - "$primary" || {
-    fail "The Limine loader is not back to upstream's raw executable"
+    if [[ -f $(loader_backup_path) ]]; then
+      fail "The Limine loader is not back to upstream's raw executable"
+    else
+      # Without the copy, upstream's reset zeroes the checksum in place and
+      # the signature stays (C2); only upstream's install writes the copy.
+      fail "The Limine loader is not back to upstream's raw executable, and upstream keeps no copy of the deployed loader ($(loader_backup_path)) to restore it from: limine-install did not deploy the package's loader (its output above says why), so the reset could only zero the checksum in place. When limine-install deploys again, or the copy is back, run ${BOLD}sudo omasecboot remove${NC} again"
+    fi
     return 1
   }
 }

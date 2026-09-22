@@ -36,6 +36,8 @@ ${FILE_HASH}  /boot/${MACHINE_ID}/limine_history/omarchy_linux.efi_sha256_${FILE
 cmdline: cryptdevice=UUID=${LUKS}:omarchy_root
 COMMAND=/usr/bin/test -f /boot/EFI/Linux/${MACHINE_ID}_linux.efi
 systemd-cryptsetup@luks\\x2d${LUKS}.service loaded active
+dev-disk-by\\x2duuid-${LUKS//-/\\x2d}.device loaded active
+path: uuid(1A2B-3C4D):/EFI/Microsoft/Boot/bootmgfw.efi
 2026-01-02T03:04:05+00:00 testhost sudo[12]:   te.ster : TTY=pts/0 ; PWD=/home/te.ster/omasecboot ; USER=root ; COMMAND=/usr/bin/omasecboot setup
 SUDO_USER=te.ster USER=teXster hostname=testhost
 sda  3.7G vfat  /run/media/te.ster/1A2B-3C4D
@@ -70,6 +72,8 @@ identifiers_are_renamed_and_the_rest_stays() {
   { grep -q -F "/boot/id-1/limine_history/" "$first" && grep -q -F "boot():/id-1/limine_history/" "$second"; } || fail_test "the machine-id is not id-1 in both"
   grep -q -F "/boot/EFI/Linux/id-1_linux.efi" "$first" || fail_test "the machine-id before an underscore: $(grep -n _linux.efi "$first")"
   grep -q -F 'luks\x2duuid-2.service' "$first" || fail_test "a UUID after the letters of an escaped dash: $(grep -n cryptsetup "$first")"
+  grep -q -F 'dev-disk-by\x2duuid-uuid-2.device' "$first" || fail_test "a UUID whose own dashes systemd escaped: $(grep -n 'disk-by' "$first")"
+  grep -q -F 'path: uuid(vol-1):/EFI/Microsoft/Boot/bootmgfw.efi' "$first" || fail_test "a volume identifier in a Limine resource: $(grep -n 'uuid(' "$first")"
   grep -q -F "SecureBoot-${UEFI_GLOBAL}" "$first" || fail_test "a UUID that every machine shares was renamed"
   [[ $(grep -c -F "$FILE_HASH" "$first") == 1 && $(grep -o -F "$FILE_HASH" "$first" | wc -l) == 2 ]] || fail_test "a file hash was changed"
   grep -q -F "2026-01-02T03:04:05+00:00 host sudo[12]:   user : TTY=pts/0 ; PWD=/home/user/omasecboot" "$first" || fail_test "the journal line: $(grep sudo "$first")"

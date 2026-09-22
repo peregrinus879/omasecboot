@@ -16,7 +16,7 @@ CONTRACT_SUITES = sbctl limine
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 CONTRACT_TARGETS = $(addprefix test-contract-,$(CONTRACT_SUITES))
 
-.PHONY: install package lint test test-contract $(TEST_TARGETS) $(CONTRACT_TARGETS)
+.PHONY: install package lint test test-hermetic test-contract $(TEST_TARGETS) $(CONTRACT_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is
@@ -60,11 +60,9 @@ package:
 	tar -C "$$build/$$pkgname-$$pkgver" -xf "$$build/files.tar"; \
 	tar -C "$$build" -czf "$$build/$$pkgname-$$pkgver.tar.gz" "$$pkgname-$$pkgver"; \
 	cp PKGBUILD omasecboot.install "$$build/"; \
-	cat /etc/makepkg.conf > "$$build/makepkg.conf"; \
-	printf 'PKGEXT=.pkg.tar.zst\n' >> "$$build/makepkg.conf"; \
 	cd "$$build" && PKGDEST="$$dest" SRCDEST="$$build" SRCPKGDEST="$$build" \
-	  LOGDEST="$$build" BUILDDIR="$$build/build" \
-	  makepkg --config "$$build/makepkg.conf" --force --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
+	  LOGDEST="$$build" BUILDDIR="$$build/build" PKGEXT=.pkg.tar.zst \
+	  makepkg --force --nodeps --noconfirm --noprogressbar --nosign 1>&2; \
 	  echo "$$dest/$$pkgname-$$pkgver-$$pkgrel-any.pkg.tar.zst"
 
 # bash -n parses only its first operand, so every script gets its own call.
@@ -78,6 +76,10 @@ lint:
 	shellcheck --shell=bash --exclude=SC2329 omasecboot.install
 
 test: $(TEST_TARGETS)
+
+# CI runs the package suite in its container job, and every other suite here,
+# so a suite added to TEST_SUITES reaches CI without a workflow change.
+test-hermetic: $(filter-out test-package,$(TEST_TARGETS))
 
 $(TEST_TARGETS): test-%:
 	bash tests/$*.sh

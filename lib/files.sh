@@ -11,11 +11,16 @@ package_loader_path() { printf '/usr/share/limine/BOOTX64.EFI\n'; }
 # primary loader and restores it from there before every operation; that can
 # be an older Limine than the package holds, because upstream refuses majors
 # it does not know (C2). A machine without that backup gets the package's
-# executable.
+# executable. A backup that is there but cannot be read is upstream's file,
+# never repaired here: the way out is named, and nothing is built.
 raw_loader() {
   local backup
   backup=$(loader_backup_path)
   if [[ -f $backup ]]; then
+    tar -tf "$backup" limine_x64.efi >/dev/null 2>&1 || {
+      fail "Upstream's copy of the raw loader, ${backup}, cannot be read as the archive limine-install writes. Move it aside, ${BOLD}sudo mv ${backup} ${backup}.damaged${NC}, then run ${BOLD}sudo limine-install${NC}, which deploys the package's loader and writes a fresh copy; until then the loader is built from the package's $(package_loader_path)"
+      return 1
+    }
     tar -xOf "$backup" limine_x64.efi
   else
     cat -- "$(package_loader_path)"
@@ -82,7 +87,7 @@ run_sbctl() {
 
 sbctl_keys_exist() {
   local status
-  status=$(sbctl status --json 2>/dev/null) || return 1
+  status=$(run_sbctl status --json 2>/dev/null) || return 1
   jq -e '.installed == true' <<<"$status" >/dev/null 2>&1
 }
 

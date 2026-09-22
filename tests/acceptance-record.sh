@@ -11,9 +11,10 @@
 # firmware's menus.
 #
 # Never recorded: DMI serial numbers and UUIDs, MAC and NVMe device-path
-# nodes, recovery keys, firmware backup payloads (listed by name and size).
-# Partition identifiers and the tool's small state files are recorded, because
-# the review needs them.
+# nodes, firmware backup payloads (listed by name and size). No row asks for
+# a recovery key, and nothing typed into a row is filtered: the transcript
+# holds what the terminal showed. Partition identifiers and the tool's small
+# state files are recorded, because the review needs them.
 set -uo pipefail
 
 usage() {
@@ -149,7 +150,7 @@ record_state() {
 {
   printf '# Acceptance record %s\n\n' "$row"
   printf -- '- Row: `%s`\n- Recorded: %s\n- Command: `%s`\n' "$row" "$stamp" "${command_args[*]:-(state only)}"
-} >"$record"
+} >"$record" || { printf 'The record %s cannot be written; nothing ran\n' "$record" >&2; exit 2; }
 
 record_state before
 
@@ -160,6 +161,9 @@ if (( ${#command_args[@]} > 0 )); then
   printf '=== omasecboot acceptance %s: %s ===\n' "$row" "${command_args[*]}"
   script -q -e -c "$(printf '%q ' "${command_args[@]}")" "$transcript"
   status=$?
+  # script exits 1 when it cannot open the transcript, which would read as the
+  # command's own status.
+  [[ -e $transcript ]] || { printf 'The transcript %s was not written; this is the recorder failing, not the command\n' "$transcript" >&2; exit 2; }
   {
     printf '```text\n'
     strip_terminal_control "$transcript"

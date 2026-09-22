@@ -67,13 +67,19 @@ show_firmware_status() {
 # Microsoft's 2023 certificates (C9). Notes: this machine's boot chain does
 # not depend on them, what Microsoft can still deliver to it does.
 show_microsoft_2023_status() {
-  local missing
-  if missing=$(missing_microsoft_2023 KEK | paste -sd, -) && [[ -n $missing ]]; then
-    note "KEK does not hold ${missing}, which signs Microsoft's db and dbx updates from 2026 on: they cannot reach this machine"
-  fi
-  if missing=$(missing_microsoft_2023 db | paste -sd, -) && [[ -n $missing ]]; then
-    note "db does not hold ${missing//,/, }: Microsoft's db updates deliver what is missing, and those need Microsoft's 2023 certificate in KEK"
-  fi
+  local name missing
+  for name in KEK db; do
+    if ! missing=$(missing_microsoft_2023 "$name"); then
+      blocking_problem "The firmware's ${name} variable cannot be read as a signature list"
+      continue
+    fi
+    [[ -n $missing ]] || continue
+    missing=$(paste -sd, - <<<"$missing")
+    case $name in
+      KEK) note "KEK does not hold ${missing}, which signs Microsoft's db and dbx updates from 2026 on: they cannot reach this machine" ;;
+      db) note "db does not hold ${missing//,/, }: Microsoft's db updates deliver what is missing, and those need Microsoft's 2023 certificate in KEK" ;;
+    esac
+  done
 }
 
 show_settings_status() {
@@ -177,11 +183,15 @@ show_sbctl_rows_status() {
 # Path hashes of OS entries that no longer match, and the snapshot images
 # from before setup, which are upstream's and stay unsigned (D5).
 show_path_hash_status() {
-  local stale line file old_snapshots=0 unread_snapshots=0
+  local stale kind line file old_snapshots=0 unread_snapshots=0
   if stale=$(list_stale_os_hashes); then
-    while IFS= read -r line; do
-      [[ -z $line ]] ||
+    while IFS=$'\t' read -r kind line; do
+      [[ -n $line ]] || continue
+      if [[ $kind == unchecked ]]; then
+        note "Path hash in limine.conf line ${line%%:*} (entry: $(entry_title_for_line "${line%%:*}")) cannot be checked: the path is not under boot():/, so only the firmware can tell which volume it names"
+      else
         setup_problem "Stale path hash in limine.conf line ${line%%:*} (entry: $(entry_title_for_line "${line%%:*}"))"
+      fi
     done <<<"$stale"
   else
     blocking_problem "Could not check the path hashes in limine.conf"
@@ -222,11 +232,20 @@ show_windows_status() {
   if (( status == 2 )); then
     blocking_problem "The Windows entry is enabled, but the firmware's boot entries could not be read"
     return
+  elif (( status == 3 )); then
+    blocking_problem "The Windows entry is enabled, but ${WINDOWS_TARGET_NAME} with ${BOLD}sudo omasecboot windows remove${NC}"
+    return
   elif (( status != 0 )); then
-    blocking_problem "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares. Take the entry out with ${BOLD}sudo omasecboot windows remove${NC}"
+    blocking_problem "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares. Take the entry out with ${BOLD}sudo omasecboot windows remove${NC}, or leave the firmware one such entry (${BOLD}efibootmgr${NC} shows them)"
     return
   fi
   state=$(windows_entry_state "$(windows_target_label)")
+  # The pass writes nothing into a limine.conf without entries (C6): the way
+  # out is upstream's, not sign.
+  if [[ $state == absent ]] && limine_conf_lacks_entries; then
+    blocking_problem "${WINDOWS_ENTRY_WAITS}; if none follows, run ${BOLD}sudo limine-update${NC}"
+    return
+  fi
   case $state in
     current) pass "The Windows entry restarts the machine into $(windows_target_label)" ;;
     absent) problem "The Windows entry is missing from limine.conf" ;;

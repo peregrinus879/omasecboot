@@ -87,9 +87,15 @@ print_entries() {
 # while a PK was in place; a machine that reached Setup Mode before its first
 # setup has only a backup of what was left, and is told so.
 setup_enrollment() {
-  local backup path lost question name setup_mode
+  local backup path lost question name setup_mode audit_mode
   setup_mode=$(read_mode_variable SetupMode) || die "Could not read the firmware's SetupMode variable; nothing was written"
   [[ $setup_mode == 1 ]] || die "The firmware has no Platform Key but does not report Setup Mode; nothing was written. Restore the factory keys in the firmware's key menu and run ${BOLD}sudo omasecboot setup${NC} again"
+  # A UEFI 2.5 firmware in Audit Mode leaves it for Deployed Mode when the PK
+  # is written, a state no machine has a record of (section 7.6).
+  if [[ -e $(firmware_variable_path AuditMode) ]]; then
+    audit_mode=$(read_mode_variable AuditMode) || die "Could not read the firmware's AuditMode variable; nothing was written"
+    [[ $audit_mode == 0 ]] || die "The firmware is in Audit Mode, which OmaSecBoot has no record of: writing the Platform Key would move it to Deployed Mode. Leave Audit Mode in the firmware's own menu, then run ${BOLD}sudo omasecboot setup${NC} again; nothing was written"
+  fi
   if ! backup=$(reference_backup); then
     backup=$(latest_firmware_backup) || backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
     warn "The only backup was taken in Setup Mode, so OmaSecBoot cannot tell what the firmware's key menu removed. If more than the Platform Key went, restore the factory keys in the firmware and run ${BOLD}sudo omasecboot setup${NC} again before you go on"
@@ -127,12 +133,18 @@ setup_enrollment() {
       for name in KEK db; do
         [[ -n $(foreign_entries "$name") ]] || print_message "      ${name} holds no entries besides yours, while the other list was kept" >&2
       done
-      dbx_equals_backup "$backup" || print_message "      The revocation list (dbx) differs from the backup" >&2
+      if ! dbx_equals_backup "$backup"; then
+        if [[ -z $lost ]]; then
+          print_message "      KEK and db hold every entry of the backup; only the revocation list (dbx) differs from it, as it does after a dbx update Windows applied, and nothing is written beside a dbx that changed" >&2
+        else
+          print_message "      The revocation list (dbx) differs from the backup" >&2
+        fi
+      fi
       die "Restore the factory keys in the firmware, run ${BOLD}sudo omasecboot setup${NC}, then delete only the Platform Key (PK)"
       ;;
   esac
 
-  note "The backup of the keys this machine trusted is in ${backup}"
+  note "The backup of the keys this machine trusted is in ${backup}. What is written now is taken back only in the firmware's key menu, by restoring the factory keys"
   acknowledge_windows_encryption || exit 1
   confirm "the key enrollment" "$question" || exit 1
   enroll_local_keys "$path" || die "The enrollment stopped, and the firmware may hold a part of it. Run ${BOLD}sudo omasecboot setup${NC} again: it reads the variables and writes what is missing"
@@ -185,7 +197,7 @@ setup_firmware_step() {
 }
 
 cmd_setup() {
-  local first_run=true secure_boot
+  local first_run=true secure_boot status
   no_arguments "$@"
   check_root setup
   header "Setup"
@@ -229,11 +241,20 @@ cmd_setup() {
   # the watchers, also when this run is interrupted.
   : >"$(enabled_file)"
   if os_entries_carry_hashes; then
-    regenerate_os_entries || {
-      fail "limine.conf still holds path hashes after limine-mkinitcpio ran, and signing a hashed file would make its entry stale:"
-      print_message "$(list_os_hashed_paths | sed 's/^/      /')" >&2
-      die "If its build failed, run ${BOLD}sudo omasecboot setup${NC} again. An entry that limine-mkinitcpio does not write keeps its hash: take the #hash off its path first"
-    }
+    status=0
+    regenerate_os_entries || status=$?
+    case $status in
+      0) ;;
+      3)
+        fail "limine.conf still holds path hashes after limine-mkinitcpio ran, and signing a hashed file would make its entry stale:"
+        print_message "$(list_os_hashed_paths | sed 's/^/      /')" >&2
+        die "If its build failed, run ${BOLD}sudo omasecboot setup${NC} again. An entry that limine-mkinitcpio does not write keeps its hash: take the #hash off its path first, which suits an entry that starts an EFI application; an entry of any other protocol needs its hash under Secure Boot and is not served here"
+        ;;
+      75) exit 75 ;;
+      # The tool's own status, or the lock's when it could not be taken
+      # again, whose own line stands above.
+      *) die "limine-mkinitcpio failed (status ${status}); look at its output above, then run ${BOLD}sudo omasecboot setup${NC} again" ;;
+    esac
   fi
   boot_lock_release
   offer_fallback_loader
@@ -301,17 +322,23 @@ cmd_remove() {
     die "Secure Boot is on. Turn it off in the firmware first: the stock boot files are unsigned"
   fi
   ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
+  # Upstream's install, which remove runs, deploys the fallback where the
+  # setting says so, over whatever stands there (C2, C3): said before the
+  # question, and left to the setting (D6).
+  if [[ $(fallback_state) == foreign && $(effective_setting ENABLE_LIMINE_FALLBACK) == yes ]]; then
+    warn "EFI/BOOT/BOOTX64.EFI is not a Limine loader, and ENABLE_LIMINE_FALLBACK is yes: limine-install, which remove runs, replaces it with upstream's fallback loader, as every Limine upgrade does. To keep it, set ENABLE_LIMINE_FALLBACK=no in $(limine_default_config) first"
+  fi
   confirm "the return to stock" "Return the Limine settings and boot files to stock?" || exit 1
 
   # The lock comes first: a busy lock must leave the hook and the watchers at
   # work on a loader that is still sealed.
   boot_lock_acquire || exit "$?"
   rm -f -- "$(enabled_file)"
-  disable_watch || warn "Could not disable the watchers"
+  disable_watch || warn "Could not disable the watchers; when systemd answers, take them down with ${BOLD}sudo systemctl disable --now $(watch_units 2>/dev/null | tr '\n' ' ')${NC}"
   restore_settings_originals || die "Could not restore $(limine_default_config)"
   restore_stock_boot_files || die "The boot files are not back to stock; run this again"
   # Only now: the loader is proved raw, so limine.conf may change under it.
-  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); run this again"
+  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"
   rm -f -- "$(windows_flag)"
   clear_attention
   rm -f -- "$(settings_originals_file)"
@@ -335,6 +362,7 @@ require_windows_target() {
   case $status in
     0) ;;
     1) die "The firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares; $1. Look with ${BOLD}efibootmgr${NC} for a second, an inactive or a renamed entry, or one that BootOrder does not list" ;;
+    3) die "${WINDOWS_TARGET_NAME^}; $1" ;;
     *) die "Could not read the firmware's boot entries${2:+; $2}" ;;
   esac
 }
@@ -371,11 +399,14 @@ cmd_windows_status() {
       esac
       ;;
     1) note "The firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares; look with ${BOLD}efibootmgr${NC} for a second, an inactive or a renamed entry, or one that BootOrder does not list" ;;
+    3) note "${WINDOWS_TARGET_NAME^}" ;;
     *) fail "Could not read the firmware's boot entries" ;;
   esac
   if [[ -e $(windows_flag) ]]; then note "The Windows entry is enabled"; else note "The Windows entry is not enabled"; fi
   note_windows_chainloads
-  (( status < 2 ))
+  # A target that is missing or unmatchable is reported, not failed; only
+  # entries that could not be read fail the report.
+  (( status < 2 || status == 3 ))
 }
 
 cmd_windows_setup() {

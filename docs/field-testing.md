@@ -20,7 +20,7 @@ Stop means: do not reboot and do not go on to the next step. Go to [The way back
 
 One case has a repair first. When a `status` exits 1 on a machine where `setup` has run, record the repair and the report again, under the row's name with `-sign` and `-again` added:
 
-```bash
+```text
 cd ~/omasecboot
 sudo bash tests/acceptance-record.sh <row>-sign -- omasecboot sign
 sudo bash tests/acceptance-record.sh <row>-again -- omasecboot status
@@ -34,7 +34,7 @@ Read this now, not then.
 
 - With Secure Boot on: turn it off in the firmware first. A loader the firmware refuses for its signature starts again with Secure Boot off.
 - A snapshot entry stops at `PANIC: efi: LoadImage failure` with Secure Boot on: that snapshot is older than `setup` and its kernel image is unsigned. Nothing is broken. Hold the power button, start again and pick the normal entry.
-- A sealed Limine loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in [Before you start](#before-you-start), log in, and run `sudo omasecboot sign`.
+- A sealed Limine loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in [Before you start](#before-you-start), log in, read `limine.conf` if you did not change it yourself (`sign` seals the loader over whatever it holds), and run `sudo omasecboot sign`.
 - Without a working fallback: boot the rescue media and follow the README's [If the machine does not start](../README.md#if-the-machine-does-not-start), which puts a raw loader over the Limine loader.
 
 ## Before you start
@@ -42,9 +42,9 @@ Read this now, not then.
 Nothing of the test is run yet. Settle each line first.
 
 - The machine runs Omarchy on x86_64 with Limine, unified kernel images and a vfat ESP, as Omarchy installs it.
-- Secure Boot is off and the firmware holds its factory keys: `bootctl status 2>/dev/null | command grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key; report that line instead of testing. A machine on which you have enrolled Secure Boot keys of your own before is not one for this page: its way back would put the factory keys in their place.
+- Secure Boot is off and the firmware holds its factory keys: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key; report that line instead of testing. A machine on which you have enrolled Secure Boot keys of your own before is not one for this page: its way back would put the factory keys in their place.
 - It is on AC power, and you have about half an hour for level 1 and an hour for level 2.
-- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. If that file is another system's loader (it does not show Limine's menu), leave it: the test then relies on rescue media alone, and the report should say so. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback` adds it when it is missing.
+- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. If that file is another system's loader (it does not show Limine's menu), leave it: the test then relies on rescue media alone, and the report should say so. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback --no-efi-register` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file that `sudo ls -lSh /boot/EFI/Linux` lists as available.
 - The system is up to date and was rebooted since: run `omarchy update`, restart with `systemctl reboot`, and start the test then. Do not update again, and do not run `pacman -Sy`, before [The way back](#the-way-back) is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
 - With Windows on the same machine, at any level: the BitLocker or Device Encryption recovery key is backed up and at hand. `setup` asks about it, and changing Secure Boot keys or its state can make Windows ask for the key.
@@ -85,7 +85,7 @@ sudo bash tests/acceptance-record.sh 0-before-install
 
 ```bash
 cd ~/omasecboot
-timedatectl | command grep -E 'Local time|System clock synchronized'
+timedatectl | grep -E 'Local time|System clock synchronized'
 [[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 0-snapshot-baseline -- snapper -c root create -d "omasecboot-test baseline" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
 sleep 15
 sudo grep -n 'omasecboot-test baseline' /boot/limine.conf
@@ -151,7 +151,7 @@ Expected: `status` exits 0 without your help.
 
 ```bash
 cd ~/omasecboot
-timedatectl | command grep -E 'Local time|System clock synchronized'
+timedatectl | grep -E 'Local time|System clock synchronized'
 [[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 1-snapshot -- snapper -c root create -d "omasecboot-test level 1" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
 sleep 15
 sudo grep -n 'omasecboot-test level 1' /boot/limine.conf
@@ -318,7 +318,7 @@ sudo bash tests/acceptance-record.sh 3-status-limine -- omasecboot status
 
 ```bash
 cd ~/omasecboot
-timedatectl | command grep -E 'Local time|System clock synchronized'
+timedatectl | grep -E 'Local time|System clock synchronized'
 [[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 3-snapshot -- snapper -c root create -d "omasecboot-test level 2" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
 sleep 15
 sudo grep -n 'omasecboot-test level 2' /boot/limine.conf
@@ -370,7 +370,7 @@ In this order, whatever level you reached.
 systemctl reboot --firmware-setup
 ```
 
-**2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove" and exits 0.
+**2.** Return the boot files and settings to stock. `remove` asks once; the answer is yes. It takes the Windows entry out as well. After a `setup` that never got as far as changing a setting it says "Nothing to remove" and exits 0. Where another system's loader stands at `EFI/BOOT/BOOTX64.EFI` and `ENABLE_LIMINE_FALLBACK=yes` is in effect, `remove` warns before its question that upstream's install will replace it: answer no, set `ENABLE_LIMINE_FALLBACK=no` in `/etc/default/limine`, and run the row again.
 
 ```bash
 cd ~/omasecboot
@@ -405,6 +405,11 @@ Then the test's snapshots, by number:
 
 ```bash
 sudo snapper -c root list | grep omasecboot-test
+```
+
+Then delete the ones the list shows, with their numbers in place of the placeholder:
+
+```text
 sudo snapper -c root delete <numbers>
 ```
 
@@ -448,7 +453,7 @@ cd ~/omasecboot
 bash tests/acceptance-share.sh
 ```
 
-It writes `acceptance-records/share/` and `omasecboot-records.tgz` inside it. In the copies every such value is renamed (`uuid-1`, `id-1`, `user`, `host`), the same value the same way in every record, so nothing is lost for the review. What stays is what the review needs or no rule can know: the machine's model and firmware version, package versions, disk sizes, boot entry labels, the time zone of time stamps, hashes of boot files, and every text typed by hand, such as snapshot descriptions and your notes. The command's last lines say where your names still occur. Skim the copies before you share them; some firmware puts a disk's model or serial number into a boot entry's label.
+It writes `acceptance-records/share/` and `omasecboot-records.tgz` inside it; `share/` is its output, which it replaces when everything in it is shaped as one of its copies and leaves alone otherwise. In the copies every such value is renamed (`uuid-1`, `id-1`, `user`, `host`), the same value the same way in every record, so nothing is lost for the review. What stays is what the review needs or no rule can know: the machine's model and firmware version, package versions, disk sizes, boot entry labels, the time zone of time stamps, hashes of boot files, and every text typed by hand, such as snapshot descriptions and your notes. The command's last lines say where your names still occur. Skim the copies before you share them; some firmware puts a disk's model or serial number into a boot entry's label.
 
 Then open a [field report](https://github.com/peregrinus879/omasecboot/issues/new?template=field-report.yml). The form asks for the machine, the firmware, the commit, how far you went, what happened at each step that no record can show (texts on the screen, firmware menu wording, whether Windows started, whether BitLocker asked for its key), how the way back went, and the archive: drag `omasecboot-records.tgz` into the last field, or write "none" there when the run ended in [Prepare](#prepare). Quote from the copies in `share/`, never from the records themselves. Attach only that archive, and never recovery keys, serial numbers or anything from `/var/lib/sbctl` or `/var/lib/omasecboot/firmware-backup`.
 

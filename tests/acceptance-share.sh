@@ -72,6 +72,8 @@ fi
 mkdir -p "$share_dir" || exit 2
 
 readonly UUID='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+# The same with every dash escaped, as systemd writes a UUID into a unit name.
+readonly ESCAPED_UUID='[0-9a-fA-F]{8}\\x2d[0-9a-fA-F]{4}\\x2d[0-9a-fA-F]{4}\\x2d[0-9a-fA-F]{4}\\x2d[0-9a-fA-F]{12}'
 # The UEFI global variable and image security namespaces, and Microsoft's owner.
 readonly PUBLIC_UUIDS='8be4df61-93ca-11d2-aa0d-00e098032b8c d719b2cb-3d3a-4596-a3bc-dad00e67656f 77fa9abd-0359-4d32-bd60-28f4e78f784b'
 
@@ -113,7 +115,8 @@ trap 'rm -f -- "$rules"' EXIT
     [[ -n $value && " $PUBLIC_UUIDS " != *" $value "* ]] || continue
     number=$((number + 1))
     printf 's/%s/uuid-%s/gI\n' "$value" "$number"
-  done < <(distinct "$UUID")
+    printf 's/%s/uuid-%s/gI\n' "${value//-/\\\\x2d}" "$number"
+  done < <({ distinct "$UUID"; distinct "$ESCAPED_UUID" | sed 's/\\x2d/-/g'; } | awk '!seen[$0]++')
   number=0
   while IFS= read -r value; do
     [[ -n $value ]] || continue
@@ -121,13 +124,14 @@ trap 'rm -f -- "$rules"' EXIT
     printf 's/%s/id-%s/gI\n' "$value" "$number"
   done < <(distinct '[0-9a-fA-F]{32,}' | awk 'length($0) == 32')
   # A FAT volume identifier is too short to be told from other text by its
-  # form, so only the ones a mount point or a UUID= names are renamed.
+  # form, so only the ones a mount point, a UUID= or a Limine uuid() names
+  # are renamed.
   number=0
   while IFS= read -r value; do
     [[ -n $value ]] || continue
     number=$((number + 1))
     printf 's/\\(^\\|[^-0-9A-Za-z]\\)%s\\($\\|[^-0-9A-Za-z]\\)/\\1vol-%s\\2/g\n' "$value" "$number"
-  done < <(grep -h -o -E '(/run/media/[^/[:space:]]+/|UUID=)[0-9A-F]{4}-[0-9A-F]{4}\b' "${records[@]}" | grep -o -E '[0-9A-F]{4}-[0-9A-F]{4}$' | awk '!seen[$0]++')
+  done < <(grep -h -o -E '(/run/media/[^/[:space:]]+/|UUID=|uuid\()[0-9A-F]{4}-[0-9A-F]{4}\b' "${records[@]}" | grep -o -E '[0-9A-F]{4}-[0-9A-F]{4}$' | awk '!seen[$0]++')
   while IFS= read -r value; do
     [[ -n $value ]] || continue
     escaped=$(sed 's/[][\\.*^$/]/\\&/g' <<<"$value")

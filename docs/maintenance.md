@@ -13,12 +13,14 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 - The firmware's boot entry for the Limine loader compared by partition identity and `BootOrder` membership, as the Windows target is, instead of by path alone (spec, section 4).
 - The watchers' event schedules on a real systemd: a change that lands after the pass's last proof and before it exits, and a stop at shutdown while the pass waits (spec, D8).
 - The enrollment proof by Microsoft's fingerprints (C9) besides "more than the local certificate", and the identity of signature-list headers of unknown types.
-- The recorder's own failures: a record that cannot be written should stop the row before its command runs.
+- The recorder's own failures beyond the two it now stops at (a record header or a transcript that cannot be written): a state block that fails half way, and a row whose "State after" was never written, should end the row with a status of the recorder's own.
+- Mount ordering for the watcher service: `RequiresMountsFor=%f` would state what the path unit's implicit dependency (C5) gives it; whether `Triggers=` carries that ordering to the service at shutdown is unverified.
+- Pin the workflow actions to commit SHAs instead of major tags; the report job holds `issues: write`.
 - Deferred until field reports show the need: a way to add Microsoft's 2023 KEK certificate with the user's own keys on a machine that lacks it after the Platform Key changed hands (C9). sbctl's append always adds the local certificate again (C4), so it needs a route of its own.
 
 ## Evidence owed
 
-- The first hardware row of the pass that writes the Windows entry only beside Omarchy's entries and moves a displaced one behind them: checklist 5.4, `omarchy refresh limine` with the entry enabled. The change followed the release's records (C10).
+- The first hardware rows of what changed in the tool after the release's records, which C10 lists: checklist 5.4, `omarchy refresh limine` with the entry enabled, for the Windows entry's place, and a full run of stages 0 to 7 for the guards and the changes beside them.
 - Whether BitLocker stays quiet when Windows is started through a chainload entry alone and the loader is sealed again in between (checklist, stage 5): Microsoft's pages say it cannot (C8), and no machine has a record.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.
 - The record of a stock single-boot Omarchy install, where the fallback loader and its `/EFI fallback` menu entry exist from the start. The recorded machine (C10) was installed beside Windows and had neither.
@@ -29,8 +31,8 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 | What | Recheck |
 | --- | --- |
-| `limine` | C1: keys without case, the checksum marker, the unconditional check, the lookup order of `limine.conf`, `LoadImage` for a chainload, the missing `.sbat` section. C7: the `efi_boot_entry` protocol, its `entry` option and its search of `BootOrder` alone |
-| `limine-mkinitcpio-hook` | C2 and C3: hook names 89, 90 and 91 (`90-omasecboot-sign` sorts between the last two), the condition of hook 89, what `limine-scan` writes (a `protocol: efi` entry without a hash, its name and layout), the form of `limine-remove-entry` and its first-match rule, the `order-priority` comment on every entry it writes, the loader backup `limine_x64.bak`, `limine-install --no-efi-register` and `--fallback`, when the fallback is deployed and that the step copies over whatever is there, the lock path and descriptor, the configuration layers |
+| `limine` | C1: keys without case, the checksum marker, the unconditional check, the lookup order of `limine.conf`, the path grammar and its resources, `LoadImage` for a chainload, the missing `.sbat` section. C7: the `efi_boot_entry` protocol, its `entry` option and its search of `BootOrder` alone |
+| `limine-mkinitcpio-hook` | C2 and C3: hook names 89, 90 and 91 (`90-omasecboot-sign` sorts between the last two), the condition of hook 89, what `limine-scan` writes (a `protocol: efi` entry without a hash, its name and layout), the form of `limine-remove-entry` and its first-match rule, the `order-priority` comment on every entry it writes and the one `comment:` line of an OS entry that carries `machine-id=` with it, which `remove`'s proof keys on, the loader backup `limine_x64.bak`, `limine-install --no-efi-register` and `--fallback`, when the fallback is deployed and that the step copies over whatever is there, the lock path and descriptor, the configuration layers |
 | `limine-snapper-sync` | C2 and C7: history file names, `snapshots.json` and the `lastUTCTime` rule that decides whether a snapshot is new, the restore lock, the files the restore command exports, what its rewrite of `limine.conf` keeps |
 | `sbctl` | C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, and `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin`. C9: the four fingerprints against the certificates it ships |
 | `systemd` | C5: `PathChanged=` semantics, the start limit and `KillMode=mixed` |

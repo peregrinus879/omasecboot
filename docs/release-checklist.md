@@ -38,20 +38,20 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 2. Reinstall the kernel: the rebuilt UKI is signed before `sign` touches it.
 3. Time the hook alone, right after the kernel reinstall: `time /etc/boot/hooks/post.d/90-omasecboot-sign`. Budget: two seconds per installed kernel.
 4. Edit `limine.conf` with the watchers running: `status` passes within seconds.
-5. The stale-checksum drill, with Secure Boot off and rescue media at hand: stop the watchers, edit `limine.conf`, confirm that the primary loader refuses, confirm that the firmware's boot menu offers the fallback, start it, `sign`.
+5. The stale-checksum drill, with Secure Boot off and rescue media at hand: stop the watchers, edit `limine.conf`, `systemctl reboot` and confirm that the primary loader refuses, confirm that the firmware's boot menu offers the fallback, start it, `sign`.
 6. `systemctl reboot`; `status`.
 
 ### Stage 2: enrollment
 
 1. `setup`; `systemctl reboot --firmware-setup` and delete only the PK.
 2. `setup` enrolls; `systemctl reboot`; `setup` confirms; `systemctl reboot --firmware-setup` and turn Secure Boot on; `status`; `sbctl status`.
-3. With Windows encryption on: start Windows from the firmware's boot menu after the PK is deleted, after the keys are written and after Secure Boot is on.
+3. With Windows encryption on: `systemctl reboot` and start Windows from the firmware's boot menu after the PK is deleted, after the keys are written and after Secure Boot is on.
 
 ### Stage 3: Secure Boot on
 
 1. Reinstall the kernel; `status`.
 2. Reinstall `limine`: Omarchy's installer hook puts the raw loader back, and the loader's watcher must have rebuilt it a few seconds after pacman ended; `status`.
-3. Create a snapshot and see its entry in `limine.conf`; `status`; `systemctl reboot` and start the snapshot's entry, then the normal entry, which starts the reinstalled kernel.
+3. Create a snapshot and see its entry in `limine.conf`; `status`; `systemctl reboot` and start the snapshot's entry, then the normal entry, which starts the reinstalled kernel, then each other kernel entry of the menu once: Omarchy installs two kernels, and both images are signed.
 4. Start an entry that predates enrollment and record what Limine and the firmware show.
 5. `omarchy refresh limine`, `status`.
 6. An interrupted `sign`: stop the watchers, add a comment line to `limine.conf` so the pass has a loader to rebuild, run `sudo timeout -s TERM 0.5 omasecboot sign`, with a shorter time until `timeout` exits 124, then `sign`, `status`, `systemctl reboot`, `status`.
@@ -65,7 +65,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 ### Stage 5: Windows
 
 1. `windows preflight`; `windows setup`; `status`.
-2. Pick the entry in Limine's menu; return to Omarchy.
+2. `systemctl reboot` and pick the entry in Limine's menu; from Windows, restart and return to Omarchy.
 3. `windows bootnext`; `systemctl reboot`; return.
 4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`: the entry must stand after Omarchy's entries, and Limine's timeout must still start Omarchy's kernel at the next restart.
 5. With Windows encryption on: disable and enable the protectors once in Windows, then start Windows through the menu entry and through BootNext again.
@@ -74,7 +74,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 ### Stage 6: remove
 
 1. Remove the package while set up: pacman prints the warning and goes through. Reinstall; `status`.
-2. Secure Boot off. With Windows encryption on: start Windows once.
+2. `systemctl reboot --firmware-setup` and turn Secure Boot off. With Windows encryption on: `systemctl reboot` and start Windows once.
 3. `remove`; `status`; the primary loader equals the raw executable in upstream's backup.
 4. Remove the package; the state directory remains.
 
@@ -85,16 +85,16 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 3. `setup`: it says that the key menu cleared KEK and db with the PK, lists the backup entries the rebuild cannot bring back, and asks. Answer yes; it writes db, KEK and PK and reads each back.
 4. `systemctl reboot`; `setup` confirms; `systemctl reboot --firmware-setup` and turn Secure Boot on; `status`; `sbctl status`.
 5. With Windows on the machine: start it.
-6. Secure Boot off; `remove`; restore the factory keys.
+6. `systemctl reboot --firmware-setup` and turn Secure Boot off; `remove`; `systemctl reboot --firmware-setup` and restore the factory keys.
 
 ## Tag
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
 - [ ] `CHANGELOG.md` has the release's section, with its date, and the README's status note and install line name the release.
-- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile`, `omasecboot.install` and `.gitattributes`. Where the tool changed after the records, C10 of [upstream-contracts.md](upstream-contracts.md) names the change, what proves it without hardware (its hermetic cases, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured), and the row of the next run that records it, which [maintenance.md](maintenance.md) lists as owed.
+- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile` and `omasecboot.install`. Where the tool changed after the records, C10 of [upstream-contracts.md](upstream-contracts.md) names the change, what proves it without hardware (its hermetic cases, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured), and the row of the next run that records it, which [maintenance.md](maintenance.md) lists as owed.
 - [ ] The rows above are the rows the records ran.
 - [ ] `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit.
-- [ ] The recipe builds from an archive made as the tag's will be, `git archive --prefix=omasecboot-<version>/`, with the same payload as `make package`.
+- [ ] The recipe builds from an archive made as the tag's will be, with the same payload as `make package`: in a scratch directory holding copies of `PKGBUILD` and `omasecboot.install`, `git archive --prefix=omasecboot-<version>/ -o omasecboot-<version>.tar.gz <commit>`, then `PKGEXT=.pkg.tar.zst makepkg --nodeps --noconfirm --nosign`, and `diff <(bsdtar -tf that package) <(bsdtar -tf the one make package built)` prints nothing. They differ only where an untracked file stands under `lib/` or `docs/`.
 - [ ] The records are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 
 Delivery through Omarchy follows a tag and does not gate it: [omarchy-integration.md](omarchy-integration.md) owns that side, and its recipe pins the tagged archive's checksum.

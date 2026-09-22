@@ -27,6 +27,7 @@ logged() {
 (( EUID == 0 )) || fail_test "this check installs packages and needs root"
 [[ -f /.dockerenv || -f /run/.containerenv ]] || fail_test "refusing to run outside a container"
 [[ ! -e /var/lib/sbctl/keys ]] || fail_test "refusing to run where sbctl keys exist"
+[[ $(stat -f -c %T /sys/firmware/efi/efivars 2>/dev/null) != efivarfs ]] || fail_test "refusing to run where the firmware's variables are reachable"
 
 pkgname=omasecboot
 pkgver=$(sed -n 's/^pkgver=//p' "$ROOT_DIR/PKGBUILD")

@@ -72,7 +72,7 @@ lock_is_taken_and_released() {
 }
 
 # The lock is a pathname in a directory root shares with other tools: a lock
-# taken on a file that was replaced meanwhile serializes nothing.
+# taken on a file that was replaced meanwhile serialises nothing.
 replaced_lock_file_is_not_a_lock() {
   flock() {
     command flock "$@" || return

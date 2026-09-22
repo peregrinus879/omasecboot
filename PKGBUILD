@@ -40,7 +40,7 @@ install=omasecboot.install
 options=('docs' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # An in-tree recipe cannot carry the checksum of the archive that contains it,
-# so the omarchy-pkgs release recipe pins the tagged archive checksum instead.
+# so a release recipe in omarchy-pkgs would pin the tagged archive checksum instead.
 # "make package" supplies an archive of the working tree in its place.
 sha256sums=('SKIP')
 

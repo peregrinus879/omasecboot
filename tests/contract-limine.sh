@@ -230,6 +230,43 @@ fallback_step_copies_over_whatever_is_there() {
   cmp -s "$(fallback_loader_path)" "$(package_loader_path)" || fail_test "upstream did not copy over a loader that is not Limine's: it spares one now, or does not know the packaged Limine's major (recheck C2 and the guard of add_fallback_loader)"
 }
 
+# The pre-hook's command puts the primary back from the backup, and without
+# one resets the checksum in place; it runs no hook of either kind (C2), which
+# is why remove's reset comes last.
+reset_enroll_runs_no_hook_and_restores_the_loader() {
+  sandbox_settings
+  fresh_esp
+  upstream_header
+  source_upstream_deploy
+  update_limine_efi >/dev/null || fail_test "upstream's deploy failed: recheck C2"
+  rm -rf /etc/boot/hooks /tmp/hooks-run
+  write_hook pre 10-marker 0
+  write_hook post 10-marker 0
+  printf 'altered' >>"$(primary_loader_path)"
+  reset_enroll_config >/dev/null 2>&1 || fail_test "upstream's reset_enroll_config failed: recheck C2"
+  cmp -s "$(primary_loader_path)" <(raw_loader) || fail_test "the reset did not put upstream's copy back"
+  [[ ! -e /tmp/hooks-run ]] || fail_test "the reset ran hooks: $(tr '\n' ' ' </tmp/hooks-run)"
+  limine enroll-config "$(primary_loader_path)" "$(config_checksum)" >/dev/null 2>&1 || fail_test "limine enroll-config"
+  rm "$(loader_backup_path)"
+  reset_enroll_config >/dev/null 2>&1 || fail_test "upstream's reset without a backup failed: recheck C2"
+  checksum_is_zero "$(embedded_checksum "$(primary_loader_path)")" || fail_test "without a backup the checksum was not reset in place"
+}
+
+# The real enroll-config refuses a file without the marker and a checksum
+# that is not 128 hex digits, and changes nothing then (C1); the harness's
+# stub refuses the same input.
+enroll_config_refuses_bad_input() {
+  local loader=/tmp/bad-input.efi checksum
+  sandbox_settings
+  fresh_esp
+  checksum=$(config_checksum) || fail_test "config_checksum"
+  printf 'no marker here' >"$loader"
+  ! limine enroll-config "$loader" "$checksum" >/dev/null 2>&1 || fail_test "a file without the marker was enrolled"
+  cp "$(package_loader_path)" "$loader" || fail_test "fixture loader"
+  ! limine enroll-config "$loader" zz >/dev/null 2>&1 || fail_test "a checksum that is not 128 hex digits was enrolled"
+  cmp -s "$loader" "$(package_loader_path)" || fail_test "a refused enrollment changed the file"
+}
+
 enrollment_is_read_back() {
   local loader=/tmp/enrollment.efi checksum
   sandbox_settings
@@ -275,5 +312,7 @@ run_case lock-is-the-one-upstream-holds lock_is_the_one_upstream_holds
 run_case loader-paths-and-backup-are-upstreams loader_paths_and_backup_are_upstreams
 run_case fallback-step-copies-over-whatever-is-there fallback_step_copies_over_whatever_is_there
 run_case enrollment-is-read-back enrollment_is_read_back
+run_case reset-enroll-runs-no-hook-and-restores-the-loader reset_enroll_runs_no_hook_and_restores_the_loader
+run_case enroll-config-refuses-bad-input enroll_config_refuses_bad_input
 run_case upstreams-enrollment-and-ours-prove-the-same-loader upstreams_enrollment_and_ours_prove_the_same_loader
 finish_suite "$(limine --version | head -n 1), $(pacman --config /dev/null -Q limine-mkinitcpio-hook 2>/dev/null), sbctl $(sbctl version 2>/dev/null | head -n 1)"

@@ -42,29 +42,45 @@ remove_harmful_sbctl_rows() {
 # room is checked first. Every file is read once, and a pass that returns 0
 # has proved each of them signed.
 sign_unsigned_arrivals() {
-  local files file primary state failed=0
+  local files file primary state hashed failed=0
   files=$(list_signable_files) || return 1
   primary=$(primary_loader_path)
   while IFS= read -r file; do
-    [[ -n $file && $file != "$primary" ]] || continue
+    # FAT names have no case: the primary is never signed in place (D7).
+    [[ -n $file && ${file,,} != "${primary,,}" ]] || continue
     state=0
     signature_state "$file" || state=$?
     case $state in
       0) ;;
       1)
-        if file_has_path_hash "$file"; then
-          # setup regenerates the entries without hashes before anything is
-          # signed. A build that failed without saying so (C2) leaves this, and
-          # so does an entry written by hand; setup names the way out of both.
-          fail "Not signing ${file}: limine.conf holds a path hash for it, which a signature would break. Run ${BOLD}sudo omasecboot setup${NC}"
-          failed=1
-        else
-          qact "Signing ${file}"
-          { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
-            fail "Could not sign ${file}; a file that stays unsigned fails every pass, so sign it by hand with sbctl or take it off the ESP"
+        hashed=0
+        file_has_path_hash "$file" || hashed=$?
+        case $hashed in
+          0)
+            # setup regenerates the entries without hashes before anything is
+            # signed. A build that failed without saying so (C2) leaves this, and
+            # so does an entry written by hand; setup names the way out of both.
+            fail "Not signing ${file}: limine.conf holds a path hash for it, which a signature would break. Run ${BOLD}sudo omasecboot setup${NC}"
             failed=1
-          }
-        fi
+            ;;
+          1)
+            qact "Signing ${file}"
+            { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
+              # A kernel image is upstream's to build (section 7.3); any other
+              # file is the user's.
+              if [[ ${file,,} == */efi/linux/* ]]; then
+                fail "Could not sign ${file}; a file that stays unsigned fails every pass, so rebuild it with ${BOLD}sudo limine-mkinitcpio${NC}, which signs it as it builds it"
+              else
+                fail "Could not sign ${file}; a file that stays unsigned fails every pass, so sign it by hand with sbctl or take it off the ESP"
+              fi
+              failed=1
+            }
+            ;;
+          *)
+            fail "Not signing ${file}: limine.conf cannot be read, so nothing shows whether it holds a path hash for it"
+            failed=1
+            ;;
+        esac
         ;;
       *)
         fail "Could not read the signature state of ${file}"
@@ -76,14 +92,20 @@ sign_unsigned_arrivals() {
 }
 
 # A stale hash stops its OS entry once Secure Boot is on, and only
-# limine-mkinitcpio can rewrite it, which setup runs.
+# limine-mkinitcpio can rewrite it, which setup runs. A hash under a resource
+# other than boot():/ names a volume only the firmware resolves (C1): it is
+# said, not failed, because nothing here can prove or break it.
 check_os_path_hashes() {
-  local stale line failed=0
+  local stale kind line failed=0
   stale=$(list_stale_os_hashes) || return 1
-  while IFS= read -r line; do
+  while IFS=$'\t' read -r kind line; do
     [[ -n $line ]] || continue
-    fail "Stale path hash in limine.conf, line ${line}"
-    failed=1
+    if [[ $kind == unchecked ]]; then
+      qnote "Path hash in limine.conf that cannot be checked, line ${line}: the path is not under boot():/, so only the firmware can tell which volume it names"
+    else
+      fail "Stale path hash in limine.conf, line ${line}"
+      failed=1
+    fi
   done <<<"$stale"
   return "$failed"
 }
@@ -140,7 +162,7 @@ sign_boot_files() {
     sign_unsigned_arrivals || rc=1
     check_os_path_hashes || rc=1
     watch_is_active || enable_watch || {
-      fail "Could not enable the watchers of limine.conf and the loader"
+      fail "Could not enable the watchers of limine.conf and the loader (without a running systemd, as inside a chroot, the first pass after a boot enables them)"
       rc=1
     }
   fi

@@ -19,6 +19,7 @@ le32() {
 # x509_list OWNER CERTIFICATE-TEXT: a list with one certificate, which is how
 # firmware and sbctl store them, because certificates differ in size.
 x509_list() {
+  local LC_ALL=C
   local entry_size=$((16 + ${#2}))
   hex_bytes "$ESL_X509_TYPE"
   le32 $((28 + entry_size))

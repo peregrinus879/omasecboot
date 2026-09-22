@@ -113,10 +113,32 @@ rebuild_plan_for_cleared_firmware() {
   { read_enrollment_plan && local_certificates_are_identified; } || fail_test "plan on cleared firmware"
   { read_rebuild_plan && rebuild_plan_is_sound; } || fail_test "the rebuild plan does not hold the local certificates, or its PK is not the local certificate alone"
   [[ $(count "${_planned[db]}") -gt 1 && $(count "${_planned[KEK]}") -gt 1 ]] || fail_test "--microsoft added nothing"
+  [[ " ${_rebuild_flags[*]} " != *' --firmware-builtin '* ]] || fail_test "--firmware-builtin was planned without KEKDefault and dbDefault"
   { mkdir -p /tmp/rebuild && cd /tmp/rebuild; } || fail_test "scratch"
   sbctl enroll-keys "${_rebuild_flags[@]}" --export esl >/dev/null 2>&1 || fail_test "export"
   run_sbctl enroll-keys "${_rebuild_flags[@]}" --partial db --ignore-immutable >/dev/null 2>&1 || fail_test "--partial with ${_rebuild_flags[*]} was refused: recheck C4"
   cmp -s <(tail -c "$(stat -c %s db.esl)" "$(firmware_variable_path db)") db.esl || fail_test "the rebuilt variable does not end with the exported list"
+  # Firmware that exposes its built-in defaults: the plan adds --firmware-builtin,
+  # the export carries the defaults' entries, and --partial combines with both
+  # flags (C4).
+  rm -f "$(firmware_variable_path db)"
+  # The firmware sets its defaults at every boot, so they are volatile; sbctl
+  # refuses a non-volatile one ("vendor default database is non-volatile").
+  x509_list "$OEM_OWNER" 'OEM KEK default' >/tmp/KEKDefault.list
+  x509_list "$OEM_OWNER" 'OEM db default' >/tmp/dbDefault.list
+  write_variable KEKDefault /tmp/KEKDefault.list
+  write_variable dbDefault /tmp/dbDefault.list
+  ! sbctl enroll-keys --microsoft --firmware-builtin --export esl >/dev/null 2>&1 || fail_test "sbctl accepted non-volatile defaults: recheck C4 and firmware_has_builtin_defaults"
+  { read_rebuild_plan && [[ " ${_rebuild_flags[*]} " != *' --firmware-builtin '* ]]; } || fail_test "non-volatile defaults were planned"
+  { printf '\x06\x00\x00\x00'; cat /tmp/KEKDefault.list; } >"$(firmware_variable_path KEKDefault)"
+  { printf '\x06\x00\x00\x00'; cat /tmp/dbDefault.list; } >"$(firmware_variable_path dbDefault)"
+  read_enrollment_plan || fail_test "the plan with built-in defaults present"
+  read_rebuild_plan || fail_test "the rebuild export with the firmware's defaults failed: $(sbctl enroll-keys --microsoft --firmware-builtin --export esl 2>&1 | tr '\n' ' ' | cut -c1-700)"
+  rebuild_plan_is_sound || fail_test "the rebuild plan with the defaults is not sound; PK rows: ${_planned[PK]}"
+  [[ " ${_rebuild_flags[*]} " == *' --firmware-builtin '* ]] || fail_test "KEKDefault and dbDefault did not add --firmware-builtin"
+  [[ ${_planned[db]} == *"$(x509_row "$OEM_OWNER" 'OEM db default')"* && ${_planned[KEK]} == *"$(x509_row "$OEM_OWNER" 'OEM KEK default')"* ]] || fail_test "the export lacks the firmware's built-in defaults: recheck C4"
+  run_sbctl enroll-keys "${_rebuild_flags[@]}" --partial db --ignore-immutable >/dev/null 2>&1 || fail_test "--partial with ${_rebuild_flags[*]} was refused: recheck C4"
+  [[ $(variable_entries db) == *"$(x509_row "$OEM_OWNER" 'OEM db default')"* ]] || fail_test "the written db lacks the built-in default"
 }
 
 # The four fingerprints this tool looks for (C9) against the certificates the

@@ -43,7 +43,7 @@ numbered_references_resolve() {
       D*) grep -q "^### ${reference}\. " docs/spec.md || fail_test "${file} cites ${reference}, which the spec does not define" ;;
       C*) grep -q "^## ${reference}\. " docs/upstream-contracts.md || fail_test "${file} cites ${reference}, which the contracts do not define" ;;
     esac
-  done < <(grep -oHE '\b[CD][0-9]+\b' "${PAGES[@]}" "${FORMS[@]}" "${SOURCES[@]}" | sort -u)
+  done < <(grep -oHE '\b[CD][1-9][0-9]?\b' "${PAGES[@]}" "${FORMS[@]}" "${SOURCES[@]}" | sort -u)
   # "sections" in the plural cites the UEFI specification.
   while IFS=: read -r file reference; do
     references=$((references + 1))

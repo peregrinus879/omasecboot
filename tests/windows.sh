@@ -94,7 +94,9 @@ target_is_one_clear_entry_or_none() {
 
 entry_is_written_once_and_taken_out_whole() {
   local before=$FIX/run/limine-before inode
-  # Writing and taking out again leaves the file it started from.
+  # Writing and taking out again leaves the file it started from, one that
+  # ends in a single newline; a trailing blank line is folded into the one
+  # the pass writes before its entry.
   cp "$FIX/esp/limine.conf" "$before"
   { write_windows_entry 'Windows Boot Manager' && write_windows_entry; } || fail_test "round trip"
   cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "a round trip changed limine.conf: $(diff "$before" "$FIX/esp/limine.conf")"
@@ -388,7 +390,7 @@ bootnext_is_judged_by_reading_back() {
 encryption_is_acknowledged_before_the_firmware_changes() {
   add_windows
   CONFIRM_ANSWER=no run_cli setup && fail_test "setup went on although the acknowledgement was declined"
-  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Required where Windows is encrypted'*'To avoid the prompt, on every edition'*'manage-bde -protectors -disable C: -RebootCount 0'*'manage-bde -protectors -enable C:'* ]] || fail_test "guidance, the key first and suspension as the way to avoid the prompt: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Required where Windows is encrypted'*'To avoid the prompt, in an administrator terminal'*'manage-bde -protectors -disable C: -RebootCount 0'*'manage-bde -protectors -enable C:'* ]] || fail_test "guidance, the key first and suspension as the way to avoid the prompt: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *nvme0n1p5* && $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "the instruction was given without the acknowledgement, or another volume was listed"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   [[ $(grep -c '^QUESTION: Is the Windows recovery key at hand' "$FIX/run/output") == 1 ]] || fail_test "asked more than once in a run"
@@ -403,7 +405,7 @@ encryption_is_acknowledged_before_the_firmware_changes() {
   grep -n 'keep its recovery key at hand\|and turn Secure Boot on' "$FIX/run/output" | head -1 | grep -q 'recovery key' || fail_test "no reminder before turning Secure Boot on: $(<"$FIX/run/output")"
 
   run_cli windows preflight || fail_test "preflight failed on a machine it could read"
-  [[ $(<"$FIX/run/output") == *'on every edition'*'manage-bde -protectors -disable'* ]] || fail_test "preflight guidance"
+  [[ $(<"$FIX/run/output") == *'without naming an edition'*'manage-bde -protectors -disable'* ]] || fail_test "preflight guidance"
   : >"$FIX/run/lsblk-fails"
   run_cli windows preflight && fail_test "preflight passed although the volumes could not be listed"
   [[ $(<"$FIX/run/output") == *'Could not tell'* ]] || fail_test "unknown: $(<"$FIX/run/output")"
@@ -527,7 +529,8 @@ entry_waits_for_upstreams_entries() {
   run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
   [[ ! -s $FIX/run/output ]] || fail_test "the quiet pass spoke: $(<"$FIX/run/output")"
   run_cli status && fail_test "status passed with the entry missing"
-  [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  # sign writes nothing into the template, so status names upstream's step, not sign.
+  [[ $(<"$FIX/run/output") == *'holds no menu entries yet'*'sudo limine-update'* && $(<"$FIX/run/output") != *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli windows setup && fail_test "windows setup reported an entry on the bare template"
   [[ $(<"$FIX/run/output") == *'holds no menu entries yet'*'did not reach limine.conf'* ]] || fail_test "windows setup on the template: $(<"$FIX/run/output")"
   # A file that cannot be read is no template: the pass says so.
@@ -549,10 +552,10 @@ entry_waits_for_upstreams_entries() {
 displaced_entry_is_moved_behind_upstreams() {
   local before
   set_up_with_windows
-  # This tool's entry first, then upstream's OS entry alone, as the refresh
-  # leaves it on a machine without a fallback entry.
+  # The global keys, this tool's entry, then upstream's OS entry alone, as the
+  # refresh leaves it on a machine without a fallback entry.
   write_limine_conf unhashed
-  { windows_entry 'Windows Boot Manager'; printf '\n'; cat "$FIX/esp/limine.conf"; } >"$FIX/run/displaced"
+  { sed '/^\//,$d' "$FIX/esp/limine.conf"; windows_entry 'Windows Boot Manager'; printf '\n'; sed -n '/^\//,$p' "$FIX/esp/limine.conf"; } >"$FIX/run/displaced"
   cp "$FIX/run/displaced" "$FIX/esp/limine.conf"
   [[ $(windows_entry_state 'Windows Boot Manager') == displaced ]] || fail_test "state: $(windows_entry_state 'Windows Boot Manager')"
   run_cli status && fail_test "status passed with the entry before Omarchy's"
@@ -580,7 +583,8 @@ real_shape_file_reads_right() {
   limine_conf_lacks_entries && fail_test "a full limine.conf read as holding no entries"
   [[ $(windows_entry_state 'Windows Boot Manager') == absent ]] || fail_test "state without the entry: $(windows_entry_state 'Windows Boot Manager')"
   [[ $(list_windows_chainloads) == $'1\tWindows Boot Manager' ]] || fail_test "chainloads: $(list_windows_chainloads)"
-  { windows_entry 'Windows Boot Manager'; printf '\n'; cat "$FIX/esp/limine.conf"; } >"$FIX/run/first" && cp "$FIX/run/first" "$FIX/esp/limine.conf"
+  # The global keys, this tool's entry, then upstream's entries, as the refresh leaves it.
+  { sed '/^\//,$d' "$FIX/esp/limine.conf"; windows_entry 'Windows Boot Manager'; printf '\n'; sed -n '/^\//,$p' "$FIX/esp/limine.conf"; } >"$FIX/run/first" && cp "$FIX/run/first" "$FIX/esp/limine.conf"
   [[ $(windows_entry_state 'Windows Boot Manager') == displaced ]] || fail_test "the entry first read as $(windows_entry_state 'Windows Boot Manager')"
   write_windows_entry 'Windows Boot Manager' || fail_test "move"
   [[ $(windows_entry_state 'Windows Boot Manager') == current && $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "after the move: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
@@ -596,6 +600,75 @@ real_shape_file_reads_right() {
 # Omarchy's refresh replaces limine.conf outside the lock (C6). A write that
 # finds the file changed right before its rename gives up, so the newer file
 # stays; the next pass writes the entry.
+# Omarchy's refresh lands between the pass's look at limine.conf and the
+# write (C6): the look saw entries, the write finds the template. Judged on
+# the content the write is built from, nothing goes into the template.
+template_put_there_after_the_look_is_not_written() {
+  local output
+  set_up_with_windows
+  write_limine_conf unhashed
+  limine_conf_lacks_entries() { write_omarchy_limine_template; return 1; }
+  output=$(converge_windows_entry 2>&1) || fail_test "the pass's step failed: ${output}"
+  [[ $(entry_count) == 0 ]] || fail_test "the entry was written into the template put there after the look"
+  [[ $output == *'holds no menu entries yet'* ]] || fail_test "no word about it: ${output}"
+  # Once limine-update has filled the file, a fresh pass writes the entry behind Omarchy's.
+  write_omarchy_limine_conf
+  run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
+  [[ $(entry_count) == 1 && $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the entry after limine-update: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+}
+
+# A name Limine is not proved to match, blanks at its ends or characters
+# outside ASCII (C7 records the ASCII case fold alone), is refused with its
+# own reason: an entry Limine cannot find stops at its panic.
+target_name_must_be_one_limine_matches() {
+  local label status
+  for label in 'Windows Boot Manager ' ' Windows Boot Manager' $'Windows B\xc3\xb6\xc3\xb6t Manager'; do
+    write_boot_entry 0000 active "$label" '\EFI\Microsoft\Boot\bootmgfw.efi'
+    write_boot_order 0000
+    printf '/dev/nvme0n1p1 vfat\n' >"$FIX/run/lsblk"
+    status=0
+    resolve_windows_target || status=$?
+    (( status == 3 )) || fail_test "status ${status} for the label '${label}'"
+    run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+    run_cli windows setup && fail_test "windows setup wrote an entry for the label '${label}'"
+    [[ $(<"$FIX/run/output") == *'blanks at its ends or characters outside ASCII'* ]] || fail_test "no reason for '${label}': $(<"$FIX/run/output")"
+    [[ $(entry_count) == 0 ]] || fail_test "an entry was written for the label '${label}'"
+    # The report says so and, as for a missing target, does not fail.
+    run_cli windows status || fail_test "windows status failed on the label '${label}': $(<"$FIX/run/output")"
+    [[ $(<"$FIX/run/output") == *'blanks at its ends or characters outside ASCII'* ]] || fail_test "windows status said nothing about '${label}': $(<"$FIX/run/output")"
+  done
+  write_boot_entry 0000 active 'Windows Boot Manager' '\EFI\Microsoft\Boot\bootmgfw.efi'
+  resolve_windows_target || fail_test "the plain name was refused"
+}
+
+# Limine reads an entry up to the next top-level header (C1): a blank line a
+# hand edit left inside this tool's entry is part of it, so the rewrite takes
+# the whole entry out and leaves no line of it on the entry before.
+blank_line_inside_the_entry_leaves_no_orphans() {
+  write_limine_conf unhashed
+  printf '\n/Before\n    protocol: efi\n    path: boot():/EFI/before.efi\n' >>"$FIX/esp/limine.conf"
+  write_windows_entry 'Windows Boot Manager' || fail_test "write"
+  sed -i 's/^    protocol: efi_boot_entry$/&\n/' "$FIX/esp/limine.conf"
+  [[ $(windows_entry_state 'Windows Boot Manager') == stale ]] || fail_test "state with a blank line inside: $(windows_entry_state 'Windows Boot Manager')"
+  write_windows_entry 'Windows Boot Manager' || fail_test "rewrite"
+  [[ $(entry_count) == 1 && $(grep -c '^    entry: Windows Boot Manager$' "$FIX/esp/limine.conf") == 1 ]] || fail_test "lines of the old entry remain: $(grep -n 'entry:' "$FIX/esp/limine.conf")"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "state after the rewrite: $(windows_entry_state 'Windows Boot Manager')"
+  # /Before still ends where it did: nothing of this tool's is attached to it.
+  [[ $(sed -n '/^\/Before$/,/^\/Windows$/p' "$FIX/esp/limine.conf" | grep -c 'efi_boot_entry\|entry: ') == 0 ]] || fail_test "an orphan line stands on the entry before: $(sed -n '/^\/Before$/,/^\/Windows$/p' "$FIX/esp/limine.conf")"
+}
+
+# Limine strips leading blanks: an indented top-level entry of the user's
+# after this tool's is its own entry, not a line of this tool's.
+indented_user_entry_after_ours_is_its_own() {
+  write_limine_conf unhashed
+  write_windows_entry 'Windows Boot Manager' || fail_test "write"
+  printf '\n  /Mine\n    protocol: efi\n    path: boot():/EFI/mine.efi\n' >>"$FIX/esp/limine.conf"
+  [[ $(windows_entry_state 'Windows Boot Manager') == current ]] || fail_test "state beside an indented entry: $(windows_entry_state 'Windows Boot Manager')"
+  write_windows_entry || fail_test "removal"
+  { grep -q '^  /Mine$' "$FIX/esp/limine.conf" && grep -q 'boot():/EFI/mine.efi' "$FIX/esp/limine.conf"; } || fail_test "the indented entry was taken out with this tool's"
+  [[ $(windows_entry_state '') == absent ]] || fail_test "state after removal: $(windows_entry_state '')"
+}
+
 late_writer_is_not_overwritten() {
   local output
   set_up_with_windows
@@ -635,4 +708,8 @@ run_case entry-waits-for-upstreams-entries entry_waits_for_upstreams_entries
 run_case displaced-entry-is-moved-behind-upstreams displaced_entry_is_moved_behind_upstreams
 run_case real-shape-file-reads-right real_shape_file_reads_right
 run_case late-writer-is-not-overwritten late_writer_is_not_overwritten
+run_case template-put-there-after-the-look-is-not-written template_put_there_after_the_look_is_not_written
+run_case target-name-must-be-one-limine-matches target_name_must_be_one_limine_matches
+run_case blank-line-inside-the-entry-leaves-no-orphans blank_line_inside_the_entry_leaves_no_orphans
+run_case indented-user-entry-after-ours-is-its-own indented_user_entry_after_ours_is_its_own
 finish_suite

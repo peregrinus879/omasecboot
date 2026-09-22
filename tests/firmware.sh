@@ -54,6 +54,10 @@ signature_lists_are_read_entry_by_entry() {
   ! list_signature_entries "$FIX/run/missing" 0 >/dev/null 2>&1 || fail_test "an unreadable file read as empty"
   : >"$FIX/run/empty"
   [[ -z $(list_signature_entries "$FIX/run/empty" 0) ]] || fail_test "an empty file has entries"
+  # A list of a header and no entry is a list of nothing, not a malformed one.
+  { printf '\x27\x00\x00\x00'; hex_bytes "$ESL_X509_TYPE"; le32 34; le32 6; le32 44; printf 'header'; } >"$FIX/run/header-only"
+  rows=$(list_signature_entries "$FIX/run/header-only" 4) || fail_test "a header-only list was refused"
+  [[ -z $rows ]] || fail_test "a header-only list has entries: ${rows}"
 }
 
 backup_is_taken_once_and_complete() {
@@ -314,6 +318,7 @@ setup_asks_for_the_pk_then_enrolls_then_confirms() {
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a declined enrollment wrote to the firmware"
   run_cli setup || fail_test "enrollment failed: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'Your keys are enrolled'* && $(<"$FIX/run/output") == *"$backup"* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'taken back only in the firmware'"'"'s key menu'*'QUESTION: The Platform Key becomes yours'* ]] || fail_test "the way back is not named before the question: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'systemctl reboot'*'then run'* ]] || fail_test "no reboot instruction"
   [[ $(latest_firmware_backup) == "$backup" ]] || fail_test "the backup from before the delete was replaced"
 
@@ -366,8 +371,40 @@ changed_dbx_is_refused() {
   delete_platform_key
   write_key_variable dbx "$(sha256_list "$MICROSOFT_OWNER" "$(printf 'c%.0s' {1..64})" | base64 -w0)"
   run_cli setup && fail_test "setup enrolled although dbx differs from the backup"
-  [[ $(<"$FIX/run/output") == *'revocation list (dbx) differs'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  # KEK and db are whole: the refusal says that only dbx differs, and why.
+  [[ $(<"$FIX/run/output") == *'KEK and db hold every entry of the backup; only the revocation list (dbx) differs'*'dbx update Windows applied'* ]] || fail_test "report: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a refused enrollment wrote to the firmware"
+}
+
+# A built-in default that is non-volatile could have been written by anyone:
+# sbctl refuses it (C4), so the rebuild plans Microsoft's certificates alone.
+non_volatile_defaults_are_not_used() {
+  prepared_machine
+  delete_platform_key
+  rm "$(key_variable_path KEK)" "$(key_variable_path db)" "$(key_variable_path dbx)"
+  { printf '\x27\x00\x00\x00'; x509_list "$OEM_OWNER" 'OEM KEK'; } >"$(key_variable_path KEKDefault)"
+  { printf '\x27\x00\x00\x00'; x509_list "$OEM_OWNER" 'OEM db'; } >"$(key_variable_path dbDefault)"
+  firmware_has_builtin_defaults && fail_test "non-volatile defaults counted as the firmware's"
+  run_cli setup || fail_test "the rebuild failed: $(<"$FIX/run/output")"
+  grep -q 'enroll-keys --microsoft --partial KEK --ignore-immutable' "$FIX/run/calls" || fail_test "calls: $(<"$FIX/run/calls")"
+  ! grep -q -- '--firmware-builtin' "$FIX/run/calls" || fail_test "a non-volatile default was handed to sbctl"
+}
+
+# A UEFI 2.5 firmware in Audit Mode leaves it for Deployed Mode when the PK is
+# written: a state without a record is refused before anything is written.
+audit_mode_is_refused() {
+  prepared_machine
+  delete_platform_key
+  set_mode_variable AuditMode 1
+  run_cli setup && fail_test "setup enrolled a firmware in Audit Mode"
+  [[ $(<"$FIX/run/output") == *'Audit Mode'*'Deployed Mode'*'nothing was written'* && $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "report: $(<"$FIX/run/output")"
+  ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a refused enrollment wrote to the firmware"
+  printf 'garbage' >"$FIX/efivars/AuditMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  run_cli setup && fail_test "setup enrolled with an unreadable AuditMode"
+  [[ $(<"$FIX/run/output") == *'Could not read the firmware'"'"'s AuditMode variable'* ]] || fail_test "unreadable: $(<"$FIX/run/output")"
+  set_mode_variable AuditMode 0
+  run_cli setup || fail_test "enrollment failed with AuditMode 0: $(<"$FIX/run/output")"
+  grep -q -- '--partial' "$FIX/run/calls" || fail_test "AuditMode 0 was not written past"
 }
 
 # What sbctl would write is checked where it matters: right before the
@@ -417,6 +454,7 @@ cleared_firmware_is_rebuilt_with_the_loss_named() {
   cmp -s <(tail -c +5 "$(key_variable_path PK)") <(x509_list "$LOCAL_OWNER" 'local PK certificate') || fail_test "the PK is not the local certificate alone"
   [[ $(grep -aoF 'local db certificate' "$(key_variable_path db)" | wc -l) == 1 ]] || fail_test "db holds the local certificate twice"
   [[ $(<"$FIX/run/output") == *'Your keys are enrolled'* ]] || fail_test "not enrolled: $(<"$FIX/run/output")"
+  [[ ! -e $(key_variable_path dbx) ]] || fail_test "the rebuild wrote dbx, which nothing here ever writes"
 }
 
 # The same firmware meeting this tool for the first time: the only backup is
@@ -453,6 +491,37 @@ proof_uses_the_backup_taken_with_the_pk_in_place() {
 # it did not read, and is refused when an existing backup is later than the
 # clock: a name from a clock that ran ahead would keep the reference at an
 # old backup (C10).
+# A backup that somebody else could have written serves nobody, whatever its
+# sums say (D9), and the root of the backups is judged as it is, never set
+# right through a link.
+unsafe_backups_are_passed_over() {
+  local backup root target
+  printf 0 >"$FIX/run/clock"
+  date() { local n; n=$(($(<"$FIX/run/clock") + 1)); printf '%s' "$n" >"$FIX/run/clock"; printf '20260101T00000%sZ\n' "$n"; }
+  root=$(firmware_backup_root)
+  backup=$(take_firmware_backup) || fail_test "backup"
+  [[ $(latest_firmware_backup) == "$backup" && $(reference_backup) == "$backup" ]] || fail_test "a fresh backup does not serve"
+  chmod 777 "$backup"
+  { ! latest_firmware_backup >/dev/null && ! reference_backup >/dev/null; } || fail_test "a world-writable backup served"
+  chmod 700 "$backup"
+  chmod 666 "$backup/db"
+  { ! latest_firmware_backup >/dev/null && ! reference_backup >/dev/null; } || fail_test "a backup with a world-writable file served"
+  chmod 600 "$backup/db"
+  [[ $(take_firmware_backup) == "$backup" ]] || fail_test "the backup did not serve again once it was root's alone"
+  # What earlier builds of the tool wrote as root under umask 022 stays usable.
+  chmod 755 "$backup" && chmod 644 "$backup"/*
+  [[ $(latest_firmware_backup) == "$backup" && $(reference_backup) == "$backup" ]] || fail_test "a 755/644 backup, root's alone, was passed over"
+  target=$FIX/run/elsewhere
+  mkdir -m 700 "$target"
+  mv "$root" "$FIX/run/backups-aside"
+  ln -s "$target" "$root"
+  ! take_firmware_backup >/dev/null 2>&1 || fail_test "a backup was taken through a link"
+  [[ $(stat -c %a "$target") == 700 && -z $(command ls -A "$target") ]] || fail_test "the link's target was touched: mode $(stat -c %a "$target"), $(command ls -A "$target" | wc -l) entries"
+  rm "$root"
+  mv "$FIX/run/backups-aside" "$root"
+  [[ $(reference_backup) == "$backup" ]] || fail_test "the backup does not serve with its root back"
+}
+
 backup_is_root_only_complete_and_ordered() {
   local backup db
   # Names come from the clock, one per second; the case takes several backups
@@ -526,11 +595,14 @@ run_case missing-2023-kek-is-asked-about-before-the-pk-goes missing_2023_kek_is_
 run_case first-run-never-writes-to-the-firmware first_run_never_writes_to_the_firmware
 run_case partial-loss-is-refused partial_loss_is_refused
 run_case changed-dbx-is-refused changed_dbx_is_refused
+run_case audit-mode-is-refused audit_mode_is_refused
+run_case non-volatile-defaults-are-not-used non_volatile_defaults_are_not_used
 run_case unsound-answers-from-sbctl-stop-setup unsound_answers_from_sbctl_stop_setup
 run_case cleared-firmware-is-rebuilt-with-the-loss-named cleared_firmware_is_rebuilt_with_the_loss_named
 run_case firmware-cleared-before-the-first-setup-is-rebuilt firmware_cleared_before_the_first_setup_is_rebuilt
 run_case proof-uses-the-backup-taken-with-the-pk-in-place proof_uses_the_backup_taken_with_the_pk_in_place
 run_case backup-is-root-only-complete-and-ordered backup_is_root_only_complete_and_ordered
+run_case unsafe-backups-are-passed-over unsafe_backups_are_passed_over
 run_case rebuild-plan-needs-more-than-the-local-entry rebuild_plan_needs_more_than_the_local_entry
 run_case firmware-step-needs-readable-modes firmware_step_needs_readable_modes
 finish_suite

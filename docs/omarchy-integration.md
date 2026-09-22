@@ -2,7 +2,7 @@
 
 What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. The package itself is complete without any of it.
 
-## What Omarchy adds
+## What Omarchy's side would add
 
 | Piece | Shape |
 | --- | --- |

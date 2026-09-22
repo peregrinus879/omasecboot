@@ -47,6 +47,8 @@ done
 grep -qx "ExecStart=${PREFIX}/bin/omasecboot sign --quiet --seal-only" "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "watcher command"
 grep -qx 'StartLimitIntervalSec=0' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watcher's start limit is on"
 grep -qx 'PathChanged=%f' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.path" || fail_test "watch path"
+grep -qx 'Type=oneshot' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watcher's service is not one-shot"
+grep -qx 'WantedBy=multi-user.target' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.path" || fail_test "the path unit cannot be enabled"
 [[ ! -e $STAGE/usr/lib/tmpfiles.d ]] || fail_test "a tmpfiles declaration was installed"
 [[ ! -e $STAGE/usr/share/libalpm/hooks ]] || fail_test "a pacman hook was installed"
 [[ ! -e $STAGE/var ]] || fail_test "state was installed as package content"

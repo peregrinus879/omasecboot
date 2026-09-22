@@ -283,6 +283,25 @@ unread_history_signatures_are_said() {
 
 # "Raw" is what sbctl can tell; the bytes decide whether the report may call
 # the fallback upstream's copy (D6).
+# A key variable that is not a signature list is named as such, never blamed
+# on sbctl and never passed over in silence (section 7.6).
+unreadable_key_variable_is_named() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  printf 'garbage' >"$(key_variable_path KEK)"
+  run_cli status && fail_test "status passed with an unreadable KEK"
+  [[ $(<"$FIX/run/output") == *'KEK variable'* && $(<"$FIX/run/output") != *'ask sbctl'* ]] || fail_test "report: $(<"$FIX/run/output")"
+}
+
+# A hash under a resource other than boot():/ names a volume only the firmware
+# resolves (C1): status says so as a note, and sends nobody to setup for it.
+unchecked_hash_is_a_note() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  printf '\n/Other\n    protocol: efi\n    path: guid(0a1b2c3d-1111-2222-3333-444455556666):/EFI/other/app.efi#%0128d\n' 0 >>"$FIX/esp/limine.conf"
+  run_cli sign || fail_test "the pass failed beside an unchecked hash: $(<"$FIX/run/output")"
+  run_cli status || fail_test "status failed beside an unchecked hash: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'cannot be checked'*'not under boot():/'* && $(<"$FIX/run/output") != *'Stale path hash'* ]] || fail_test "report: $(<"$FIX/run/output")"
+}
+
 fallback_raw_is_only_what_sbctl_can_tell() {
   local output
   set_up_machine
@@ -296,4 +315,6 @@ fallback_raw_is_only_what_sbctl_can_tell() {
 run_case restore-lock-is-said restore_lock_is_said
 run_case unread-history-signatures-are-said unread_history_signatures_are_said
 run_case fallback-raw-is-only-what-sbctl-can-tell fallback_raw_is_only_what_sbctl_can_tell
+run_case unreadable-key-variable-is-named unreadable_key_variable_is_named
+run_case unchecked-hash-is-a-note unchecked_hash_is_a_note
 finish_suite

@@ -250,6 +250,17 @@ pass_looks_again_after_its_wait() {
 
 # A file that limine.conf hashes under another spelling of its path is the
 # same file: the guard resolves both before it compares (D4).
+# FAT names have no case: the primary loader under another spelling is the
+# same file, and signing it in place would leave a signed raw loader that
+# starts under Secure Boot without enforcing limine.conf (D7).
+primary_under_another_case_is_never_signed_in_place() {
+  local other=$FIX/esp/EFI/limine/LIMINE_X64.EFI
+  prepared_machine
+  cp "$FIX/share/BOOTX64.EFI" "$other"
+  sign_boot_files >/dev/null 2>&1 || :
+  cmp -s "$other" "$FIX/share/BOOTX64.EFI" || fail_test "the primary under another case was signed in place"
+}
+
 hashed_alias_is_not_signed() {
   local file=$FIX/esp/EFI/Linux/custom.efi output
   prepared_machine
@@ -259,6 +270,21 @@ hashed_alias_is_not_signed() {
   [[ $output == *"Not signing ${file}"* ]] || fail_test "the refusal: ${output}"
   [[ $(<"$file") == 'custom loader' ]] || fail_test "the aliased file was signed in place"
   [[ -z $(list_stale_os_hashes) ]] || fail_test "a hash went stale: $(list_stale_os_hashes)"
+  # Under a resource that is not boot() (C1): the file the entry may mean
+  # stays as it is, and the refusal comes before any write.
+  write_limine_conf unhashed
+  printf '\n/Custom\n    protocol: efi\n    path: guid(0a1b2c3d-1111-2222-3333-444455556666):/EFI/Linux/custom.efi#%s\n' "$(b2sum <"$file" | cut -d' ' -f1)" >>"$FIX/esp/limine.conf"
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed beside a file named under guid()"
+  [[ $output == *"Not signing ${file}"* ]] || fail_test "the refusal under guid(): ${output}"
+  [[ $(<"$file") == 'custom loader' ]] || fail_test "the file named under guid() was signed in place"
+  # The hash under guid() is said as one that cannot be checked, not as stale:
+  # only the firmware resolves that volume (C1).
+  [[ $(list_stale_os_hashes) == unchecked$'\t'*'guid('* ]] || fail_test "the guid() hash was not listed as unchecked: $(list_stale_os_hashes)"
+  # An inventory that cannot be read answers nothing, and nothing is signed on it.
+  list_hashed_paths() { return 2; }
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed with an unreadable limine.conf"
+  [[ $output == *"Not signing ${file}: limine.conf cannot be read"* ]] || fail_test "no word about the unread inventory: ${output}"
+  [[ $(<"$file") == 'custom loader' ]] || fail_test "the file was signed on an unread inventory"
 }
 
 run_case converges-and-is-idempotent converges_and_is_idempotent
@@ -276,4 +302,5 @@ run_case seal-only-reseals-and-stops seal_only_reseals_and_stops
 run_case seal-only-waits-for-pacman-to-finish seal_only_waits_for_pacman_to_finish
 run_case pass-looks-again-after-its-wait pass_looks_again_after_its_wait
 run_case hashed-alias-is-not-signed hashed_alias_is_not_signed
+run_case primary-under-another-case-is-never-signed-in-place primary_under_another_case_is_never_signed_in_place
 finish_suite

@@ -134,21 +134,33 @@ backup_is_complete() {
   [[ -f $1/SHA256SUMS ]] && (cd -- "$1" && sha256sum --check --quiet --strict SHA256SUMS) >/dev/null 2>&1
 }
 
-# The newest complete backup; the directory names are UTC times and sort as text.
+# A backup that can serve: complete, and root's alone in every part, because
+# what the rebuild writes into the firmware comes from it (D9). A backup
+# somebody else can write is passed over, whatever its sums say.
+backup_is_usable() {
+  local file
+  { backup_is_complete "$1" && is_safe_directory "$1"; } || return 1
+  for file in "$1"/*; do
+    is_safe_file "$file" || return 1
+  done
+}
+
+# The newest usable backup; the directory names are UTC times and sort as text.
 latest_firmware_backup() {
   local directory newest=''
   for directory in "$(firmware_backup_root)"/*/; do
-    ! backup_is_complete "${directory%/}" || newest=${directory%/}
+    ! backup_is_usable "${directory%/}" || newest=${directory%/}
   done
   [[ -n $newest ]] && printf '%s\n' "$newest"
 }
 
-# The backup the enrollment is proved against: the newest one taken while a PK
-# was in place, because only that one can show what the key menu removed.
+# The backup the enrollment is proved against: the newest usable one taken
+# while a PK was in place, because only that one can show what the key menu
+# removed.
 reference_backup() {
   local directory newest=''
   for directory in "$(firmware_backup_root)"/*/; do
-    ! { backup_is_complete "${directory%/}" && [[ -e ${directory}PK ]]; } || newest=${directory%/}
+    ! { backup_is_usable "${directory%/}" && [[ -e ${directory}PK ]]; } || newest=${directory%/}
   done
   [[ -n $newest ]] && printf '%s\n' "$newest"
 }
@@ -182,8 +194,12 @@ take_firmware_backup() {
   fi
   ensure_state_dir || return 1
   # The root of the backups is root's alone too: a parent others may write
-  # would let them rename or replace a backup, whatever the backup's mode.
-  install -d -m 755 -- "$(firmware_backup_root)" && is_safe_directory "$(firmware_backup_root)" || return 1
+  # would let them rename or replace a backup, whatever the backup's mode. An
+  # existing root is judged as it is, never set right first.
+  if [[ ! -e $(firmware_backup_root) && ! -L $(firmware_backup_root) ]]; then
+    install -d -m 755 -- "$(firmware_backup_root)" || return 1
+  fi
+  is_safe_directory "$(firmware_backup_root)" || return 1
   name=$(date -u +%Y%m%dT%H%M%SZ)
   # The names order the backups, so a complete backup named later than now,
   # left by a clock that ran ahead, would keep the reference at an old one:
@@ -225,7 +241,7 @@ write_firmware_backup() {
 # fields little-endian.
 local_owner() {
   local guid
-  guid=$(sbctl status --json 2>/dev/null | jq -er '.guid | ascii_downcase') || return 1
+  guid=$(run_sbctl status --json 2>/dev/null | jq -er '.guid | ascii_downcase') || return 1
   [[ $guid =~ ^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})-([0-9a-f]{2})([0-9a-f]{2})-([0-9a-f]{2})([0-9a-f]{2})-([0-9a-f]{4})-([0-9a-f]{12})$ ]] || return 1
   printf '%s%s%s%s%s%s%s%s%s%s\n' "${BASH_REMATCH[4]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" \
     "${BASH_REMATCH[6]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[8]}" "${BASH_REMATCH[7]}" "${BASH_REMATCH[9]}" "${BASH_REMATCH[10]}"
@@ -249,7 +265,10 @@ read_enrollment_plan() {
   export_planned_entries --microsoft || return 1
   for name in "${KEY_VARIABLES[@]}"; do
     _local[$name]=$(grep -x "${EFI_CERT_X509_TYPE} ${owner} [0-9a-f]*" <<<"${_planned[$name]}") || _local[$name]=''
-    _current[$name]=$(variable_entries "$name") || return 1
+    _current[$name]=$(variable_entries "$name") || {
+      fail "Could not read the firmware's ${name} variable as a signature list"
+      return 1
+    }
   done
   export_planned_entries --append
 }
@@ -266,15 +285,28 @@ read_rebuild_plan() {
   export_planned_entries "${_rebuild_flags[@]}"
 }
 
+# Both defaults must exist and be volatile, as the specification defines
+# them: sbctl refuses a non-volatile one, which anything could have written,
+# and then the rebuild does without them (C4).
 firmware_has_builtin_defaults() {
-  [[ -e $(firmware_variable_path KEKDefault) && -e $(firmware_variable_path dbDefault) ]]
+  local name
+  for name in KEKDefault dbDefault; do
+    variable_is_volatile "$(firmware_variable_path "$name")" || return 1
+  done
+}
+
+# The first attribute byte carries EFI_VARIABLE_NON_VOLATILE as bit 0.
+variable_is_volatile() {
+  local attribute
+  attribute=$(od -An -N1 -tu1 -- "$1" 2>/dev/null) || return 1
+  [[ $attribute =~ ^[[:space:]]*([0-9]+)$ ]] && (( (BASH_REMATCH[1] & 1) == 0 ))
 }
 
 describe_rebuild_sources() {
   if firmware_has_builtin_defaults; then
     printf "your certificates, Microsoft's and the firmware's built-in defaults\n"
   else
-    printf "your certificates and Microsoft's; this firmware does not expose its built-in defaults\n"
+    printf "your certificates and Microsoft's; this firmware does not expose its built-in defaults as volatile variables, which is all sbctl accepts\n"
   fi
 }
 
@@ -327,7 +359,7 @@ foreign_entries() { grep -vxF -- "${_local[$1]}" <<<"${_current[$1]}" || :; }
 count_foreign_entries() {
   local rows
   rows=$(foreign_entries KEK; foreign_entries db)
-  if [[ -z $rows ]]; then printf '0\n'; else wc -l <<<"$rows"; fi
+  grep -c . <<<"$rows" || :
 }
 
 # list_lost_entries BACKUP current|planned: prints "NAME entry" for every KEK

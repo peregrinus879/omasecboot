@@ -439,14 +439,140 @@ secure_boot_on_needs_trusted_keys() {
 # originals when they are not as stock has them, and finishes on a later run.
 remove_keeps_its_record_after_a_masked_build_failure() {
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  # A menu with an entry of the user's own beside Omarchy's: its hash proves
+  # nothing about the entries upstream was asked to rebuild.
+  printf 'custom' >"$FIX/esp/EFI/Linux/custom.efi"
+  printf '\n/Custom\n    protocol: efi\n    path: boot():/EFI/Linux/custom.efi#%s\n' "$(b2sum <"$FIX/esp/EFI/Linux/custom.efi" | cut -d' ' -f1)" >>"$FIX/esp/limine.conf"
   : >"$FIX/run/uki-build-fails-silently"
   run_cli remove && fail_test "remove reported stock with the entries not rebuilt"
-  [[ $(<"$FIX/run/output") == *'carry no path hashes although the restored settings ask for them'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'limine-mkinitcpio did not rebuild the OS entries'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
   [[ -e $(settings_originals_file) ]] || fail_test "the originals were dropped on an unproved outcome"
   rm "$FIX/run/uki-build-fails-silently"
   run_cli remove || fail_test "the second remove failed: $(<"$FIX/run/output")"
   [[ ! -e $(settings_originals_file) ]] || fail_test "originals remain"
   grep -qE '^    path: boot\(\):/EFI/Linux/omarchy_linux\.efi#[0-9a-f]{128}$' "$FIX/esp/limine.conf" || fail_test "the entry carries no hash after the retry"
+  grep -q '^/Custom$' "$FIX/esp/limine.conf" || fail_test "the user's entry is gone"
+}
+
+# Upstream's install, which remove runs, replaces a foreign fallback loader
+# where ENABLE_LIMINE_FALLBACK is yes (C2, C3): remove says so before its
+# question, and the setting decides (D6).
+remove_says_when_upstream_will_replace_a_foreign_fallback() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  printf 'another system' >"$(fallback_loader_path)"
+  CONFIRM_ANSWER=no run_cli remove && fail_test "a declined remove went on"
+  [[ $(<"$FIX/run/output") == *'ENABLE_LIMINE_FALLBACK is yes: limine-install, which remove runs, replaces it'*'Return the Limine settings and boot files to stock?'* ]] || fail_test "no warning before the question: $(<"$FIX/run/output")"
+  printf 'ENABLE_LIMINE_FALLBACK=no\n' >>"$FIX/etc/default-limine"
+  CONFIRM_ANSWER=no run_cli remove
+  [[ $(<"$FIX/run/output") != *'replaces it with'* ]] || fail_test "the warning came although the last layer says no"
+  # Unset: upstream deploys only where nothing stands (C3).
+  sed -i '/^ENABLE_LIMINE_FALLBACK=/d' "$FIX/etc/default-limine" "$FIX/etc/layers/20-omarchy.conf"
+  CONFIRM_ANSWER=no run_cli remove
+  [[ $(<"$FIX/run/output") != *'replaces it with'* ]] || fail_test "the warning came with the setting unset"
+  [[ -e $(enabled_file) && $(<"$(fallback_loader_path)") == 'another system' ]] || fail_test "a declined remove changed state"
+  # The setting decides, through upstream's step (C2): no keeps the loader, yes replaces it.
+  printf 'ENABLE_LIMINE_FALLBACK=no\n' >>"$FIX/etc/default-limine"
+  run_cli remove || fail_test "remove under no failed: $(<"$FIX/run/output")"
+  [[ $(<"$(fallback_loader_path)") == 'another system' ]] || fail_test "the foreign loader was replaced although the setting says no"
+  run_cli setup || fail_test "the second setup failed: $(<"$FIX/run/output")"
+  sed -i 's/^ENABLE_LIMINE_FALLBACK=no$/ENABLE_LIMINE_FALLBACK=yes/' "$FIX/etc/default-limine"
+  run_cli remove || fail_test "remove under yes failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'replaces it with'* ]] || fail_test "no warning under yes: $(<"$FIX/run/output")"
+  cmp -s "$(fallback_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "upstream's step did not replace the foreign loader under yes"
+}
+
+# limine-mkinitcpio's own failure is reported as that, with its status, not
+# as hashes that remain (C2 exit codes).
+failed_mkinitcpio_stops_setup_with_its_status() {
+  : >"$FIX/run/limine-mkinitcpio-fails"
+  run_cli setup && fail_test "setup passed although limine-mkinitcpio failed"
+  [[ $(<"$FIX/run/output") == *'limine-mkinitcpio failed (status 1)'* && $(<"$FIX/run/output") != *'still holds path hashes'* ]] || fail_test "message: $(<"$FIX/run/output")"
+  rm "$FIX/run/limine-mkinitcpio-fails"
+  run_cli setup || fail_test "setup after the repair failed: $(<"$FIX/run/output")"
+}
+
+# limine-reset-enroll's own failure keeps remove's record, and the next run
+# finishes (C2 exit codes).
+failed_reset_enroll_keeps_the_record() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/limine-reset-enroll-fails"
+  run_cli remove && fail_test "remove reported stock although limine-reset-enroll failed"
+  [[ -e $(settings_originals_file) ]] || fail_test "the originals were dropped on an unproved outcome"
+  rm "$FIX/run/limine-reset-enroll-fails"
+  run_cli remove || fail_test "the second remove failed: $(<"$FIX/run/output")"
+  [[ ! -e $(settings_originals_file) ]] || fail_test "originals remain"
+}
+
+# Without upstream's copy of the deployed loader and with the package's held
+# back, upstream's reset can only zero the checksum in place: remove names
+# the way out instead of asking to be run again (C2).
+remove_without_a_copy_names_the_way_out() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  rm "$(loader_backup_path)"
+  : >"$FIX/run/upstream-holds-back"
+  run_cli remove && fail_test "remove reported stock without a raw loader to prove it"
+  [[ $(<"$FIX/run/output") == *'keeps no copy of the deployed loader'*'limine-install did not deploy'* ]] || fail_test "the way out was not named: $(<"$FIX/run/output")"
+  [[ -e $(settings_originals_file) ]] || fail_test "the originals were dropped"
+  rm "$FIX/run/upstream-holds-back"
+  run_cli remove || fail_test "remove failed once upstream could deploy: $(<"$FIX/run/output")"
+  cmp -s "$(primary_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the primary is not the raw executable"
+}
+
+# The shape the recorded machine has (C10): two kernels under one OS entry,
+# the snapshot block nested under it, upstream's EFI entries after it. setup
+# signs both images, remove proves both hashes back.
+setup_and_remove_on_the_real_shape() {
+  local file
+  write_uki "$FIX/esp/EFI/Linux/omarchy_linux-omarchy.efi" unsigned
+  write_omarchy_limine_conf 2
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  for file in omarchy_linux.efi omarchy_linux-omarchy.efi; do
+    signature_state "$FIX/esp/EFI/Linux/$file" || fail_test "${file} is not signed"
+  done
+  run_cli status || fail_test "status: $(<"$FIX/run/output")"
+  run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
+  [[ $(grep -cE '^  path: boot\(\):/EFI/Linux/omarchy_linux[^#]*#[0-9a-f]{128}$' "$FIX/esp/limine.conf") == 2 ]] || fail_test "not both kernels carry a hash after remove: $(grep 'path:' "$FIX/esp/limine.conf" | cut -c1-80)"
+  { grep -q '^/Windows Boot Manager$' "$FIX/esp/limine.conf" && grep -q '^/EFI fallback$' "$FIX/esp/limine.conf"; } || fail_test "upstream's EFI entries were lost"
+  [[ ! -e $(settings_originals_file) ]] || fail_test "originals remain"
+}
+
+# With FIND_BOOTLOADERS=yes upstream's install adds its own entry for the
+# fallback loader while setup runs it (C2): the pass seals over it, and the
+# Windows entry goes behind it.
+fallback_entry_upstream_adds_is_sealed_over() {
+  printf 'FIND_BOOTLOADERS=yes\n' >>"$FIX/etc/default-limine"
+  rm "$(fallback_loader_path)"
+  add_windows
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  grep -q '^/EFI fallback$' "$FIX/esp/limine.conf" || fail_test "upstream's fallback entry was not added by the stub"
+  primary_is_proved || fail_test "the loader is not sealed over the entry upstream added"
+  run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
+  [[ $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the Windows entry is not behind upstream's: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+  run_cli status || fail_test "status: $(<"$FIX/run/output")"
+}
+
+# Where the restored settings do not ask for hashes, the rebuild has no proof
+# to give, and remove finishes on upstream's word.
+remove_without_hashes_asked_for_has_no_proof() {
+  local value
+  # Upstream hashes only for a value of yes, in any case (C2): "no" and a
+  # value it does not know alike ask for none.
+  for value in no true; do
+    printf 'ENABLE_VERIFICATION=%s\n' "$value" >>"$FIX/etc/default-limine"
+    run_cli setup || fail_test "setup failed with ${value}: $(<"$FIX/run/output")"
+    : >"$FIX/run/uki-build-fails-silently"
+    run_cli remove || fail_test "remove failed with ${value}: $(<"$FIX/run/output")"
+    [[ $(<"$FIX/run/output") != *'did not rebuild'* && ! -e $(settings_originals_file) ]] || fail_test "a proof was asked for although ${value} asks for no hashes: $(<"$FIX/run/output")"
+    grep -qx "ENABLE_VERIFICATION=${value}" "$FIX/etc/default-limine" || fail_test "the user's own setting ${value} is gone"
+    rm "$FIX/run/uki-build-fails-silently"
+    sed -i '/^ENABLE_VERIFICATION=/d' "$FIX/etc/default-limine"
+  done
+  # Yes in another case asks for them, as upstream reads it.
+  printf 'ENABLE_VERIFICATION=Yes\n' >>"$FIX/etc/default-limine"
+  run_cli setup || fail_test "setup failed with Yes: $(<"$FIX/run/output")"
+  : >"$FIX/run/uki-build-fails-silently"
+  run_cli remove && fail_test "remove passed without the hashes Yes asks for"
+  [[ $(<"$FIX/run/output") == *'did not rebuild'* ]] || fail_test "no reason with Yes: $(<"$FIX/run/output")"
 }
 
 run_case silent-build-failure-stops-setup silent_build_failure_stops_setup
@@ -462,4 +588,11 @@ run_case unfinished-remove-is-reported unfinished_remove_is_reported
 run_case watchers-pass-finishes-through-a-stop watchers_pass_finishes_through_a_stop
 run_case secure-boot-on-needs-trusted-keys secure_boot_on_needs_trusted_keys
 run_case remove-keeps-its-record-after-a-masked-build-failure remove_keeps_its_record_after_a_masked_build_failure
+run_case remove-says-when-upstream-will-replace-a-foreign-fallback remove_says_when_upstream_will_replace_a_foreign_fallback
+run_case remove-without-hashes-asked-for-has-no-proof remove_without_hashes_asked_for_has_no_proof
+run_case failed-mkinitcpio-stops-setup-with-its-status failed_mkinitcpio_stops_setup_with_its_status
+run_case failed-reset-enroll-keeps-the-record failed_reset_enroll_keeps_the_record
+run_case remove-without-a-copy-names-the-way-out remove_without_a_copy_names_the_way_out
+run_case setup-and-remove-on-the-real-shape setup_and_remove_on_the_real_shape
+run_case fallback-entry-upstream-adds-is-sealed-over fallback_entry_upstream_adds_is_sealed_over
 finish_suite
