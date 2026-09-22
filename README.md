@@ -8,7 +8,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tools, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Status:** no release exists yet. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 7 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from a stock baseline through `remove` and back to set up, on commit `2a8d324`, with Secure Boot on and Windows Home's device encryption on beside it. One change to the tool followed that run and has its hermetic proof but no hardware row yet (C10). What it showed is in section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence still owed is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
+> **Status:** 0.1.0 is the first release. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 7 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from a stock baseline through `remove` and back to set up, on commit `2a8d324`, with Secure Boot on and Windows Home's device encryption on beside it. One change to the tool followed that run and has its hermetic proof but no hardware row yet (C10). What it showed is in section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence still owed is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
 
 ## Why
 
@@ -43,7 +43,7 @@ Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images (UKIs)
 ## Install
 
 ```bash
-git clone https://github.com/peregrinus879/omasecboot
+git clone --branch v0.1.0 https://github.com/peregrinus879/omasecboot
 cd omasecboot
 make package
 sudo pacman -U omasecboot-0.1.0-1-any.pkg.tar.zst

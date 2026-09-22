@@ -11,7 +11,7 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 
 ## Hardware acceptance
 
-Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); a record counts only when its checkout is clean and the installed files equal it, both of which it states. The recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and review the record before going on; never reboot with Secure Boot on while `omasecboot status` fails.
+Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); a record counts only when its checkout is clean and the installed files equal it, both of which it states. The recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and review the record before going on; never reboot with Secure Boot on while `omasecboot status` fails: a restart that follows a `status` row runs as `sudo omasecboot status --quiet && systemctl reboot`, so a failed report keeps the machine up. A snapshot is taken only while `timedatectl` reports the clock synchronised, and its row is followed by the menu line that names it (C2 of [upstream-contracts.md](upstream-contracts.md)).
 
 | Stage | Proves | STOP when |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 
 ### Stage 0: baseline
 
-1. Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`. The clock is right and synchronised (`timedatectl`), here and before every snapshot of the run: a snapshot taken while the clock runs ahead, as after a Windows session that wrote local time to the hardware clock, keeps later snapshots out of Limine's menu (C2 of [upstream-contracts.md](upstream-contracts.md)).
+1. Stock machine: factory keys, Secure Boot off, stock `/etc/default/limine`. The clock is right and synchronised (`timedatectl`), here and before every snapshot of the run: a snapshot taken while the clock runs ahead, as after a Windows session that wrote local time to the hardware clock, keeps later snapshots out of Limine's menu (C2).
 2. Record the state before the package is installed, take a snapshot, install the package.
 3. `status` reports "not set up".
 
@@ -69,7 +69,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 3. `windows bootnext`; `systemctl reboot`; return.
 4. A kernel reinstall and a snapshot, then `status`: the entry must still be there once, and any entry `FIND_BOOTLOADERS` adds is recorded. `omarchy refresh limine`, `status`, `windows status`: the entry must stand after Omarchy's entries, and Limine's timeout must still start Omarchy's kernel at the next restart.
 5. With Windows encryption on: disable and enable the protectors once in Windows, then start Windows through the menu entry and through BootNext again.
-6. With Windows encryption on, the chainload comparison (spec D11): add a chainload entry with `limine-scan` beside the tool's; `status` and `windows status` carry the note. Start Windows through it, disable and enable the protectors there, start it again, change `limine.conf` so that the loader is sealed again, and start Windows through it once more. Then the command the note prints, `status`, Windows through the tool's entry, and the protectors disabled and enabled once more.
+6. With Windows encryption on, the chainload note (spec D11): add a chainload entry with `limine-scan` beside the tool's; `status` and `windows status` carry the note; the command the note prints takes the entry out; `status` is clean again. Windows is not started through the chainload entry.
 
 ### Stage 6: remove
 

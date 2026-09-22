@@ -73,15 +73,24 @@ Run it from `~/omasecboot`, from your own login with `sudo`, never from a root s
 sudo bash tests/acceptance-record.sh 1-note -- echo "At boot Limine showed: <the text>"
 ```
 
-Where a step restarts the machine, it gives the command: `systemctl reboot`, or `systemctl reboot --firmware-setup`, which opens the firmware's menus. If the firmware does not take that request, the command says so and does not restart: use `systemctl reboot` and the firmware's setup key.
+Where a step restarts the machine, it gives the command: `systemctl reboot`, or `systemctl reboot --firmware-setup`, which opens the firmware's menus. With Secure Boot on, a restart that follows a `status` row is guarded: `status --quiet` runs first and the restart happens only when it passes, otherwise the line prints STOP and the machine stays up. A snapshot is taken only while the clock is synchronised, in a block of its own that can be pasted again, and the line after it shows the menu entry the snapshot got: no line means no entry, which happens for hours after a snapshot taken while the clock ran ahead, as it does after a Windows session (C2 of [upstream-contracts.md](upstream-contracts.md)). If the firmware does not take that request, the command says so and does not restart: use `systemctl reboot` and the firmware's setup key.
 
-Record the machine before anything is installed, and take the first snapshot:
+Record the machine before anything is installed, then take the first snapshot:
 
 ```bash
 cd ~/omasecboot
 sudo bash tests/acceptance-record.sh 0-before-install
-sudo snapper -c root create -d "omasecboot-test baseline"
 ```
+
+```bash
+cd ~/omasecboot
+timedatectl | command grep -E 'Local time|System clock synchronized'
+[[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 0-snapshot-baseline -- snapper -c root create -d "omasecboot-test baseline" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
+sleep 15
+sudo grep -n 'omasecboot-test baseline' /boot/limine.conf
+```
+
+Expected: the right time, and one line `comment: omasecboot-test baseline`.
 
 ## Level 1: boot files, Secure Boot off
 
@@ -91,7 +100,7 @@ Before: [Before you start](#before-you-start) and [Prepare](#prepare) are done, 
 
 ```bash
 cd ~/omasecboot
-sudo pacman -U "$(command ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
+sudo pacman -U --noconfirm "$(command ls -t omasecboot-*-any.pkg.tar.zst | head -n 1)"
 sudo bash tests/acceptance-record.sh 0-baseline -- omasecboot status
 make test-contract
 ```
@@ -137,12 +146,15 @@ Expected: `status` exits 0 without your help.
 **5.** Take a snapshot, which makes limine-snapper-sync rewrite `limine.conf`.
 
 ```bash
-sudo bash tests/acceptance-record.sh 1-snapshot -- snapper -c root create -d "omasecboot-test level 1"
+cd ~/omasecboot
+timedatectl | command grep -E 'Local time|System clock synchronized'
+[[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 1-snapshot -- snapper -c root create -d "omasecboot-test level 1" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
 sleep 15
+sudo grep -n 'omasecboot-test level 1' /boot/limine.conf
 sudo bash tests/acceptance-record.sh 1-status-snapshot -- omasecboot status
 ```
 
-Expected: exit 0.
+Expected: one menu line for the snapshot, and `status` exits 0.
 
 **6.** Reboot, only when the last `status` exited 0. Secure Boot is still off. If the loader refuses to start, the section [If the machine does not start](#if-the-machine-does-not-start) says what to do; note the text it showed.
 
@@ -180,7 +192,7 @@ sudo bash tests/acceptance-record.sh 5-status -- omasecboot status
 Expected: "Windows is in Limine's menu", and `status` exits 0. Stop otherwise. If `limine.conf` also holds a chainload entry for Windows, as `limine-scan` writes it, and Windows is encrypted, both commands add a note: BitLocker can ask for the recovery key whenever the way of starting Windows changes, so start it through the firmware only, which this entry does. Then reboot, pick "Windows" in Limine's menu, and come back to Omarchy.
 
 ```bash
-systemctl reboot
+sudo omasecboot status --quiet && systemctl reboot || echo "STOP: status failed, do not reboot"
 ```
 
 Record what you saw, with the words that do not apply taken out:
@@ -194,7 +206,7 @@ sudo bash tests/acceptance-record.sh 5-bootnext -- omasecboot windows bootnext
 Expected: the firmware took the request. Reboot: Windows must start without the menu, and the boot after it must return to Omarchy.
 
 ```bash
-systemctl reboot
+sudo omasecboot status --quiet && systemctl reboot || echo "STOP: status failed, do not reboot"
 ```
 
 Then record, again with the words that do not apply taken out:
@@ -295,17 +307,23 @@ sudo bash tests/acceptance-record.sh 3-status-kernel -- omasecboot status
 sudo bash tests/acceptance-record.sh 3-limine -- pacman -S --noconfirm limine
 sleep 15
 sudo bash tests/acceptance-record.sh 3-status-limine -- omasecboot status
-sudo bash tests/acceptance-record.sh 3-snapshot -- snapper -c root create -d "omasecboot-test level 2"
+```
+
+```bash
+cd ~/omasecboot
+timedatectl | command grep -E 'Local time|System clock synchronized'
+[[ $(timedatectl show -p NTPSynchronized --value) == yes ]] && sudo bash tests/acceptance-record.sh 3-snapshot -- snapper -c root create -d "omasecboot-test level 2" || echo "STOP: the clock is not synchronised; wait a minute and paste this block again"
 sleep 15
+sudo grep -n 'omasecboot-test level 2' /boot/limine.conf
 sudo bash tests/acceptance-record.sh 3-status-snapshot -- omasecboot status
 ```
 
-Expected: all three `status` rows exit 0. Stop otherwise, as [What stop means](#what-stop-means) says: a reboot with Secure Boot on and a loader that is not proved ends at a firmware refusal.
+Expected: all three `status` rows exit 0, and one menu line for the snapshot. Stop otherwise, as [What stop means](#what-stop-means) says: a reboot with Secure Boot on and a loader that is not proved ends at a firmware refusal.
 
-**7.** Only when the three rows exited 0: reboot, in Limine's menu start the entry of the snapshot you have just taken, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill.
+**7.** Restart, guarded by `status`; in Limine's menu start the entry of the snapshot you have just taken, and note whether it started. If the desktop offers to restore that snapshot, decline: a restore is a level 3 drill.
 
 ```bash
-systemctl reboot
+sudo omasecboot status --quiet && systemctl reboot || echo "STOP: status failed, do not reboot"
 ```
 
 When the snapshot has started, run `systemctl reboot` inside it; after a refusal, hold the power button. Start the normal entry, and record there, with the words that do not apply taken out:
@@ -318,10 +336,10 @@ sudo bash tests/acceptance-record.sh 3-status-reboot -- omasecboot status
 
 Expected: the snapshot entry and the normal entry both start, and `status` exits 0.
 
-**8.** Optional: reboot once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on the firmware must refuse it: Limine shows `PANIC: efi: LoadImage failure` and halts.
+**8.** Optional: restart once more and start the entry of the "omasecboot-test baseline" snapshot, which predates `setup`. Its kernel image is unsigned, so with Secure Boot on the firmware must refuse it: Limine shows `PANIC: efi: LoadImage failure` and halts.
 
 ```bash
-systemctl reboot
+sudo omasecboot status --quiet && systemctl reboot || echo "STOP: status failed, do not reboot"
 ```
 
 Note the text, hold the power button, start the normal entry, and record:

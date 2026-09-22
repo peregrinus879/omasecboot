@@ -235,7 +235,7 @@ The converge-and-verify pass that people, the hook and the watchers all run. It 
 
 ### `status`
 
-Read-only.
+Read-only, as root: whether the firmware's keys are the user's is judged against sbctl's export of the local certificates, which needs root and the keys [C4], and one report with one exit status serves the menu row and the update check alike.
 
 - It reports the firmware state and whether the user's keys are enrolled, whether the firmware has an active boot entry for the primary loader, which of Microsoft's 2023 certificates KEK and db lack [C9], the managed settings, the loader proof, the fallback and whether it is the Limine build of the primary loader, the signing keys, every signable file, an ESP with less free space than its largest boot file, a `limine.conf` that shadows the real one, harmful sbctl rows, stale path hashes of OS entries, unsigned history files as a count, the Windows entry, a chainload entry for Windows beside a BitLocker volume (a note, D11), the hook, the watchers, the restore lock while it stands, and `needs-attention`.
 - On a machine that is not set up it reports a `setup` or `remove` that stopped half way, which `settings-originals` without `enabled` shows, and names the two commands that finish it.
