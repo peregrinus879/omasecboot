@@ -14,4 +14,4 @@ The first release.
 - pacman warns when the package is removed from a machine that is still set up; it never blocks the removal.
 - Snapshot images and the fallback loader are never signed or sealed, sbctl's file list is never added to, the hook never fails a Limine tool, and nothing blocks pacman.
 - `tests/acceptance-record.sh` records a hardware run, and `tests/acceptance-share.sh` makes the copies that are fit for a public issue.
-- Hardware record: ASUS Vivobook TP3402VA, AMI BIOS 307, Omarchy 4.0.4, stages 0 to 7 with commit `2a8d324`, Windows Home beside it with device encryption on (`docs/upstream-contracts.md`, C10).
+- Hardware record: ASUS Vivobook TP3402VA, AMI BIOS 307, Omarchy 4.0.4, stages 0 to 7 with commit `2a8d324`, Windows Home beside it with device encryption on; one change to the tool followed and has no hardware row yet (`docs/upstream-contracts.md`, C10).

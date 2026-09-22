@@ -24,7 +24,7 @@ Run on a dedicated machine, never on a daily one. [field-testing.md](field-testi
 | 6 Remove | pacman's warning when the package goes from a machine that is set up, and the way back to stock | pacman prints no warning or does not remove the package, the primary loader is still sealed, or a managed setting is still in `/etc/default/limine` |
 | 7 Rebuild | Enrollment on firmware whose key menu clears KEK and db together with the Platform Key | The tool appends to an empty list, the confirmation does not name what cannot come back, a variable misses the local or Microsoft's certificates after the rebuild, or Windows no longer starts |
 
-A release needs stages 0 to 6 on at least one machine and stage 7 on one whose key menu can clear every key, and every firmware vendor named in public text needs its own record. Rows that begin "With Windows encryption on" apply to a machine with BitLocker or Device Encryption on, the recovery key on paper and nothing suspended; a Windows start there records whether BitLocker asked for the key at the first and at a second start, and the PCR validation profile that `manage-bde -protectors -get C:` names.
+A release needs stages 0 to 6 on at least one machine and stage 7 on one whose key menu can clear every key, and every firmware vendor named in public text needs its own record. Rows that begin "With Windows encryption on" apply to a machine with BitLocker or Device Encryption on, the recovery key on paper and nothing suspended; a Windows start there records whether BitLocker asked for the key at the first and at a second start, and the PCR validation profile that `manage-bde -protectors -get C: -Type TPM` names.
 
 ### Stage 0: baseline
 

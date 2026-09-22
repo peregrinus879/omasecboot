@@ -181,6 +181,6 @@ make test-contract   # the installed sbctl and Limine tools against the upstream
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).
 
-## License and credits
+## Licence and credits
 
 [MIT](LICENSE). Created by [peregrinus879](https://github.com/peregrinus879). OmaSecBoot builds on [sbctl](https://github.com/Foxboron/sbctl), [Limine](https://github.com/limine-bootloader/limine), Zesko's [limine-entry-tool](https://gitlab.com/Zesko/limine-entry-tool) and [limine-snapper-sync](https://gitlab.com/Zesko/limine-snapper-sync), and [Omarchy](https://omarchy.org).

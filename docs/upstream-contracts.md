@@ -182,7 +182,7 @@ ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4. The release's record: 
   - The firmware exposes neither AuditMode nor DeployedMode (pre-UEFI 2.5 model). Its key menu appears only while Secure Boot is set to enabled. Deleting only the PK keeps KEK, db and dbx and enters Setup Mode.
   - Per-variable writes of db, KEK and PK over the immutable variables succeeded with `--ignore-immutable` and read back exactly. After the PK write, `SetupMode` kept reading 1 until the next boot, although the variables already held the new keys; enrollment must be judged by the variables.
   - Deleting only the PK kept all eight KEK and db entries; the append wrote db, KEK and PK, each read back, and the machine started with Secure Boot on.
-  - The key menu's "clear every key" emptied PK, KEK, db and dbx. `setup` said so, found every KEK and db entry of the backup in what sbctl can put back, warned that dbx differed, asked, and wrote db, KEK and PK, each read back; the machine and Windows started with Secure Boot on (seen with commit `ccc6e8a`).
+  - The key menu's "clear every key" emptied PK, KEK, db and dbx. `setup` said so, found every KEK and db entry of the backup in what sbctl can put back, warned that dbx differed, asked, and wrote db, KEK and PK, each read back; the machine and Windows started with Secure Boot on.
   - KEK held Microsoft Corporation KEK 2K CA 2023, and db held Windows UEFI CA 2023 and Microsoft UEFI CA 2023 but not Microsoft Option ROM UEFI CA 2023 (C9): a firmware can carry a part of the 2023 set.
 - Snapshots:
   - An entry that predates enrollment does not start with Secure Boot on: the firmware refuses the unsigned image, and Limine reports `PANIC: efi: LoadImage failure (0x800000000000000f)`, which is the firmware's `EFI_ACCESS_DENIED` (UEFI 2.10, Appendix D), and halts, so the machine needs a power cycle. The entry of a snapshot taken after `setup` started.
@@ -199,4 +199,5 @@ ASUS Vivobook TP3402VA, AMI BIOS 307, with Omarchy 4.0.4. The release's record: 
   - It did not tell the firmware's boot menu, the tool's `efi_boot_entry` entry and a BootNext request apart, under either profile, while `limine.conf` was rewritten and the loader sealed again several times in between.
   - With Secure Boot on and the profile 7, 11, the first start through a `limine-scan` chainload entry asked for the key and a new PIN, the second did not, and the next start through the tool's entry asked again. Whether a chainload start survives a re-seal of the loader has no record.
 - The package:
+  - With Secure Boot on, `remove` refused, and beside Windows it reminded of the recovery key first.
   - pacman printed the package's removal warning while the machine was set up and removed the package. After a reinstall the two watchers were still active and `status` passed; after `remove`, a second removal printed nothing.
