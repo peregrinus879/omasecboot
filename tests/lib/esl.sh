@@ -16,6 +16,10 @@ le32() {
   hex_bytes "$hex"
 }
 
+# x509_row OWNER CERTIFICATE-TEXT: the row the reader prints for that
+# certificate, "TYPE OWNER SHA256-OF-THE-DATA", for the suites' assertions.
+x509_row() { printf '%s %s %s\n' "$ESL_X509_TYPE" "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"; }
+
 # x509_list OWNER CERTIFICATE-TEXT: a list with one certificate, which is how
 # firmware and sbctl store them, because certificates differ in size.
 x509_list() {

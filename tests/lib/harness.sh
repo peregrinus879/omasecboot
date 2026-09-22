@@ -25,11 +25,18 @@ fail_test() {
 # Each case gets its own fixture machine and runs in a subshell, so overrides
 # and shell state never leak between cases.
 run_case() {
+  local errors
   CASE_NAME=$1
+  # A helper the suite never sourced would turn an assertion into one that
+  # matches anything, so the case's stderr is kept and read for bash's word
+  # on it before the case can pass.
+  errors=$TEST_DIR/$1.stderr
   (
     fixture_machine "$TEST_DIR/$1"
     "$2"
-  ) || fail_test "case failed"
+  ) 2>"$errors" || { cat "$errors" >&2; fail_test "case failed"; }
+  cat "$errors" >&2
+  ! grep -q 'command not found' "$errors" || fail_test "the case calls a command that is not defined here"
   printf 'PASS: %s/%s\n' "$SUITE_NAME" "$1"
   CASES_RUN=$((CASES_RUN + 1))
 }
@@ -288,7 +295,6 @@ add_windows() {
 
 # Rows as the library prints them, computed here from the known fixture
 # content, so an assertion never depends on the reader under test.
-x509_row() { printf '%s %s %s\n' "$ESL_X509_TYPE" "$1" "$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"; }
 
 file_is_fixture_signed() { [[ $(tail -c ${#FIXTURE_SIGNATURE} "$1") == "$FIXTURE_SIGNATURE" ]]; }
 

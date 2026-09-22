@@ -107,9 +107,17 @@ fail_test() {
 # Each case runs in a subshell, so overrides and shell state never leak
 # between cases. The sandbox's files do, so a case sets up what it reads.
 run_case() {
+  local errors
   CASE_NAME=$1
   in_sandbox || fail_test "refusing to run a case outside the sandbox"
-  ("$2") || fail_test "case failed"
+  # A helper the suite never sourced would turn an assertion into one that
+  # matches anything, so the case's stderr is kept and read for bash's word
+  # on it before the case can pass.
+  errors=$(mktemp) || fail_test "scratch"
+  ("$2") 2>"$errors" || { cat "$errors" >&2; fail_test "case failed"; }
+  cat "$errors" >&2
+  ! grep -q 'command not found' "$errors" || fail_test "the case calls a command that is not defined here"
+  rm -f "$errors"
   printf 'PASS: %s/%s\n' "$SUITE_NAME" "$1"
   CASES_RUN=$((CASES_RUN + 1))
 }

@@ -108,6 +108,7 @@ enrolled_state_is_recognised_and_left_alone() {
 }
 
 rebuild_plan_for_cleared_firmware() {
+  local db_row kek_row absent_row rows
   machine_in_setup_mode
   rm -f "$(firmware_variable_path KEK)" "$(firmware_variable_path db)"
   { read_enrollment_plan && local_certificates_are_identified; } || fail_test "plan on cleared firmware"
@@ -136,9 +137,22 @@ rebuild_plan_for_cleared_firmware() {
   read_rebuild_plan || fail_test "the rebuild export with the firmware's defaults failed: $(sbctl enroll-keys --microsoft --firmware-builtin --export esl 2>&1 | tr '\n' ' ' | cut -c1-700)"
   rebuild_plan_is_sound || fail_test "the rebuild plan with the defaults is not sound; PK rows: ${_planned[PK]}"
   [[ " ${_rebuild_flags[*]} " == *' --firmware-builtin '* ]] || fail_test "KEKDefault and dbDefault did not add --firmware-builtin"
-  [[ ${_planned[db]} == *"$(x509_row "$OEM_OWNER" 'OEM db default')"* && ${_planned[KEK]} == *"$(x509_row "$OEM_OWNER" 'OEM KEK default')"* ]] || fail_test "the export lacks the firmware's built-in defaults: recheck C4"
+  # The expected rows are proved non-empty first, and a row of a certificate
+  # nobody wrote must be absent: an empty pattern would match anything.
+  db_row=$(x509_row "$OEM_OWNER" 'OEM db default') && [[ -n $db_row ]] || fail_test "no expected db row"
+  kek_row=$(x509_row "$OEM_OWNER" 'OEM KEK default') && [[ -n $kek_row ]] || fail_test "no expected KEK row"
+  absent_row=$(x509_row "$OEM_OWNER" 'no such certificate') && [[ -n $absent_row ]] || fail_test "no absent row"
+  [[ ${_planned[db]} == *"$db_row"* && ${_planned[KEK]} == *"$kek_row"* ]] || fail_test "the export lacks the firmware's built-in defaults: recheck C4"
+  [[ ${_planned[db]} != *"$absent_row"* ]] || fail_test "the export matched a certificate nobody wrote"
+  # The write carries the authentication header a plain directory keeps (see
+  # the head of this file), so the proof is the exported list: it holds the
+  # default's row and not the absent one, and the written variable ends with
+  # it byte for byte.
+  sbctl enroll-keys "${_rebuild_flags[@]}" --export esl >/dev/null 2>&1 || fail_test "export with the defaults"
+  rows=$(list_signature_entries db.esl 0) || fail_test "the exported db with the defaults cannot be read"
+  [[ $rows == *"$db_row"* && $rows != *"$absent_row"* ]] || fail_test "the exported db lacks the built-in default, or matched one nobody wrote: $(tr '\n' ' ' <<<"$rows")"
   run_sbctl enroll-keys "${_rebuild_flags[@]}" --partial db --ignore-immutable >/dev/null 2>&1 || fail_test "--partial with ${_rebuild_flags[*]} was refused: recheck C4"
-  [[ $(variable_entries db) == *"$(x509_row "$OEM_OWNER" 'OEM db default')"* ]] || fail_test "the written db lacks the built-in default"
+  cmp -s <(tail -c "$(stat -c %s db.esl)" "$(firmware_variable_path db)") db.esl || fail_test "the rebuilt variable with the defaults does not end with the exported list"
 }
 
 # The four fingerprints this tool looks for (C9) against the certificates the
