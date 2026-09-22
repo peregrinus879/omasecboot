@@ -5,6 +5,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 ## Read first
 
 - [README.md](README.md) is the operator page and states only what exists.
+- [docs/concepts.md](docs/concepts.md) explains the concepts the design rests on, for a first read; every fact it touches lives in the spec or the contracts.
 - [docs/spec.md](docs/spec.md) owns the design.
 - [docs/upstream-contracts.md](docs/upstream-contracts.md) owns the upstream and hardware facts the design relies on (sections C1 to C10), each with its source.
 - [docs/release-checklist.md](docs/release-checklist.md) owns what a release needs.

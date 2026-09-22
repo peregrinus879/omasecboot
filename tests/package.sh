@@ -98,6 +98,7 @@ usr/share/doc/omasecboot/CHANGELOG.md
 usr/share/doc/omasecboot/CONTRIBUTING.md
 usr/share/doc/omasecboot/README.md
 usr/share/doc/omasecboot/docs/
+usr/share/doc/omasecboot/docs/concepts.md
 usr/share/doc/omasecboot/docs/field-testing.md
 usr/share/doc/omasecboot/docs/maintenance.md
 usr/share/doc/omasecboot/docs/omarchy-integration.md

@@ -24,7 +24,7 @@ Omarchy boots through Limine with unified kernel images and Snapper snapshot ent
 - It integrates in two places only. A small Limine hook runs at the end of every Limine operation (kernel updates, Limine upgrades, snapshots). Two watchers, instances of one systemd path unit, re-seal the loader when `limine.conf` is edited or the loader itself is replaced: Omarchy's installer leaves a pacman hook that copies a raw loader over it after every Limine upgrade. OmaSecBoot never blocks an update. On a machine where `setup` never ran, the hook exits on its first line.
 - It keeps a few small files under `/var/lib/omasecboot` and works out everything else from what it observes, so any interrupted step is finished by running the same command again. It rebuilds the loader from the raw Limine executable that upstream keeps beside the loader, the one upstream deployed, never from a newer one in the package that upstream is holding back.
 
-The design, every decision behind it and the failure table are in [docs/spec.md](docs/spec.md). The upstream behaviour it relies on, with sources, is in [docs/upstream-contracts.md](docs/upstream-contracts.md).
+[docs/concepts.md](docs/concepts.md) explains the concepts a first reader needs. The design, every decision behind it and the failure table are in [docs/spec.md](docs/spec.md). The upstream behaviour it relies on, with sources, is in [docs/upstream-contracts.md](docs/upstream-contracts.md).
 
 ## What it never signs or registers
 
