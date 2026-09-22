@@ -106,6 +106,7 @@ Source: systemd 261 `src/core/path.c`, `systemd.path(5)`, `systemd.unit(5)`, `sy
 - Path units depend on the mount of the watched path implicitly.
 - An enabled instance whose package was removed leaves a harmless dangling link that `systemctl disable` still removes.
 - On the vfat ESP of C10 an instance fired both on a line appended to `limine.conf` and on a `cp` over the primary loader.
+- `KillMode=mixed` sends the stop signal to the main process alone and, when `TimeoutStopSec` expires, SIGKILL to every remaining process of the unit, the main one included; without the setting the manager's `DefaultTimeoutStopSec` applies, 90 seconds by default (`systemd.kill(5)`, `systemd.service(5)`).
 
 ## C6. pacman and Omarchy
 

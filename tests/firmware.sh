@@ -449,6 +449,67 @@ proof_uses_the_backup_taken_with_the_pk_in_place() {
   [[ $(<"$FIX/run/output") == *'db: certificate with SHA-256 fingerprint'* && $(<"$FIX/run/output") != *'taken in Setup Mode'* ]] || fail_test "report: $(<"$FIX/run/output")"
 }
 
+# The backup is root's alone whatever the caller's umask, holds no mode value
+# it did not read, and is refused when an existing backup is later than the
+# clock: a name from a clock that ran ahead would keep the reference at an
+# old backup (C10).
+backup_is_root_only_complete_and_ordered() {
+  local backup db
+  # Names come from the clock, one per second; the case takes several backups
+  # in a row, so it hands out ascending names of its own, counted in a file
+  # because the backups are taken in subshells.
+  printf 0 >"$FIX/run/clock"
+  date() { local n; n=$(($(<"$FIX/run/clock") + 1)); printf '%s' "$n" >"$FIX/run/clock"; printf '20260101T00000%sZ\n' "$n"; }
+  backup=$(umask 000; take_firmware_backup) || fail_test "backup"
+  [[ $(stat -c %a "$(firmware_backup_root)") == 755 && $(stat -c %a "$backup") == 700 && $(stat -c %a "$backup/db") == 600 && $(stat -c %a "$backup/modes") == 600 ]] || fail_test "modes: $(stat -c %a "$(firmware_backup_root)" "$backup" "$backup/db" "$backup/modes" | tr '\n' ' ')"
+  backup_is_complete "$backup" || fail_test "the backup is not complete"
+  grep -qx 'SetupMode=0' "$backup/modes" || fail_test "modes file: $(<"$backup/modes")"
+  db=$(key_variable_path db)
+  printf 'changed' >>"$db"
+  ( read_mode_variable() { return 1; }; take_firmware_backup >/dev/null 2>&1 ) && fail_test "a backup was taken with unread mode variables"
+  rm -rf "$(firmware_backup_root)/20260101T000002Z"
+  # An incomplete directory with a later name is nobody's reference and is passed over.
+  mkdir "$(firmware_backup_root)/20990101T000000Z"
+  take_firmware_backup >/dev/null 2>&1 || fail_test "an incomplete directory with a later name stopped the backup"
+  rmdir "$(firmware_backup_root)/20990101T000000Z"
+  mv "$backup" "$(firmware_backup_root)/20990101T000000Z"
+  printf 'changed again' >>"$db"
+  take_firmware_backup >/dev/null 2>"$FIX/run/backup-error" && fail_test "a backup was taken beside one later than the clock"
+  { grep -q 'later than the clock reads now' "$FIX/run/backup-error" && grep -q 'move it out of' "$FIX/run/backup-error"; } || fail_test "no reason: $(<"$FIX/run/backup-error")"
+  [[ $(basename "$(reference_backup)") == 20990101T000000Z ]] || fail_test "the reference: $(reference_backup)"
+}
+
+# A rebuild plan that holds only the local certificate, even twice, promises
+# nothing of what the key menu cleared (D9).
+rebuild_plan_needs_more_than_the_local_entry() {
+  prepared_machine
+  read_enrollment_plan || fail_test "plan"
+  _planned[PK]=${_local[PK]}
+  _planned[KEK]=$(printf '%s\n%s\n' "${_local[KEK]}" "${_local[KEK]}")
+  _planned[db]=$(printf '%s\n%s\n' "${_local[db]}" "${_local[db]}")
+  rebuild_plan_is_sound && fail_test "a plan of local entries alone read as sound"
+  _planned[KEK]=$(printf '%s\n%s\n' "${_local[KEK]}" "${_current[KEK]}" | sort -u)
+  _planned[db]=$(printf '%s\n%s\n' "${_local[db]}" "${_current[db]}" | sort -u)
+  rebuild_plan_is_sound || fail_test "a plan with the firmware's entries read as unsound"
+}
+
+# The firmware step reads the mode variables once and stops when it cannot,
+# instead of taking an empty value for "off".
+firmware_step_needs_readable_modes() {
+  local output
+  prepared_machine
+  # The step is the dispatcher's, so it runs as the CLI process runs, in a
+  # process of its own with the fixture's overrides and one reader that fails.
+  # shellcheck disable=SC2016 # The process expands its own variables.
+  output=$(ROOT_DIR=$ROOT_DIR bash -c '
+    source "$ROOT_DIR/tests/lib/harness.sh"
+    source "$ROOT_DIR/bin/omasecboot"
+    fixture_overrides
+    read_mode_variable() { return 1; }
+    setup_firmware_step false' 2>&1) && fail_test "the firmware step went on without the mode variables"
+  [[ $output == *"Could not read the firmware's SecureBoot and SetupMode variables"* ]] || fail_test "no reason: ${output}"
+}
+
 run_case signature-lists-are-read-entry-by-entry signature_lists_are_read_entry_by_entry
 run_case backup-is-taken-once-and-complete backup_is_taken_once_and_complete
 run_case local-certificates-are-found-by-owner local_certificates_are_found_by_owner
@@ -469,4 +530,7 @@ run_case unsound-answers-from-sbctl-stop-setup unsound_answers_from_sbctl_stop_s
 run_case cleared-firmware-is-rebuilt-with-the-loss-named cleared_firmware_is_rebuilt_with_the_loss_named
 run_case firmware-cleared-before-the-first-setup-is-rebuilt firmware_cleared_before_the_first_setup_is_rebuilt
 run_case proof-uses-the-backup-taken-with-the-pk-in-place proof_uses_the_backup_taken_with_the_pk_in_place
+run_case backup-is-root-only-complete-and-ordered backup_is_root_only_complete_and_ordered
+run_case rebuild-plan-needs-more-than-the-local-entry rebuild_plan_needs_more_than_the_local_entry
+run_case firmware-step-needs-readable-modes firmware_step_needs_readable_modes
 finish_suite

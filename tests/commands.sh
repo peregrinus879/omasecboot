@@ -414,6 +414,41 @@ run_case busy-remove-changes-nothing busy_remove_changes_nothing
 run_case refusals-say-why refusals_say_why
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept
 run_case remove-can-be-run-again remove_can_be_run_again
+# With Secure Boot on, a loader signed with keys the firmware does not trust
+# stops the machine, and the firmware step comes after the boot files (D10):
+# setup refuses before it creates keys or writes anything.
+secure_boot_on_needs_trusted_keys() {
+  cp "$(primary_loader_path)" "$FIX/run/loader-before"
+  set_mode_variable SecureBoot 1
+  run_cli setup && fail_test "setup created keys with Secure Boot on"
+  [[ $(<"$FIX/run/output") == *'has no signing keys'*'Turn Secure Boot off'* ]] || fail_test "no keys: $(<"$FIX/run/output")"
+  [[ ! -e $FIX/sbctl/keys ]] || fail_test "keys were created"
+  : >"$FIX/sbctl/keys"
+  run_cli setup && fail_test "setup signed with keys the firmware does not hold"
+  [[ $(<"$FIX/run/output") == *"db does not hold this machine's signing certificate"* ]] || fail_test "untrusted keys: $(<"$FIX/run/output")"
+  : >"$FIX/run/sbctl-export-fails"
+  run_cli setup && fail_test "setup went on without knowing which certificate is its own"
+  [[ $(<"$FIX/run/output") == *'whether the firmware trusts these keys cannot be told'* ]] || fail_test "unreadable plan: $(<"$FIX/run/output")"
+  rm "$FIX/run/sbctl-export-fails"
+  cmp -s "$(primary_loader_path)" "$FIX/run/loader-before" || fail_test "the loader was replaced"
+  [[ ! -e $(enabled_file) ]] || fail_test "the machine was marked set up"
+}
+
+# limine-mkinitcpio reports success after a failed build (C2). remove judges
+# the entries against the settings it restored, keeps its record of the
+# originals when they are not as stock has them, and finishes on a later run.
+remove_keeps_its_record_after_a_masked_build_failure() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/uki-build-fails-silently"
+  run_cli remove && fail_test "remove reported stock with the entries not rebuilt"
+  [[ $(<"$FIX/run/output") == *'carry no path hashes although the restored settings ask for them'* ]] || fail_test "no reason: $(<"$FIX/run/output")"
+  [[ -e $(settings_originals_file) ]] || fail_test "the originals were dropped on an unproved outcome"
+  rm "$FIX/run/uki-build-fails-silently"
+  run_cli remove || fail_test "the second remove failed: $(<"$FIX/run/output")"
+  [[ ! -e $(settings_originals_file) ]] || fail_test "originals remain"
+  grep -qE '^    path: boot\(\):/EFI/Linux/omarchy_linux\.efi#[0-9a-f]{128}$' "$FIX/esp/limine.conf" || fail_test "the entry carries no hash after the retry"
+}
+
 run_case silent-build-failure-stops-setup silent_build_failure_stops_setup
 run_case hand-written-hash-stops-setup-with-the-way-out hand_written_hash_stops_setup_with_the_way_out
 run_case setup-removes-harmful-sbctl-rows setup_removes_harmful_sbctl_rows
@@ -425,4 +460,6 @@ run_case hook-never-fails-its-caller hook_never_fails_its_caller
 run_case setup-and-remove-wait-for-a-restore setup_and_remove_wait_for_a_restore
 run_case unfinished-remove-is-reported unfinished_remove_is_reported
 run_case watchers-pass-finishes-through-a-stop watchers_pass_finishes_through_a_stop
+run_case secure-boot-on-needs-trusted-keys secure_boot_on_needs_trusted_keys
+run_case remove-keeps-its-record-after-a-masked-build-failure remove_keeps_its_record_after_a_masked_build_failure
 finish_suite

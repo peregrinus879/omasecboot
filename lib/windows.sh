@@ -267,6 +267,9 @@ windows_entry_state() {
 
 readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds OmaSecBoot's Windows comment in an entry that is not as OmaSecBoot writes it; remove that comment line, or the entry, by hand"
 
+# config_is_still CHECKSUM: limine.conf still reads as it did.
+config_is_still() { [[ $(config_checksum) == "$1" ]]; }
+
 # write_windows_entry [LABEL]: limine.conf with exactly the entry for LABEL,
 # or with none. Nothing is touched when it already reads that way. Omarchy
 # replaces limine.conf outside any lock (C6), so the file must still be what
@@ -299,11 +302,18 @@ write_windows_entry() {
   before=$(config_checksum) || return 1
   content=$(windows_config_with "$label" && printf x) || return 1
   content=${content%x}
-  [[ $(config_checksum) == "$before" ]] || {
+  # Checked once here and again right before the rename: Omarchy's refresh
+  # replaces limine.conf outside the lock (C6), and a rename over its newer
+  # file would lose it. The instant between the last check and the rename
+  # stays; the next pass converges (section 7.7).
+  config_is_still "$before" || {
     warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
     return 1
   }
-  printf '%s' "$content" | atomic_write "$config" "$mode"
+  printf '%s' "$content" | atomic_write "$config" "$mode" config_is_still "$before" || {
+    warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
+    return 1
+  }
 }
 
 # Inside every pass, before the loader is sealed: the entry is in limine.conf

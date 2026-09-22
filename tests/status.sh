@@ -11,7 +11,7 @@ test_harness_init status
 set_up_machine() {
   : >"$FIX/sbctl/keys"
   write_limine_conf unhashed
-  { save_settings_originals && QUIET=true sign_boot_files && : >"$(enabled_file)"; } || fail_test "fixture setup"
+  { save_settings_originals && : >"$(enabled_file)" && QUIET=true sign_boot_files; } || fail_test "fixture setup"
 }
 
 not_set_up_is_not_a_problem() {
@@ -269,5 +269,31 @@ run_case missing-limine-boot-entry-blocks missing_limine_boot_entry_blocks
 run_case full-esp-is-a-note full_esp_is_a_note
 run_case missing-2023-certificates-are-notes missing_2023_certificates_are_notes
 run_case old-rescue-loader-is-a-note old_rescue_loader_is_a_note
+# A snapshot image whose signature cannot be read is said to be unread, not
+# counted as one from before setup.
+unread_history_signatures_are_said() {
+  local history=$FIX/esp/machine/limine_history/old.efi_sha256_abc output
+  set_up_machine
+  mkdir -p "${history%/*}" && printf 'image' >"$history"
+  : >"$FIX/run/sbctl-cannot-read"
+  output=$(show_status 2>&1)
+  [[ $output == *'1 snapshot image(s) could not be checked for a signature'* ]] || fail_test "not said: ${output}"
+  [[ $output != *'predate Secure Boot setup'* ]] || fail_test "an unread image was counted as old: ${output}"
+}
+
+# "Raw" is what sbctl can tell; the bytes decide whether the report may call
+# the fallback upstream's copy (D6).
+fallback_raw_is_only_what_sbctl_can_tell() {
+  local output
+  set_up_machine
+  output=$(show_status 2>&1) || fail_test "clean machine: ${output}"
+  [[ $output == *"The fallback loader is upstream's raw copy"* ]] || fail_test "upstream's copy not named: ${output}"
+  write_raw_loader "$(fallback_loader_path)" 12.7.0
+  output=$(show_status 2>&1) || fail_test "a raw fallback of another build failed the report: ${output}"
+  [[ $output == *'no seal and no signature by the current key, as far as sbctl can tell'* && $output != *"is upstream's raw copy"* ]] || fail_test "the limit was not said: ${output}"
+}
+
 run_case restore-lock-is-said restore_lock_is_said
+run_case unread-history-signatures-are-said unread_history_signatures_are_said
+run_case fallback-raw-is-only-what-sbctl-can-tell fallback_raw_is_only_what_sbctl_can_tell
 finish_suite

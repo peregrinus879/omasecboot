@@ -8,7 +8,7 @@ How to try OmaSecBoot on your own machine and report what happened, so that the 
 
 | Level | What it changes | The way back | For whom |
 | --- | --- | --- | --- |
-| 1. Boot files | Limine settings, a sealed and signed loader, signing keys on disk. Secure Boot stays off, and no Secure Boot key or setting in the firmware changes | `sudo omasecboot remove`, which this page ends with | A machine you use every day, once [Before you start](#before-you-start) is settled |
+| 1. Boot files | Limine settings, a sealed and signed loader, signing keys on disk. Secure Boot stays off, and no Secure Boot key or setting in the firmware changes | `sudo omasecboot remove`, which this page ends with | A machine you use every day, once [Before you start](#before-you-start) is settled and a fallback loader or rescue media is at hand: this level seals the primary loader, and a `limine.conf` mistake then needs that way back |
 | 2. Your keys, Secure Boot on | The firmware's Platform Key is replaced and your certificates are added to KEK and db | The firmware's own menu that restores its factory keys. Those are the keys the machine was built with: updates to db, KEK and dbx that arrived since then come back only with the next firmware or Windows update. No snapshot brings firmware keys back | A machine whose firmware menus you know |
 | 3. Drills | A deliberately stale seal, a snapshot restore, an interrupted pass | Rescue media, if a drill goes wrong | A spare machine only |
 
@@ -224,7 +224,7 @@ sudo bash tests/acceptance-record.sh 5-status-after -- omasecboot status
 
 ## Level 2: your keys in the firmware, Secure Boot on
 
-Before: level 1 is done and its last `status` exited 0; the firmware lines of [Before you start](#before-you-start) are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone, and only ever adds to KEK and db. The README's [How your keys get into the firmware](../README.md#how-your-keys-get-into-the-firmware) says what happens and why.
+Before: level 1 is done and its last `status` exited 0; the firmware lines of [Before you start](#before-you-start) are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone, and at this level only ever adds to KEK and db; the rebuild after a key menu that clears every key is a checklist row, not part of this guide. The README's [How your keys get into the firmware](../README.md#how-your-keys-get-into-the-firmware) says what happens and why.
 
 With Windows on the machine: at the restart after step 2, after step 4 and after step 5, start Windows first, from the firmware's boot menu (the key your firmware names at power-on), never through a chainload entry. In Windows, an administrator terminal shows the binding: `manage-bde -protectors -get C: -Type TPM`, read on the screen only, whose "PCR Validation Profile" line is the one value to note; never copy the recovery key or its identifier anywhere. Then start Omarchy and record, with the words that do not apply taken out:
 

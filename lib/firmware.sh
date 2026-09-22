@@ -175,27 +175,47 @@ backup_matches_firmware() {
 # the firmware still equals it. This is the set the machine trusted before
 # this tool asked for any change; it is never called the factory set.
 take_firmware_backup() {
-  local directory name path
+  local directory name existing
   if directory=$(latest_firmware_backup) && backup_matches_firmware "$directory"; then
     printf '%s\n' "$directory"
     return 0
   fi
   ensure_state_dir || return 1
-  mkdir -p -- "$(firmware_backup_root)" || return 1
-  directory=$(firmware_backup_root)/$(date -u +%Y%m%dT%H%M%SZ)
+  # The root of the backups is root's alone too: a parent others may write
+  # would let them rename or replace a backup, whatever the backup's mode.
+  install -d -m 755 -- "$(firmware_backup_root)" && is_safe_directory "$(firmware_backup_root)" || return 1
+  name=$(date -u +%Y%m%dT%H%M%SZ)
+  # The names order the backups, so a complete backup named later than now,
+  # left by a clock that ran ahead, would keep the reference at an old one:
+  # refused, with the way out.
+  for existing in "$(firmware_backup_root)"/*/; do
+    existing=${existing%/}
+    backup_is_complete "$existing" || continue
+    existing=${existing##*/}
+    [[ $existing > $name ]] || continue
+    fail "The backup ${existing} is later than the clock reads now (${name}). If the clock is right, that backup was taken while it ran ahead: move it out of $(firmware_backup_root), then run this again"
+    return 1
+  done
+  directory=$(firmware_backup_root)/${name}
   # A plain mkdir: a name that exists belongs to another backup.
-  mkdir -- "$directory" || return 1
+  mkdir -m 700 -- "$directory" || return 1
+  (umask 077 && write_firmware_backup "$directory") || return 1
+  durable_sync "$directory" || return 1
+  printf '%s\n' "$directory"
+}
+
+# The files of a backup, readable by root alone, whatever the caller's umask.
+write_firmware_backup() {
+  local directory=$1 name path setup_mode secure_boot
   for name in "${KEY_VARIABLES[@]}" dbx; do
     path=$(firmware_variable_path "$name")
     [[ -e $path ]] || continue
     # A second read proves the copy: efivarfs has no snapshot to copy from.
     { cat -- "$path" >"${directory}/${name}" && cmp -s -- "$path" "${directory}/${name}"; } || return 1
   done
-  printf 'SetupMode=%s\nSecureBoot=%s\n' "$(read_mode_variable SetupMode)" "$(read_mode_variable SecureBoot)" \
-    >"${directory}/modes" || return 1
+  { setup_mode=$(read_mode_variable SetupMode) && secure_boot=$(read_mode_variable SecureBoot); } || return 1
+  printf 'SetupMode=%s\nSecureBoot=%s\n' "$setup_mode" "$secure_boot" >"${directory}/modes" || return 1
   (cd -- "$directory" && sha256sum -- * >.SHA256SUMS && mv .SHA256SUMS SHA256SUMS) || return 1
-  durable_sync "$directory" || return 1
-  printf '%s\n' "$directory"
 }
 
 # --- The enrollment plan --------------------------------------------------------------
@@ -363,8 +383,9 @@ rebuild_plan_is_sound() {
   for name in KEK db; do
     [[ -z $(entries_missing_from "${_local[$name]}" "${_planned[$name]}") ]] || return 1
     # The local keys alone would be what empty never means (D9): an sbctl that
-    # stopped honouring --microsoft still exports without complaint.
-    [[ -n $(entries_missing_from "${_planned[$name]}" "${_local[$name]}") ]] || return 1
+    # stopped honouring --microsoft still exports without complaint. Each
+    # entry counts once, so a repeated local entry is not "something else".
+    [[ -n $(entries_missing_from "$(LC_ALL=C sort -u <<<"${_planned[$name]}")" "$(LC_ALL=C sort -u <<<"${_local[$name]}")") ]] || return 1
   done
 }
 

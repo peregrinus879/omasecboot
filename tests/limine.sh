@@ -197,6 +197,21 @@ run_case settings-round-trip-from-stock settings_round_trip_from_stock
 run_case original-values-come-back-verbatim original_values_come_back_verbatim
 run_case failed-write-keeps-the-settings-file failed_write_keeps_the_settings_file
 run_case originals-are-recorded-once originals_are_recorded_once
+# The guard and the stale-hash reader resolve a hashed path the same way, so
+# "./", "//" and ".." name the file they name (D4).
+hashed_paths_are_resolved_before_they_compare() {
+  local file=$FIX/esp/EFI/Linux/omarchy_linux.efi spelling
+  for spelling in 'EFI/Linux/./omarchy_linux.efi' 'EFI//Linux/omarchy_linux.efi' 'EFI/../EFI/Linux/omarchy_linux.efi' 'efi/linux/OMARCHY_LINUX.EFI'; do
+    write_limine_conf unhashed
+    printf '\n/Other\n    protocol: efi\n    path: boot():/%s#%s\n' "$spelling" "$(b2sum <"$file" | cut -d' ' -f1)" >>"$FIX/esp/limine.conf"
+    file_has_path_hash "$file" || fail_test "the guard missed the spelling ${spelling}"
+    # The fixture's filesystem has case, a FAT ESP has none: the stale reader
+    # resolves the name on disk, so only the exact-case spellings are checked.
+    [[ $spelling == *OMARCHY* || -z $(list_stale_os_hashes) ]] || fail_test "a fresh hash read as stale under ${spelling}"
+    ! file_has_path_hash "$FIX/esp/EFI/Linux/other.efi" || fail_test "another file read as hashed under ${spelling}"
+  done
+}
+
 run_case stale-os-hashes-are-found stale_os_hashes_are_found
 run_case snapshot-hashes-are-upstreams snapshot_hashes_are_upstreams
 run_case primary-is-sealed-signed-and-reproved primary_is_sealed_signed_and_reproved
@@ -208,4 +223,5 @@ run_case change-during-the-rebuild-is-caught change_during_the_rebuild_is_caught
 run_case fallback-states fallback_states
 run_case watch-units-are-template-instances watch_units_are_template_instances
 run_case shadowing-configs-are-listed shadowing_configs_are_listed
+run_case hashed-paths-are-resolved-before-they-compare hashed_paths_are_resolved_before_they_compare
 finish_suite

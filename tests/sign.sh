@@ -11,6 +11,7 @@ test_harness_init sign
 # Keys exist and the OS entry carries no hash, as after setup's regeneration.
 prepared_machine() {
   : >"$FIX/sbctl/keys"
+  : >"$(enabled_file)"
   write_limine_conf unhashed
   # shellcheck disable=SC2034 # The output helpers read it.
   QUIET=true
@@ -221,6 +222,45 @@ seal_only_waits_for_pacman_to_finish() {
   (( SECONDS < 3 )) || fail_test "the full pass waited for pacman"
 }
 
+# What the pass observed before it waited for pacman and the lock can have
+# changed by then: remove finished, a restore began, the ESP went away. The
+# pass looks again once it holds the lock, and a pass that finds the machine
+# removed does nothing (D2).
+pass_looks_again_after_its_wait() {
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  printf '# edit\n' >>"$FIX/esp/limine.conf"
+  wait_for_pacman() { rm -f -- "$(enabled_file)"; }
+  : >"$FIX/run/calls"
+  sign_boot_files seal-only || fail_test "a pass on a removed machine failed"
+  ! grep -q 'enroll-config' "$FIX/run/calls" || fail_test "the pass sealed the loader after remove"
+  : >"$(enabled_file)"
+  wait_for_pacman() { : >"$(restore_lock_path)"; }
+  sign_boot_files seal-only || fail_test "a pass beside a restore failed"
+  ! grep -q 'enroll-config' "$FIX/run/calls" || fail_test "the pass sealed the loader while a restore began"
+  rm "$(restore_lock_path)"
+  wait_for_pacman() { : >"$FIX/run/esp-unmounted"; }
+  sign_boot_files seal-only || fail_test "a pass whose ESP went away failed"
+  ! grep -q 'enroll-config' "$FIX/run/calls" || fail_test "the pass wrote to an unmounted ESP"
+  rm "$FIX/run/esp-unmounted"
+  wait_for_pacman() { :; }
+  sign_boot_files seal-only || fail_test "the pass after the drills failed"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader was not sealed once the way was clear"
+}
+
+# A file that limine.conf hashes under another spelling of its path is the
+# same file: the guard resolves both before it compares (D4).
+hashed_alias_is_not_signed() {
+  local file=$FIX/esp/EFI/Linux/custom.efi output
+  prepared_machine
+  printf 'custom loader' >"$file"
+  printf '\n/Custom\n    protocol: efi\n    path: boot():/EFI/Linux/./custom.efi#%s\n' "$(b2sum <"$file" | cut -d' ' -f1)" >>"$FIX/esp/limine.conf"
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed beside a file it must not sign"
+  [[ $output == *"Not signing ${file}"* ]] || fail_test "the refusal: ${output}"
+  [[ $(<"$file") == 'custom loader' ]] || fail_test "the aliased file was signed in place"
+  [[ -z $(list_stale_os_hashes) ]] || fail_test "a hash went stale: $(list_stale_os_hashes)"
+}
+
 run_case converges-and-is-idempotent converges_and_is_idempotent
 run_case history-files-are-never-touched history_files_are_never_touched
 run_case other-systems-files-are-never-touched other_systems_files_are_never_touched
@@ -234,4 +274,6 @@ run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention
 run_case restore-in-progress-is-left-alone restore_in_progress_is_left_alone
 run_case seal-only-reseals-and-stops seal_only_reseals_and_stops
 run_case seal-only-waits-for-pacman-to-finish seal_only_waits_for_pacman_to_finish
+run_case pass-looks-again-after-its-wait pass_looks_again_after_its_wait
+run_case hashed-alias-is-not-signed hashed_alias_is_not_signed
 finish_suite

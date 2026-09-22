@@ -104,6 +104,25 @@ sign_boot_files() {
   fi
   [[ $scope != seal-only ]] || wait_for_pacman
   boot_lock_acquire || return "$?"
+  # What was observed before the wait and the lock can have changed by now:
+  # remove may have finished, a restore may have started, the ESP may be gone.
+  # A pass that went on regardless would seal a loader nobody watches (D2).
+  if ! is_set_up; then
+    qnote "OmaSecBoot was removed while this pass waited; nothing to do"
+    boot_lock_release
+    return 0
+  fi
+  if restore_in_progress; then
+    qnote "A snapshot restore started while this pass waited; leaving the boot files to it"
+    boot_lock_release
+    return 0
+  fi
+  if ! esp_is_mounted_vfat; then
+    boot_lock_release
+    [[ $scope != seal-only ]] || return 0
+    fail "The EFI system partition is not mounted"
+    return 1
+  fi
 
   remove_stale_staging || rc=1
   apply_managed_settings || {

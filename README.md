@@ -125,10 +125,9 @@ From rescue media (the Omarchy installer on a USB stick), put a raw loader over 
 lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME
 mount /dev/<the EFI system partition> /mnt
 tar -xf /mnt/EFI/limine/limine_x64.bak -C /mnt/EFI/limine limine_x64.efi
-umount /mnt
 ```
 
-If there is no `limine_x64.bak`, or tar reports an error, copy `/mnt/EFI/BOOT/BOOTX64.EFI` over `/mnt/EFI/limine/limine_x64.efi` instead. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go on to [Removing it](#removing-it).
+If there is no `limine_x64.bak`, or tar reports an error, a live system that has the `limine` package holds the same executable at `/usr/share/limine/BOOTX64.EFI` (`pacman -Qo` that path says whether yours does; with a network, `pacman -Sy limine` puts it there): `cp /usr/share/limine/BOOTX64.EFI /mnt/EFI/limine/limine_x64.efi`. That is the packaged raw loader of the live system's Limine version, which normally starts the kernel images. Do not copy `/mnt/EFI/BOOT/BOOTX64.EFI` over it, which on a machine installed beside another system may be that system's. When the loader is in place, `umount /mnt`. Then start Omarchy with Secure Boot off and run `sudo omasecboot sign`, or go on to [Removing it](#removing-it).
 
 If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot off, then run `sudo omasecboot sign`.
 
@@ -157,7 +156,7 @@ Turn Secure Boot off, run `sudo omasecboot remove`, then `sudo pacman -R omasecb
 ## Limits
 
 - The Omarchy installer ISO does not boot under Secure Boot; OmaSecBoot is for installed systems.
-- Signing and sealing address changes made to the boot files while the system is off, as far as upstream's design allows. The raw loader that every Limine operation seals and signs comes from a backup on the ESP that nothing authenticates, and OmaSecBoot rebuilds from the same file: it adds no exposure and removes none. Root, and physical access with the firmware's credentials, are trusted. Microsoft's certificates stay in db, so the firmware still starts any other system that Microsoft signed: OmaSecBoot protects Omarchy's own boot chain, and does not lock the machine to it ([docs/spec.md](docs/spec.md), section 3).
+- Signing and sealing address changes made to the boot files while the system is off, as far as upstream's design allows. The raw loader that every Limine operation seals and signs comes from a backup on the ESP that nothing authenticates, and OmaSecBoot rebuilds from the same file: it adds no source of trust and removes none. A pass signs what it finds: every EFI program on the ESP that arrived unsigned, and whatever `limine.conf` holds is sealed, without knowing where either came from. Root, and physical access with the firmware's credentials, are trusted. Microsoft's certificates stay in db, so the firmware still starts any other system that Microsoft signed: OmaSecBoot protects Omarchy's own boot chain, and does not lock the machine to it ([docs/spec.md](docs/spec.md), section 3).
 - Your keys being enrolled does not mean Secure Boot is on; `status` reports both.
 - After the Platform Key is yours, updates that the manufacturer signs with its own Platform Key no longer apply. Microsoft's KEK entries stay, so the db and dbx updates that Microsoft signs can still be applied, as long as KEK holds Microsoft's 2023 certificate: the 2011 one expired in June 2026. `setup` warns before you delete the Platform Key when KEK lacks that certificate, because the manufacturer's updates are the easy way to get it, and `status` names any of Microsoft's 2023 certificates that KEK or db lack.
 - The backup under `/var/lib/omasecboot/firmware-backup/` is what this machine trusted before the change, not a factory key set. OmaSecBoot never writes dbx and restores no firmware keys; the firmware's own key menu does that.

@@ -124,16 +124,20 @@ list_hashed_paths() {
 
 # A file that limine.conf names with a "#hash", whoever wrote it. Signing such
 # a file in place would make its entry stale (D4, D5), and Limine stops at a
-# stale hash under Secure Boot (C1). FAT names compare without case.
+# stale hash under Secure Boot (C1). Both spellings are resolved the same way
+# before they compare, so "./", "//" or ".." in the entry name the same file;
+# FAT names compare without case.
 file_has_path_hash() {
-  local paths line value path named
+  local paths line value path named file
   paths=$(list_hashed_paths) || return 1
+  file=$(realpath -m -- "$1") || return 1
   while IFS= read -r line; do
     value=${line#*: }
     value=${value#*: }
     path=${value%#*}
-    named="$(esp_path)/${path#boot():/}"
-    [[ -z $line || $path != 'boot():/'* || ${1,,} != "${named,,}" ]] || return 0
+    [[ -n $line && $path == 'boot():/'* ]] || continue
+    named=$(realpath -m -- "$(esp_path)/${path#boot():/}") || return 1
+    [[ ${file,,} != "${named,,}" ]] || return 0
   done <<<"$paths"
   return 1
 }
@@ -414,6 +418,12 @@ restore_stock_boot_files() {
   primary=$(primary_loader_path)
   run_unlocked run_visible limine-install --no-efi-register || return 1
   run_unlocked run_visible limine-mkinitcpio || return 1
+  # limine-mkinitcpio reports success after a failed build (C2): the entries
+  # are judged, as setup judges them, against the settings now in effect.
+  [[ $(effective_setting ENABLE_VERIFICATION) == no ]] || os_entries_carry_hashes || {
+    fail "The menu entries carry no path hashes although the restored settings ask for them: limine-mkinitcpio did not rebuild them"
+    return 1
+  }
   run_visible limine-reset-enroll || return 1
   durable_sync "$primary" || return 1
   raw_loader | cmp -s -- - "$primary" || {

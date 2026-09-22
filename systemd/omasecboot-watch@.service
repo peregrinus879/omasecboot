@@ -3,8 +3,10 @@
 # limit is off so an editor that saves several times cannot fail the watcher.
 # A stop, as at shutdown, signals the pass alone, which ignores it and
 # finishes: a pass cut off before the rename leaves the loader the firmware
-# refuses, or the one sealed over the old limine.conf. The pass needs the ESP,
-# /etc, its state and sbctl's keys, and neither a network nor anybody's home.
+# refuses, or the one sealed over the old limine.conf. The stop budget covers
+# what the pass may wait for, a running pacman (300 s) and the boot lock
+# (90 s), before systemd would kill it. The pass needs the ESP, /etc, its
+# state and sbctl's keys, and neither a network nor anybody's home.
 [Unit]
 Description=Re-seal the Limine loader after %f changed
 StartLimitIntervalSec=0
@@ -12,6 +14,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 KillMode=mixed
+TimeoutStopSec=8min
 NoNewPrivileges=yes
 PrivateNetwork=yes
 ProtectHome=yes

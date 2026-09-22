@@ -52,11 +52,21 @@ for record in "${records[@]}"; do
   }
 done
 share_dir=$records_dir/share
+# Only earlier copies are replaced: a copy is a plain file whose first line is
+# a record's, or the archive; anything else in there is somebody's and stops
+# this script.
 if [[ -e $share_dir ]]; then
-  [[ -d $share_dir && ! -L $share_dir && -z $(find "$share_dir" -mindepth 1 ! -name '*.md' ! -name 'omasecboot-records.tgz' -print -quit) ]] || {
-    printf 'Refusing to replace %s: it holds something other than earlier copies\n' "$share_dir" >&2
+  [[ -d $share_dir && ! -L $share_dir ]] || {
+    printf 'Refusing to replace %s: it is not a directory of earlier copies\n' "$share_dir" >&2
     exit 2
   }
+  while IFS= read -r -d '' entry; do
+    if [[ -L $entry || ! -f $entry ]] ||
+      { [[ ${entry##*/} != omasecboot-records.tgz ]] && [[ $(head -n 1 -- "$entry") != '# Acceptance record '* ]]; }; then
+      printf 'Refusing to replace %s: %s is not an earlier copy\n' "$share_dir" "${entry##*/}" >&2
+      exit 2
+    fi
+  done < <(find "$share_dir" -mindepth 1 -maxdepth 1 -print0)
   rm -rf -- "$share_dir"
 fi
 mkdir -p "$share_dir" || exit 2

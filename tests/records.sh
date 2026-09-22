@@ -157,8 +157,34 @@ nothing_to_share_is_a_usage_error() {
 
 run_case identifiers-are-renamed-and-the-rest-stays identifiers_are_renamed_and_the_rest_stays
 run_case originals-stay-and-a-second-run-gives-the-same-names originals_stay_and_a_second_run_gives_the_same_names
+# The share directory gives up only earlier copies: anything else in it is
+# somebody's, and the script stops rather than deleting it.
+share_replaces_only_its_own_copies() {
+  local records=$FIX/records
+  mkdir -p "$records/share"
+  # shellcheck disable=SC2016 # Markdown backticks.
+  printf '# Acceptance record x\n\n- Row: `x`\n- Recorded: 20260101T000000Z\n- Command: `(state only)`\n' >"$records/20260101T000000Z-x.md"
+  printf 'my notes\n' >"$records/share/notes.md"
+  bash "$ROOT_DIR/tests/acceptance-share.sh" "$records" >/dev/null 2>"$FIX/run/share-error" && fail_test "the share step replaced a stranger's file"
+  [[ -e $records/share/notes.md && $(<"$records/share/notes.md") == 'my notes' ]] || fail_test "notes.md was deleted"
+  grep -q 'notes.md is not an earlier copy' "$FIX/run/share-error" || fail_test "no reason: $(<"$FIX/run/share-error")"
+  rm "$records/share/notes.md"
+  mkdir "$records/share/folder.md"
+  bash "$ROOT_DIR/tests/acceptance-share.sh" "$records" >/dev/null 2>&1 && fail_test "a directory named like a copy was deleted"
+  rmdir "$records/share/folder.md"
+  printf 'hidden notes\n' >"$records/share/..notes"
+  bash "$ROOT_DIR/tests/acceptance-share.sh" "$records" >/dev/null 2>&1 && fail_test "a name beginning with two dots was deleted"
+  [[ -e $records/share/..notes ]] || fail_test "..notes is gone"
+  rm "$records/share/..notes"
+  printf '# Acceptance record x\n' >"$records/share/20260101T000000Z-x.md"
+  : >"$records/share/omasecboot-records.tgz"
+  bash "$ROOT_DIR/tests/acceptance-share.sh" "$records" >/dev/null 2>&1 || fail_test "earlier copies were not replaced"
+  [[ -s $records/share/omasecboot-records.tgz ]] || fail_test "no archive after the regeneration"
+}
+
 run_case names-that-stay-are-pointed-at names_that_stay_are_pointed_at
 run_case only-records-are-read-and-only-copies-deleted only_records_are_read_and_only_copies_deleted
 run_case recorder-keeps-control-and-raw-bytes-out recorder_keeps_control_and_raw_bytes_out
 run_case nothing-to-share-is-a-usage-error nothing_to_share_is_a_usage_error
+run_case share-replaces-only-its-own-copies share_replaces_only_its_own_copies
 finish_suite

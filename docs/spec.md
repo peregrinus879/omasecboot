@@ -25,7 +25,7 @@ The cost of own keys is D9: one round trip through a key menu that differs from 
 
 ### D2. Converge and verify, no journal
 
-State is derived from observation on every run, every command is idempotent, and an interrupted operation is finished by running the same command again. A journal is a second account of the machine that can be wrong: `/var/lib` rolls back with a snapshot restore while the ESP and the firmware do not, and power loss separates a record from what it records. Observation cannot go stale. The cost: the tool can say what is true now, never what it did last, and the files it keeps are only what observation cannot recover: consent, the settings' originals, the keys' backup, and one note that a pass could not finish, which the next clean pass removes.
+State is derived from observation on every run, every command is idempotent, and an interrupted operation is finished by running the same command again. A journal is a second account of the machine that can be wrong: `/var/lib` rolls back with a snapshot restore while the ESP and the firmware do not, and power loss separates a record from what it records. An observation can go stale while a command waits, for pacman, for the lock or for a person, so the pass looks again once it holds the lock, and what it finds then decides. The cost: the tool can say what is true now, never what it did last, and the files it keeps are only what observation cannot recover: consent, the settings' originals, the keys' backup, and one note that a pass could not finish, which the next clean pass removes.
 
 ### D3. The loader is sealed over `limine.conf`, and OS entries carry no path hashes
 
@@ -60,6 +60,8 @@ Limine checks a sealed loader's checksum unconditionally and refuses to start on
 
 A machine that Omarchy installed beside another system starts without a fallback [C6], so `setup` offers to add one through `limine-install --fallback`, and only while nothing stands at that path, because upstream's step copies over whatever does [C2]. A fallback that is signed but not sealed, which the comments in upstream's configuration file suggest [C2], would boot under Secure Boot without enforcing `limine.conf`; `status` reports one and `sign` restores the raw copy. The cost: a firmware that loses its Limine boot entry but keeps the keys needs one Secure Boot toggle to recover.
 
+Two limits are stated rather than hidden. `remove` returns the boot files to stock through upstream's install, which deploys the fallback by the user's `ENABLE_LIMINE_FALLBACK` setting as every Limine upgrade does [C2]: with `no`, Omarchy's setting beside another system [C6], another system's loader at that path stays; with `yes` it is replaced by upstream's, on `remove` as on any upgrade. And "raw" is what sbctl can tell, no seal and no signature by the current local key: a signature by another key that db still trusts is not seen, so `status` calls the fallback upstream's copy only when its bytes are, and says otherwise what sbctl could tell.
+
 ### D7. Nothing is registered in sbctl's file list
 
 Nothing is registered in sbctl's file list, because nothing in this stack needs it and one row can do damage. Upstream's tools sign with plain `sbctl sign`: the mkinitcpio hook signs each UKI while it is built, and `90-limine-enroll-config` signs the loader after sealing it [C2], so on a stock machine the list is empty and `sbctl sign-all` has nothing to do. A row for the loader would have sbctl's pacman hook sign the raw executable that Omarchy's installer hook leaves after a Limine upgrade [C6]: a loader that starts under Secure Boot and enforces nothing, until the next pass replaces it. A row for a history file or the fallback is the damage D5 and D6 exist to prevent. And the list lives on the root filesystem, which a snapshot restore rolls back while the ESP stays as it is. The pass finds its files by looking at the ESP. The cost: `sbctl list-files` shows nothing of this tool's, though `sbctl verify` does, because it scans the ESP; and `sbctl sign-all` and `sbctl rotate-keys` pass its files by, so `sign` runs after a key rotation. The list stays the user's for files outside the ESP, such as the signed helper fwupd needs.
@@ -70,7 +72,10 @@ The seal holds two files together, and either can change where no Limine hook ru
 
 - waits for a running pacman, five minutes at most, so it judges what the transaction's last hook left behind; a lock file without a pacman process is a crashed pacman's and is not waited for. The lock is a plain file with no owner to ask, so a package front end that runs no process named pacman looks the same and is not waited for either; the result is still right, because every later change of the loader or of `limine.conf` starts the pass again;
 - rebuilds the loader only when the proof fails, and repeats until `limine.conf` held still across a round, because systemd merges changes that arrive while the service runs [C5]. Three rounds are the bound: any later change starts the pass again. The service's start rate limit is off, so a burst of saves cannot disable a watcher;
-- ignores the stop signal of a shutdown, which `KillMode=mixed` sends to it alone, because a pass cut off before the rename leaves the loader the firmware refuses, or the one sealed over the old `limine.conf`.
+- ignores the stop signal of a shutdown, which `KillMode=mixed` sends to it alone, because a pass cut off before the rename leaves the loader the firmware refuses, or the one sealed over the old `limine.conf`; the unit's stop budget of eight minutes covers the waits above before systemd would kill every process of the service, the pass included [C5];
+- looks again once it holds the lock: a machine that was removed, a restore that began or an ESP that went away while it waited ends the pass with nothing written (D2).
+
+systemd does not replay a change that lands after the pass's last proof and before it exits [C5]; the next change of either file starts the pass again, and `status` reports the seal in between.
 
 The watchers need a running systemd, so a Limine upgrade from a chroot leaves the raw loader until the next pass; and if Omarchy drops its installer hook, the loader's watcher guards only copies by hand, and stays, because it is cheap.
 
@@ -105,14 +110,14 @@ A chainload entry is upstream's or the user's: Limine starts it under Secure Boo
 
 ### Threat model
 
-Secure Boot's own threat is the offline modification of boot files; signing and sealing address it as far as the upstream tools' design allows. One limit is upstream's: the raw loader that every Limine operation seals and signs comes from an unauthenticated backup file on the ESP [C2], and OmaSecBoot rebuilds from the same file, so it adds no exposure and removes none. At runtime the only adversary considered is a non-root user; root, and physical access with the firmware's credentials, are trusted. db keeps Microsoft's certificates (D9), so the firmware still starts any loader that Microsoft signed and dbx does not revoke, another distribution's shim included: signing and sealing keep Omarchy's own boot chain from being changed unnoticed, and do not keep another signed system from being started on the machine.
+Secure Boot's own threat is the offline modification of boot files; signing and sealing address it as far as the upstream tools' design allows. One limit is upstream's: the raw loader that every Limine operation seals and signs comes from an unauthenticated backup file on the ESP [C2], and OmaSecBoot rebuilds from the same file, so it adds no source of trust and removes none. A pass authorises what it finds: a full pass signs every EFI program on the ESP that arrived unsigned (D4) and seals whatever `limine.conf` holds, without knowing where either came from, so a file placed on the ESP while the system was off is signed by the next full pass. Four checks stand in a row: the firmware verifies each image against db, Limine checks `limine.conf` against its embedded checksum, OmaSecBoot checks that the boot files agree and were signed with the current local key, and its signing rule takes what stands on the ESP for the user's. An older file that db still trusts is not refused for being older. At runtime the only adversary considered is a non-root user; root, and physical access with the firmware's credentials, are trusted. db keeps Microsoft's certificates (D9), so the firmware still starts any loader that Microsoft signed and dbx does not revoke, another distribution's shim included: signing and sealing keep Omarchy's own boot chain from being changed unnoticed, and do not keep another signed system from being started on the machine.
 
 ### Non-goals
 
 - No transaction journal, state machine, version pin or patched upstream package (D2).
 - No pacman hook of any kind, and no write to sbctl's file list beyond removing rows that would cause damage.
 - No crash-atomic publication of several files. A single file is replaced through a staging file in the same directory, a sync and a rename; FAT rename is not claimed to be atomic.
-- No dbx writer, no restoration of factory keys, no `sbctl reset`, no access to NTFS, no enforcement of module signatures. The firmware's key menu restores its factory keys on every machine that has the menu D9 needs, and it is the only writer that also restores dbx; a restore by this tool would need a writer of signed variables of its own, the one job the design leaves to sbctl. The backup is the reference for D9's proof and a record for a person; no command reads it back. `remove` leaves sbctl's keys, because the firmware may still hold their certificates, and a PK whose private key is gone can sign no KEK update [C9].
+- No dbx writer, no restoration of factory keys, no `sbctl reset`, no access to NTFS, no enforcement of module signatures. The firmware's key menu restores its factory keys on every machine that has the menu D9 needs, dbx among them, which a firmware update, fwupd or Windows also writes [C4]; a restore by this tool would need a writer of signed variables of its own, the one job the design leaves to sbctl. The backup is the reference for D9's proof and a record for a person; no command reads it back. `remove` leaves sbctl's keys, because the firmware may still hold their certificates, and a PK whose private key is gone can sign no KEK update [C9].
 
 ### Never claimed
 
@@ -196,10 +201,9 @@ The one command a user needs; it is run again after each step it asks for. It is
 Boot files, on every run:
 
 1. Preflight: x86_64, UEFI, a vfat ESP resolved through the four configuration layers, `ENABLE_UKI=yes`, the tools present, no `limine.conf` in a place Limine reads first, and readable `SecureBoot` and `SetupMode` variables, because `remove` refuses without a readable `SecureBoot` and the firmware step needs `SetupMode`.
-2. `sbctl create-keys` only when there are no keys, without creating anything under `/var/lib/sbctl` itself [C4]; `pacman -D --asexplicit sbctl`, so orphan cleanup never offers to remove it.
-3. The originals of the two managed settings are saved. Whatever `/etc/default/limine` said before is the user's and comes back with `remove`, including values equal to the managed ones.
-4. Rows that would make sbctl sign a history file or the fallback in place are removed from its file list.
-5. Under the lock: the managed settings, then `enabled`, then regeneration of the OS entries when they carry hashes.
+2. With `SecureBoot` reading 1, the keys must exist and db must hold their certificate before anything is written, or `setup` refuses and names the way, Secure Boot off: a loader signed with keys the firmware does not trust stops the machine, and the step that would enroll them comes later (D10). Then `sbctl create-keys` only when there are no keys, without creating anything under `/var/lib/sbctl` itself [C4]; `pacman -D --asexplicit sbctl`, so orphan cleanup never offers to remove it.
+3. Rows that would make sbctl sign a history file or the fallback in place are removed from its file list.
+4. Under the lock, as `remove` deletes them under it: the originals of the two managed settings, which are the user's and come back with `remove`, values equal to the managed ones included; then the managed settings, then `enabled`, then regeneration of the OS entries when they carry hashes.
 6. The offer of D6 when there is no fallback loader, through `limine-install --fallback --no-efi-register`.
 7. The pass, which enables the watchers.
 8. A warning while the machine has no Limine fallback, because there is none or because a loader that is not Limine's stands at its path, and on the first run the advice to take a snapshot.
@@ -222,11 +226,12 @@ Where Windows or a BitLocker volume is found, or cannot be ruled out, the delete
 
 The converge-and-verify pass that people, the hook and the watchers all run. It is idempotent and cheap when nothing changed.
 
+- Looks again once it holds the lock, since the wait for pacman can be long: a machine that was removed, a restore that began or an ESP that went away ends the pass with nothing written (D2).
 - Sweeps staging files a killed pass left on the ESP, and ensures the managed settings.
 - Keeps the Windows entry in step with `windows-enabled`: written or replaced while the flag exists, taken out when it does not. Whatever keeps the entry from being written is said and left to `status`, never made the pass's failure.
 - Proves the primary loader or rebuilds it (section 4).
 - Restores the raw copy over a fallback that is Limine's (it contains the checksum marker) and has been signed or sealed, and never touches any other `BOOTX64.EFI`.
-- Signs EFI files that arrived unsigned (D4, D5 and D6 apply), never one that `limine.conf` names with a path hash, and proves each signable file with one read.
+- Signs EFI files that arrived unsigned (D4, D5 and D6 apply), never one that `limine.conf` names with a path hash under any spelling of its path, and proves each signable file with one read.
 - Fails on a stale path hash of an OS entry, re-enables the watchers when either is inactive, and clears or writes `needs-attention`.
 - Writes nothing to an ESP with less than 2 MiB free.
 - Never asks sbctl for its file list, which would make sbctl read every tracked file [C4].
@@ -251,9 +256,9 @@ The way back to stock, named as Omarchy names the counterpart of a `setup` [C6].
 - It is driven by `settings-originals`, which it deletes last, so it can be run again after an interruption:
   1. It takes the lock and deletes `enabled`, so the hook goes quiet.
   2. It disables the watchers and restores the settings.
-  3. It runs upstream's install, entry generation and reset; their post-hooks sign the primary loader while keys exist, so the reset comes last.
+  3. It runs upstream's install, entry generation and reset; their post-hooks sign the primary loader while keys exist, so the reset comes last. The entries are judged as `setup` judges them, against the restored settings, because `limine-mkinitcpio` reports success after a failed build [C2]; a run that cannot prove them keeps `settings-originals` and fails, and the next run finishes.
   4. It verifies that the primary loader is upstream's raw executable again.
-  5. Only then does it take the Windows entry and the flag out, because `limine.conf` must not change under a sealed loader, and clear `needs-attention`.
+  5. Only then does it take the Windows entry and the flag out, because `limine.conf` must not change under a sealed loader, clear `needs-attention`, and delete `settings-originals`, still under the lock.
 - Keys and firmware backups stay, and so does a fallback loader that `setup` added: it is upstream's raw copy.
 
 ### `windows preflight | setup | remove | status | bootnext | available`
@@ -289,6 +294,8 @@ A finding or a feature cites a row here, or adds one with its evidence.
 | --- | --- | --- | --- | --- |
 | The firmware never had a boot entry for the Limine loader: a board upstream installs with `--skip-uefi`, or a registration that failed [C2] | The machine starts through the fallback path, which is raw (D6) and refused | Boots | Secure Boot off, `limine-install`, check with `efibootmgr`, `setup` again | `status` blocks, and `setup` holds back the instruction to turn Secure Boot on, without an active firmware entry for the primary loader |
 | The firmware loses its Limine boot entry but keeps the keys (a firmware or Windows update) | The raw fallback is refused; the firmware boots Windows or stops | The fallback boots | Secure Boot off, boot, `limine-install`, Secure Boot on | Documented; the accepted cost of D6 |
+| `remove` on a machine with `ENABLE_LIMINE_FALLBACK=yes` and another system's loader at the fallback path | n/a | Upstream's install replaces that loader, as every Limine upgrade does [C2] | Put the other loader back from its own media | Documented (D6); `status` names a foreign fallback while the machine is set up, and the setting decides [C3] |
+| The signing keys are missing or their certificate is not in db while Secure Boot is on (a snapshot restore from before `setup`, lost keys) | Boots on the files as they are | n/a | Secure Boot off, then `setup` | `setup` refuses before it creates keys or writes a file (section 6) |
 | Upstream never refreshes the fallback (`ENABLE_LIMINE_FALLBACK` is no, as Omarchy's installer writes beside another system [C6], or unset [C3]) | The fallback is refused, as always | The rescue loader is an older Limine, which a later major's `limine.conf` may not suit | `limine-install --fallback` | `status` notes a fallback that is another build than the primary loader, unless upstream holds the packaged Limine back, when its step would refresh nothing [C2] |
 
 ### 7.3 Power loss
@@ -328,6 +335,8 @@ A finding or a feature cites a row here, or adds one with its evidence.
 | The firmware's key menu cleared KEK and db with the PK, or left something in between | n/a: Setup Mode | Boots | Restore the factory keys in the firmware, then delete only the PK | D9: rebuild only from lists that are empty or what an interrupted rebuild wrote, behind a confirmation that names what cannot come back; anything else is refused with the list |
 | The firmware has no Platform Key and does not report Setup Mode | n/a | Boots | Look at the firmware's key menu; restore the factory keys | `setup` writes nothing and says so |
 | `SetupMode` still reads 1 after the PK write | n/a | n/a | Reboot, `setup` | Judged by the variables [C10] |
+| A mode variable cannot be read during the firmware step | n/a | n/a | Look at efivarfs, `setup` again | `setup` refuses before anything is written; an empty value never passes for "off" |
+| A backup carries a name later than the clock reads now (a clock that ran ahead, C10) | n/a | n/a | Set the clock right, `setup` again | `setup` refuses to take a new backup beside it, because the names order the backups and the reference is the newest complete one; the backups and their directory are root's alone whatever the caller's umask |
 | The enrollment is interrupted between db, KEK and PK | Secure Boot cannot be turned on yet | Boots | `setup` again | A variable that already holds the local certificate is skipped |
 | A firmware update or CMOS reset restores the factory keys | Limine is refused; Windows boots | Boots | Secure Boot off, `setup` again | `status` error while Secure Boot is on without the local keys; with it off, `status` names the firmware step again |
 | Microsoft or firmware servicing changes db or dbx | Unaffected | Unaffected | None | Never refused |
@@ -336,7 +345,7 @@ A finding or a feature cites a row here, or adds one with its evidence.
 
 | Event | Secure Boot on | Secure Boot off | Recovery | Handling |
 | --- | --- | --- | --- | --- |
-| Omarchy replaces `limine.conf` from its template (`omarchy-refresh-limine`, `omarchy-reinstall-configs`) | The Windows entry disappears; an entry written into the bare template would stand first and shift Omarchy's `default_entry` [C6, C10] | Same | `sign` | The `windows-enabled` flag; the pass writes nothing into a `limine.conf` without menu entries and puts the entry back behind Omarchy's once `limine-update` has filled it; `status` reports an entry that stands before them |
+| Omarchy replaces `limine.conf` from its template (`omarchy-refresh-limine`, `omarchy-reinstall-configs`) | The Windows entry disappears; an entry written into the bare template would stand first and shift Omarchy's `default_entry` [C6, C10] | Same | `sign` | The `windows-enabled` flag; the pass writes nothing into a `limine.conf` without menu entries and puts the entry back behind Omarchy's once `limine-update` has filled it; `status` reports an entry that stands before them. A write that finds `limine.conf` changed right before its rename gives up, so a newer file of upstream's is not lost; the instant between that check and the rename stays, and the next pass converges |
 | The tool's Windows comment stands in an entry that is not as the tool writes it, `limine.conf` is not root's alone, or it changed while the entry was being written | Omarchy boots; the Windows entry may be missing or out of date | Same | Fix what the pass or `status` names, then `sign` | The pass says so and goes on; `status` error; a refused write never touches `limine.conf` |
 | Windows is removed, or a second Windows Boot Manager entry appears, while the entry is enabled | Omarchy boots; the menu entry may point nowhere | Same | `windows remove`, or fix the firmware's entries | The pass goes on quietly; `status` error that names `windows remove`; the menu guard hides the row |
 | A chainload entry for Windows stands beside a BitLocker volume | Windows starts; on the recorded machine BitLocker asked for its recovery key at each change between that entry and the firmware's way [C10], and by C8 a chainload start is asked again after the loader is sealed anew, which has no record | No record | Start Windows through the firmware only and take the chainload entry out with `limine-remove-entry` [C2] | A note in `status`, `windows setup` and `windows status`; the entry is never written or removed (D11) |
@@ -349,13 +358,15 @@ A finding or a feature cites a row here, or adds one with its evidence.
 | Another tool holds the lock | The command waits, then exits 75 | Same | Run it again | The lock is named, no `needs-attention`; the hook waits five seconds at most |
 | The boot lock cannot be opened | Nothing is changed | Same | Look at `/run/lock` | The command fails and names the lock; it never proceeds unlocked |
 | `setup` or `remove` stops half way, for example when a Limine tool fails | Depends on where it stopped; `status` exit 1 | Same | `remove`, or `setup` | `settings-originals` without `enabled`; `status` names both commands |
+| `limine-mkinitcpio` reports success without rebuilding the entries during `remove` [C2] | Boots | Boots | `remove` again | `remove` judges the entries against the restored settings, keeps `settings-originals` and fails; the next run finishes |
+| A watcher's pass waits for pacman while `remove` finishes | Boots | Boots | None needed | The pass looks again under the lock and does nothing on a removed machine (D2) |
 | `enabled` exists without the settings' originals | Boots | Boots | `setup` again, which records the settings as they stand now, then `remove`; the two managed settings then stay in `/etc/default/limine` and are deleted by hand | `remove` refuses, says that what the settings were before is gone, and names `setup`; nothing is guessed |
 | No terminal, or a declined prompt | n/a | n/a | Run it again in a terminal | The refusal says what was cancelled |
 | The package is removed while set up | sbctl and upstream keep signing the UKI and the primary loader, but nothing repairs a change that bypasses them: after the next Limine upgrade the installer hook's raw loader [C6] is refused | Boots until `limine.conf` is edited by hand: upstream keeps sealing the loader, and nothing re-seals it after an edit [C1] | Reinstall, or `remove` first | The package warns before it goes, and never blocks the removal; the documented removal order; Omarchy's remove wrapper runs `remove`; `setup` marks sbctl as explicitly installed |
 
 ## 8. The package
 
-[CONTRIBUTING.md](../CONTRIBUTING.md) owns the layout of the code. The package also holds the Limine hook, the two unit templates, the menu fragment for Omarchy and its documentation. It carries version floors only and ships no state directory and no tmpfiles declaration. Its one install scriptlet prints a warning before the package is removed from a machine that is still set up; it never fails and changes nothing.
+[CONTRIBUTING.md](../CONTRIBUTING.md) owns the layout of the code. The package also holds the Limine hook, the two unit templates, the menu fragment for Omarchy and its documentation. It carries version floors only, capability floors and not tested versions: `limine` 11.0.0 brought the `efi_boot_entry` protocol, `sbctl` 0.18 and `limine-mkinitcpio-hook` 1.38.0 are the versions the contracts were read at, and the machine of C10 ran Limine 12.8.0 and 12.9.0. It ships no state directory and no tmpfiles declaration. Its one install scriptlet prints a warning before the package is removed from a machine that is still set up; it never fails and changes nothing.
 
 ## 9. Tests
 

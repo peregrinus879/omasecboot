@@ -116,16 +116,20 @@ b2sum_file() {
 # data and its directory entry are only durable together.
 durable_sync() { sync -f "$1"; }
 
-# Writes stdin to the destination through a temporary file in the same
-# directory, synced before and after the rename. FAT rename is not atomic
-# across power loss; this only guarantees no reader sees a partial file.
+# atomic_write DESTINATION MODE [GUARD...]: writes stdin to the destination
+# through a temporary file in the same directory, synced before and after the
+# rename. FAT rename is not atomic across power loss; this only guarantees no
+# reader sees a partial file. A GUARD command runs right before the rename and
+# refuses the write when it fails: the last moment to see that the destination
+# changed while the content was being staged.
 atomic_write() {
   local destination=$1 mode=$2 parent temporary
+  shift 2
   parent=$(dirname "$destination")
   [[ -d $parent ]] || return 1
   temporary=$(umask 077 && mktemp "${parent}/.${destination##*/}.XXXXXX") || return 1
   if cat >"$temporary" && chmod "$mode" "$temporary" && durable_sync "$temporary" &&
-    mv -f -- "$temporary" "$destination"; then
+    { (( $# == 0 )) || "$@"; } && mv -f -- "$temporary" "$destination"; then
     durable_sync "$parent"
   else
     rm -f -- "$temporary"

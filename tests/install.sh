@@ -39,6 +39,7 @@ for unit in omasecboot-watch@.path omasecboot-watch@.service; do
   [[ -f $STAGE/usr/lib/systemd/system/$unit ]] || fail_test "missing unit ${unit}"
   ! grep -q '@BINDIR@' "$STAGE/usr/lib/systemd/system/$unit" || fail_test "unsubstituted path in ${unit}"
 done
+grep -qx 'TimeoutStopSec=8min' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the stop budget does not cover the pass's waits"
 grep -qx 'KillMode=mixed' "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "a stop would signal the tools the watchers' pass runs, not the pass alone"
 for hardening in NoNewPrivileges=yes PrivateNetwork=yes ProtectHome=yes; do
   grep -qx "$hardening" "$STAGE/usr/lib/systemd/system/omasecboot-watch@.service" || fail_test "the watchers' service lost ${hardening}"

@@ -593,6 +593,23 @@ real_shape_file_reads_right() {
   return 0
 }
 
+# Omarchy's refresh replaces limine.conf outside the lock (C6). A write that
+# finds the file changed right before its rename gives up, so the newer file
+# stays; the next pass writes the entry.
+late_writer_is_not_overwritten() {
+  local output
+  set_up_with_windows
+  write_limine_conf unhashed
+  durable_sync() { [[ $1 != "$FIX"/esp/.limine.conf.* ]] || printf '# newer upstream line\n' >>"$FIX/esp/limine.conf"; }
+  output=$(write_windows_entry 'Windows Boot Manager' 2>&1) && fail_test "the write went over a newer file"
+  [[ $output == *'changed while the Windows entry was being written'* ]] || fail_test "no word: ${output}"
+  grep -q 'newer upstream line' "$FIX/esp/limine.conf" || fail_test "the newer line was lost"
+  [[ $(entry_count) == 0 ]] || fail_test "the entry was written over the newer file"
+  durable_sync() { :; }
+  write_windows_entry 'Windows Boot Manager' || fail_test "the next write failed"
+  { [[ $(entry_count) == 1 ]] && grep -q 'newer upstream line' "$FIX/esp/limine.conf"; } || fail_test "the next write lost the line"
+}
+
 run_case boot-entries-are-read-from-the-firmware boot_entries_are_read_from_the_firmware
 run_case target-is-one-clear-entry-or-none target_is_one_clear_entry_or_none
 run_case full-form-device-path-is-read full_form_device_path_is_read
@@ -617,4 +634,5 @@ run_case remove-reminds-of-the-recovery-key remove_reminds_of_the_recovery_key
 run_case entry-waits-for-upstreams-entries entry_waits_for_upstreams_entries
 run_case displaced-entry-is-moved-behind-upstreams displaced_entry_is_moved_behind_upstreams
 run_case real-shape-file-reads-right real_shape_file_reads_right
+run_case late-writer-is-not-overwritten late_writer_is_not_overwritten
 finish_suite

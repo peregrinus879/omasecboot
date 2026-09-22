@@ -108,7 +108,13 @@ show_loader_status() {
   case $(fallback_state) in
     absent) note "No fallback loader: after a limine.conf mistake only rescue media can boot this machine; ${BOLD}sudo omasecboot setup${NC} offers to add one" ;;
     raw)
-      pass "The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off"
+      # The bytes prove upstream's copy; sbctl can only say that no seal and no
+      # signature by the current key are there (D6).
+      if cmp -s -- "$(package_loader_path)" "$(fallback_loader_path)" || raw_loader 2>/dev/null | cmp -s -- - "$(fallback_loader_path)"; then
+        pass "The fallback loader is upstream's raw copy, the rescue loader when Secure Boot is off"
+      else
+        note "The fallback loader carries no seal and no signature by the current key, as far as sbctl can tell; it is not byte for byte upstream's copy"
+      fi
       # Upstream refreshes it only where its settings say so (C3), and never
       # on a machine that Omarchy installed beside another system (C6). While
       # upstream holds a Limine major back, its step would refresh nothing (C2).
@@ -171,7 +177,7 @@ show_sbctl_rows_status() {
 # Path hashes of OS entries that no longer match, and the snapshot images
 # from before setup, which are upstream's and stay unsigned (D5).
 show_path_hash_status() {
-  local stale line file old_snapshots=0
+  local stale line file old_snapshots=0 unread_snapshots=0
   if stale=$(list_stale_os_hashes); then
     while IFS= read -r line; do
       [[ -z $line ]] ||
@@ -182,8 +188,13 @@ show_path_hash_status() {
   fi
 
   while IFS= read -r file; do
-    [[ -z $file ]] || signature_state "$file" || old_snapshots=$((old_snapshots + 1))
+    [[ -n $file ]] || continue
+    signature_state "$file" || case $? in
+      1) old_snapshots=$((old_snapshots + 1)) ;;
+      *) unread_snapshots=$((unread_snapshots + 1)) ;;
+    esac
   done < <(list_history_files)
+  (( unread_snapshots == 0 )) || note "${unread_snapshots} snapshot image(s) could not be checked for a signature"
   (( old_snapshots == 0 )) ||
     note "${old_snapshots} snapshot image(s) predate Secure Boot setup and are unsigned: those entries boot only with Secure Boot off. They leave with snapshot rotation, or within seconds when those snapshots are deleted (${BOLD}sudo snapper -c root delete NUMBER${NC})"
 }

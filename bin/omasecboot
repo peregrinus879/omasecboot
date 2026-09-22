@@ -87,8 +87,9 @@ print_entries() {
 # while a PK was in place; a machine that reached Setup Mode before its first
 # setup has only a backup of what was left, and is told so.
 setup_enrollment() {
-  local backup path lost question name
-  [[ $(read_mode_variable SetupMode) == 1 ]] || die "The firmware has no Platform Key but does not report Setup Mode; nothing was written. Restore the factory keys in the firmware's key menu and run ${BOLD}sudo omasecboot setup${NC} again"
+  local backup path lost question name setup_mode
+  setup_mode=$(read_mode_variable SetupMode) || die "Could not read the firmware's SetupMode variable; nothing was written"
+  [[ $setup_mode == 1 ]] || die "The firmware has no Platform Key but does not report Setup Mode; nothing was written. Restore the factory keys in the firmware's key menu and run ${BOLD}sudo omasecboot setup${NC} again"
   if ! backup=$(reference_backup); then
     backup=$(latest_firmware_backup) || backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
     warn "The only backup was taken in Setup Mode, so OmaSecBoot cannot tell what the firmware's key menu removed. If more than the Platform Key went, restore the factory keys in the firmware and run ${BOLD}sudo omasecboot setup${NC} again before you go on"
@@ -134,7 +135,7 @@ setup_enrollment() {
   note "The backup of the keys this machine trusted is in ${backup}"
   acknowledge_windows_encryption || exit 1
   confirm "the key enrollment" "$question" || exit 1
-  enroll_local_keys "$path" || die "The enrollment stopped. The firmware stays in Setup Mode; run ${BOLD}sudo omasecboot setup${NC} again"
+  enroll_local_keys "$path" || die "The enrollment stopped, and the firmware may hold a part of it. Run ${BOLD}sudo omasecboot setup${NC} again: it reads the variables and writes what is missing"
   { read_enrollment_plan && firmware_is_enrolled; } || die "The firmware does not hold your keys after the write; run ${BOLD}sudo omasecboot setup${NC} again"
   pass "Your keys are enrolled"
   act "Restart (${BOLD}systemctl reboot${NC}), then run ${BOLD}sudo omasecboot setup${NC} once more"
@@ -144,16 +145,18 @@ setup_enrollment() {
 # holds. first_run: this invocation created "enabled", so it ends
 # with an instruction and leaves any firmware write to the next one.
 setup_firmware_step() {
-  local first_run=$1 backup
+  local first_run=$1 backup setup_mode secure_boot
+  { setup_mode=$(read_mode_variable SetupMode) && secure_boot=$(read_mode_variable SecureBoot); } ||
+    die "Could not read the firmware's SecureBoot and SetupMode variables"
   read_enrollment_plan || die "Could not ask sbctl what an enrollment would write"
   # Everything after this rests on knowing the local certificates, so it is
   # settled before the user is asked to delete anything.
   local_certificates_are_identified || die "sbctl's export does not show exactly one certificate of yours for each of db, KEK and PK; look at the keys with ${BOLD}sudo sbctl status${NC}"
   if firmware_is_enrolled; then
     # SetupMode keeps reading 1 in the boot that wrote the PK (C10).
-    if [[ $(read_mode_variable SetupMode) == 1 ]]; then
+    if [[ $setup_mode == 1 ]]; then
       act "Your keys are enrolled. Restart (${BOLD}systemctl reboot${NC}), then run ${BOLD}sudo omasecboot setup${NC} once more"
-    elif [[ $(read_mode_variable SecureBoot) == 1 ]]; then
+    elif [[ $secure_boot == 1 ]]; then
       pass "Secure Boot is on with your keys. Setup is complete"
     else
       pass "Your keys are enrolled and every boot file is proved"
@@ -182,7 +185,7 @@ setup_firmware_step() {
 }
 
 cmd_setup() {
-  local first_run=true
+  local first_run=true secure_boot
   no_arguments "$@"
   check_root setup
   header "Setup"
@@ -192,6 +195,18 @@ cmd_setup() {
   ! restore_in_progress || die "A snapshot restore is running; run this again when it has finished"
   ! is_set_up || first_run=false
 
+  # With Secure Boot on, a loader signed with keys the firmware does not trust
+  # stops the machine as soon as it is in place, and the firmware step that
+  # would enroll them comes later (D10): the keys must exist and be trusted
+  # before anything is written.
+  secure_boot=$(read_mode_variable SecureBoot) || die "Could not read the firmware's SecureBoot variable; nothing was written"
+  if [[ $secure_boot == 1 ]]; then
+    sbctl_keys_exist || die "Secure Boot is on and this machine has no signing keys: a loader signed with new keys would be refused. Turn Secure Boot off in the firmware, then run ${BOLD}sudo omasecboot setup${NC}, which creates the keys"
+    { read_enrollment_plan && local_certificates_are_identified; } ||
+      die "Secure Boot is on, and sbctl's export does not show exactly one certificate of yours for each of db, KEK and PK, so whether the firmware trusts these keys cannot be told; nothing was written. Look at the keys with ${BOLD}sudo sbctl status${NC}"
+    variable_holds_local_certificate db ||
+      die "Secure Boot is on, but the firmware's db does not hold this machine's signing certificate: a loader signed with these keys would be refused. Turn Secure Boot off in the firmware, then run ${BOLD}sudo omasecboot setup${NC} again"
+  fi
   if sbctl_keys_exist; then
     pass "Signing keys exist"
   else
@@ -204,9 +219,11 @@ cmd_setup() {
   pacman -D --asexplicit sbctl >/dev/null || warn "Could not mark sbctl as explicitly installed; removing a package that depends on it could then remove sbctl with it"
 
   ensure_state_dir || die "Unsafe state directory $(state_dir): it or a directory above it is a symlink, is not root's, or is writable by others"
-  save_settings_originals || die "Could not record the original Limine settings"
   remove_harmful_sbctl_rows || exit 1
+  # The originals are recorded under the lock, and remove deletes them under
+  # it, so the two never interleave their view of the settings.
   boot_lock_acquire || exit "$?"
+  save_settings_originals || die "Could not record the original Limine settings"
   apply_managed_settings || die "Could not write $(limine_default_config)"
   # From here on the Limine hook keeps the boot files converged, and enables
   # the watchers, also when this run is interrupted.
@@ -296,9 +313,9 @@ cmd_remove() {
   # Only now: the loader is proved raw, so limine.conf may change under it.
   write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); run this again"
   rm -f -- "$(windows_flag)"
-  boot_lock_release
   clear_attention
   rm -f -- "$(settings_originals_file)"
+  boot_lock_release
   pass "Limine settings and boot files are back to stock"
   note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu"
 }

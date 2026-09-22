@@ -414,7 +414,7 @@ install_stubs() {
   # dbDefault or KEKDefault.
   #
   # sbctl 0.18 (C4): status reports whether keys exist; create-keys makes
-  # them; verify exits 0 and answers with an array of one entry whose
+  # them (run/sbctl-export-fails: the export fails outright); verify exits 0 and answers with an array of one entry whose
   # is_signed is 1, 0 or -1, or with null for a file it may not read, which
   # is any file outside the ESP that ESP_PATH names (or run/sbctl-cannot-read);
   # sign works in place and leaves an already signed
@@ -447,7 +447,7 @@ case $1 in
         --microsoft) microsoft=true ;;
         --firmware-builtin) builtin=true ;;
         --ignore-immutable) immutable_ok=true ;;
-        --export) [[ $2 == esl ]] || exit 64; export=true; shift ;;
+        --export) [[ $2 == esl ]] || exit 64; [[ ! -e $FIX/run/sbctl-export-fails ]] || exit 1; export=true; shift ;;
         --partial) targets=("$2"); shift ;;
         *) exit 64 ;;
       esac
