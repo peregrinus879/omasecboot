@@ -47,6 +47,10 @@ enrollment_state_chooses_the_next_step() {
   write_key_variable PK "$(x509_list "$OEM_OWNER" 'OEM platform key' | base64 -w0)"
   output=$(show_status 2>&1) && fail_test "Secure Boot on without the local keys passed"
   [[ $output == *'does not hold your keys'* && $output == *'Next: resolve what is marked above, then run sudo omasecboot status again'*'Do not reboot with Secure Boot on'* ]] || fail_test "report: ${output}"
+  # Beside Windows the line that says to turn Secure Boot off names the key.
+  add_windows
+  output=$(show_status 2>&1) && fail_test "Secure Boot on without the local keys passed"
+  [[ $output == *'keep its recovery key at hand when you turn Secure Boot off'*'Turn Secure Boot off, then run'* ]] || fail_test "no reminder: ${output}"
   : >"$FIX/run/sbctl-owner-changed"
   output=$(show_status 2>&1) && fail_test "unidentifiable certificates passed"
   [[ $output == *'which certificates are yours'*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
@@ -189,9 +193,13 @@ unknown_states_block() {
 
 unreadable_firmware_is_a_problem() {
   local output
+  mv "$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c" "$FIX/run/SetupMode"
+  output=$(show_status 2>&1) && fail_test "a firmware without SetupMode passed"
+  [[ $output == *'reports no SetupMode variable'*'Restore the factory keys'* ]] || fail_test "no SetupMode: ${output}"
+  mv "$FIX/run/SetupMode" "$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   rm "$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   output=$(show_status 2>&1) && fail_test "an unreadable SecureBoot variable passed"
-  [[ $output == *"Could not read the firmware's Secure Boot variables"* ]] || fail_test "report: ${output}"
+  [[ $output == *"Could not read the firmware's SecureBoot and SetupMode variables"* ]] || fail_test "report: ${output}"
 }
 
 needs_attention_is_a_problem() {
@@ -266,6 +274,11 @@ missing_2023_certificates_are_notes() {
   output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
   [[ $output == *'KEK does not hold Microsoft Corporation KEK 2K CA 2023'* ]] || fail_test "no note on KEK: ${output}"
   [[ $output == *'db does not hold Microsoft UEFI CA 2023:'* && $output != *'Windows UEFI CA 2023'* ]] || fail_test "the note on db: ${output}"
+  # Two names read as a sentence reads them.
+  write_key_variable db "$(x509_list "$OEM_OWNER" 'OEM db' | base64 -w0)"
+  output=$(show_status 2>&1) || fail_test "a note changed the exit status: ${output}"
+  [[ $output == *'db does not hold Windows UEFI CA 2023 or Microsoft UEFI CA 2023:'* ]] || fail_test "two names: ${output}"
+  [[ $(printf 'A\nB\nC\n' | join_or) == 'A, B or C' ]] || fail_test "three names: $(printf 'A\nB\nC\n' | join_or)"
 }
 
 # Not a problem of the boot chain, so it leaves the exit status alone.
@@ -365,7 +378,11 @@ signed_unsealed_loader_is_said_after_remove() {
   rm "$FIX/run/sbctl-export-fails"
   set_mode_variable SecureBoot 1
   output=$(show_status 2>&1) && fail_test "status passed with Secure Boot on"
-  [[ $output == *'  ✗ Secure Boot is on, and the Limine loader carries your signature and no seal'* ]] || fail_test "report: ${output}"
+  [[ $output == *'  ✗ Secure Boot is on, and the Limine loader carries your signature and no seal'*'Turn Secure Boot off, then restore the factory keys'* ]] || fail_test "report: ${output}"
+  # Beside Windows the way out names the recovery key first.
+  add_windows
+  output=$(show_status 2>&1) && fail_test "status passed with Secure Boot on"
+  [[ $output == *'keep its recovery key at hand when you turn Secure Boot off'*'  ✗ Secure Boot is on, and the Limine loader carries your signature and no seal'* ]] || fail_test "no reminder: ${output}"
   rm "$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   output=$(show_status 2>&1) && fail_test "status passed without a readable SecureBoot"
   [[ $output == *'  ✗ The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on could not be read'* ]] || fail_test "unreadable SecureBoot: ${output}"

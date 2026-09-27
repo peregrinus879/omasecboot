@@ -58,7 +58,7 @@ setup_preflight() {
   # remove refuses without a readable SecureBoot variable, so a machine that
   # cannot be undone is not set up in the first place.
   { read_mode_variable SecureBoot && read_mode_variable SetupMode; } >/dev/null || {
-    fail "Could not read the firmware's SecureBoot and SetupMode variables"
+    fail "$(mode_variables_problem)"
     return 1
   }
   unsafe=$(esp_mount_is_safe) || {
@@ -91,7 +91,7 @@ print_entries() {
 # while a PK was in place; a machine that reached Setup Mode before its first
 # setup has only a backup of what was left, and is told so.
 setup_enrollment() {
-  local backup path lost question name setup_mode audit_mode
+  local backup path lost question name setup_mode audit_mode only_setup_mode=false kek db
   setup_mode=$(read_mode_variable SetupMode) || die "Could not read the firmware's SetupMode variable; nothing was written"
   [[ $setup_mode == 1 ]] || die "The firmware has no Platform Key but does not report Setup Mode; nothing was written. Restore the factory keys in the firmware's key menu and run ${BOLD}sudo omasecboot setup${NC} again"
   # A UEFI 2.5 firmware in Audit Mode leaves it for Deployed Mode when the PK
@@ -102,7 +102,7 @@ setup_enrollment() {
   fi
   if ! backup=$(reference_backup); then
     backup=$(latest_firmware_backup) || backup=$(take_firmware_backup) || die "Could not back up the firmware's key variables"
-    warn "The only backup was taken in Setup Mode, so OmaSecBoot cannot tell what the firmware's key menu removed. If more than the Platform Key went, restore the factory keys in the firmware and run ${BOLD}sudo omasecboot setup${NC} again before you go on"
+    only_setup_mode=true
   fi
   lost=$(list_lost_entries "$backup" current) || die "Could not compare the firmware's keys with the backup ${backup}"
   if append_is_safe "$backup"; then
@@ -112,10 +112,14 @@ setup_enrollment() {
   else
     path=refuse
   fi
+  # The rebuild says it in its own words, beside its question.
+  [[ $only_setup_mode == false || $path == rebuild ]] ||
+    warn "The only backup was taken in Setup Mode, so OmaSecBoot cannot tell what the firmware's key menu removed. If more than the Platform Key went, restore the factory keys in the firmware and run ${BOLD}sudo omasecboot setup${NC} again before you go on"
 
   case $path in
     append)
-      append_plan_is_sound || die "sbctl's plan is not the firmware's entries plus your certificates; nothing was written. This sbctl does not behave as the one OmaSecBoot was tested with: please report it with the output of ${BOLD}sbctl version${NC}"
+      # sbctl's db_additions reach every enrollment, the append included (C4).
+      append_plan_is_sound || die "sbctl's plan is not the firmware's entries plus your certificates; nothing was written. Where /etc/sbctl/sbctl.conf sets db_additions, sbctl adds those to every enrollment: take them out and run ${BOLD}sudo omasecboot setup${NC} again. Otherwise this sbctl does not behave as the one OmaSecBoot was tested with: please report it with the output of ${BOLD}sbctl version${NC}"
       note "Your certificates join the $(count_foreign_entries) KEK and db entries the firmware holds; nothing is removed"
       question="The Platform Key becomes yours. Write your keys to the firmware?"
       ;;
@@ -126,29 +130,42 @@ setup_enrollment() {
       if [[ -n $lost ]]; then
         warn "These entries of the backup cannot be put back and will no longer be trusted:"
         print_entries "$lost"
+        # An option ROM that db does not verify is not run (C9).
+        warn "One of them may be what the firmware checks a device's option ROM against, a graphics card's for one: with Secure Boot on the firmware then does not run it, and a graphics card it does not start shows nothing, the firmware's own menu included"
       fi
-      dbx_equals_backup "$backup" ||
-        warn "The revocation list (dbx) differs from the backup. OmaSecBoot never writes it; a firmware update or fwupd restores it"
+      if dbx_is_empty; then
+        warn "The firmware holds no revocation list (dbx), so nothing is revoked, Microsoft's revocations included, until a firmware update, fwupd or Windows writes one; OmaSecBoot never writes it"
+      elif ! dbx_equals_backup "$backup"; then
+        warn "The revocation list (dbx) differs from the backup. OmaSecBoot never writes it; it stays as it is until a firmware update, fwupd or Windows writes it"
+      fi
+      # A backup taken in Setup Mode holds nothing to compare against.
+      [[ $only_setup_mode == false ]] ||
+        warn "The only backup was taken in Setup Mode, so nothing shows what else the firmware held or what this rebuild cannot put back; one such entry may be what the firmware checks a device's option ROM against, a graphics card's for one. To start from the factory lists instead, dbx possibly among them, decline, restore the factory keys in the firmware, run ${BOLD}sudo omasecboot setup${NC}, then delete only the Platform Key"
       question="Rebuild KEK and db as described above, and write your keys to the firmware?"
       ;;
     refuse)
       fail "The firmware's keys are in a state OmaSecBoot will not write to:"
       print_entries "$lost"
-      for name in KEK db; do
-        [[ -n $(foreign_entries "$name") ]] || print_message "      ${name} holds no entries besides yours, while the other list was kept" >&2
-      done
+      kek=$(foreign_entries KEK) db=$(foreign_entries db)
+      if [[ -z $kek && -z $db ]]; then
+        print_message "      KEK and db hold no entries besides yours" >&2
+      elif [[ -z $kek ]]; then
+        print_message "      KEK holds no entries besides yours, while db kept its own" >&2
+      elif [[ -z $db ]]; then
+        print_message "      db holds no entries besides yours, while KEK kept its own" >&2
+      fi
       if ! dbx_equals_backup "$backup"; then
         if [[ -z $lost ]]; then
-          print_message "      KEK and db hold every entry of the backup; only the revocation list (dbx) differs from it, as it does after a dbx update Windows applied, and nothing is written beside a dbx that changed" >&2
+          print_message "      KEK and db hold every entry of the backup; only the revocation list (dbx) differs from it, as it does after a dbx update Windows applied, and nothing is written beside a dbx that changed. Restoring the factory keys may also return dbx to the firmware's own list, without the newer revocations" >&2
         else
           print_message "      The revocation list (dbx) differs from the backup" >&2
         fi
       fi
-      die "Restore the factory keys in the firmware, run ${BOLD}sudo omasecboot setup${NC}, then delete only the Platform Key (PK)"
+      die "Restore the factory keys in the firmware, run ${BOLD}sudo omasecboot setup${NC}, then delete only the Platform Key (PK), starting no other system in between"
       ;;
   esac
 
-  note "The backup of the keys this machine trusted is in ${backup}. What is written now is taken back only in the firmware's key menu, by restoring the factory keys"
+  note "The backup of the firmware's key variables is in ${backup}. What is written now is taken back only in the firmware's key menu, by restoring the factory keys"
   acknowledge_windows_encryption || exit 1
   confirm "the key enrollment" "$question" || exit 1
   enroll_local_keys "$path" || die "The enrollment stopped, and the firmware may hold a part of it. Run ${BOLD}sudo omasecboot setup${NC} again: it reads the variables and writes what is missing"
@@ -163,7 +180,7 @@ setup_enrollment() {
 setup_firmware_step() {
   local first_run=$1 backup setup_mode secure_boot
   { setup_mode=$(read_mode_variable SetupMode) && secure_boot=$(read_mode_variable SecureBoot); } ||
-    die "Could not read the firmware's SecureBoot and SetupMode variables"
+    die "$(mode_variables_problem)"
   read_enrollment_plan || die "Could not ask sbctl what an enrollment would write"
   # Everything after this rests on knowing the local certificates, so it is
   # settled before the user is asked to delete anything.
@@ -192,6 +209,7 @@ setup_firmware_step() {
     # Deleting the PK already changes what Windows measures at boot.
     acknowledge_windows_encryption || exit 1
     act "Restart into the firmware (${BOLD}systemctl reboot --firmware-setup${NC}) and delete only the Platform Key (PK); keep KEK, db and dbx, and leave Secure Boot disabled when you save"
+    note "If you start Windows or update the firmware before that delete, run ${BOLD}sudo omasecboot setup${NC} again right before it: an update can change dbx, and the backup must hold what it wrote"
     note "Some firmware shows its key menu only while Secure Boot is set to enabled: set it back to disabled before you save"
     act "Then run ${BOLD}sudo omasecboot setup${NC} again"
   elif [[ $first_run == true ]]; then
@@ -219,11 +237,16 @@ cmd_setup() {
   # before anything is written.
   secure_boot=$(read_mode_variable SecureBoot) || die "Could not read the firmware's SecureBoot variable; nothing was written"
   if [[ $secure_boot == 1 ]]; then
-    sbctl_keys_exist || die "Secure Boot is on and this machine has no signing keys: a loader signed with new keys would be refused. Turn Secure Boot off in the firmware, then run ${BOLD}sudo omasecboot setup${NC}, which creates the keys"
+    sbctl_keys_exist || {
+      remind_of_windows_encryption off
+      die "Secure Boot is on and this machine has no signing keys: a loader signed with new keys would be refused. Turn Secure Boot off in the firmware, then run ${BOLD}sudo omasecboot setup${NC}, which creates the keys"
+    }
     { read_enrollment_plan && local_certificates_are_identified; } ||
       die "Secure Boot is on, and sbctl's export does not show exactly one certificate of yours for each of db, KEK and PK, so whether the firmware trusts these keys cannot be told; nothing was written. Look at the keys with ${BOLD}sudo sbctl status${NC}"
-    variable_holds_local_certificate db ||
+    variable_holds_local_certificate db || {
+      remind_of_windows_encryption off
       die "Secure Boot is on, but the firmware's db does not hold this machine's signing certificate: a loader signed with these keys would be refused. Turn Secure Boot off in the firmware, then run ${BOLD}sudo omasecboot setup${NC} again"
+    }
   fi
   if sbctl_keys_exist; then
     pass "Signing keys exist"
@@ -430,6 +453,7 @@ cmd_windows_status() {
 }
 
 cmd_windows_setup() {
+  local status
   check_root "windows setup"
   header "Windows entry"
   is_set_up || die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"
@@ -441,7 +465,11 @@ cmd_windows_setup() {
   boot_lock_acquire || exit "$?"
   ensure_state_dir || die "Unsafe state directory $(state_dir): it or a directory above it is a symlink, is not root's, or is writable by others"
   : >"$(windows_flag)"
-  sign_boot_files || exit "$?"
+  sign_boot_files || {
+    status=$?
+    warn "The Windows entry stays enabled: every pass that finishes puts it in limine.conf, unless ${BOLD}sudo omasecboot status${NC} names what stands in the way"
+    exit "$status"
+  }
   [[ $(windows_entry_state "$(windows_target_label)") == current ]] ||
     die "The Windows entry did not reach limine.conf. It stays enabled, and the next pass writes it; see ${BOLD}sudo omasecboot status${NC}"
   pass "Windows is in Limine's menu: the entry restarts the machine into $(windows_target_label)"

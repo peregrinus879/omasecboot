@@ -225,7 +225,8 @@ half_cleared_firmware_is_refused() {
   rm "$(key_variable_path db)"
   run_cli setup || fail_test "first setup failed: $(<"$FIX/run/output")"
   run_cli setup && fail_test "setup wrote to a half-cleared firmware"
-  [[ $(<"$FIX/run/output") == *'db holds no entries besides yours'* && $(<"$FIX/run/output") == *'Restore the factory keys'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'db holds no entries besides yours, while KEK kept its own'* && $(<"$FIX/run/output") == *'Restore the factory keys'* &&
+    $(<"$FIX/run/output") != *'KEK holds no entries besides yours'* ]] || fail_test "report: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a refused enrollment wrote to the firmware"
 }
 
@@ -318,6 +319,11 @@ lost_entries_are_named() {
   [[ $lost == "KEK $(x509_row "$MICROSOFT_OWNER" 'Microsoft KEK')" ]] || fail_test "lost: ${lost}"
   # shellcheck disable=SC2086 # The row's three fields are the three arguments.
   [[ $(describe_entry ${lost#KEK }) == "certificate with SHA-256 fingerprint $(printf 'Microsoft KEK' | sha256sum | cut -d' ' -f1)" ]] || fail_test "description"
+  # The firmware's trust reads a certificate's data, never its owner (C9): the
+  # same certificate kept under another owner is not lost.
+  write_key_variable KEK "$({ x509_list "$OEM_OWNER" 'OEM KEK'; x509_list "$LOCAL_OWNER" 'Microsoft KEK'; } | base64 -w0)"
+  read_enrollment_plan || fail_test "plan"
+  [[ -z $(list_lost_entries "$backup" current) ]] || fail_test "an owner change counted as a loss: $(list_lost_entries "$backup" current)"
   rm "$(key_variable_path dbx)"
   ! dbx_equals_backup "$backup" || fail_test "a cleared dbx equalled the backup"
 }
@@ -344,7 +350,7 @@ missing_2023_kek_is_asked_about_before_the_pk_goes() {
 setup_asks_for_the_pk_then_enrolls_then_confirms() {
   local backup
   prepared_machine
-  [[ $(<"$FIX/run/output") == *'delete only the Platform Key (PK)'*'leave Secure Boot disabled when you save'*'set it back to disabled'* ]] || fail_test "no firmware instruction, or it lets Secure Boot come on by itself: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'delete only the Platform Key (PK)'*'leave Secure Boot disabled when you save'*'If you start Windows or update the firmware before that delete, run sudo omasecboot setup again right before it'*'set it back to disabled'* ]] || fail_test "no firmware instruction, or it lets Secure Boot come on by itself: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "a machine without Windows was asked about it: $(<"$FIX/run/output")"
   backup=$(latest_firmware_backup) || fail_test "no backup before the firmware instruction"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "the first run wrote to the firmware"
@@ -419,7 +425,7 @@ changed_dbx_is_refused() {
   write_key_variable dbx "$(sha256_list "$MICROSOFT_OWNER" "$(printf 'c%.0s' {1..64})" | base64 -w0)"
   run_cli setup && fail_test "setup enrolled although dbx differs from the backup"
   # KEK and db are whole: the refusal says that only dbx differs, and why.
-  [[ $(<"$FIX/run/output") == *'KEK and db hold every entry of the backup; only the revocation list (dbx) differs'*'dbx update Windows applied'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'KEK and db hold every entry of the backup; only the revocation list (dbx) differs'*'dbx update Windows applied'*'may also return dbx'*'starting no other system in between'* ]] || fail_test "report: $(<"$FIX/run/output")"
   ! grep -q -- '--partial' "$FIX/run/calls" || fail_test "a refused enrollment wrote to the firmware"
 }
 
@@ -470,7 +476,7 @@ unsound_answers_from_sbctl_stop_setup() {
   delete_platform_key
   : >"$FIX/run/sbctl-plans-a-stowaway"
   run_cli setup && fail_test "setup accepted a plan with an entry nobody asked for"
-  [[ $(<"$FIX/run/output") == *"not the firmware's entries plus your certificates"* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *"not the firmware's entries plus your certificates"*'sets db_additions'* ]] || fail_test "report: $(<"$FIX/run/output")"
   rm "$(key_variable_path KEK)" "$(key_variable_path db)"
   run_cli setup && fail_test "setup accepted a rebuild plan with a second PK entry"
   [[ $(<"$FIX/run/output") == *'rebuild plan does not hold your certificates'* ]] || fail_test "report: $(<"$FIX/run/output")"
@@ -495,7 +501,8 @@ cleared_firmware_is_rebuilt_with_the_loss_named() {
   : >"$FIX/run/calls"
   run_cli setup || fail_test "the rebuild was not finished by the next run: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'cleared KEK and db together with the Platform Key'* ]] || fail_test "report: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'cannot be put back'* && $(<"$FIX/run/output") == *'revocation list (dbx) differs'* ]] || fail_test "the loss was not named: $(<"$FIX/run/output")"
+  # The key menu cleared dbx too: nothing is revoked until something writes it.
+  [[ $(<"$FIX/run/output") == *'cannot be put back'*'option ROM'* && $(<"$FIX/run/output") == *'holds no revocation list (dbx), so nothing is revoked'* ]] || fail_test "the loss was not named: $(<"$FIX/run/output")"
   ! grep -q -- '--partial db' "$FIX/run/calls" || fail_test "db was written a second time"
   grep -q 'enroll-keys --microsoft --firmware-builtin --partial KEK --ignore-immutable' "$FIX/run/calls" || fail_test "calls: $(<"$FIX/run/calls")"
   cmp -s <(tail -c +5 "$(key_variable_path PK)") <(x509_list "$LOCAL_OWNER" 'local PK certificate') || fail_test "the PK is not the local certificate alone"
@@ -511,7 +518,9 @@ firmware_cleared_before_the_first_setup_is_rebuilt() {
   rm "$(key_variable_path KEK)" "$(key_variable_path db)"
   run_cli setup || fail_test "first setup failed: $(<"$FIX/run/output")"
   run_cli setup || fail_test "second setup failed: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'taken in Setup Mode'* && $(<"$FIX/run/output") == *'cleared KEK and db'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  # Beside the rebuild's question the backup's limit is a choice, not an order.
+  [[ $(<"$FIX/run/output") == *'cleared KEK and db'*'taken in Setup Mode, so nothing shows what else the firmware held'*'decline'* &&
+    $(<"$FIX/run/output") != *'before you go on'* ]] || fail_test "report: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'does not expose its built-in defaults'* ]] || fail_test "the missing defaults were not named: $(<"$FIX/run/output")"
   grep -q 'enroll-keys --microsoft --partial db --ignore-immutable' "$FIX/run/calls" || fail_test "calls: $(<"$FIX/run/calls")"
   ! grep -q 'enroll-keys --append --partial' "$FIX/run/calls" || fail_test "empty variables were appended to"
@@ -650,9 +659,14 @@ enrollment_is_judged_by_the_variables_afterwards() {
 setup_needs_setup_mode_readable_before_any_change() {
   local before=$FIX/run/default-limine-before
   cp "$FIX/etc/default-limine" "$before"
+  # A firmware that dropped SetupMode after an erase of every key (7.6) is
+  # told the way out; one whose variable cannot be read, to look at efivarfs.
   rm "$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   run_cli setup && fail_test "setup went on without SetupMode"
-  [[ $(<"$FIX/run/output") == *"Could not read the firmware's SecureBoot and SetupMode variables"* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'reports no SetupMode variable'*'delete only the Platform Key, not every key'* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  printf 'garbage' >"$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  run_cli setup && fail_test "setup went on with an unreadable SetupMode"
+  [[ $(<"$FIX/run/output") == *"Could not read the firmware's SecureBoot and SetupMode variables; is efivarfs mounted"* ]] || fail_test "refusal: $(<"$FIX/run/output")"
   [[ ! -e $(enabled_file) && ! -e $(settings_originals_file) ]] || fail_test "setup recorded state before refusing"
   cmp -s "$FIX/etc/default-limine" "$before" || fail_test "setup changed the settings before refusing"
   [[ ! -e $FIX/sbctl/keys ]] || fail_test "setup created keys before refusing"

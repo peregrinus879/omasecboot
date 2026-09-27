@@ -9,6 +9,8 @@ pre_remove() {
     or off, and with Secure Boot on the next Limine upgrade can leave a loader
     that the firmware refuses.
     Reinstall the package. To return to stock, turn Secure Boot off and run
-    "sudo omasecboot remove", then remove the package.
+    "sudo omasecboot remove", then remove the package. With an encrypted
+    Windows beside it, have its recovery key at hand before Secure Boot goes
+    off: BitLocker can ask for it then.
 NOTICE
 }

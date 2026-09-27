@@ -246,6 +246,12 @@ m F221 lib/status.sh 1 '1:unsupported) blocking_problem on' '1:unsupported) bloc
 m F222 lib/status.sh 1 '[01]:unreadable) blocking_problem on' '[01]:unreadable) blocking_problem none' status/unsealed-limine-is-reported-by-its-signature
 m F223 lib/status.sh 1 'blocking_problem on "Could not tell from sbctl which certificates' 'blocking_problem none "Could not tell from sbctl which certificates' status/enrollment-state-chooses-the-next-step
 
+m F224 lib/firmware.sh 1 "'\$1 == type && \$3 == digest { found = 1 }" "'\$1 == type { found = 1 }" firmware/lost-entries-are-named
+m F225 bin/omasecboot 1 $'    sbctl_keys_exist || {\n      remind_of_windows_encryption off' $'    sbctl_keys_exist || {\n      :' commands/secure-boot-on-needs-trusted-keys
+m F226 bin/omasecboot 1 $'    variable_holds_local_certificate db || {\n      remind_of_windows_encryption off' $'    variable_holds_local_certificate db || {\n      :' commands/secure-boot-on-needs-trusted-keys
+m F227 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' $'    blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
+m F228 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem none "Secure Boot is on, and the Limine loader' $'    blocking_problem none "Secure Boot is on, and the Limine loader' status/signed-unsealed-loader-is-said-after-remove
+
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {
   local id=$1 base=$2 dir=$3/$1 suite=${expected[$1]%%/*} output rc caught line

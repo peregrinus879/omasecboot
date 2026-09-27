@@ -81,6 +81,8 @@ Source: `Foxboron/sbctl` tag `0.18` (`cmd/sbctl/enroll-keys.go`, `verify.go`, `s
 - `enroll-keys` writes whole variables (never `EFI_VARIABLE_APPEND_WRITE`) in the order db, KEK, PK, stops at the first error and does not roll back. db is signed by the local KEK, KEK by the local PK, PK by itself; the OEM's keys are never needed in Setup Mode.
 - `sbctl enroll-keys` writes PK, KEK and db only (`--partial [PK,KEK,db]`) and has no command for dbx: a dbx that a key menu cleared stays empty until a firmware update, fwupd or Windows writes it again.
 - Every entry sbctl writes is owned by its own GUID (`KeySync` appends its certificates with `GetGUID`), which `status --json` reports as `guid`; `rotate-keys` keeps it. OmaSecBoot identifies the local certificates by that owner in a `--microsoft --export esl`, which does not read the firmware.
+- `db_additions` in `/etc/sbctl/sbctl.conf` is merged into every `enroll-keys`, `--append` and `--export` included (`cmd/sbctl/enroll-keys.go`, `RunEnrollKeys`), so it adds entries that an append plan would not otherwise hold.
+- Some firmware reports no `SetupMode` variable at all, where sbctl then says the system is not booted with UEFI: Foxboron/sbctl#407, and FrameworkComputer/SoftwareFirmwareIssueTracker#30, where it disappears after the key menu's erase of every Secure Boot key.
 - `--append` reads the current db, KEK and PK and adds the local certificates to them, so nothing already trusted is removed.
   - It is not idempotent: a second run adds the local certificate again, because its duplicate check compares the PEM it holds with the DER in the variable.
   - OmaSecBoot does not depend on that: it never appends to a variable that already holds the certificate.
@@ -149,7 +151,7 @@ Hardware: the entry, the BootNext request and upstream's rewrites are recorded o
 
 ## C8. BitLocker and the TPM
 
-Source: Microsoft Learn, "BitLocker drive encryption in Windows 11 for OEMs" (updated 2025-08-12), "Configure BitLocker" (updated 2025-07-29) and "manage-bde protectors" (updated 2026-02-16); the TCG PC Client Platform Firmware Profile; util-linux 2.41's libblkid.
+Source: Microsoft Learn, "BitLocker drive encryption in Windows 11 for OEMs" (updated 2025-08-12), "Configure BitLocker" (updated 2025-07-29), "BitLocker operations guide" (updated 2025-07-29) and "manage-bde protectors" (updated 2026-02-16); the TCG PC Client Platform Firmware Profile; util-linux 2.41's libblkid.
 
 Hardware: C10 holds what BitLocker did on one machine, Windows Home with device encryption.
 
@@ -158,6 +160,7 @@ Hardware: C10 holds what BitLocker did on one machine, Windows Home with device 
   - PCR 7 holds the contents of `SecureBoot`, PK, KEK, db and dbx, then the db entries that verified what ran in the boot path, and "BitLocker expects only one entry here": "Any extra CA hash (even Windows Prod CA) before final bootmgr Windows Prod CA will prevent BitLocker from choosing to use PCR7." So every change of PK, KEK or db changes PCR 7, and a loader verified with another certificate before `bootmgfw.efi` rules the PCR 7 binding out.
   - The firmware measures every UEFI application it loads into PCR 4 (TCG), so a chainload leaves the Limine loader there as well. PCRs start anew at a restart, and both `efi_boot_entry` and a BootNext request start Windows only after one.
   - Microsoft's procedure, in the page for OEMs, for a device bound to PCR 7 when "the Secure Boot policy" changes: suspend BitLocker, apply, restart, resume.
+  - When BitLocker is turned on, its recovery key is saved to a Microsoft or Microsoft Entra account, a USB drive or a file, or printed (Microsoft Learn, "BitLocker operations guide"); Microsoft's page for `manage-bde -protectors` documents that `-get` shows each protector's type and ID.
   - `manage-bde -protectors -disable <drive> -RebootCount 0` suspends protection "indefinitely" by "making the encryption key available unsecured on drive", nothing is decrypted, and `-enable` resumes it; without a count, protection resumes "after Windows is restarted" (Microsoft Learn, "manage-bde protectors", updated 2026-02-16). Its page names no edition of Windows.
 
 ## C9. Microsoft's 2011 and 2023 Secure Boot certificates
@@ -168,6 +171,8 @@ Source: Microsoft's support article "Windows Secure Boot certificate expiration 
 - Their replacements: Microsoft Corporation KEK 2K CA 2023 in KEK; Windows UEFI CA 2023, Microsoft UEFI CA 2023 and Microsoft Option ROM UEFI CA 2023 in db.
 - Microsoft: a machine without the new certificates keeps starting and keeps installing ordinary updates, but no longer receives new protections for the early boot process: boot manager updates, database updates and revocations.
 - A KEK update must be signed by the Platform Key's owner. Once the PK is the user's, the manufacturer's updates can no longer add the 2023 KEK certificate; with it in KEK, Microsoft's db and dbx updates keep arriving, the three db certificates among them.
+- EDK2, and the firmware built on it, uses the signature data of db, dbx and KEK entries alone and never reads their owner GUID, so a certificate held under another owner carries the same trust. For images, `SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.c`: `IsAllowedByDb` takes an entry's `SignatureData` as the trusted certificate, and `IsSignatureFoundInDatabase`, `IsForbiddenByDbx` and `IsCertHashFoundInDbx` compare it; for variable writes signed by a KEK or the PK, `SecurityPkg/Library/AuthVariableLib/AuthService.c` (`VerifyTimeBasedPayload`: `TrustedCert = Cert->SignatureData`).
+- With Secure Boot on, EDK2 denies a device's option ROM that db does not verify: `PcdOptionRomImageVerificationPolicy` defaults to `0x04`, "Deny execution when there is security violation" (`SecurityPkg/SecurityPkg.dec`). A graphics card's option ROM is what shows the firmware's own screens on it; Microsoft's UEFI CA, above, signs third-party option ROMs.
 - The SHA-256 of each certificate's DER form, which is what a signature-list entry holds:
   - Microsoft Corporation KEK 2K CA 2023: `3cd3f0309edae228767a976dd40d9f4affc4fbd5218f2e8cc3c9dd97e8ac6f9d`
   - Windows UEFI CA 2023: `076f1fea90ac29155ebf77c17682f75f1fdd1be196da302dc8461e350a9ae330`

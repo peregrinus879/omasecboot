@@ -49,7 +49,7 @@ entry_title_for_line() {
 show_firmware_status() {
   local secure_boot setup_mode
   if ! secure_boot=$(read_mode_variable SecureBoot) || ! setup_mode=$(read_mode_variable SetupMode); then
-    blocking_problem on "Could not read the firmware's Secure Boot variables; is efivarfs mounted at /sys/firmware/efi/efivars?"
+    blocking_problem on "$(mode_variables_problem)"
     return
   fi
   if [[ $secure_boot == 1 ]]; then
@@ -69,6 +69,7 @@ show_firmware_status() {
     [[ $setup_mode == 0 ]] || _status_firmware=reboot
     [[ $secure_boot == 0 ]] || _status_firmware=complete
   elif [[ $secure_boot == 1 ]]; then
+    remind_of_windows_encryption off
     blocking_problem on "Secure Boot is on, but the firmware does not hold your keys: it will refuse these boot files. Turn Secure Boot off, then run ${BOLD}sudo omasecboot setup${NC}"
   else
     note "Your keys are not enrolled in the firmware yet"
@@ -92,8 +93,15 @@ show_unsealed_signed_loader() {
   elif [[ $secure_boot == 0 ]]; then
     warn "The Limine loader carries your signature and no seal, and the firmware trusts your key: with Secure Boot on it would start without checking limine.conf. Keep Secure Boot off, or restore the factory keys in the firmware's key menu"
   else
-    blocking_problem none "Secure Boot is on, and the Limine loader carries your signature and no seal: it starts without checking limine.conf. Restore the factory keys in the firmware's key menu, or run ${BOLD}sudo omasecboot setup${NC}"
+    # Factory keys with Secure Boot on would refuse the loader signed here.
+    remind_of_windows_encryption off
+    blocking_problem none "Secure Boot is on, and the Limine loader carries your signature and no seal: it starts without checking limine.conf. Turn Secure Boot off, then restore the factory keys in the firmware's key menu, or run ${BOLD}sudo omasecboot setup${NC}"
   fi
+}
+
+# Names, one per line, as a sentence carries them: "A", "A or B", "A, B or C".
+join_or() {
+  awk 'NR > 1 { list = list (NR > 2 ? ", " : "") previous } { previous = $0 } END { print (NR > 1 ? list " or " previous : previous) }'
 }
 
 # Microsoft's 2023 certificates (C9). Notes: this machine's boot chain does
@@ -106,10 +114,10 @@ show_microsoft_2023_status() {
       continue
     fi
     [[ -n $missing ]] || continue
-    missing=$(paste -sd, - <<<"$missing")
+    missing=$(join_or <<<"$missing")
     case $name in
       KEK) note "KEK does not hold ${missing}, which signs Microsoft's db and dbx updates from 2026 on: they cannot reach this machine" ;;
-      db) note "db does not hold ${missing//,/, }: Microsoft's db updates deliver what is missing, and those need Microsoft's 2023 certificate in KEK" ;;
+      db) note "db does not hold ${missing}: Microsoft's db updates deliver what is missing, and those need Microsoft's 2023 certificate in KEK" ;;
     esac
   done
 }
@@ -160,7 +168,7 @@ show_loader_status() {
     0) ;;
     1)
       if [[ $risk == on ]]; then
-        blocking_problem on "The firmware has no active boot entry for the Limine loader, so this machine starts through the fallback path, which the firmware refuses with Secure Boot on. Run ${BOLD}sudo limine-install${NC}, check with ${BOLD}efibootmgr${NC}, and keep Secure Boot off until then"
+        blocking_problem on "The firmware has no active boot entry for the Limine loader, so this machine starts through the fallback path, which the firmware refuses with Secure Boot on. Run ${BOLD}sudo limine-install${NC} and check with ${BOLD}efibootmgr${NC} before a restart with Secure Boot on"
       else
         blocking_problem both "The firmware has no active boot entry for the Limine loader, and the fallback path holds no raw Limine loader to start instead. Run ${BOLD}sudo limine-install${NC} and check with ${BOLD}efibootmgr${NC} before a restart"
       fi

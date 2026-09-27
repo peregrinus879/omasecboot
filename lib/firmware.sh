@@ -30,6 +30,16 @@ read_mode_variable() {
   printf '%s\n' "${bytes[4]}"
 }
 
+# Why the mode variables cannot be read. Some firmware drops SetupMode when its
+# key menu erases every Secure Boot key (spec, 7.6), which no remount cures.
+mode_variables_problem() {
+  if read_mode_variable SecureBoot >/dev/null && [[ ! -e $(firmware_variable_path SetupMode) ]]; then
+    printf "The firmware reports no SetupMode variable, as some firmware does after its key menu erased every Secure Boot key. Restore the factory keys in the firmware's key menu, and where it offers the choice delete only the Platform Key, not every key; then run %s\n" "${BOLD}sudo omasecboot setup${NC}"
+  else
+    printf "Could not read the firmware's SecureBoot and SetupMode variables; is efivarfs mounted at /sys/firmware/efi/efivars?\n"
+  fi
+}
+
 # --- Signature lists ---------------------------------------------------------------
 
 # The bytes a string of hex digits stands for, NULs included.
@@ -365,9 +375,12 @@ count_foreign_entries() {
 # list_lost_entries BACKUP current|planned: prints "NAME entry" for every KEK
 # and db entry of the backup that the firmware no longer holds, or that the
 # plan would not write. Append skips sbctl's option-ROM check (C4), so this is
-# the tool's own proof that nothing but the PK goes missing.
+# the tool's own proof that nothing but the PK goes missing. An entry counts by
+# its type and data: EDK2's trust, and so that of the firmware built on it,
+# never reads the owner GUID (C9), so a certificate written back under another
+# owner is not lost.
 list_lost_entries() {
-  local backup=$1 against=$2 name entries against_entries entry
+  local backup=$1 against=$2 name entries against_entries type owner digest
   for name in KEK db; do
     entries=$(backup_entries "$backup" "$name") || return 1
     if [[ $against == planned ]]; then
@@ -375,13 +388,20 @@ list_lost_entries() {
     else
       against_entries=${_current[$name]}
     fi
-    while IFS= read -r entry; do
-      [[ -z $entry ]] || printf '%s %s\n' "$name" "$entry"
-    done < <(entries_missing_from "$entries" "$against_entries")
+    while read -r type owner digest; do
+      [[ -z $type ]] || awk -v type="$type" -v digest="$digest" '$1 == type && $3 == digest { found = 1 } END { exit !found }' <<<"$against_entries" ||
+        printf '%s %s %s %s\n' "$name" "$type" "$owner" "$digest"
+    done <<<"$entries"
   done
 }
 
 # dbx must equal the backup byte for byte: this tool never writes it.
+# No revocation list at all, or one without an entry.
+dbx_is_empty() {
+  local entries
+  entries=$(variable_entries dbx) && [[ -z $entries ]]
+}
+
 dbx_equals_backup() {
   local backup=$1 path
   path=$(firmware_variable_path dbx)

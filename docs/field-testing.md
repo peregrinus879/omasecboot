@@ -32,7 +32,7 @@ Go on if that `status` exits 0. If it still exits 1, stop, and do not reboot wit
 
 Read this now, not then.
 
-- With Secure Boot on: turn it off in the firmware first. A loader the firmware refuses for its signature starts again with Secure Boot off.
+- With Secure Boot on: turn it off in the firmware first, with Windows' recovery key at hand if Windows is encrypted. A loader the firmware refuses for its signature starts again with Secure Boot off.
 - A snapshot entry stops at `PANIC: efi: LoadImage failure` with Secure Boot on: that snapshot is older than `setup` and its kernel image is unsigned. Nothing is broken. Hold the power button, start again and pick the normal entry.
 - A sealed Limine loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in [Before you start](#before-you-start), log in, read `limine.conf` if you did not change it yourself (`sign` seals the loader over whatever it holds), and run `sudo omasecboot sign`.
 - Without a working fallback: boot the rescue media and follow the README's [If the machine does not start](../README.md#if-the-machine-does-not-start), which puts a raw loader over the Limine loader.
@@ -255,7 +255,7 @@ cd ~/omasecboot
 sudo bash tests/acceptance-record.sh 2-after-pk-delete
 ```
 
-Expected: `SetupMode=1` under "Secure Boot variables", and `sbctl status` still lists the vendor keys without the builtin PK. Stop if the record shows that more than the Platform Key is gone, or that the Platform Key came back on its own.
+Expected: `SetupMode=1` in the record's block of Secure Boot variables, and `sbctl status` still lists the vendor keys without the builtin PK. Stop if the record shows that more than the Platform Key is gone, or that the Platform Key came back on its own.
 
 **3.** Enroll.
 
@@ -281,7 +281,7 @@ sudo bash tests/acceptance-record.sh 2-confirm -- omasecboot setup
 
 Expected: "Your keys are enrolled and every boot file is proved", exit 0, and the instruction to turn Secure Boot on. Stop on anything else, and leave Secure Boot off.
 
-**5.** Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, turn Secure Boot off again, boot, record `status`, and report.
+**5.** Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, turn Secure Boot off again, with Windows' recovery key at hand if Windows is encrypted, boot, record `status`, and report.
 
 ```bash
 systemctl reboot --firmware-setup
@@ -364,7 +364,7 @@ The rows are in [release-checklist.md](release-checklist.md), stages 1, 3 and 4:
 
 In this order, whatever level you reached.
 
-**1.** Level 2 only: turn Secure Boot off in the firmware and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
+**1.** Level 2 only: turn Secure Boot off in the firmware, with Windows' recovery key at hand if Windows is encrypted, and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
 
 ```bash
 systemctl reboot --firmware-setup

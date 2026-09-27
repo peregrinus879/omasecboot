@@ -519,6 +519,15 @@ secure_boot_on_needs_trusted_keys() {
   : >"$FIX/sbctl/keys"
   run_cli setup && fail_test "setup signed with keys the firmware does not hold"
   [[ $(<"$FIX/run/output") == *"db does not hold this machine's signing certificate"* ]] || fail_test "untrusted keys: $(<"$FIX/run/output")"
+  # Beside Windows, both refusals that turn Secure Boot off name the recovery
+  # key first: that change is where BitLocker asked on the recorded machine.
+  add_windows
+  run_cli setup && fail_test "setup signed with keys the firmware does not hold"
+  [[ $(<"$FIX/run/output") == *'keep its recovery key at hand when you turn Secure Boot off'*"db does not hold this machine's signing certificate"* ]] || fail_test "no reminder: $(<"$FIX/run/output")"
+  rm "$FIX/sbctl/keys"
+  run_cli setup && fail_test "setup created keys with Secure Boot on"
+  [[ $(<"$FIX/run/output") == *'keep its recovery key at hand when you turn Secure Boot off'*'has no signing keys'* ]] || fail_test "no reminder: $(<"$FIX/run/output")"
+  : >"$FIX/sbctl/keys"
   : >"$FIX/run/sbctl-export-fails"
   run_cli setup && fail_test "setup went on without knowing which certificate is its own"
   [[ $(<"$FIX/run/output") == *'whether the firmware trusts these keys cannot be told'* ]] || fail_test "unreadable plan: $(<"$FIX/run/output")"

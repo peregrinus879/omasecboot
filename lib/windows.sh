@@ -562,11 +562,11 @@ print_encryption_guidance() {
   warn "Changing Secure Boot keys or its state can make Windows ask for the BitLocker recovery key"
   print_message "
     ${BOLD}Required where Windows is encrypted${NC}
-      Back up and verify every recovery key (account.microsoft.com/devices/recoverykey, or your organisation)
+      Back up and verify every recovery key (account.microsoft.com/devices/recoverykey, your organisation, or the file, printout or USB drive it was saved to)
       With the key a prompt is an inconvenience; without it, a lockout
     ${BOLD}To avoid the prompt, in an administrator terminal in Windows (Microsoft documents this without naming an edition; Windows Home accepted it on the recorded machine)${NC}
       1. Before the change: manage-bde -protectors -disable C: -RebootCount 0
-      2. After Secure Boot is on and Windows has started once: manage-bde -protectors -enable C:
+      2. After the change, once Windows has started: manage-bde -protectors -enable C:
       While the protectors are disabled the key lies unprotected on the drive, so do not skip step 2
     A device managed by an organisation needs its administrator's approval first
 "

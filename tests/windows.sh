@@ -400,7 +400,8 @@ bootnext_is_judged_by_reading_back() {
 encryption_is_acknowledged_before_the_firmware_changes() {
   add_windows
   CONFIRM_ANSWER=no run_cli setup && fail_test "setup went on although the acknowledgement was declined"
-  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Required where Windows is encrypted'*'To avoid the prompt, in an administrator terminal'*'manage-bde -protectors -disable C: -RebootCount 0'*'manage-bde -protectors -enable C:'* ]] || fail_test "guidance, the key first and suspension as the way to avoid the prompt: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'BitLocker-format volume: /dev/nvme0n1p3'* && $(<"$FIX/run/output") == *'Required where Windows is encrypted'*'To avoid the prompt, in an administrator terminal'*'manage-bde -protectors -disable C: -RebootCount 0'*'After the change, once Windows has started: manage-bde -protectors -enable C:'* &&
+    $(<"$FIX/run/output") == *'the file, printout or USB drive it was saved to'* ]] || fail_test "guidance, the key first, where to find it, and suspension as the way to avoid the prompt, either way: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *nvme0n1p5* && $(<"$FIX/run/output") != *'delete only the Platform Key'* ]] || fail_test "the instruction was given without the acknowledgement, or another volume was listed"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   [[ $(grep -c '^QUESTION: Is the Windows recovery key at hand' "$FIX/run/output") == 1 ]] || fail_test "asked more than once in a run"
@@ -843,6 +844,20 @@ template_put_there_after_the_look_is_not_written() {
   [[ $(entry_count) == 1 && $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the entry after limine-update: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
 }
 
+# A pass that cannot finish leaves the request recorded, and says so: the next
+# pass that finishes writes the entry.
+failed_pass_keeps_the_entry_enabled() {
+  add_windows
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/sbctl-sign-fails"
+  printf 'new unsigned uki' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  run_cli windows setup && fail_test "windows setup passed over a pass that failed"
+  [[ $(<"$FIX/run/output") == *'The Windows entry stays enabled: every pass that finishes puts it in limine.conf, unless sudo omasecboot status names what stands in the way'* && -e $(windows_flag) ]] || fail_test "report: $(<"$FIX/run/output")"
+  rm "$FIX/run/sbctl-sign-fails"
+  run_cli sign || fail_test "sign failed: $(<"$FIX/run/output")"
+  [[ $(entry_count) == 1 ]] || fail_test "the next pass did not write the entry"
+}
+
 # A Windows target that is lost or unclear leaves Omarchy booting (7.7): the
 # report names the way out and warns against no restart.
 target_problems_leave_the_restart_alone() {
@@ -974,6 +989,7 @@ run_case late-writer-is-not-overwritten late_writer_is_not_overwritten
 run_case template-put-there-after-the-look-is-not-written template_put_there_after_the_look_is_not_written
 run_case target-name-must-be-one-limine-matches target_name_must_be_one_limine_matches
 run_case target-problems-leave-the-restart-alone target_problems_leave_the_restart_alone
+run_case failed-pass-keeps-the-entry-enabled failed_pass_keeps_the_entry_enabled
 run_case edited-entry-is-taken-out-whole edited_entry_is_taken_out_whole
 run_case blank-line-inside-the-entry-leaves-no-orphans blank_line_inside_the_entry_leaves_no_orphans
 run_case indented-user-entry-after-ours-is-its-own indented_user_entry_after_ours_is_its_own
