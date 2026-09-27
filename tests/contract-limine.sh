@@ -24,7 +24,7 @@ if ! in_sandbox; then
   enter_sandbox "${BASH_SOURCE[0]}"
 fi
 
-for module in common checks files firmware limine; do
+for module in common checks files firmware limine sign; do
   # shellcheck source=/dev/null
   source "$ROOT_DIR/lib/${module}.sh"
 done
@@ -249,7 +249,7 @@ reset_enroll_runs_no_hook_and_restores_the_loader() {
   limine enroll-config "$(primary_loader_path)" "$(config_checksum)" >/dev/null 2>&1 || fail_test "limine enroll-config"
   rm "$(loader_backup_path)"
   reset_enroll_config >/dev/null 2>&1 || fail_test "upstream's reset without a backup failed: recheck C2"
-  checksum_is_zero "$(embedded_checksum "$(primary_loader_path)")" || fail_test "without a backup the checksum was not reset in place"
+  [[ $(limine_seal "$(primary_loader_path)") == unsealed ]] || fail_test "without a backup the checksum was not reset in place"
 }
 
 # The real enroll-config refuses a file without the marker and a checksum
@@ -272,13 +272,29 @@ enrollment_is_read_back() {
   sandbox_settings
   fresh_esp
   cp "$(package_loader_path)" "$loader" || fail_test "fixture loader"
-  checksum=$(embedded_checksum "$loader") || fail_test "the package's loader does not carry exactly one marker with 128 hex digits behind it: recheck C1"
-  checksum_is_zero "$checksum" || fail_test "the package's loader is not unenrolled"
+  # One marker and a slot of 128 zeros in the releases C1 records.
+  [[ $(limine_seal "$loader") == unsealed ]] || fail_test "the package's loader reads as $(limine_seal "$loader"), not unsealed: recheck C1"
   checksum=$(b2sum </boot/limine.conf)
   checksum=${checksum%% *}
   [[ $(config_checksum) == "$checksum" ]] || fail_test "config_checksum"
   limine enroll-config "$loader" "$checksum" >/dev/null 2>&1 || fail_test "limine enroll-config"
-  [[ $(embedded_checksum "$loader") == "$checksum" ]] || fail_test "the enrolled checksum reads back as $(embedded_checksum "$loader")"
+  [[ $(limine_seal "$loader") == "blake2b $checksum" ]] || fail_test "the enrolled checksum reads back as $(limine_seal "$loader")"
+}
+
+# The pass never signs a Limine executable that is not sealed (D4), judged
+# with the real sbctl on the real executable; a sealed one it signs.
+pass_leaves_an_unsealed_limine_unsigned() {
+  local stray=/boot/EFI/arch-limine/BOOTX64.EFI sealed=/boot/EFI/other/limine.efi
+  sandbox_settings
+  fresh_esp
+  run_sbctl create-keys >/dev/null 2>&1 || fail_test "create-keys"
+  mkdir -p "${stray%/*}" "${sealed%/*}"
+  cp "$(package_loader_path)" "$stray"
+  cp "$(package_loader_path)" "$sealed"
+  limine enroll-config "$sealed" "$(config_checksum)" >/dev/null 2>&1 || fail_test "limine enroll-config"
+  QUIET=true sign_unsigned_arrivals || fail_test "the pass failed beside a loader it leaves unsigned"
+  cmp -s "$stray" "$(package_loader_path)" || fail_test "the real sbctl signed an unsealed Limine"
+  signature_state "$sealed" || fail_test "a sealed Limine of another system was not signed"
 }
 
 # The whole exchange of the two tools over one loader: upstream's hook work,
@@ -305,6 +321,7 @@ upstreams_enrollment_and_ours_prove_the_same_loader() {
 }
 
 run_case settings-are-read-as-upstream-reads-them settings_are_read_as_upstream_reads_them
+run_case pass-leaves-an-unsealed-limine-unsigned pass_leaves_an_unsealed_limine_unsigned
 run_case hooks-run-as-the-contract-says hooks_run_as_the_contract_says
 run_case our-hook-runs-between-upstreams our_hook_runs_between_upstreams
 run_case upstream-still-offers-what-this-tool-uses upstream_still_offers_what_this_tool_uses

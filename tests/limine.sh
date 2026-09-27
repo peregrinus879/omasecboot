@@ -219,13 +219,34 @@ restless_limine_conf_is_not_reported_sealed() {
   ! converge_primary_loader >/dev/null 2>&1 || fail_test "the pass reported a seal while limine.conf kept changing"
 }
 
-# The checksum is read from after Limine's marker, which occurs once (C1): a
-# file with two is no Limine executable this tool can read.
-two_markers_are_no_answer() {
-  local file=$FIX/run/two-markers
+# The seal is the slot after Limine's marker, which occurs once (C1): 128
+# digits in the releases, 256 on the development branch, where zeros in the
+# upper half keep BLAKE2b in the lower half and anything else is BLAKE3. Only
+# BLAKE2b is proved here; a slot of any other form is no answer about a seal.
+seal_classes_follow_the_slot() {
+  local file=$FIX/run/loader sum zeros
+  sum=$(printf 'config' | b2sum | cut -d' ' -f1)
+  zeros=$(printf '0%.0s' {1..128})
   write_raw_loader "$file"
-  printf '%s%0128d\n' "$FIXTURE_MARKER" 0 >>"$file"
-  ! embedded_checksum "$file" >/dev/null || fail_test "a file with two markers gave a checksum"
+  [[ $(limine_seal "$file") == unsealed ]] || fail_test "a raw 12.x loader: $(limine_seal "$file")"
+  limine enroll-config "$file" "$sum"
+  [[ $(limine_seal "$file") == "blake2b $sum" ]] || fail_test "an enrolled 12.x loader: $(limine_seal "$file")"
+  write_loader_with_slot "$file" "${zeros}${zeros}"
+  [[ $(limine_seal "$file") == unsealed ]] || fail_test "a raw loader with a 256-digit slot: $(limine_seal "$file")"
+  write_loader_with_slot "$file" "${sum}${zeros}"
+  [[ $(limine_seal "$file") == "blake2b $sum" ]] || fail_test "BLAKE2b in a 256-digit slot: $(limine_seal "$file")"
+  write_loader_with_slot "$file" "${zeros}${sum}"
+  [[ $(limine_seal "$file") == blake3 ]] || fail_test "a non-zero upper half: $(limine_seal "$file")"
+  write_loader_with_slot "$file" "${sum:0:100}"
+  [[ $(limine_seal "$file") == unsupported ]] || fail_test "a short slot: $(limine_seal "$file")"
+  write_loader_with_slot "$file" "${zeros}${zeros}0"
+  [[ $(limine_seal "$file") == unsupported ]] || fail_test "a run of 257 digits: $(limine_seal "$file")"
+  write_raw_loader "$file"
+  printf '%s%s\n' "$FIXTURE_MARKER" "$zeros" >>"$file"
+  [[ $(limine_seal "$file") == unsupported ]] || fail_test "two markers: $(limine_seal "$file")"
+  printf 'not a loader' >"$file"
+  [[ $(limine_seal "$file") == none ]] || fail_test "a file without the marker: $(limine_seal "$file")"
+  ! limine_seal "$FIX/run/missing" >/dev/null 2>&1 || fail_test "a file that cannot be read gave an answer"
 }
 
 fallback_states() {
@@ -241,6 +262,9 @@ fallback_states() {
   [[ $(fallback_state) == altered ]] || fail_test "a sealed fallback is not altered"
   write_raw_loader "$fallback" 12.5.2
   [[ $(fallback_state) == raw ]] || fail_test "an older raw Limine copy is upstream's business"
+  # A slot whose seal cannot be told is nobody's to rewrite on a guess.
+  write_loader_with_slot "$fallback" "$(printf '0%.0s' {1..100})"
+  [[ $(fallback_state) == foreign ]] || fail_test "a fallback whose seal cannot be told is $(fallback_state)"
   printf 'Windows boot manager copy' >"$fallback"
   [[ $(fallback_state) == foreign ]] || fail_test "a foreign BOOTX64.EFI was not recognised"
   # Upstream's step copies over whatever is there (C2), so it is used only
@@ -363,7 +387,7 @@ run_case unwritten-seal-or-signature-publishes-nothing unwritten_seal_or_signatu
 run_case stale-staging-files-are-swept stale_staging_files_are_swept
 run_case change-during-the-rebuild-is-caught change_during_the_rebuild_is_caught
 run_case restless-limine-conf-is-not-reported-sealed restless_limine_conf_is_not_reported_sealed
-run_case two-markers-are-no-answer two_markers_are_no_answer
+run_case seal-classes-follow-the-slot seal_classes_follow_the_slot
 run_case fallback-states fallback_states
 run_case watch-units-are-template-instances watch_units_are_template_instances
 run_case shadowing-configs-are-listed shadowing_configs_are_listed

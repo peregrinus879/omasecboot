@@ -208,19 +208,44 @@ list_shadowing_configs() {
 
 config_checksum() { b2sum_file "$(limine_config_path)"; }
 
-# The 128 hex digits after Limine's marker; all zero means nothing enrolled.
-embedded_checksum() {
-  local binary=$1 offset embedded
+# Limine's seal is the checksum slot after its marker (C1): 128 hex digits in
+# the releases C1 records, 256 on Limine's development branch, where zeros in
+# the upper half keep a BLAKE2b checksum in the lower half and any other upper
+# half makes the slot a BLAKE3 checksum. Prints one of
+#   none              no marker: not a Limine executable
+#   unsealed          only zeros: Limine checks no limine.conf
+#   blake2b CHECKSUM  sealed with BLAKE2b, which this tool can prove
+#   blake3            sealed with BLAKE3, which this tool cannot prove
+#   unsupported       another slot, or more than one marker: whether Limine
+#                     checks anything cannot be told
+# Status 1 when the file cannot be read.
+limine_seal() {
+  local binary=$1 found offset slot
   local -a markers=()
-  mapfile -t markers < <(LC_ALL=C grep -aobF -- "$LIMINE_CONFIG_MARKER" "$binary" 2>/dev/null)
-  (( ${#markers[@]} == 1 )) || return 1
+  found=$(LC_ALL=C grep -aobF -- "$LIMINE_CONFIG_MARKER" "$binary" 2>/dev/null)
+  (( $? <= 1 )) || return 1
+  [[ -n $found ]] || { printf 'none\n'; return 0; }
+  mapfile -t markers <<<"$found"
+  (( ${#markers[@]} == 1 )) || { printf 'unsupported\n'; return 0; }
   offset=$(( ${markers[0]%%:*} + ${#LIMINE_CONFIG_MARKER} ))
-  embedded=$(dd if="$binary" bs=1 skip="$offset" count=128 status=none 2>/dev/null) || return 1
-  [[ $embedded =~ ^[0-9a-fA-F]{128}$ ]] || return 1
-  printf '%s\n' "${embedded,,}"
+  # The run of hex digits after the marker; a NUL or any other byte ends it.
+  slot=$(dd if="$binary" bs=1 skip="$offset" count=257 status=none 2>/dev/null | LC_ALL=C tr -c '0-9a-fA-F' '\n' | head -n 1)
+  slot=${slot,,}
+  if (( ${#slot} == 256 )) && [[ ${slot:128} =~ ^0+$ ]]; then
+    slot=${slot:0:128}
+  elif (( ${#slot} == 256 )); then
+    printf 'blake3\n'
+    return 0
+  elif (( ${#slot} != 128 )); then
+    printf 'unsupported\n'
+    return 0
+  fi
+  if [[ $slot =~ ^0+$ ]]; then
+    printf 'unsealed\n'
+  else
+    printf 'blake2b %s\n' "$slot"
+  fi
 }
-
-checksum_is_zero() { [[ $1 =~ ^0{128}$ ]]; }
 
 # Sealed over the current limine.conf and signed. Upstream's hook does both
 # but hides its failures, so this is checked after every Limine operation.
@@ -229,7 +254,7 @@ checksum_is_zero() { [[ $1 =~ ^0{128}$ ]]; }
 primary_is_sealed() {
   local primary checksum
   primary=$(primary_loader_path)
-  [[ -f $primary ]] && checksum=$(config_checksum) && [[ $(embedded_checksum "$primary") == "$checksum" ]]
+  [[ -f $primary ]] && checksum=$(config_checksum) && [[ $(limine_seal "$primary") == "blake2b $checksum" ]]
 }
 
 primary_is_proved() {
@@ -237,7 +262,7 @@ primary_is_proved() {
   primary=$(primary_loader_path)
   [[ -f $primary ]] || return 1
   checksum=$(config_checksum) || return 1
-  [[ $(embedded_checksum "$primary") == "$checksum" ]] && signature_state "$primary"
+  [[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"
 }
 
 readonly LOADER_STAGING_PREFIX='.omasecboot-loader.'
@@ -265,7 +290,7 @@ install_sealed_loader() {
     run_visible limine enroll-config "$staging" "$checksum" &&
     run_visible run_sbctl sign "$staging" &&
     durable_sync "$staging" &&
-    [[ $(embedded_checksum "$staging") == "$checksum" ]] &&
+    [[ $(limine_seal "$staging") == "blake2b $checksum" ]] &&
     signature_state "$staging" &&
     mv -f -- "$staging" "$target" &&
     durable_sync "$parent"; then
@@ -304,16 +329,20 @@ converge_primary_loader() {
 
 # absent, raw (Limine's executable, neither sealed nor locally signed: what
 # upstream deploys and D6 wants), altered (Limine's executable, sealed or
-# locally signed) or foreign (someone else's BOOTX64.EFI, never touched). A
-# signature that cannot be read counts as raw: nothing is rewritten on a guess.
+# locally signed) or foreign (someone else's BOOTX64.EFI, or a file whose seal
+# cannot be told, never touched). A signature that cannot be read counts as
+# raw: nothing is rewritten on a guess.
 fallback_state() {
-  local fallback embedded
+  local fallback seal
   fallback=$(fallback_loader_path)
   if [[ ! -e $fallback ]]; then
     printf 'absent\n'
-  elif ! embedded=$(embedded_checksum "$fallback"); then
+    return 0
+  fi
+  seal=$(limine_seal "$fallback") || seal=unsupported
+  if [[ $seal == none || $seal == unsupported ]]; then
     printf 'foreign\n'
-  elif checksum_is_zero "$embedded" && ! signature_state "$fallback"; then
+  elif [[ $seal == unsealed ]] && ! signature_state "$fallback"; then
     printf 'raw\n'
   else
     printf 'altered\n'

@@ -64,6 +64,27 @@ show_firmware_status() {
   fi
 }
 
+# After remove sbctl's keys stay, and upstream signs the loader at every
+# Limine operation without sealing it (C2). While the firmware trusts the key,
+# Secure Boot on would start that loader without a check of limine.conf.
+show_unsealed_signed_loader() {
+  local primary secure_boot
+  primary=$(primary_loader_path)
+  sbctl_keys_exist && [[ -f $primary && $(limine_seal "$primary") == unsealed ]] && signature_state "$primary" || return 0
+  if ! read_enrollment_plan 2>/dev/null; then
+    warn "The Limine loader carries your signature and no seal, and whether the firmware trusts your key could not be read: if it does, keep Secure Boot off, or restore the factory keys in the firmware's key menu"
+    return 0
+  fi
+  variable_holds_local_certificate db || return 0
+  if ! secure_boot=$(read_mode_variable SecureBoot 2>/dev/null); then
+    blocking_problem "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on could not be read: with it on, the loader starts without checking limine.conf"
+  elif [[ $secure_boot == 0 ]]; then
+    warn "The Limine loader carries your signature and no seal, and the firmware trusts your key: with Secure Boot on it would start without checking limine.conf. Keep Secure Boot off, or restore the factory keys in the firmware's key menu"
+  else
+    blocking_problem "Secure Boot is on, and the Limine loader carries your signature and no seal: it starts without checking limine.conf. Restore the factory keys in the firmware's key menu, or run ${BOLD}sudo omasecboot setup${NC}"
+  fi
+}
+
 # Microsoft's 2023 certificates (C9). Notes: this machine's boot chain does
 # not depend on them, what Microsoft can still deliver to it does.
 show_microsoft_2023_status() {
@@ -137,7 +158,7 @@ show_loader_status() {
 # The signing keys, every signable file, and room on the ESP for the next one.
 # Status 1 when the ESP cannot be listed: what follows reads the same files.
 show_signable_files_status() {
-  local files file state size largest=0 available
+  local files file state size largest=0 available primary seal
   if sbctl_keys_exist; then
     pass "sbctl's signing keys exist"
   else
@@ -147,13 +168,23 @@ show_signable_files_status() {
     blocking_problem "Could not list the EFI files on the ESP"
     return 1
   }
+  primary=$(primary_loader_path)
   while IFS= read -r file; do
     [[ -n $file ]] || continue
     state=0
     signature_state "$file" || state=$?
-    case $state in
-      0) pass "Signed: ${file}" ;;
-      1) problem "Not signed: ${file}" ;;
+    # A Limine executable that is not sealed is never signed (D4); the
+    # primary's seal has a proof of its own above.
+    seal=none
+    [[ ${file,,} == "${primary,,}" ]] || seal=$(limine_seal "$file") || seal=unreadable
+    case $state:${seal%% *} in
+      0:unsealed) blocking_problem "A Limine loader that is not sealed carries your signature: ${file}. With Secure Boot on it starts and reads whatever limine.conf it finds without checking it; delete it if nothing starts from it, or seal it over its own limine.conf with its system's tools" ;;
+      0:unsupported) blocking_problem "A file with Limine's marker whose checksum slot does not tell whether it checks limine.conf carries your signature: ${file}. Delete it if nothing starts from it" ;;
+      [01]:unreadable) blocking_problem "Could not read ${file} to tell whether it is a Limine loader that is not sealed; check the ESP" ;;
+      0:*) pass "Signed: ${file}" ;;
+      1:unsealed) note "Left unsigned: ${file} is a Limine loader that is not sealed, which the firmware refuses with Secure Boot on. Delete it if nothing starts from it, or seal it over its own limine.conf with its system's tools, and the next pass signs it" ;;
+      1:unsupported) blocking_problem "Not signed: ${file} carries Limine's marker, and its checksum slot does not tell whether it checks limine.conf. Delete it if nothing starts from it" ;;
+      1:*) problem "Not signed: ${file}" ;;
       *) blocking_problem "sbctl could not tell whether this file is signed: ${file}" ;;
     esac
     size=$(stat -c %s -- "$file" 2>/dev/null) || size=0
@@ -168,7 +199,8 @@ show_signable_files_status() {
   fi
 }
 
-# Rows that would make sbctl sign a history file or the fallback in place.
+# Rows that would make sbctl sign a history file, the fallback or a Limine
+# executable in place (D7).
 show_sbctl_rows_status() {
   local rows file
   if rows=$(list_harmful_sbctl_rows); then
@@ -315,6 +347,7 @@ show_status() {
       problem "An earlier setup or remove did not finish. Run ${BOLD}sudo omasecboot remove${NC} to return to stock, or ${BOLD}sudo omasecboot setup${NC} to set up again"
     else
       note "OmaSecBoot is not set up on this machine"
+      show_unsealed_signed_loader
     fi
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"

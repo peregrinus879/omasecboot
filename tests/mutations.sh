@@ -62,12 +62,12 @@ m F31 lib/common.sh 1 'if [[ $_boot_lock == local ]]; then' 'if true; then' comm
 m F32 lib/common.sh 1 'flock -E 75 -w "$(hook_lock_wait)" 200 || rc=$?' 'flock -E 75 -w "$(hook_lock_wait)" 200 || :' common/inherited-unlocked-descriptor-waits-briefly
 m F33 lib/common.sh 1 $'  boot_lock_release\n  "$@" 200>&- || rc=$?' '  "$@" || rc=$?' commands/setup-from-stock-and-again
 m F34 lib/common.sh 1 $'boot_lock_acquire() {\n  local lock rc=0\n' $'boot_lock_acquire() {\n  local lock rc=0\n  return 0\n' commands/busy-remove-changes-nothing
-m F35 bin/omasecboot 1 '{ checksum=$(embedded_checksum "$(primary_loader_path)") && checksum_is_zero "$checksum"; } ||' 'true ||' windows/entry-is-only-taken-out-when-the-loader-follows
+m F35 bin/omasecboot 1 '[[ $(limine_seal "$(primary_loader_path)") == unsealed ]] ||' 'true ||' windows/entry-is-only-taken-out-when-the-loader-follows
 m F36 lib/windows.sh 1 'if [[ -n $label ]] && lacks_menu_entries "$content"; then' 'if false; then' windows/template-put-there-after-the-look-is-not-written
 m F37 lib/files.sh 1 '  local path=${1,,}' '  local path=$1' sign/history-files-are-never-touched
 m F38 lib/files.sh 1 '[[ $path == */limine_history/* || ${path##*/} =~ \.efi_(sha1|sha256|b3|blake3|xxh|xxhash)_ ]]' 'false' commands/setup-removes-harmful-sbctl-rows
 m F39 lib/files.sh 1 '[[ ${1,,} == "${fallback,,}" ]]' '[[ $1 == "$fallback" ]]' sign/lower-case-foreign-fallback-is-left-alone
-m F40 lib/files.sh 1 '[[ ${1,,} == "${fallback,,}" ]]' 'false' commands/setup-from-stock-and-again
+m F40 lib/files.sh 1 '[[ ${1,,} == "${fallback,,}" ]]' 'false' commands/fallback-is-offered-only-into-an-empty-place
 m F41 lib/limine.sh 1 $'printf \'foreign\\n\'' $'printf \'altered\\n\'' commands/fallback-is-offered-only-into-an-empty-place
 m F42 lib/limine.sh 1 '[[ $(fallback_state) == absent ]] || return 1' ':' limine/fallback-states
 m F43 bin/omasecboot 1 '[[ $(fallback_state) == absent ]] || return 0' ':' commands/fallback-is-offered-only-into-an-empty-place
@@ -76,10 +76,10 @@ m F45 lib/files.sh 1 $'! -ipath \'*/Microsoft/*\' ! -iname \'BOOTIA32.EFI\'' $'!
 m F46 lib/sign.sh 1 '[[ -n $file && ${file,,} != "${primary,,}" ]] || continue' '[[ -n $file && $file != "$primary" ]] || continue' sign/primary-under-another-case-is-never-signed-in-place
 m F47 lib/sign.sh 1 'file_has_path_hash "$file" || hashed=$?' 'hashed=1' commands/silent-build-failure-stops-setup
 m F48 lib/limine.sh 1 '[[ ${file,,} != "${named,,}" ]] || return 0' '[[ $file != "$named" ]] || return 0' limine/stale-os-hashes-are-found
-m F49 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file"; then' 'if is_history_file "$file"; then' commands/setup-removes-harmful-sbctl-rows
-m F50 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file"; then' 'if is_fallback_loader "$file"; then' commands/setup-removes-harmful-sbctl-rows
-m F51 lib/limine.sh 1 '[[ $(embedded_checksum "$primary") == "$checksum" ]] && signature_state "$primary"' '[[ $(embedded_checksum "$primary") == "$checksum" ]]' status/sealed-but-unsigned-is-not-called-unsealed
-m F52 lib/limine.sh 1 '[[ $(embedded_checksum "$primary") == "$checksum" ]] && signature_state "$primary"' 'signature_state "$primary"' sign/seal-only-reseals-and-stops
+m F49 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file" || [[ $seal != none ]]; then' 'if is_history_file "$file" || [[ $seal != none ]]; then' sign/harmful-rows-are-found-and-removed
+m F50 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file" || [[ $seal != none ]]; then' 'if is_fallback_loader "$file" || [[ $seal != none ]]; then' commands/setup-removes-harmful-sbctl-rows
+m F51 lib/limine.sh 1 '[[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"' '[[ $(limine_seal "$primary") == "blake2b $checksum" ]]' status/sealed-but-unsigned-is-not-called-unsealed
+m F52 lib/limine.sh 1 '[[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"' 'signature_state "$primary"' sign/seal-only-reseals-and-stops
 m F53 lib/limine.sh 1 'for _ in 1 2 3; do' 'for _ in 1; do' limine/change-during-the-rebuild-is-caught
 m F54 lib/limine.sh 1 '[[ $sealed == true && $before == "$after" ]]' '[[ $sealed == true ]]' limine/restless-limine-conf-is-not-reported-sealed
 m F55 lib/limine.sh 1 'raw_loader | cmp -s -- - "$primary" || {' 'true || {' commands/remove-without-a-copy-names-the-way-out
@@ -89,7 +89,7 @@ m F58 bin/omasecboot 1 $'trap \'\' TERM' ':' commands/watchers-pass-finishes-thr
 m F59 lib/limine.sh 1 'pgrep -x pacman >/dev/null 2>&1 && (( SECONDS < deadline ))' '(( SECONDS < deadline ))' sign/seal-only-waits-for-pacman-to-finish
 m F60 lib/limine.sh 1 'pgrep -x pacman >/dev/null 2>&1 && (( SECONDS < deadline ))' 'pgrep -x pacman >/dev/null 2>&1' sign/seal-only-waits-for-pacman-to-finish
 m F61 lib/sign.sh 1 $'  converge_windows_entry\n  # Sealed but not signed starts with Secure Boot off; not sealed never does.\n  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' $'  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false\n  converge_windows_entry' commands/fallback-entry-upstream-adds-is-sealed-over
-m F62 lib/limine.sh 1 '[[ $(embedded_checksum "$staging") == "$checksum" ]] &&' 'true &&' limine/unwritten-seal-or-signature-publishes-nothing
+m F62 lib/limine.sh 1 '[[ $(limine_seal "$staging") == "blake2b $checksum" ]] &&' 'true &&' limine/unwritten-seal-or-signature-publishes-nothing
 m F63 lib/limine.sh 1 '    signature_state "$staging" &&' '    true &&' limine/unwritten-seal-or-signature-publishes-nothing
 m F64 lib/windows.sh 1 'boot_order_holds "$target_number" || return 1' ':' windows/setup-without-a-target-changes-nothing
 m F65 lib/windows.sh 1 '[[ $same == 1 && -n $target_label' '[[ -n $target_label' windows/target-is-one-clear-entry-or-none
@@ -98,7 +98,7 @@ m F67 bin/omasecboot 1 '{ [[ -e $(windows_flag) ]] && resolve_windows_target; }'
 m F68 bin/omasecboot 1 $'  restore_stock_boot_files || die "The boot files are not back to stock; run this again"\n  # Only now: the loader is proved raw, so limine.conf may change under it.\n  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"' $'  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"\n  restore_stock_boot_files || die "The boot files are not back to stock; run this again"' windows/failed-remove-keeps-limine-conf-and-loader-together
 m F69 lib/windows.sh 1 $'printf \'%s\' "$content" | atomic_write "$config" "$mode" config_is_still "$before"' $'printf \'%s\' "$content" | atomic_write "$config" "$mode"' windows/late-writer-is-not-overwritten
 m F70 lib/limine.sh 1 'atomic_write "$file" "$mode" default_config_is_still "$before"' 'atomic_write "$file" "$mode"' limine/settings-file-changed-meanwhile-is-not-overwritten
-m F71 lib/limine.sh 1 '(( ${#markers[@]} == 1 )) || return 1' '(( ${#markers[@]} >= 1 )) || return 1' limine/two-markers-are-no-answer
+m F71 lib/limine.sh 1 '(( ${#markers[@]} == 1 )) || {' '(( ${#markers[@]} >= 1 )) || {' limine/seal-classes-follow-the-slot
 m F72 lib/sign.sh 1 $'      failed=1\n    fi\n  done <<<"$stale"' $'      :\n    fi\n  done <<<"$stale"' sign/stale-hash-alone-fails-the-pass
 m F73 lib/sign.sh 1 'run_visible run_sbctl sign "$file" && durable_sync "$file"' 'run_visible run_sbctl sign -s "$file" && durable_sync "$file"' sign/converges-and-is-idempotent
 m F74 lib/sign.sh 1 '{ esp_has_room && run_visible run_sbctl sign' '{ run_visible run_sbctl sign' sign/full-esp-is-not-written-to
@@ -138,7 +138,7 @@ m F122 bin/omasecboot 1 'confirm "the return to stock" "Return the Limine settin
 m F123 lib/sign.sh 1 '&& durable_sync "$file" && signature_state "$file"; } || {' '&& durable_sync "$file"; } || {' sign/claimed-signature-is-proved
 m F124 lib/sign.sh 1 'converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' 'converge_primary_loader || { primary_is_sealed && rc=1; } || :' sign/failure-writes-needs-attention
 m F125 lib/sign.sh 1 'if [[ $(fallback_state) == altered ]]; then' 'if false; then' sign/fallback-is-returned-to-raw
-m F126 lib/limine.sh 1 'elif checksum_is_zero "$embedded" && ! signature_state "$fallback"; then' 'elif checksum_is_zero "$embedded"; then' limine/fallback-states
+m F126 lib/limine.sh 1 'elif [[ $seal == unsealed ]] && ! signature_state "$fallback"; then' 'elif [[ $seal == unsealed ]]; then' limine/fallback-states
 m F127 lib/limine.sh 1 '[[ ! -e $originals ]] || return 0' ':' limine/originals-are-recorded-once
 m F128 lib/limine.sh 1 $'      *) return 1 ;;\n    esac\n  done <"$originals"' $'      *) ;;\n    esac\n  done <"$originals"' limine/malformed-originals-record-is-no-answer
 m F129 lib/limine.sh 1 '    run_visible run_sbctl sign "$staging" &&' '    run_visible run_sbctl sign -s "$staging" &&' sign/converges-and-is-idempotent
@@ -159,9 +159,38 @@ m F144 lib/windows.sh 1 '  is_safe_file "$config" || {' '  true || {' windows/un
 m F146 bin/omasecboot 1 '{ read_enrollment_plan && firmware_is_enrolled; } || die "The firmware does not hold your keys after the write' '{ read_enrollment_plan && firmware_is_enrolled; } || : "The firmware does not hold your keys after the write' firmware/enrollment-is-judged-by-the-variables-afterwards
 m F145 lib/status.sh 1 'blocking_problem "Secure Boot is on, but the firmware does not hold your keys' 'note "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
 
+m F147 lib/sign.sh 1 $'          unsealed)\n            qnote "Not signing' $'          unsealed-never)\n            qnote "Not signing' sign/unsealed-limine-is-never-signed
+m F148 lib/sign.sh 1 $'          unsupported)\n            fail "Not signing' $'          unsupported-never)\n            fail "Not signing' sign/untold-seal-is-not-signed-and-fails-the-pass
+m F149 lib/sign.sh 1 ' || [[ $seal != none ]]; then' '; then' sign/harmful-rows-are-found-and-removed
+m F150 lib/sign.sh 1 $'  [[ -z $rows ]] || {\n    warn "sbctl still lists' $'  true || {\n    warn "sbctl still lists' sign/harmful-rows-are-found-and-removed
+m F151 lib/status.sh 1 '0:unsealed) blocking_problem' '0:unsealed) pass' status/unsealed-limine-is-reported-by-its-signature
+m F152 lib/status.sh 1 '      show_unsealed_signed_loader' '      :' status/signed-unsealed-loader-is-said-after-remove
+m F153 lib/status.sh 1 '    blocking_problem "Secure Boot is on, and the Limine loader carries your signature and no seal' '    note "Secure Boot is on, and the Limine loader carries your signature and no seal' status/signed-unsealed-loader-is-said-after-remove
+m F154 lib/limine.sh 1 'if (( ${#slot} == 256 )) && [[ ${slot:128} =~ ^0+$ ]]; then' 'if (( ${#slot} == 256 )); then' limine/seal-classes-follow-the-slot
+m F155 lib/limine.sh 1 'elif (( ${#slot} != 128 )); then' 'elif false; then' limine/seal-classes-follow-the-slot
+m F156 lib/limine.sh 1 '(( $? <= 1 )) || return 1' ':' limine/seal-classes-follow-the-slot
+m F157 lib/limine.sh 1 'if [[ $seal == none || $seal == unsupported ]]; then' 'if [[ $seal == none ]]; then' limine/fallback-states
+
+m F158 lib/sign.sh 1 $'            failed=1\n            continue\n            ;;\n          unreadable)' $'            continue\n            ;;\n          unreadable)' sign/untold-seal-is-not-signed-and-fails-the-pass
+m F159 lib/sign.sh 1 $'seal=$(limine_seal "$file") || seal=unreadable\n        case $seal in' $'seal=$(limine_seal "$file") || seal=none\n        case $seal in' sign/untold-seal-is-not-signed-and-fails-the-pass
+m F160 lib/status.sh 1 '1:unsupported) blocking_problem' '1:unsupported) note' status/unsealed-limine-is-reported-by-its-signature
+m F161 lib/status.sh 1 '  variable_holds_local_certificate db || return 0' '  true || return 0' status/signed-unsealed-loader-is-said-after-remove
+m F162 lib/limine.sh 1 'count=257' 'count=256' limine/seal-classes-follow-the-slot
+m F163 bin/omasecboot 1 'if ! sbctl_keys_exist || [[ $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]]; then' 'if true; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
+m F164 lib/status.sh 1 '    blocking_problem "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' '    note "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' status/signed-unsealed-loader-is-said-after-remove
+m F165 bin/omasecboot 1 '  elif variable_holds_local_certificate db; then' '  elif true; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
+m F166 bin/omasecboot 1 '[[ $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]]; then' 'false; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
+
+m F167 bin/omasecboot 1 'could not be read: if it does, keep Secure Boot off until its factory keys' 'could not be read: nothing to do until its factory keys' commands/remove-warns-only-while-the-firmware-trusts-the-key
+m F168 lib/status.sh 1 $'  if ! read_enrollment_plan 2>/dev/null; then\n    warn "The Limine loader' $'  if false; then\n    warn "The Limine loader' status/signed-unsealed-loader-is-said-after-remove
+m F169 lib/status.sh 1 '0:unsupported) blocking_problem' '0:unsupported) pass' status/unsealed-limine-is-reported-by-its-signature
+m F170 lib/status.sh 1 '[01]:unreadable) blocking_problem' '[01]:unreadable) pass' status/unsealed-limine-is-reported-by-its-signature
+m F171 lib/sign.sh 1 $'    seal=$(limine_seal "$file") || seal=unreadable\n    if is_history_file' $'    seal=$(limine_seal "$file") || seal=none\n    if is_history_file' sign/harmful-rows-are-found-and-removed
+m F172 lib/sign.sh 1 $'            failed=1\n            continue\n            ;;\n        esac' $'            continue\n            ;;\n        esac' sign/untold-seal-is-not-signed-and-fails-the-pass
+
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {
-  local id=$1 base=$2 dir=$3/$1 suite=${expected[$1]%%/*} output rc caught
+  local id=$1 base=$2 dir=$3/$1 suite=${expected[$1]%%/*} output rc caught line
   cp -a "$base" "$dir"
   SEARCH=${search[$id]} REPLACE=${replacement[$id]} OCC=${occurrence[$id]} perl -0777 -i -pe '
     my ($s, $r, $o) = ($ENV{SEARCH}, $ENV{REPLACE}, $ENV{OCC}); my $n = 0;
@@ -176,14 +205,15 @@ run_one() {
   }
   output=$(cd "$dir" && timeout 300 bash "tests/${suite}.sh" 2>&1)
   rc=$?
-  caught=$(grep -m1 -o '^FAIL: [a-z-]*/[a-z0-9-]*' <<<"$output")
+  line=$(grep -m1 '^FAIL: ' <<<"$output" | cut -c1-200)
+  caught=$(grep -o '^FAIL: [a-z-]*/[a-z0-9-]*' <<<"$line")
   caught=${caught#FAIL: }
   if (( rc == 0 )); then
     printf '%s SURVIVED %s\n' "$id" "${expected[$id]}"
   elif [[ $caught == "${expected[$id]}" ]]; then
-    printf '%s CAUGHT %s\n' "$id" "$caught"
+    printf '%s CAUGHT %s\n' "$id" "${line#FAIL: }"
   elif [[ -n $caught ]]; then
-    printf '%s CAUGHT-BY-ANOTHER %s (expected %s)\n' "$id" "$caught" "${expected[$id]}"
+    printf '%s CAUGHT-BY-ANOTHER %s (expected %s)\n' "$id" "${line#FAIL: }" "${expected[$id]}"
   else
     printf '%s ERROR %s exited %s without a FAIL line\n' "$id" "$suite" "$rc"
   fi

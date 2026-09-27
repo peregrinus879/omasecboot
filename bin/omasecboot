@@ -344,7 +344,17 @@ cmd_remove() {
   rm -f -- "$(settings_originals_file)"
   boot_lock_release
   pass "Limine settings and boot files are back to stock"
-  note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu"
+  # sbctl's keys stay, and upstream signs the loader at every Limine operation
+  # while they exist, and seals it only where the restored settings say so (C2).
+  if ! sbctl_keys_exist || [[ $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]]; then
+    note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu"
+  elif ! read_enrollment_plan 2>/dev/null; then
+    note "Your signing keys stay in /var/lib/sbctl, and while they do, upstream signs the Limine loader at every Limine operation without sealing it. Whether the firmware trusts your key could not be read: if it does, keep Secure Boot off until its factory keys are restored in its own key menu"
+  elif variable_holds_local_certificate db; then
+    note "Your signing keys stay in /var/lib/sbctl, and while they do, upstream signs the Limine loader at every Limine operation without sealing it, and the firmware trusts your key until its factory keys are restored in its own key menu: until then, keep Secure Boot off"
+  else
+    note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu"
+  fi
 }
 
 # The menu row's guard: unprivileged and silent. The opt-in exists and the
@@ -429,7 +439,6 @@ cmd_windows_setup() {
 }
 
 cmd_windows_remove() {
-  local checksum
   check_root "windows remove"
   header "Windows entry"
   check_esp || exit 1
@@ -443,7 +452,7 @@ cmd_windows_remove() {
   else
     # No pass will seal the loader, so limine.conf may only change while
     # the loader carries no checksum at all.
-    { checksum=$(embedded_checksum "$(primary_loader_path)") && checksum_is_zero "$checksum"; } ||
+    [[ $(limine_seal "$(primary_loader_path)") == unsealed ]] ||
       die "The Limine loader is sealed over the current limine.conf, or cannot be read, and nothing would seal it again. Run ${BOLD}sudo omasecboot remove${NC} or ${BOLD}sudo omasecboot setup${NC} first"
     write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path)"
     rm -f -- "$(windows_flag)"

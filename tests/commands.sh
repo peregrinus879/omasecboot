@@ -156,6 +156,37 @@ failed_fallback_step_is_reported() {
   done
 }
 
+# After remove sbctl's keys stay, and upstream signs the loader at every
+# Limine operation, sealing it only where the settings say so (C2). The
+# closing note warns only where that leaves a signed loader without a seal
+# that the firmware trusts.
+remove_warns_only_while_the_firmware_trusts_the_key() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Firmware keys are restored in the firmware'* && $(<"$FIX/run/output") != *'keep Secure Boot off'* ]] ||
+    fail_test "factory keys: $(<"$FIX/run/output")"
+  run_cli setup || fail_test "setup again failed: $(<"$FIX/run/output")"
+  delete_platform_key
+  run_cli setup || fail_test "enrollment failed: $(<"$FIX/run/output")"
+  set_mode_variable SetupMode 0
+  run_cli remove || fail_test "remove after enrollment failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'upstream signs the Limine loader at every Limine operation without sealing it'*'keep Secure Boot off'* ]] ||
+    fail_test "enrolled keys: $(<"$FIX/run/output")"
+  # Whether the firmware trusts the key cannot be read: the warning comes with
+  # its condition.
+  run_cli setup || fail_test "setup on enrolled keys failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/sbctl-export-fails"
+  run_cli remove || fail_test "remove without the export failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'Whether the firmware trusts your key could not be read: if it does, keep Secure Boot off'* ]] ||
+    fail_test "no conditional warning: $(<"$FIX/run/output")"
+  rm "$FIX/run/sbctl-export-fails"
+  # The user's own setting seals the loader again: nothing to warn of.
+  printf 'ENABLE_ENROLL_LIMINE_CONFIG=yes\n' >>"$FIX/etc/default-limine"
+  run_cli setup || fail_test "setup with the user's setting failed: $(<"$FIX/run/output")"
+  run_cli remove || fail_test "remove with the user's setting failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'keep Secure Boot off'* ]] || fail_test "warned although the restored setting seals: $(<"$FIX/run/output")"
+}
+
 remove_returns_to_stock() {
   local secure_boot=$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
   cp "$FIX/etc/default-limine" "$FIX/run/default-limine-before"
@@ -423,6 +454,7 @@ run_case earlier-values-are-the-users earlier_values_are_the_users
 run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
 run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
+run_case remove-warns-only-while-the-firmware-trusts-the-key remove_warns_only_while_the_firmware_trusts_the_key
 run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
 run_case refusals-say-why refusals_say_why

@@ -3,17 +3,22 @@
 # hook and the watchers all run; an interrupted pass is finished by the next
 # one.
 
-# Rows that make sbctl's pacman hook sign a history file or the fallback loader
-# in place. OmaSecBoot adds no rows; these come from the user, from
+# Rows that make sbctl's pacman hook sign a history file, the fallback loader
+# or any Limine executable in place (D7): a row signs whatever stands at its
+# path after every transaction, and a Limine executable there can be one that
+# is not sealed, as the raw copy Omarchy's installer hook leaves over the
+# primary (C6). OmaSecBoot adds no rows; these come from the user, from
 # `sbctl sign -s` for example. Listing them makes sbctl read every tracked
 # file, so this belongs to setup and status, never to the hook's pass.
 list_harmful_sbctl_rows() {
-  local esp tracked file
+  local esp tracked file seal
   esp=$(esp_path) || return 1
   tracked=$(sbctl_tracked_files) || return 1
   while IFS= read -r file; do
     [[ $file == "${esp}/"* ]] || continue
-    if is_history_file "$file" || is_fallback_loader "$file"; then
+    # A file that cannot be read to tell counts as one: a row is never needed.
+    seal=$(limine_seal "$file") || seal=unreadable
+    if is_history_file "$file" || is_fallback_loader "$file" || [[ $seal != none ]]; then
       printf '%s\n' "$file"
     fi
   done <<<"$tracked"
@@ -33,26 +38,59 @@ remove_harmful_sbctl_rows() {
       return 1
     }
   done <<<"$rows"
+  # sbctl's word that a row went is checked against its list (CONTRIBUTING).
+  [[ -n $rows ]] || return 0
+  rows=$(list_harmful_sbctl_rows) || {
+    warn "Could not read sbctl's file list after removing rows from it"
+    return 1
+  }
+  [[ -z $rows ]] || {
+    warn "sbctl still lists files its pacman hook would sign in place: ${rows//$'\n'/, }"
+    return 1
+  }
 }
 
 # UKIs normally arrive signed by sbctl's mkinitcpio hook. One that did not is
 # signed where it is: staging a copy of an image of a few hundred megabytes
-# can exhaust a small ESP.
+# can exhaust a small ESP. A Limine executable that is not sealed is never
+# signed (D4): signed, it would start under Secure Boot and read whatever
+# limine.conf it finds without checking it, while unsigned the firmware
+# refuses it, so it is left quietly and status names it. One whose seal
+# cannot be told, or a file that cannot be read to tell, is not signed either,
+# and fails the pass: a kernel image among them would not start.
 # sbctl truncates the file and writes it back with the signature (C4), so
 # room is checked first. Every file is read once, and a pass that returns 0
 # has proved each of them signed.
 sign_unsigned_arrivals() {
-  local files file primary state hashed failed=0
+  local files file primary state seal hashed failed=0
   files=$(list_signable_files) || return 1
   primary=$(primary_loader_path)
   while IFS= read -r file; do
-    # FAT names have no case: the primary is never signed in place (D7).
+    # FAT names have no case: the primary is only ever replaced through the
+    # staged rebuild (section 4), never signed in place.
     [[ -n $file && ${file,,} != "${primary,,}" ]] || continue
     state=0
     signature_state "$file" || state=$?
     case $state in
       0) ;;
       1)
+        seal=$(limine_seal "$file") || seal=unreadable
+        case $seal in
+          unsealed)
+            qnote "Not signing ${file}: a Limine loader that is not sealed, which the firmware refuses unsigned"
+            continue
+            ;;
+          unsupported)
+            fail "Not signing ${file}: it carries Limine's marker, and its checksum slot does not tell whether it checks limine.conf. Delete it if nothing starts from it"
+            failed=1
+            continue
+            ;;
+          unreadable)
+            fail "Not signing ${file}: it cannot be read to tell whether it is a Limine loader that is not sealed. Check the ESP, then run ${BOLD}sudo omasecboot sign${NC}"
+            failed=1
+            continue
+            ;;
+        esac
         hashed=0
         file_has_path_hash "$file" || hashed=$?
         case $hashed in

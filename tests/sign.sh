@@ -73,17 +73,83 @@ fallback_is_returned_to_raw() {
 }
 
 # Rows that someone registered with sbctl sign -s: sbctl's pacman hook would
-# sign these files in place (D7). Rows outside the ESP are the user's.
+# sign these files in place (D7), and a row signs whatever stands at its path,
+# so every Limine executable's row is one, the primary's too. Rows outside the
+# ESP are the user's.
 harmful_rows_are_found_and_removed() {
   local history=$FIX/esp/machine/limine_history/old.efi_sha256_abc uki=$FIX/esp/EFI/Linux/omarchy_linux.efi
+  local stray=$FIX/esp/EFI/arch-limine/BOOTX64.EFI primary rows
   prepared_machine
-  mkdir -p "${history%/*}" "$FIX/elsewhere" && : >"$history" && : >"$FIX/elsewhere/keep.efi"
-  printf '%s\n' "$history" "$(fallback_loader_path)" "$uki" "$FIX/elsewhere/keep.efi" >"$FIX/sbctl/files"
-  [[ $(list_harmful_sbctl_rows) == "$history"$'\n'"$(fallback_loader_path)" ]] || fail_test "listed: $(list_harmful_sbctl_rows)"
+  primary=$(primary_loader_path)
+  mkdir -p "${history%/*}" "${stray%/*}" "$FIX/elsewhere" && : >"$history" && : >"$FIX/elsewhere/keep.efi"
+  cp "$FIX/share/BOOTX64.EFI" "$stray"
+  printf '%s\n' "$history" "$(fallback_loader_path)" "$uki" "$FIX/elsewhere/keep.efi" "$primary" "$stray" >"$FIX/sbctl/files"
+  rows=$(list_harmful_sbctl_rows)
+  [[ $rows == "$history"$'\n'"$(fallback_loader_path)"$'\n'"$primary"$'\n'"$stray" ]] || fail_test "listed: ${rows}"
   remove_harmful_sbctl_rows || fail_test "remove"
   [[ $(<"$FIX/sbctl/files") == "$uki"$'\n'"$FIX/elsewhere/keep.efi" ]] || fail_test "rows left: $(<"$FIX/sbctl/files")"
+  # Another system's loader at the fallback path is no Limine executable, and
+  # its row is harmful all the same (D6).
+  printf 'another system' >"$(fallback_loader_path)"
+  printf '%s\n' "$(fallback_loader_path)" >>"$FIX/sbctl/files"
+  [[ $(list_harmful_sbctl_rows) == "$(fallback_loader_path)" ]] || fail_test "a foreign fallback's row: $(list_harmful_sbctl_rows)"
+  remove_harmful_sbctl_rows || fail_test "remove the foreign fallback's row"
+  # A tracked file that cannot be read to tell counts as harmful: no row is
+  # ever needed.
+  printf '%s\n' "$uki" >"$FIX/sbctl/files"
+  eval "original_$(declare -f limine_seal)"
+  limine_seal() { [[ $1 != "$uki" ]] || return 1; original_limine_seal "$@"; }
+  [[ $(list_harmful_sbctl_rows) == "$uki" ]] || fail_test "an unreadable tracked file: $(list_harmful_sbctl_rows)"
+  eval "$(declare -f original_limine_seal | sed '1s/original_limine_seal/limine_seal/')"
+  printf '' >"$FIX/sbctl/files"
+  # sbctl's word that a row went is read back from its list.
+  printf '%s\n' "$primary" >>"$FIX/sbctl/files"
+  eval "original_$(declare -f run_sbctl)"
+  run_sbctl() { [[ $1 == remove-file ]] || original_run_sbctl "$@"; }
+  ! remove_harmful_sbctl_rows 2>/dev/null || fail_test "a row that stayed was taken as removed"
+  unset -f run_sbctl
+  eval "$(declare -f original_run_sbctl | sed '1s/original_run_sbctl/run_sbctl/')"
   : >"$FIX/run/sbctl-list-fails"
   ! remove_harmful_sbctl_rows 2>/dev/null || fail_test "an unreadable list read as clean"
+}
+
+# A Limine executable that is not sealed is never signed, wherever it stands
+# (D4): signed, it would start under Secure Boot and read whatever limine.conf
+# it finds without checking it, and unsigned the firmware refuses it, so the
+# pass leaves it quietly. Omarchy 3 left such a copy at EFI/arch-limine. A
+# sealed one of another system is signed like any other loader.
+unsealed_limine_is_never_signed() {
+  local stray=$FIX/esp/EFI/arch-limine/BOOTX64.EFI sealed=$FIX/esp/EFI/other/limine.efi
+  prepared_machine
+  mkdir -p "${stray%/*}" "${sealed%/*}"
+  cp "$FIX/share/BOOTX64.EFI" "$stray"
+  write_raw_loader "$sealed"
+  limine enroll-config "$sealed" "$(printf 'another limine.conf' | b2sum | cut -d' ' -f1)"
+  sign_boot_files || fail_test "the pass failed beside a loader it leaves unsigned"
+  cmp -s "$stray" "$FIX/share/BOOTX64.EFI" || fail_test "an unsealed Limine was signed"
+  file_is_fixture_signed "$sealed" || fail_test "another system's sealed Limine was not signed"
+}
+
+# A file whose checksum slot does not tell whether it checks limine.conf, or
+# one that cannot be read to tell, is not signed either, and the pass says so
+# and fails: a kernel image among them would not start with Secure Boot on.
+untold_seal_is_not_signed_and_fails_the_pass() {
+  local odd=$FIX/esp/EFI/next/BOOTX64.EFI output
+  prepared_machine
+  mkdir -p "${odd%/*}"
+  write_loader_with_slot "$odd" "$(printf '0%.0s' {1..100})"
+  cp "$odd" "$FIX/run/odd-before"
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed beside a seal it cannot tell"
+  [[ $output == *"Not signing ${odd}: it carries Limine's marker"* ]] || fail_test "report: ${output}"
+  cmp -s "$odd" "$FIX/run/odd-before" || fail_test "a Limine whose seal cannot be told was signed"
+  rm "$odd"
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the odd file went"
+  write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" 'a new unsigned image'
+  eval "original_$(declare -f limine_seal)"
+  limine_seal() { [[ $1 != *omarchy_linux.efi ]] || return 1; original_limine_seal "$@"; }
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed beside a file it could not read"
+  [[ $output == *"Not signing $FIX/esp/EFI/Linux/omarchy_linux.efi"* ]] || fail_test "report: ${output}"
+  ! file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "fixture: the image was signed"
 }
 
 foreign_fallback_is_left_alone() {
@@ -301,14 +367,18 @@ pass_looks_again_after_its_wait() {
 # A file that limine.conf hashes under another spelling of its path is the
 # same file: the guard resolves both before it compares (D4).
 # FAT names have no case: the primary loader under another spelling is the
-# same file, and signing it in place would leave a signed raw loader that
-# starts under Secure Boot without enforcing limine.conf (D7).
+# same file, and it is only ever replaced through the staged rebuild (section
+# 4), never signed in place, where a torn write would leave no loader. The
+# copy here is sealed, so the rule for unsealed Limine executables (D4) does
+# not decide it.
 primary_under_another_case_is_never_signed_in_place() {
   local other=$FIX/esp/EFI/limine/LIMINE_X64.EFI
   prepared_machine
   cp "$FIX/share/BOOTX64.EFI" "$other"
+  limine enroll-config "$other" "$(config_checksum)"
+  cp "$other" "$FIX/run/other-before"
   sign_boot_files >/dev/null 2>&1 || :
-  cmp -s "$other" "$FIX/share/BOOTX64.EFI" || fail_test "the primary under another case was signed in place"
+  cmp -s "$other" "$FIX/run/other-before" || fail_test "the primary under another case was signed in place"
 }
 
 hashed_alias_is_not_signed() {
@@ -342,6 +412,8 @@ run_case history-files-are-never-touched history_files_are_never_touched
 run_case other-systems-files-are-never-touched other_systems_files_are_never_touched
 run_case fallback-is-returned-to-raw fallback_is_returned_to_raw
 run_case harmful-rows-are-found-and-removed harmful_rows_are_found_and_removed
+run_case unsealed-limine-is-never-signed unsealed_limine_is_never_signed
+run_case untold-seal-is-not-signed-and-fails-the-pass untold_seal_is_not_signed_and_fails_the_pass
 run_case unproved-state-fails-the-pass unproved_state_fails_the_pass
 run_case stale-hash-alone-fails-the-pass stale_hash_alone_fails_the_pass
 run_case foreign-fallback-is-left-alone foreign_fallback_is_left_alone

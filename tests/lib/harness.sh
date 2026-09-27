@@ -67,6 +67,12 @@ write_raw_loader() {
   { printf 'LIMINE-%s\n%s' "${2:-12.8.0}" "$FIXTURE_MARKER"; printf '0%.0s' {1..128}; printf '\ntail\n'; } >"$1"
 }
 
+# write_loader_with_slot FILE SLOT: a Limine executable whose checksum slot
+# holds SLOT, as Limine's development branch lays out 256 digits (C1).
+write_loader_with_slot() {
+  { printf 'LIMINE-13.0.0\n%s%s' "$FIXTURE_MARKER" "$2"; printf '\ntail\n'; } >"$1"
+}
+
 # limine-install keeps the executable it deployed as a one-member tar beside
 # the primary (C2).
 write_loader_backup() {

@@ -62,11 +62,11 @@ Where the facts live: [D5](spec.md#d5-snapshot-images-are-never-touched), [C2](u
 
 ## The fallback loader
 
-`EFI/BOOT/BOOTX64.EFI` is where firmware looks when it has no entry to start. Upstream deploys a raw Limine loader there, and OmaSecBoot leaves it raw: without a seal it starts whatever `limine.conf` holds, which makes it the rescue after a `limine.conf` mistake, and without a signature the firmware refuses it under Secure Boot, which makes it no way around the seal. A machine installed beside another system starts without one, and `setup` offers to add one only while nothing stands at that path.
+`EFI/BOOT/BOOTX64.EFI` is where firmware looks when it has no entry to start. Upstream deploys a raw Limine loader there, and OmaSecBoot leaves it raw: without a seal it starts whatever `limine.conf` holds, which makes it the rescue after a `limine.conf` mistake, and without a signature the firmware refuses it under Secure Boot, which makes it no way around the seal. A machine installed beside another system starts without one, and `setup` offers to add one only while nothing stands at that path. For the same reason no copy of the Limine executable anywhere on the ESP is signed while it carries no seal.
 
 "Raw" means unsealed and unsigned, and only the bytes prove it: `status` calls the fallback upstream's raw copy when they equal it, and otherwise says what sbctl can tell, no seal and no signature by the current key, which does not rule out a signature by another key the firmware trusts. The spec states that limit, and the one that upstream's install redeploys the fallback by the user's own setting, `remove` included.
 
-Where the facts live: [D6](spec.md#d6-the-fallback-loader-stays-raw), [D4](spec.md#d4-every-efi-program-on-the-esp-is-signed-with-five-exceptions).
+Where the facts live: [D6](spec.md#d6-the-fallback-loader-stays-raw), [D4](spec.md#d4-every-efi-program-on-the-esp-is-signed-with-six-exceptions).
 
 ## Windows, measurements and the recovery key
 

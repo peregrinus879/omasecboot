@@ -251,6 +251,66 @@ old_rescue_loader_is_a_note() {
   [[ $output != *'another Limine build'* ]] || fail_test "advice that upstream's step cannot follow: ${output}"
 }
 
+# The report follows the pass (D4): a Limine loader that is not sealed is left
+# unsigned, which is said as a note; one that carries the local signature
+# starts under Secure Boot unchecked, which blocks.
+unsealed_limine_is_reported_by_its_signature() {
+  local stray=$FIX/esp/EFI/arch-limine/BOOTX64.EFI output
+  set_up_machine
+  mkdir -p "${stray%/*}"
+  cp "$FIX/share/BOOTX64.EFI" "$stray"
+  output=$(show_status 2>&1) || fail_test "an unsigned, unsealed Limine failed the report: ${output}"
+  [[ $output == *"  · Left unsigned: ${stray} is a Limine loader that is not sealed"* ]] || fail_test "no note: ${output}"
+  sbctl sign "$stray"
+  output=$(show_status 2>&1) && fail_test "a signed, unsealed Limine passed"
+  [[ $output == *"  ✗ A Limine loader that is not sealed carries your signature: ${stray}"* ]] || fail_test "report: ${output}"
+  # A slot that does not tell is never said as unsealed, signed or not.
+  write_loader_with_slot "$stray" "$(printf '0%.0s' {1..100})"
+  output=$(show_status 2>&1) && fail_test "a seal that cannot be told passed"
+  [[ $output == *"  ✗ Not signed: ${stray} carries Limine's marker, and its checksum slot does not tell"* ]] || fail_test "report: ${output}"
+  sbctl sign "$stray"
+  output=$(show_status 2>&1) && fail_test "a signed file whose seal cannot be told passed"
+  [[ $output == *"  ✗ A file with Limine's marker whose checksum slot does not tell whether it checks limine.conf carries your signature: ${stray}"* ]] || fail_test "report: ${output}"
+  # A file that cannot be read to tell is said as that.
+  eval "original_$(declare -f limine_seal)"
+  limine_seal() { [[ $1 != "$stray" ]] || return 1; original_limine_seal "$@"; }
+  output=$(show_status 2>&1) && fail_test "a file that could not be read passed"
+  [[ $output == *"  ✗ Could not read ${stray} to tell whether it is a Limine loader that is not sealed"* ]] || fail_test "report: ${output}"
+}
+
+# After remove, sbctl's keys stay and upstream signs the loader without a seal
+# (C2): while the firmware trusts the key, Secure Boot on would start it
+# unchecked.
+signed_unsealed_loader_is_said_after_remove() {
+  local output
+  : >"$FIX/sbctl/keys"
+  # While the firmware does not trust the key, a signed loader starts nowhere.
+  write_limine_conf unhashed
+  sbctl sign "$(primary_loader_path)"
+  output=$(show_status 2>&1) || fail_test "status failed on factory keys: ${output}"
+  [[ $output != *'carries your signature and no seal'* ]] || fail_test "warned while the firmware does not trust the key: ${output}"
+  cp "$FIX/share/BOOTX64.EFI" "$(primary_loader_path)"
+  delete_platform_key
+  { read_enrollment_plan && enroll_local_keys append; } >/dev/null 2>&1 || fail_test "fixture enrollment"
+  set_mode_variable SetupMode 0
+  write_limine_conf unhashed
+  sbctl sign "$(primary_loader_path)"
+  output=$(show_status 2>&1) || fail_test "status failed with Secure Boot off: ${output}"
+  [[ $output == *'  ! The Limine loader carries your signature and no seal, and the firmware trusts your key'* ]] || fail_test "no warning: ${output}"
+  # Whether the firmware trusts the key cannot be read: the warning is said
+  # with its condition.
+  : >"$FIX/run/sbctl-export-fails"
+  output=$(show_status 2>&1) || fail_test "status failed without the export: ${output}"
+  [[ $output == *'whether the firmware trusts your key could not be read: if it does, keep Secure Boot off'* ]] || fail_test "no conditional warning: ${output}"
+  rm "$FIX/run/sbctl-export-fails"
+  set_mode_variable SecureBoot 1
+  output=$(show_status 2>&1) && fail_test "status passed with Secure Boot on"
+  [[ $output == *'  ✗ Secure Boot is on, and the Limine loader carries your signature and no seal'* ]] || fail_test "report: ${output}"
+  rm "$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  output=$(show_status 2>&1) && fail_test "status passed without a readable SecureBoot"
+  [[ $output == *'  ✗ The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on could not be read'* ]] || fail_test "unreadable SecureBoot: ${output}"
+}
+
 # A limine.conf that Limine reads before the sealed one (C1) stops the machine
 # at its next start; status blocks on it, and the pass never looks (7.1).
 shadowing_limine_conf_blocks() {
@@ -325,6 +385,8 @@ fallback_raw_is_only_what_sbctl_can_tell() {
 run_case restore-lock-is-said restore_lock_is_said
 run_case unread-history-signatures-are-said unread_history_signatures_are_said
 run_case shadowing-limine-conf-blocks shadowing_limine_conf_blocks
+run_case unsealed-limine-is-reported-by-its-signature unsealed_limine_is_reported_by_its_signature
+run_case signed-unsealed-loader-is-said-after-remove signed_unsealed_loader_is_said_after_remove
 run_case fallback-raw-is-only-what-sbctl-can-tell fallback_raw_is_only_what_sbctl_can_tell
 run_case unreadable-key-variable-is-named unreadable_key_variable_is_named
 run_case unchecked-hash-is-a-note unchecked_hash_is_a_note

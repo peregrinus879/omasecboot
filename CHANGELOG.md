@@ -2,6 +2,14 @@
 
 What changed for someone who runs the tool. Git history holds the rest.
 
+## Unreleased
+
+- A Limine executable that is not sealed is never signed, wherever it stands, such as the copy Omarchy 3 left in `EFI/arch-limine`: signed, it would start under Secure Boot and read any `limine.conf` without checking it. `status` names one left unsigned, and blocks on one that carries your signature, as 0.1.0 could leave it. A second system's Limine that is not sealed, which 0.1.0 signed, is no longer signed: seal it over its own `limine.conf` with that system's tools to keep it starting with Secure Boot on. A sealed Limine of another system is signed as before.
+- A file that carries Limine's marker but whose checksum slot does not tell whether it checks `limine.conf`, or that cannot be read to tell, is not signed, and the pass says so and fails.
+- `setup` and `status` count sbctl rows for any Limine executable as harmful, the primary loader's included, and `setup` reads sbctl's list again after removing them.
+- The seal is read in the slot layouts Limine's development branch adds; a seal that cannot be told is never taken as proved or as missing.
+- After `remove`, `status` warns while the loader carries your signature and no seal and the firmware still trusts your key, and blocks on it with Secure Boot on; `remove` says so as it finishes, unless the restored settings seal the loader.
+
 ## 0.1.0 (2026-09-23)
 
 The first release.
