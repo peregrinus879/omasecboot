@@ -44,6 +44,17 @@ unsigned_arrival_is_signed() {
   [[ ! -s $FIX/sbctl/files ]] || fail_test "the pass registered files with sbctl: $(<"$FIX/sbctl/files")"
 }
 
+# setup refuses an ESP that others can write before it changes anything.
+setup_refuses_an_unsafe_esp_mount() {
+  local before=$FIX/run/default-limine-before
+  cp "$FIX/etc/default-limine" "$before"
+  printf '259:1 %s rw,relatime,fmask=0000,dmask=0000\n' "$FIX/esp" >"$FIX/run/mounts"
+  run_cli setup && fail_test "setup ran on an ESP others can write"
+  [[ $(<"$FIX/run/output") == *'Nothing was changed: the ESP must be writable by root alone, but users other than root can write to it'*'fmask=0022,dmask=0022'* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  [[ ! -e $(enabled_file) && ! -e $FIX/sbctl/keys ]] || fail_test "setup changed something first"
+  cmp -s "$FIX/etc/default-limine" "$before" || fail_test "setup changed the settings first"
+}
+
 # The firmware step comes only after the boot files are proved (D10): a pass
 # that failed stops setup before it says anything about the firmware.
 setup_stops_when_the_pass_fails() {
@@ -461,6 +472,7 @@ run_case setup-from-stock-and-again setup_from_stock_and_again
 run_case upstream-masked-failure-is-repaired upstream_masked_failure_is_repaired
 run_case unsigned-arrival-is-signed unsigned_arrival_is_signed
 run_case setup-stops-when-the-pass-fails setup_stops_when_the_pass_fails
+run_case setup-refuses-an-unsafe-esp-mount setup_refuses_an_unsafe_esp_mount
 run_case setup-refuses-before-changing-anything setup_refuses_before_changing_anything
 run_case unmounted-esp-and-unsafe-files-stop-the-commands unmounted_esp_and_unsafe_files_stop_the_commands
 run_case earlier-values-are-the-users earlier_values_are_the_users

@@ -102,6 +102,9 @@ fixture_machine() {
   write_key_variable dbx "$(sha256_list "$MICROSOFT_OWNER" "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})" | base64 -w0)"
   set_mode_variable SetupMode 0
   set_mode_variable SecureBoot 0
+  # The mount table: the ESP with the recorded machine's options, in the
+  # kernel's format (C2), and a root filesystem on another device.
+  printf '259:1 %s rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro\n259:2 / rw,relatime,compress=zstd:3\n' "$FIX/esp" >"$FIX/run/mounts"
   # The firmware boots Limine; a machine with Windows gets its entry per case.
   write_boot_entry 0001 active 'Limine' '\EFI\limine\limine_x64.efi'
   write_boot_order 0001
@@ -736,6 +739,35 @@ done
 exit "$status"
 EOF
 
+  # findmnt (util-linux, findmnt(8)): -T PATH names the mount that holds PATH,
+  # the one whose target is PATH's longest leading directory; -o picks the
+  # columns, -n drops the header and -r prints raw, one mount per line without
+  # the padding of its columns. The fixture's mount table is run/mounts,
+  # "MAJ:MIN TARGET OPTIONS" per line; tests/contract-limine.sh reads the real
+  # table the same way. A listing that fails while the lookup works is
+  # run/findmnt-list-fails.
+  cat >"$FIX/bin/findmnt" <<'EOF'
+#!/bin/bash
+table=$FIX/run/mounts
+[[ -r $table ]] || exit 1
+case "$*" in
+  '-rn -o MAJ:MIN -T '*)
+    path=${*: -1} best='' device=''
+    while read -r number target _; do
+      [[ $path == "$target" || $path == "${target%/}/"* ]] || continue
+      (( ${#target} > ${#best} )) || continue
+      best=$target device=$number
+    done <"$table"
+    [[ -n $device ]] || exit 1
+    printf '%s\n' "$device"
+    ;;
+  '-rn -o MAJ:MIN,TARGET,OPTIONS')
+    [[ ! -e $FIX/run/findmnt-list-fails ]] || exit 1
+    cat "$table"
+    ;;
+  *) exit 64 ;;
+esac
+EOF
   # pacman holds db.lck from the start of a transaction until its last
   # post-transaction hook is done, and a crashed pacman leaves the file
   # behind (C6). A case says whether a pacman process is running; the tool

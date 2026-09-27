@@ -2,7 +2,7 @@
 
 What OmaSecBoot relies on in other people's software, read from their source at the versions named, plus what real hardware showed. [spec.md](spec.md) cites these sections as [C1] to [C10]. [maintenance.md](maintenance.md) lists what to recheck when a package changes. `tests/contract-limine.sh` and `tests/contract-sbctl.sh` check parts of C1 to C4 and C9 against the installed packages.
 
-Versions read: Limine 12.9.0, limine-mkinitcpio-hook 1.38.0 (built from the limine-entry-tool sources), limine-snapper-sync 1.31.0 and 1.32.0 for the sync rule, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, pacman 7, efibootmgr 18, util-linux 2.41, Omarchy 4.0.4 (`quattro` branch) and its installer, Linux 7.2.
+Versions read: Limine 12.9.0, limine-mkinitcpio-hook 1.38.0 (built from the limine-entry-tool sources), limine-snapper-sync 1.31.0 and 1.32.0 for the sync rule, sbctl 0.18 with go-uefi `69fb7dba244f`, systemd 261, pacman 7, efibootmgr 18, util-linux 2.41 and 2.42, Omarchy 4.0.4 (`quattro` branch) and its installer, Linux 7.2.
 
 ## C1. Limine at boot
 
@@ -47,6 +47,7 @@ Source: `Zesko/limine-entry-tool` tag `1.38.0` (`install/arch-linux/limine-entry
 - With `FIND_BOOTLOADERS=yes`, Omarchy's default, `limine-install` adds an `/EFI fallback` entry for `EFI/BOOT/BOOTX64.EFI` to `limine.conf` through `limine-entry-tool --add-efi`. That entry never carries a path hash, whatever `ENABLE_VERIFICATION` says (`LimineManager.java`, `addEfi`: `b2sum()` is used for kernel, initramfs, module and UKI paths only), and an entry that exists is not rewritten.
 - The limine package ships `BOOTIA32.EFI` beside `BOOTX64.EFI`. archinstall's Limine step copies both to `EFI/BOOT` on an x86 machine and registers the one that matches the firmware's bitness (`archinstall/lib/installer.py`), while upstream's tools deploy only the loader of the running machine (`limine_efi_arch` in `limine-common-functions`: `X64` on x86_64). UEFI firmware looks for the removable-media loader of its own machine type (UEFI 2.10, 3.5.1.1), so 64-bit firmware never starts `BOOTIA32.EFI`.
 - Linux compares names on a vfat ESP without case (kernel `Documentation/filesystems/vfat.rst`: `check=n`, the default, is case insensitive), which is how the tool finds a `bootx64.efi` that another system wrote in lower case.
+- vfat keeps no owner or mode per file: every file takes the mount's `uid`, `gid` and `fmask`, every directory its `dmask`, and FAT's read-only attribute takes the write bits off a file (`fs/fat/fat.h`, `fat_make_mode`). The mount's options list `uid` and `gid` only when they are not root, and `fmask` and `dmask` always (`fs/fat/inode.c`, `fat_show_options`). They belong to the device's one superblock: a second mount of the device reuses it and ignores its own options (`fs/super.c`, `get_tree_bdev_flags`), and a remount keeps them (`fat_parse_param` ignores options on reconfiguration), so changed options take effect only when the ESP is mounted afresh. A mount alone can carry an idmapping, which vfat allows (`FS_ALLOW_IDMAP`) and a mount's options show as `idmapped` (`fs/proc_namespace.c`). `findmnt -r` prints its columns unpadded and a blank in a target as `\x20`. Seen on two Omarchy machines: `fmask=0022,dmask=0022` and, in the records of C10, `fmask=0077,dmask=0077`, both writable by root alone.
 
 **`limine-scan` and `limine-remove-entry`**
 

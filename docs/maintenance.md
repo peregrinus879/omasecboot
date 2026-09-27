@@ -38,7 +38,8 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 | `sbctl` | C4, every bullet; above all the owner GUID in `status --json`, the ESL export honouring `--append` with a PK in place, `--partial` combined with `--append`, `--microsoft` and `--firmware-builtin`, and `sign -s` on a file that is signed already, which sbctl's master adds to its database (commit `ae9c895`), so the sbctl stub, D7's harmful rows and C4 change together with the release that carries it. C9: the four fingerprints against the certificates it ships |
 | `systemd` | C5: `PathChanged=` semantics, the start limit and `KillMode=mixed` |
 | `pacman` | C6: `db.lck` held until the post-transaction hooks are done; `AbortOnFail` for pre-transaction hooks only |
-| `efibootmgr`, `util-linux` | C7: `--bootnext`. C8: `lsblk`'s `BitLocker` type |
+| `efibootmgr`, `util-linux` | C2: `findmnt -r`, its unpadded columns and `\x20` for a blank, and `-T`. C7: `--bootnext`. C8: `lsblk`'s `BitLocker` type |
+| `linux` | C2: vfat's names without case, and its mount options: what `fat_show_options` prints, kept on a remount and shared by every mount of a device, and `idmapped` |
 | `omarchy` and its installer | C6: the default settings, `omarchy-refresh-limine`, the security command pairs, the installer's `99-omarchy-limine.hook` and its fallback choice (`_boot_intent`), the manual's Secure Boot and Dual Boot Install pages, the maintainers' Secure Boot plan, a Microsoft-signed shim in Arch's or Omarchy's repositories (a condition of the spec's D1), and archinstall's copy of `BOOTIA32.EFI` (C2) |
 | Microsoft's BitLocker pages and its certificate article | C8: the default validation profile, the single-entry rule for PCR 7, the suspend procedure, `manage-bde`. C9: names, dates and fingerprints |
 | 60 days without activity in the repository | GitHub disables the scheduled contract workflow; re-enable it |

@@ -157,7 +157,7 @@ _esp_write_unconfirmed=false
 # seal-only is the watchers' pass: it starts when a running pacman is done and
 # stops after the loader proof, because the watchers' job is the seal.
 sign_boot_files() {
-  local scope=${1:-full} rc=0 sealed=true synced=true
+  local scope=${1:-full} rc=0 sealed=true synced=true unsafe
   _esp_write_unconfirmed=false
   if restore_in_progress; then
     qnote "A snapshot restore is running; leaving the boot files to it"
@@ -187,6 +187,14 @@ sign_boot_files() {
     boot_lock_release
     [[ $scope != seal-only ]] || return 0
     fail "The EFI system partition is not mounted"
+    return 1
+  fi
+  # A pass on an ESP that others can write would seal and sign what they wrote,
+  # so it writes nothing: fail closed, and say what that costs.
+  if ! unsafe=$(esp_mount_is_safe); then
+    set_attention "$ATTENTION_PASS" || true
+    boot_lock_release
+    fail "The ESP must be writable by root alone, but ${unsafe}, so OmaSecBoot seals and signs nothing until its mount shows that only root can: a change of limine.conf, or of the loader with Secure Boot on, meanwhile leaves a machine that does not start. $(unsafe_esp_remedy). Then run ${BOLD}sudo omasecboot sign${NC}"
     return 1
   fi
 

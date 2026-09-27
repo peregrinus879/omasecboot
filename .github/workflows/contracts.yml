@@ -1,10 +1,10 @@
 name: Upstream contracts
 
-# The contract suites run the real sbctl and Limine tools, so their result
-# follows those packages, not this repository. A daily job reads the packages'
-# current versions and runs the suites only when one of them, or this
-# repository's own contract code, has changed since the last green run, and at
-# least once a week. A failure opens an issue instead of blocking a change.
+# The contract suites run the real sbctl, Limine tools and findmnt, so their
+# result follows those packages, not this repository. A daily job reads the
+# packages' current versions and runs the suites only when one of them, or
+# this repository's own contract code, has changed since the last green run,
+# and at least once a week. A failure opens an issue instead of blocking a change.
 # Daily at 03:10 UTC: GitHub delays, and may drop, runs queued on the hour.
 on:
   schedule:
@@ -52,7 +52,7 @@ jobs:
       - name: Name what is under test
         id: subject
         run: |
-          versions=$(pacman -Si limine sbctl limine-mkinitcpio-hook | awk -F': ' '/^(Name|Version) /{print $2}' | paste -sd-)
+          versions=$(pacman -Si limine sbctl limine-mkinitcpio-hook util-linux | awk -F': ' '/^(Name|Version) /{print $2}' | paste -sd-)
           printf 'Versions: %s\n' "$versions"
           printf 'key=%s-%s\n' "$(date -u +%G-%V)" "$(sha256sum <<<"$versions" | cut -c1-16)" >>"$GITHUB_OUTPUT"
       - name: Look for a green run of the same subject

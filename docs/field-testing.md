@@ -106,7 +106,7 @@ sudo bash tests/acceptance-record.sh 0-baseline -- omasecboot status
 make test-contract
 ```
 
-Expected: "OmaSecBoot is not set up on this machine", exit status 0; the contract suites pass against your installed sbctl and Limine tools. Stop if a contract case fails: send its `FAIL` line, which names what changed upstream.
+Expected: "OmaSecBoot is not set up on this machine", exit status 0; the contract suites pass against your installed sbctl, Limine tools and findmnt. Stop if a contract case fails: send its `FAIL` line, which names what changed upstream.
 
 **2.** Set up the boot files. When KEK lacks Microsoft's 2023 certificate, `setup` first warns and asks whether to go on: at level 1 nothing in the firmware changes, so answer yes, and install the pending Windows and firmware updates before level 2. On a machine with Windows, or where it cannot tell whether there is one, it then prints what to do about BitLocker and asks once whether the Windows recovery key is at hand, or there is no encrypted Windows on the machine. Answer yes to that question only when it is true. With "no" to either it stops with "Cancelled", exit 1, after the boot files are set up: then run `status`, and go on or go to [The way back](#the-way-back) as you prefer. On a machine without a fallback loader it also asks "This machine has no fallback loader, which starts it after a limine.conf mistake. Add one now through limine-install?": yes.
 

@@ -281,6 +281,26 @@ enrollment_is_read_back() {
   [[ $(limine_seal "$loader") == "blake2b $checksum" ]] || fail_test "the enrolled checksum reads back as $(limine_seal "$loader")"
 }
 
+# The real findmnt answers the two questions the mount rule asks in the form
+# it reads: the mount that holds the ESP, and every mount of its device, one
+# per line, with a blank in a target written as \x20 so that it cannot split
+# the line (C2). The harness's stub answers the same two questions.
+esp_mounts_read_the_real_table() {
+  local mounts table
+  sandbox_settings
+  fresh_esp
+  mounts=$(esp_mounts) || fail_test "esp_mounts failed on the real findmnt"
+  [[ -n $mounts ]] || fail_test "no mount holds the ESP in the real table"
+  while read -r target options; do
+    [[ $target == /* && -n $options ]] || fail_test "a line not of the form TARGET OPTIONS: ${target} ${options}"
+  done <<<"$mounts"
+  table=$(mktemp) || fail_test "scratch"
+  printf '/dev/sda1 /mnt/an\\040esp vfat rw,fmask=0022,dmask=0022 0 2\n' >"$table"
+  [[ $(findmnt -rn --tab-file "$table" -o TARGET,OPTIONS) == '/mnt/an\x20esp rw,fmask=0022,dmask=0022' ]] ||
+    fail_test "a blank in a target: $(findmnt -rn --tab-file "$table" -o TARGET,OPTIONS)"
+  rm -f "$table"
+}
+
 # The pass never signs a Limine executable that is not sealed (D4), judged
 # with the real sbctl on the real executable; a sealed one it signs.
 pass_leaves_an_unsealed_limine_unsigned() {
@@ -322,6 +342,7 @@ upstreams_enrollment_and_ours_prove_the_same_loader() {
 
 run_case settings-are-read-as-upstream-reads-them settings_are_read_as_upstream_reads_them
 run_case pass-leaves-an-unsealed-limine-unsigned pass_leaves_an_unsealed_limine_unsigned
+run_case esp-mounts-read-the-real-table esp_mounts_read_the_real_table
 run_case hooks-run-as-the-contract-says hooks_run_as_the_contract_says
 run_case our-hook-runs-between-upstreams our_hook_runs_between_upstreams
 run_case upstream-still-offers-what-this-tool-uses upstream_still_offers_what_this_tool_uses
@@ -332,4 +353,4 @@ run_case enrollment-is-read-back enrollment_is_read_back
 run_case reset-enroll-runs-no-hook-and-restores-the-loader reset_enroll_runs_no_hook_and_restores_the_loader
 run_case enroll-config-refuses-bad-input enroll_config_refuses_bad_input
 run_case upstreams-enrollment-and-ours-prove-the-same-loader upstreams_enrollment_and_ours_prove_the_same_loader
-finish_suite "$(limine --version | head -n 1), $(pacman --config /dev/null -Q limine-mkinitcpio-hook 2>/dev/null), sbctl $(sbctl version 2>/dev/null | head -n 1)"
+finish_suite "$(limine --version | head -n 1), $(pacman --config /dev/null -Q limine-mkinitcpio-hook 2>/dev/null), sbctl $(sbctl version 2>/dev/null | head -n 1), $(pacman --config /dev/null -Q util-linux 2>/dev/null)"

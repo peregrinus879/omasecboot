@@ -273,6 +273,56 @@ esp_is_mounted_vfat() {
   mountpoint -q "$esp" && [[ $(findmnt -n -T "$esp" -o FSTYPE 2>/dev/null) == vfat ]]
 }
 
+# Every mount of the ESP's device, by device number, as "TARGET OPTIONS": the
+# ESP mounted a second time writes the same files. findmnt sees the mounts of
+# this mount namespace; -r keeps its columns free of the padding it adds
+# otherwise, and writes a blank in a target as \x20 (C2).
+esp_mounts() {
+  local esp device
+  esp=$(esp_path) || return 1
+  device=$(findmnt -rn -o MAJ:MIN -T "$esp" 2>/dev/null) && [[ -n $device ]] || return 1
+  findmnt -rn -o MAJ:MIN,TARGET,OPTIONS 2>/dev/null | awk -v device="$device" '$1 == device { print $2, $3 }'
+}
+
+# vfat keeps no owner or mode per file: every file takes the mount's uid and
+# fmask, every directory its dmask, and the kernel prints uid only when it is
+# not root and fmask and dmask always. The options belong to the device, so
+# every mount of it shows the same; a mount alone can add an idmapping, which
+# maps who writes (C2). So the mounts say who can write the ESP, and the rule
+# is mode_is_safe's: owned by root, no write for group or others, whatever the
+# group, and no idmapping. A mount that lets anyone else write would have the
+# pass seal and sign what they wrote. Prints why the first mount that fails the
+# rule fails it; one that cannot be read, or shows no masks, fails it too.
+esp_mount_is_safe() {
+  local mounts target options uid fmask dmask
+  mounts=$(esp_mounts) || {
+    printf 'its mount at %s could not be read\n' "$(esp_path 2>/dev/null)"
+    return 1
+  }
+  while read -r target options; do
+    uid=0 fmask='' dmask=''
+    [[ ,$options, =~ ,uid=([0-9]+), ]] && uid=${BASH_REMATCH[1]}
+    [[ ,$options, =~ ,fmask=([0-7]+), ]] && fmask=${BASH_REMATCH[1]}
+    [[ ,$options, =~ ,dmask=([0-7]+), ]] && dmask=${BASH_REMATCH[1]}
+    if [[ -z $fmask || -z $dmask ]]; then
+      printf 'its mount at %s shows no fmask and dmask (%s)\n' "$target" "$options"
+      return 1
+    elif [[ $uid != 0 || ,$options, == *,idmapped,* ]] || (( (8#$fmask & 022) != 022 || (8#$dmask & 022) != 022 )); then
+      printf 'users other than root can write to it through %s (%s)\n' "$target" "$options"
+      return 1
+    fi
+  done <<<"$mounts"
+}
+
+# How to give the ESP a mount that only root can write. vfat keeps its options
+# on a remount, so the ESP is mounted afresh (C2).
+unsafe_esp_remedy() {
+  local esp
+  esp=$(printf '%q' "$(esp_path 2>/dev/null)")
+  printf "Take any uid= off the ESP's line in /etc/fstab and give it an fmask and a dmask without write for group and others, as Omarchy's fmask=0022,dmask=0022 have, and unmount any idmapped mount of it. vfat keeps its options on a remount, so then mount the ESP afresh: %s" \
+    "${BOLD}sudo systemctl daemon-reload && sudo umount ${esp} && sudo mount ${esp}${NC}"
+}
+
 limine_config_path() { printf '%s/limine.conf\n' "$(esp_path)"; }
 
 free_bytes() { df --output=avail -B1 -- "$1" | tail -n 1; }

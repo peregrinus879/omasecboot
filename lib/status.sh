@@ -335,7 +335,7 @@ show_next_step() {
 
 # Exit 0 when nothing needs attention, 1 otherwise.
 show_status() {
-  local attention
+  local attention unsafe
   _status_problems=0 _status_next=sign _status_firmware=pending _status_sealed=true
   header "Status"
   show_firmware_status
@@ -352,6 +352,9 @@ show_status() {
   elif ! esp_is_mounted_vfat; then
     blocking_problem "The EFI system partition is not mounted; mount it and run this again"
   else
+    if ! unsafe=$(esp_mount_is_safe); then
+      blocking_problem "The ESP must be writable by root alone, but ${unsafe}. Anyone who can write it can change what boots, so OmaSecBoot seals and signs nothing until its mount shows that only root can; a change of limine.conf, or of the loader with Secure Boot on, meanwhile leaves a machine that does not start. $(unsafe_esp_remedy)"
+    fi
     show_microsoft_2023_status
     show_settings_status
     show_loader_status

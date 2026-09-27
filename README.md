@@ -39,7 +39,7 @@ Every other EFI program on the ESP that arrives unsigned is signed, a memory tes
 
 ## Requirements
 
-Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images (UKIs) and the EFI system partition (ESP) mounted as vfat, which is how Omarchy installs. Besides the base system the package depends on `sbctl`, `limine`, `limine-mkinitcpio-hook`, `efibootmgr`, `jq`, `gum` and `diffutils`.
+Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images (UKIs) and the EFI system partition (ESP) mounted as vfat and writable by root alone, which is how Omarchy installs. Besides the base system the package depends on `sbctl`, `limine`, `limine-mkinitcpio-hook`, `efibootmgr`, `jq`, `gum` and `diffutils`.
 
 ## Install
 
@@ -149,6 +149,7 @@ If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot 
 | `The firmware's keys are in a state OmaSecBoot will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `sudo omasecboot setup`, then delete only the Platform Key |
 | `Boot files are busy` (exit 75) | Another tool holds the boot lock; a kernel install held it for a minute on the recorded machine | Run the command again when that tool has finished. Nothing failed |
 | `A Limine loader that is not sealed carries your signature` | It starts under Secure Boot and reads whatever `limine.conf` it finds without checking it | Delete it if nothing starts from it, as a copy Omarchy 3 left in `EFI/arch-limine`; if another system starts from it, seal it with that system's tools |
+| `The ESP must be writable by root alone` | Users other than root can write the ESP, or its mount does not show that they cannot. Anyone who can write it can change what boots, so OmaSecBoot seals and signs nothing until only root can; a change of `limine.conf`, or of the loader with Secure Boot on, meanwhile leaves a machine that does not start | Take any `uid=` off the ESP's line in `/etc/fstab` and give it an `fmask` and a `dmask` without write for group and others, as Omarchy's `fmask=0022,dmask=0022` have, and unmount any idmapped mount of it. vfat keeps its options on a remount, so mount it afresh: `sudo systemctl daemon-reload && sudo umount /boot && sudo mount /boot`, then `sudo omasecboot sign` |
 | `The ESP did not confirm a write` | A sync of the ESP failed after the tool wrote to it, so a restart may not find the boot files as they are now | Do not reboot. Check the ESP (the kernel log names the error), then run `sudo omasecboot sign` until it finishes cleanly |
 | `it carries Limine's marker, and its checksum slot does not tell whether it checks limine.conf` | The file has Limine's marker in a form this tool cannot judge, so it stays unsigned and does not start with Secure Boot on | Delete it if nothing starts from it. If it is a kernel image, report it |
 | `cannot be read to tell whether it is a Limine loader that is not sealed` | Reading the file failed | Check the ESP for read errors, then `sudo omasecboot sign` |
@@ -184,7 +185,7 @@ Boot behaviour is proved only on the one machine recorded, so every further mach
 make lint            # bash -n, ShellCheck and the JSONC fragment
 make test            # hermetic suites and the package build, a few minutes
 make test-mutations  # each listed safety predicate disabled in turn: its case must fail
-make test-contract   # the installed sbctl and Limine tools against the upstream contracts, in a sandbox
+make test-contract   # the installed sbctl, Limine tools and findmnt against the upstream contracts, in a sandbox
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).

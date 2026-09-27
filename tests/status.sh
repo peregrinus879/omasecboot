@@ -312,6 +312,15 @@ signed_unsealed_loader_is_said_after_remove() {
   [[ $output == *'  ✗ The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on could not be read'* ]] || fail_test "unreadable SecureBoot: ${output}"
 }
 
+# An ESP that others can write blocks, with the boot risk the refusal brings.
+unsafe_esp_mount_blocks() {
+  local output
+  set_up_machine
+  printf '259:1 %s rw,relatime,uid=1000,fmask=0077,dmask=0077\n' "$FIX/esp" >"$FIX/run/mounts"
+  output=$(show_status 2>&1) && fail_test "an unsafe ESP passed"
+  [[ $output == *"  ✗ The ESP must be writable by root alone, but users other than root can write to it through $FIX/esp (rw,relatime,uid=1000"*'with Secure Boot on, meanwhile leaves a machine that does not start'*"sudo umount $FIX/esp && sudo mount $FIX/esp"* ]] || fail_test "report: ${output}"
+}
+
 # A limine.conf that Limine reads before the sealed one (C1) stops the machine
 # at its next start; status blocks on it, and the pass never looks (7.1).
 shadowing_limine_conf_blocks() {
@@ -386,6 +395,7 @@ fallback_raw_is_only_what_sbctl_can_tell() {
 run_case restore-lock-is-said restore_lock_is_said
 run_case unread-history-signatures-are-said unread_history_signatures_are_said
 run_case shadowing-limine-conf-blocks shadowing_limine_conf_blocks
+run_case unsafe-esp-mount-blocks unsafe_esp_mount_blocks
 run_case unsealed-limine-is-reported-by-its-signature unsealed_limine_is_reported_by_its_signature
 run_case signed-unsealed-loader-is-said-after-remove signed_unsealed_loader_is_said_after_remove
 run_case fallback-raw-is-only-what-sbctl-can-tell fallback_raw_is_only_what_sbctl_can_tell

@@ -14,9 +14,11 @@
 # OCCURRENCE-th literal SEARCH in FILE (0 for every one) with REPLACEMENT.
 # Left out, because each is repeated by the code after it and disabling it
 # changes nothing: the restore check and the ESP check before the lock in
-# sign.sh, which the checks after the lock repeat (D2); and the guard of an
-# empty path list in limine.sh's proof of the regenerated entries, which its
-# loop repeats (an empty string reads as one line without a hash).
+# sign.sh, which the checks after the lock repeat (D2); the guard of an empty
+# path list in limine.sh's proof of the regenerated entries, which its loop
+# repeats (an empty string reads as one line without a hash); and the check of
+# an empty device number in common.sh's esp_mounts, which chooses the message:
+# the rule's loop refuses the empty answer that follows.
 # shellcheck disable=SC2016 # Search and replacement are code, taken literally.
 set -uo pipefail
 ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -212,6 +214,16 @@ m F192 lib/sign.sh 1 '  # Each kind of finding is written or cleared under the l
 
 m F193 lib/sign.sh 1 '{ durable_sync "$file" || _esp_write_unconfirmed=true; }' 'durable_sync "$file"' sign/unsynced-esp-is-said
 m F194 bin/omasecboot 2 '[[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of' ': || die "The ESP did not confirm the write of' windows/windows-remove-says-an-unconfirmed-write
+
+m F195 lib/common.sh 1 '[[ $uid != 0 || ,$options, == *,idmapped,* ]]' '[[ ,$options, == *,idmapped,* ]]' common/esp-mount-rule-follows-the-kernels-options
+m F196 lib/common.sh 1 '(( (8#$fmask & 022) != 022 || (8#$dmask & 022) != 022 ))' '(( (8#$dmask & 022) != 022 ))' common/esp-mount-rule-follows-the-kernels-options
+m F197 lib/common.sh 1 '(( (8#$fmask & 022) != 022 || (8#$dmask & 022) != 022 ))' '(( (8#$fmask & 022) != 022 ))' common/esp-mount-rule-follows-the-kernels-options
+m F198 lib/common.sh 1 'if [[ -z $fmask || -z $dmask ]]; then' 'if false; then' common/esp-mount-rule-follows-the-kernels-options
+m F199 lib/common.sh 1 $'\'$1 == device { print $2, $3 }\'' $'\'{ print $2, $3 }\'' common/esp-mount-rule-follows-the-kernels-options
+m F200 lib/sign.sh 1 '  if ! unsafe=$(esp_mount_is_safe); then' '  if false; then' sign/unsafe-esp-mount-writes-nothing
+m F201 lib/status.sh 1 '    if ! unsafe=$(esp_mount_is_safe); then' '    if false; then' status/unsafe-esp-mount-blocks
+m F202 bin/omasecboot 1 '  unsafe=$(esp_mount_is_safe) || {' '  unsafe=$(esp_mount_is_safe) || true || {' commands/setup-refuses-an-unsafe-esp-mount
+m F203 lib/common.sh 1 '[[ $uid != 0 || ,$options, == *,idmapped,* ]]' '[[ $uid != 0 ]]' common/esp-mount-rule-follows-the-kernels-options
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

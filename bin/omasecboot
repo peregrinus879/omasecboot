@@ -53,12 +53,16 @@ offer_fallback_loader() {
 
 # Everything that must hold before anything on the machine changes.
 setup_preflight() {
-  local shadows
+  local shadows unsafe
   check_architecture && check_uefi && check_esp && check_tools || return 1
   # remove refuses without a readable SecureBoot variable, so a machine that
   # cannot be undone is not set up in the first place.
   { read_mode_variable SecureBoot && read_mode_variable SetupMode; } >/dev/null || {
     fail "Could not read the firmware's SecureBoot and SetupMode variables"
+    return 1
+  }
+  unsafe=$(esp_mount_is_safe) || {
+    fail "Nothing was changed: the ESP must be writable by root alone, but ${unsafe}, and OmaSecBoot would seal and sign whatever anyone who can write it puts there. $(unsafe_esp_remedy)"
     return 1
   }
   shadows=$(list_shadowing_configs)

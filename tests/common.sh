@@ -58,6 +58,41 @@ needs_attention_round_trip() {
   chmod o-w "$FIX/state"
 }
 
+# Who can write the ESP is the mount's to say (C2), in the kernel's own format:
+# uid only when it is not root, fmask and dmask always. Root alone may write,
+# whatever the group; an idmapped mount of the same device, a mount without
+# masks and a mount that cannot be read fail the rule too.
+esp_mount_rule_follows_the_kernels_options() {
+  local tail=',codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro' options unsafe
+  for options in "rw,relatime,fmask=0022,dmask=0022${tail}" "rw,relatime,fmask=0077,dmask=0077${tail}"; do
+    printf '259:1 %s %s\n' "$FIX/esp" "$options" >"$FIX/run/mounts"
+    esp_mount_is_safe >/dev/null || fail_test "a mount only root can write was refused: ${options}"
+  done
+  for options in "rw,relatime,uid=1000,fmask=0077,dmask=0077${tail}" "rw,relatime,fmask=0002,dmask=0022${tail}" \
+    "rw,relatime,fmask=0020,dmask=0022${tail}" "rw,relatime,fmask=0022,dmask=0000${tail}"; do
+    printf '259:1 %s %s\n' "$FIX/esp" "$options" >"$FIX/run/mounts"
+    unsafe=$(esp_mount_is_safe) && fail_test "a mount others can write passed: ${options}"
+    [[ $unsafe == "users other than root can write to it through $FIX/esp (${options})" ]] || fail_test "the mount named: ${unsafe}"
+  done
+  printf '259:1 %s rw,relatime%s\n' "$FIX/esp" "$tail" >"$FIX/run/mounts"
+  unsafe=$(esp_mount_is_safe) && fail_test "a mount without masks passed"
+  [[ $unsafe == "its mount at $FIX/esp shows no fmask and dmask (rw,relatime${tail})" ]] || fail_test "no masks: ${unsafe}"
+  # Another device's loose mount is no concern of the ESP's; an idmapped mount
+  # of the ESP's own device is.
+  printf '259:1 %s rw,fmask=0077,dmask=0077%s\n259:9 /mnt/usb rw,uid=1000,fmask=0000,dmask=0000%s\n' "$FIX/esp" "$tail" "$tail" >"$FIX/run/mounts"
+  esp_mount_is_safe >/dev/null || fail_test "another device's mount was counted"
+  printf '259:1 /mnt/esp rw,relatime,idmapped,fmask=0077,dmask=0077%s\n' "$tail" >>"$FIX/run/mounts"
+  unsafe=$(esp_mount_is_safe) && fail_test "an idmapped mount passed"
+  [[ $unsafe == 'users other than root can write to it through /mnt/esp ('* ]] || fail_test "the idmapped mount was not named: ${unsafe}"
+  rm "$FIX/run/mounts"
+  unsafe=$(esp_mount_is_safe) && fail_test "a mount that could not be read passed"
+  [[ $unsafe == "its mount at $FIX/esp could not be read" ]] || fail_test "unreadable: ${unsafe}"
+  # The table cannot be listed although the ESP's mount is found: no answer.
+  printf '259:1 %s rw,fmask=0077,dmask=0077%s\n' "$FIX/esp" "$tail" >"$FIX/run/mounts"
+  : >"$FIX/run/findmnt-list-fails"
+  ! esp_mount_is_safe >/dev/null || fail_test "a mount table that could not be listed passed"
+}
+
 file_safety_refuses_what_others_can_change() {
   local dir=$FIX/state file=$FIX/state/record
   : >"$file"
@@ -209,6 +244,7 @@ run_case enrollment-counts-only-in-the-default-file enrollment_counts_only_in_th
 run_case atomic-write-replaces-whole-files atomic_write_replaces_whole_files
 run_case needs-attention-round-trip needs_attention_round_trip
 run_case file-safety-refuses-what-others-can-change file_safety_refuses_what_others_can_change
+run_case esp-mount-rule-follows-the-kernels-options esp_mount_rule_follows_the_kernels_options
 run_case lock-is-taken-and-released lock_is_taken_and_released
 run_case replaced-lock-file-is-not-a-lock replaced_lock_file_is_not_a_lock
 run_case busy-lock-is-status-75 busy_lock_is_status_75

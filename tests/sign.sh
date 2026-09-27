@@ -248,6 +248,28 @@ stale_hash_alone_fails_the_pass() {
   [[ $output == *'Stale path hash'* ]] || fail_test "no word of the stale hash: ${output}"
 }
 
+# On an ESP that others can write the pass seals and signs nothing (fail
+# closed), says what that costs and records it; once only root can write, the
+# next pass does its work.
+unsafe_esp_mount_writes_nothing() {
+  local output before
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  printf '259:1 %s rw,relatime,fmask=0000,dmask=0000,codepage=437\n' "$FIX/esp" >"$FIX/run/mounts"
+  printf 'timeout: 7\n' >>"$FIX/esp/limine.conf"
+  write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" 'a new unsigned image'
+  before=$(find "$FIX/esp" -type f -exec b2sum {} + | sort)
+  for scope in full seal-only; do
+    output=$(sign_boot_files "$scope" 2>&1) && fail_test "${scope}: a pass on an unsafe ESP passed"
+    [[ $output == *"The ESP must be writable by root alone, but users other than root can write to it through $FIX/esp ("*'with Secure Boot on, meanwhile leaves a machine that does not start'*'fmask=0022,dmask=0022'*"sudo umount $FIX/esp && sudo mount $FIX/esp"*'sudo omasecboot sign'* ]] || fail_test "${scope}: ${output}"
+    [[ $(find "$FIX/esp" -type f -exec b2sum {} + | sort) == "$before" ]] || fail_test "${scope}: the pass wrote to an unsafe ESP"
+  done
+  grep -q "^${ATTENTION_PASS} on " "$(attention_file)" || fail_test "not recorded"
+  printf '259:1 %s rw,relatime,fmask=0077,dmask=0077,codepage=437\n' "$FIX/esp" >"$FIX/run/mounts"
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass once only root can write"
+  { loader_is_sealed_and_signed "$(primary_loader_path)" && file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi"; } || fail_test "the pass did not do its work afterwards"
+}
+
 # A pass that cannot sync the ESP cannot say that its boot files are what a
 # restart finds, even when it wrote nothing itself; it says so until a pass
 # has synced (7.3).
@@ -493,6 +515,7 @@ run_case lower-case-foreign-fallback-is-left-alone lower_case_foreign_fallback_i
 run_case failure-writes-needs-attention failure_writes_needs_attention
 run_case claimed-signature-is-proved claimed_signature_is_proved
 run_case unsynced-esp-is-said unsynced_esp_is_said
+run_case unsafe-esp-mount-writes-nothing unsafe_esp_mount_writes_nothing
 run_case answer-about-another-file-is-no-answer answer_about_another_file_is_no_answer
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
 run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention
