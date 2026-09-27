@@ -25,6 +25,8 @@ converges_and_is_idempotent() {
   [[ $(effective_setting ENABLE_VERIFICATION) == no && $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]] || fail_test "settings"
   [[ $(enabled_watchers) == 2 ]] || fail_test "the watchers were not enabled: $(ls "$FIX/systemd")"
   [[ ! -e $(attention_file) ]] || fail_test "a clean pass left needs-attention"
+  # Nothing is ever registered in sbctl's file list (D7).
+  [[ ! -s $FIX/sbctl/files ]] || fail_test "the pass registered files with sbctl: $(<"$FIX/sbctl/files")"
   : >"$FIX/run/calls"
   sign_boot_files || fail_test "second pass"
   ! grep -qE '^(sbctl sign|limine enroll-config|systemctl enable)' "$FIX/run/calls" || fail_test "a second pass changed something: $(<"$FIX/run/calls")"
@@ -91,6 +93,19 @@ foreign_fallback_is_left_alone() {
   [[ $(<"$(fallback_loader_path)") == 'someone else' ]] || fail_test "a foreign BOOTX64.EFI was replaced"
 }
 
+# Another system writes the fallback path in lower case (C2, C10), and vfat
+# compares names without case. The fixture's filesystem does not, so only the
+# name comparison is proved here: the file is neither listed nor signed.
+lower_case_foreign_fallback_is_left_alone() {
+  local lower=$FIX/esp/EFI/BOOT/bootx64.efi
+  prepared_machine
+  rm "$(fallback_loader_path)"
+  printf 'another system' >"$lower"
+  [[ $(list_signable_files) != *bootx64.efi* ]] || fail_test "listed as signable: $(list_signable_files)"
+  sign_boot_files >/dev/null 2>&1 || :
+  [[ $(<"$lower") == 'another system' ]] || fail_test "a foreign bootx64.efi was changed"
+}
+
 failure_writes_needs_attention() {
   local output
   prepared_machine
@@ -127,6 +142,41 @@ unproved_state_fails_the_pass() {
   printf 'changed' >>"$FIX/esp/EFI/Linux/omarchy_linux.efi"
   ! sign_boot_files 2>/dev/null || fail_test "a stale OS hash passed"
   [[ -s $(attention_file) ]] || fail_test "no needs-attention"
+}
+
+# A stale hash on an OS entry whose image is already signed fails the pass by
+# itself, not only through the refusal to sign a hashed file (section 7.1).
+stale_hash_alone_fails_the_pass() {
+  local output
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  write_limine_conf hashed
+  printf 'changed' >>"$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  sbctl sign "$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  output=$(sign_boot_files 2>&1) && fail_test "a stale OS hash passed"
+  [[ $output != *'Not signing'* ]] || fail_test "the pass failed through the signing refusal: ${output}"
+  [[ $output == *'Stale path hash'* ]] || fail_test "no word of the stale hash: ${output}"
+}
+
+# The tools this pass delegates to hide their failures (CONTRIBUTING), so a
+# signature sbctl reported is read back before the pass counts it.
+claimed_signature_is_proved() {
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" 'a new unsigned image'
+  : >"$FIX/run/sbctl-sign-does-nothing"
+  ! sign_boot_files 2>/dev/null || fail_test "a signature that was never written counted"
+  ! file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "fixture: the image was signed"
+}
+
+# sbctl answers for the file it was asked about (C4); an answer about another
+# file says nothing about this one.
+answer_about_another_file_is_no_answer() {
+  local rc=0
+  prepared_machine
+  run_sbctl() { printf '[{"file_name":"/elsewhere.efi","is_signed":1}]\n'; }
+  signature_state "$FIX/esp/EFI/Linux/omarchy_linux.efi" || rc=$?
+  (( rc == 2 )) || fail_test "an answer about another file read as ${rc}"
 }
 
 # sbctl rewrites a file in place, which a full ESP would tear (C4).
@@ -293,8 +343,12 @@ run_case other-systems-files-are-never-touched other_systems_files_are_never_tou
 run_case fallback-is-returned-to-raw fallback_is_returned_to_raw
 run_case harmful-rows-are-found-and-removed harmful_rows_are_found_and_removed
 run_case unproved-state-fails-the-pass unproved_state_fails_the_pass
+run_case stale-hash-alone-fails-the-pass stale_hash_alone_fails_the_pass
 run_case foreign-fallback-is-left-alone foreign_fallback_is_left_alone
+run_case lower-case-foreign-fallback-is-left-alone lower_case_foreign_fallback_is_left_alone
 run_case failure-writes-needs-attention failure_writes_needs_attention
+run_case claimed-signature-is-proved claimed_signature_is_proved
+run_case answer-about-another-file-is-no-answer answer_about_another_file_is_no_answer
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
 run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention
 run_case restore-in-progress-is-left-alone restore_in_progress_is_left_alone

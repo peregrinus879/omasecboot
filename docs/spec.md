@@ -374,8 +374,8 @@ A finding or a feature cites a row here, or adds one with its evidence.
 
 ## 9. Tests
 
-- Hermetic suites against a fixture machine with stub tools, with a case for every failure-table row that software can simulate. The commands run as processes of their own, so errexit behaves as installed, through the tool's own prompt code, and a command that fails without a line that says why fails its case (section 6). Every stub behaviour cites the section of upstream-contracts.md that records it; anything else is marked as an assumption in the stub. The whole run takes about a minute.
-- Every safety predicate has a named case that fails when the predicate is disabled.
+- Hermetic suites against a fixture machine with stub tools, with a case for every failure-table row that software can simulate. The commands run as processes of their own, so errexit behaves as installed, through the tool's own prompt code, and a command that fails without a line that says why fails its case (section 6). Every stub behaviour cites the section of upstream-contracts.md that records it or, for a tool no contract covers, that tool's own documentation; anything else is marked as an assumption in the stub. The whole run takes a few minutes.
+- Every safety predicate has a named case that fails when the predicate is disabled; `tests/mutations.sh` disables each one it lists in turn and fails when its case does not.
 - One suite reads the documents: every decision, contract and section cited by number exists, every link and anchor resolves, a section or form field named in quotation marks exists, and the messages that the README's troubleshooting table and the field guide's "Expected" lines quote are ones the tool prints.
 - Real-tool contract suites, in a sandbox that hides the machine's own keys, firmware, settings and ESP.
   - One runs the real sbctl with keys made for the run and a fixture firmware directory: the export in the forms D9 relies on, what a write produces, `--partial` with `--append`, the owner GUID, the signature and file-list answers.

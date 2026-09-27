@@ -177,7 +177,8 @@ Boot behaviour is proved only on the one machine recorded, so every further mach
 
 ```bash
 make lint            # bash -n, ShellCheck and the JSONC fragment
-make test            # hermetic suites and the package build, about a minute
+make test            # hermetic suites and the package build, a few minutes
+make test-mutations  # each listed safety predicate disabled in turn: its case must fail
 make test-contract   # the installed sbctl and Limine tools against the upstream contracts, in a sandbox
 ```
 

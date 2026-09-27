@@ -76,6 +76,17 @@ plan_is_the_firmware_plus_the_local_certificate() {
   [[ $(count "${_planned[PK]}") == 1 ]] || fail_test "the planned PK has $(count "${_planned[PK]}") entries"
 }
 
+# setup's first firmware step, setup with Secure Boot on and status on every
+# enrolled machine read the export with a PK in place and Setup Mode off (C4).
+export_needs_no_setup_mode() {
+  machine_in_setup_mode
+  x509_list "$OEM_OWNER" 'OEM platform key' >/tmp/PK.lists
+  write_variable PK /tmp/PK.lists
+  printf '\x06\x00\x00\x00\x00' >"$(firmware_variable_path SetupMode)"
+  read_enrollment_plan || fail_test "the export failed with a PK in place and SetupMode 0: recheck C4"
+  local_certificates_are_identified || fail_test "the local certificates were not found outside Setup Mode"
+}
+
 export_is_what_a_write_produces() {
   local size
   machine_in_setup_mode
@@ -205,10 +216,23 @@ file_list_answers() {
   rm "$loader"
   tracked_files_are '' || fail_test "list-files no longer leaves out a row whose file is gone: recheck C4"
   run_sbctl remove-file "$loader" >/dev/null 2>&1 || fail_test "remove-file"
+  # The rows setup removes stand for files that exist: remove-file takes such
+  # a row out, and fails for a file sbctl does not track.
+  cp /usr/share/limine/BOOTX64.EFI "$loader" || fail_test "fixture executable"
+  run_sbctl sign -s "$loader" >/dev/null 2>&1 || fail_test "sign -s"
+  tracked_files_are "$loader" || fail_test "list-files: $(sbctl_tracked_files)"
+  run_sbctl remove-file "$loader" >/dev/null 2>&1 || fail_test "remove-file of a tracked file that exists"
+  tracked_files_are '' || fail_test "remove-file left the row: $(sbctl_tracked_files)"
+  ! run_sbctl remove-file "$loader" >/dev/null 2>&1 || fail_test "remove-file of a file sbctl does not track succeeded: recheck C4"
+  # A file that is signed already is not added by sign -s (C4); sbctl's
+  # master adds it, and maintenance.md's sbctl row says what changes then.
+  run_sbctl sign -s "$loader" >/dev/null 2>&1 || fail_test "sign -s of a signed file"
+  tracked_files_are '' || fail_test "sign -s added a file that was signed already: recheck C4 and D7"
 }
 
 run_case keys-and-owner keys_and_owner
 run_case plan-is-the-firmware-plus-the-local-certificate plan_is_the_firmware_plus_the_local_certificate
+run_case export-needs-no-setup-mode export_needs_no_setup_mode
 run_case export-is-what-a-write-produces export_is_what_a_write_produces
 run_case enrolled-state-is-recognised-and-left-alone enrolled_state_is_recognised_and_left_alone
 run_case rebuild-plan-for-cleared-firmware rebuild_plan_for_cleared_firmware

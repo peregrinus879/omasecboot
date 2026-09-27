@@ -20,6 +20,8 @@ setup_from_stock_and_again() {
   cmp -s "$(fallback_loader_path)" "$FIX/share/BOOTX64.EFI" || fail_test "the fallback must stay raw"
   [[ -e $(enabled_file) && $(enabled_watchers) == 2 ]] || fail_test "enabled or watchers"
   [[ $(<"$FIX/run/output") == *'Take a snapshot now'* ]] || fail_test "no snapshot advice"
+  # Nothing is ever registered in sbctl's file list (D7).
+  [[ ! -s $FIX/sbctl/files ]] || fail_test "setup registered files with sbctl: $(<"$FIX/sbctl/files")"
 
   : >"$FIX/run/calls"
   run_cli setup || fail_test "second setup failed: $(<"$FIX/run/output")"
@@ -39,6 +41,17 @@ unsigned_arrival_is_signed() {
   : >"$FIX/run/uki-arrives-unsigned"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   file_is_fixture_signed "$FIX/esp/EFI/Linux/omarchy_linux.efi" || fail_test "the unsigned arrival was not signed"
+  [[ ! -s $FIX/sbctl/files ]] || fail_test "the pass registered files with sbctl: $(<"$FIX/sbctl/files")"
+}
+
+# The firmware step comes only after the boot files are proved (D10): a pass
+# that failed stops setup before it says anything about the firmware.
+setup_stops_when_the_pass_fails() {
+  : >"$FIX/sbctl/keys"
+  : >"$FIX/run/sbctl-sign-fails"
+  run_cli setup && fail_test "setup went on after its pass failed"
+  [[ $(<"$FIX/run/output") != *'ready for Secure Boot'* && $(<"$FIX/run/output") != *'Platform Key'* ]] ||
+    fail_test "setup went on to the firmware step: $(<"$FIX/run/output")"
 }
 
 setup_refuses_before_changing_anything() {
@@ -403,6 +416,7 @@ watchers_pass_finishes_through_a_stop() {
 run_case setup-from-stock-and-again setup_from_stock_and_again
 run_case upstream-masked-failure-is-repaired upstream_masked_failure_is_repaired
 run_case unsigned-arrival-is-signed unsigned_arrival_is_signed
+run_case setup-stops-when-the-pass-fails setup_stops_when_the_pass_fails
 run_case setup-refuses-before-changing-anything setup_refuses_before_changing_anything
 run_case unmounted-esp-and-unsafe-files-stop-the-commands unmounted_esp_and_unsafe_files_stop_the_commands
 run_case earlier-values-are-the-users earlier_values_are_the_users
@@ -527,10 +541,11 @@ setup_and_remove_on_the_real_shape() {
   write_omarchy_limine_conf 2
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   for file in omarchy_linux.efi omarchy_linux-omarchy.efi; do
-    signature_state "$FIX/esp/EFI/Linux/$file" || fail_test "${file} is not signed"
+    file_is_fixture_signed "$FIX/esp/EFI/Linux/$file" || fail_test "${file} is not signed"
   done
   run_cli status || fail_test "status: $(<"$FIX/run/output")"
   run_cli remove || fail_test "remove failed: $(<"$FIX/run/output")"
+  [[ ! -s $FIX/sbctl/files ]] || fail_test "setup or remove registered files with sbctl: $(<"$FIX/sbctl/files")"
   [[ $(grep -cE '^  path: boot\(\):/EFI/Linux/omarchy_linux[^#]*#[0-9a-f]{128}$' "$FIX/esp/limine.conf") == 2 ]] || fail_test "not both kernels carry a hash after remove: $(grep 'path:' "$FIX/esp/limine.conf" | cut -c1-80)"
   { grep -q '^/Windows Boot Manager$' "$FIX/esp/limine.conf" && grep -q '^/EFI fallback$' "$FIX/esp/limine.conf"; } || fail_test "upstream's EFI entries were lost"
   [[ ! -e $(settings_originals_file) ]] || fail_test "originals remain"
@@ -545,7 +560,7 @@ fallback_entry_upstream_adds_is_sealed_over() {
   add_windows
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   grep -q '^/EFI fallback$' "$FIX/esp/limine.conf" || fail_test "upstream's fallback entry was not added by the stub"
-  primary_is_proved || fail_test "the loader is not sealed over the entry upstream added"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over the entry upstream added"
   run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
   [[ $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the Windows entry is not behind upstream's: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
   run_cli status || fail_test "status: $(<"$FIX/run/output")"

@@ -5,13 +5,17 @@
 # test_harness_init, then runs cases with run_case.
 #
 # Rule for stubs: every behaviour a stub models cites the section of
-# docs/upstream-contracts.md (C1 to C10) that records it. Anything a stub does
+# docs/upstream-contracts.md (C1 to C10) that records it, or, for a tool no
+# contract covers, that tool's own documentation. Anything a stub does
 # without such a record is marked ASSUMPTION, because tests that share an
 # unchecked assumption with the code prove nothing about real machines.
 # shellcheck disable=SC2329 # Overrides and case functions are called indirectly.
 
+# The fixture's paths become the watchers' unit names, and systemd-escape
+# refuses a name longer than 255 characters, so the fixture lives under /tmp
+# whatever TMPDIR says.
 test_harness_init() {
-  TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omasecboot-${1}.XXXXXX")
+  TEST_DIR=$(mktemp -d "/tmp/omasecboot-${1}.XXXXXX")
   SUITE_NAME=$1
   CASES_RUN=0
   trap 'rm -rf "$TEST_DIR"' EXIT
@@ -348,11 +352,11 @@ readonly CLI_PROCESS='
   main "$@"'
 
 # A command that fails says why, in a line of fail or warn. Two are silent by
-# contract: anything with --quiet, and the menu row's guard.
+# contract (spec, section 6): status --quiet, and the menu row's guard.
 run_cli() {
   local status=0
   ROOT_DIR=$ROOT_DIR CONFIRM_ANSWER=${CONFIRM_ANSWER:-yes} bash -c "$CLI_PROCESS" omasecboot "$@" >"$FIX/run/output" 2>&1 || status=$?
-  [[ $status == 0 || " $* " == *' --quiet '* || $* == 'windows available' ]] ||
+  [[ $status == 0 || $* == 'status --quiet' || $* == '--quiet status' || $* == 'windows available' ]] ||
     grep -q -e '^  ✗ ' -e '^  ! ' "$FIX/run/output" ||
     fail_test "omasecboot $* failed with status ${status} and gave no reason: $(<"$FIX/run/output")"
   return "$status"
@@ -427,16 +431,24 @@ install_stubs() {
   # run/firmware-ignores-writes. The export works with a PK in place and
   # outside Setup Mode, and nothing works without keys (C4). ASSUMPTIONS:
   # outside Setup Mode the firmware rejects the write, because nothing it
-  # trusts signed it; and --firmware-builtin fails on firmware without
-  # dbDefault or KEKDefault.
+  # trusts signed it; --firmware-builtin fails on firmware without
+  # dbDefault or KEKDefault; and an export that lists two certificates of
+  # sbctl's own for a variable (run/sbctl-exports-two-local), which no record
+  # shows, proves the tool's refusal of it.
   #
   # sbctl 0.18 (C4): status reports whether keys exist; create-keys makes
   # them (run/sbctl-export-fails: the export fails outright); verify exits 0 and answers with an array of one entry whose
   # is_signed is 1, 0 or -1, or with null for a file it may not read, which
-  # is any file outside the ESP that ESP_PATH names (or run/sbctl-cannot-read);
-  # sign works in place and leaves an already signed
-  # file alone; list-files is an array of entries with "file" that leaves out
-  # rows whose file is gone; remove-file drops one row.
+  # under its Landlock rules is any file outside the ESP that ESP_PATH names
+  # (or run/sbctl-cannot-read); sign works in place and leaves an already
+  # signed file alone, and with -s or --save also adds the file it signed to
+  # its database, but not one that was signed already; list-files is an array
+  # of entries with "file" that leaves out rows whose file is gone;
+  # remove-file drops one row and fails for a file it does not track; any
+  # other option is refused, so a new one is modelled before the tool uses it.
+  # ASSUMPTION, to prove the tool's own reading back of a signature, on a
+  # staged loader and on a file signed in place: a sign that reports success
+  # and writes nothing (run/sbctl-sign-does-nothing), which no record shows.
   cat >"$FIX/bin/sbctl" <<'EOF'
 #!/bin/bash
 sig='SIGNED-BY-FIXTURE-KEY'
@@ -486,6 +498,7 @@ case $1 in
         [[ ! -e $FIX/run/sbctl-plans-a-stowaway ]] || x509_list 11111111111111111111111111111111 'stowaway'
       else
         x509_list 0403020106050807090a0b0c0d0e0f10 "local ${name} certificate"
+        [[ ! -e $FIX/run/sbctl-exports-two-local || $export == false ]] || x509_list 0403020106050807090a0b0c0d0e0f10 "second local ${name} certificate"
         [[ ! -e $FIX/run/sbctl-plans-a-stowaway || $export == false ]] || x509_list 11111111111111111111111111111111 'stowaway'
         [[ $name != PK ]] || return 0
         [[ $microsoft == false ]] || x509_list bd9afa775903324dbd6028f4e78f784b "Microsoft ${name} as sbctl ships it"
@@ -518,7 +531,16 @@ case $1 in
     ;;
   sign)
     [[ -e $FIX/sbctl/keys && ! -e $FIX/run/sbctl-sign-fails ]] || exit 1
-    signed "$2" || printf '%s' "$sig" >>"$2"
+    shift
+    save=false
+    case $1 in
+      -s | --save) save=true; shift ;;
+      -*) exit 64 ;;
+    esac
+    [[ ! -e $FIX/run/sbctl-sign-does-nothing ]] || exit 0
+    signed "$1" && exit 0
+    printf '%s' "$sig" >>"$1"
+    [[ $save == false ]] || grep -qxF -- "$1" "$FIX/sbctl/files" || printf '%s\n' "$1" >>"$FIX/sbctl/files"
     ;;
   list-files)
     [[ ! -e $FIX/run/sbctl-list-fails ]] || exit 1
@@ -527,6 +549,7 @@ case $1 in
     ;;
   remove-file)
     [[ ! -e $FIX/run/sbctl-cannot-remove-rows ]] || exit 1
+    grep -qxF -- "$2" "$FIX/sbctl/files" || exit 1
     grep -vxF -- "$2" "$FIX/sbctl/files" >"$FIX/sbctl/files.new"; mv "$FIX/sbctl/files.new" "$FIX/sbctl/files"
     ;;
   *) exit 64 ;;
@@ -537,6 +560,9 @@ EOF
   # limine enroll-config writes the checksum into the slot after the marker,
   # --reset zeroes it (C1). Changing a signed executable invalidates its
   # signature (C4, sbctl issue 408), modelled by dropping the fixture signature.
+  # ASSUMPTION, to prove the tool's own check of a staged loader: an
+  # enroll-config that reports success and writes nothing
+  # (run/limine-enroll-does-nothing), which no record shows.
   cat >"$FIX/bin/limine" <<'EOF'
 #!/bin/bash
 marker='++CONFIG_B2SUM_SIGNATURE++' sig='SIGNED-BY-FIXTURE-KEY'
@@ -545,6 +571,7 @@ printf '%s\n' "limine $*" >>"$FIX/run/calls"
 shift
 if [[ $1 == --reset ]]; then file=$2 sum=$(printf '0%.0s' {1..128}); else file=$1 sum=$2; fi
 [[ ! -e $FIX/run/limine-enroll-fails ]] || exit 1
+[[ ! -e $FIX/run/limine-enroll-does-nothing ]] || exit 0
 # A case that stops the pass half way needs the time to do it.
 [[ ! -e $FIX/run/limine-enroll-is-slow ]] || sleep 2
 # An editor saves limine.conf while the loader is being rebuilt, once.

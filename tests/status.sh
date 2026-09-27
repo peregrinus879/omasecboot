@@ -251,6 +251,16 @@ old_rescue_loader_is_a_note() {
   [[ $output != *'another Limine build'* ]] || fail_test "advice that upstream's step cannot follow: ${output}"
 }
 
+# A limine.conf that Limine reads before the sealed one (C1) stops the machine
+# at its next start; status blocks on it, and the pass never looks (7.1).
+shadowing_limine_conf_blocks() {
+  local output
+  set_up_machine
+  cp "$FIX/esp/limine.conf" "$FIX/esp/EFI/limine/limine.conf"
+  output=$(show_status 2>&1) && fail_test "a shadowing limine.conf passed"
+  [[ $output == *"  ✗ A second limine.conf shadows the real one; remove it: $FIX/esp/EFI/limine/limine.conf"* ]] || fail_test "report: ${output}"
+}
+
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
 run_case clean-machine-names-the-firmware-step clean_machine_names_the_firmware_step
 run_case enrollment-state-chooses-the-next-step enrollment_state_chooses_the_next_step
@@ -314,6 +324,7 @@ fallback_raw_is_only_what_sbctl_can_tell() {
 
 run_case restore-lock-is-said restore_lock_is_said
 run_case unread-history-signatures-are-said unread_history_signatures_are_said
+run_case shadowing-limine-conf-blocks shadowing_limine_conf_blocks
 run_case fallback-raw-is-only-what-sbctl-can-tell fallback_raw_is_only_what_sbctl_can_tell
 run_case unreadable-key-variable-is-named unreadable_key_variable_is_named
 run_case unchecked-hash-is-a-note unchecked_hash_is_a_note

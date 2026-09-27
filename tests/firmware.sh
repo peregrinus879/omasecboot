@@ -51,6 +51,10 @@ signature_lists_are_read_entry_by_entry() {
   ! list_signature_entries "$FIX/run/trailing" 4 >/dev/null || fail_test "bytes after the last list were ignored"
   { printf '\x27\x00\x00\x00'; hex_bytes "$ESL_X509_TYPE"; le32 44; le32 0; le32 16; head -c 16 /dev/zero; } >"$FIX/run/no-data"
   ! list_signature_entries "$FIX/run/no-data" 4 >/dev/null || fail_test "an entry without data was accepted"
+  # Entries that do not fill the list exactly, as a list whose entry size was
+  # rewritten for other data leaves it: no entry boundary can be trusted.
+  { printf '\x27\x00\x00\x00'; hex_bytes "$ESL_X509_TYPE"; le32 $((28 + 16 + 17 + 1)); le32 0; le32 $((16 + 17)); hex_bytes "$OEM_OWNER"; printf 'first certificate?'; } >"$FIX/run/ragged"
+  ! list_signature_entries "$FIX/run/ragged" 4 >/dev/null || fail_test "a list its entries do not fill was accepted"
   ! list_signature_entries "$FIX/run/missing" 0 >/dev/null 2>&1 || fail_test "an unreadable file read as empty"
   : >"$FIX/run/empty"
   [[ -z $(list_signature_entries "$FIX/run/empty" 0) ]] || fail_test "an empty file has entries"
@@ -83,6 +87,28 @@ backup_is_taken_once_and_complete() {
   ! latest_firmware_backup >/dev/null || fail_test "a backup without sums counted"
 }
 
+# A mode variable is four attribute bytes and one value byte, 0 or 1; any
+# other form is no answer, never a guess (section 7.6).
+mode_variables_are_read_exactly() {
+  local variable=$FIX/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+  [[ $(read_mode_variable SecureBoot) == 0 ]] || fail_test "a well-formed variable"
+  printf '\x06\x00\x00\x00\x01\x00' >"$variable"
+  ! read_mode_variable SecureBoot >/dev/null || fail_test "a six-byte variable was read"
+  printf '\x06\x00\x00\x00' >"$variable"
+  ! read_mode_variable SecureBoot >/dev/null || fail_test "a variable without its value byte was read"
+  printf '\x06\x00\x00\x00\x02' >"$variable"
+  ! read_mode_variable SecureBoot >/dev/null || fail_test "a value other than 0 or 1 was read"
+}
+
+# efivarfs keeps no snapshot to copy from, so a copy is read a second time
+# before it counts: a copy that differs from the variable is no backup.
+torn_backup_copy_is_refused() {
+  cat() { command cat "$@"; [[ $1 != -- ]] || printf 'torn'; }
+  ! take_firmware_backup >/dev/null 2>&1 || fail_test "a copy that differs from the variable was taken as a backup"
+  unset -f cat
+  ! latest_firmware_backup >/dev/null || fail_test "the torn copy counts as a backup"
+}
+
 # The local certificates are the entries sbctl owns (C4), found the same way
 # whether or not the firmware holds them and whether or not sbctl's append
 # adds them a second time.
@@ -107,6 +133,13 @@ local_certificates_are_found_by_owner() {
       fail_test "an enrolled firmware was not recognised (idempotent sbctl: ${idempotent})"
     [[ $(count_foreign_entries) == 5 ]] || fail_test "the local certificates counted as foreign"
   done
+
+  # Two certificates of sbctl's own for one variable leave the local one
+  # unknown, and everything the plan proves rests on knowing it.
+  : >"$FIX/run/sbctl-exports-two-local"
+  read_enrollment_plan || fail_test "plan with two local certificates"
+  ! local_certificates_are_identified || fail_test "two certificates of sbctl's own for a variable were taken as identified"
+  rm "$FIX/run/sbctl-exports-two-local"
 
   # The owner goes into a pattern, so only a well-formed GUID is one.
   : >"$FIX/run/sbctl-owner-malformed"
@@ -161,6 +194,15 @@ empty_never_means_append() {
   ! append_is_safe "$backup" || fail_test "append was judged safe with an empty db"
   { read_rebuild_plan && ! rebuild_applies; } 2>/dev/null || fail_test "a half-cleared firmware was judged rebuildable"
   ! reference_backup >/dev/null || fail_test "a backup without a PK served as the reference"
+
+  # The same for KEK: an empty KEK beside a whole db is no list to append to.
+  write_key_variable db "$({ x509_list "$MICROSOFT_OWNER" 'Microsoft Windows CA'; x509_list "$OEM_OWNER" 'OEM db'; } | base64 -w0)"
+  rm "$(key_variable_path KEK)"
+  sleep 1
+  backup=$(take_firmware_backup) || fail_test "backup with an empty KEK"
+  read_enrollment_plan || fail_test "plan"
+  [[ -z $(list_lost_entries "$backup" current) ]] || fail_test "fixture: the late backup shows a loss"
+  ! append_is_safe "$backup" || fail_test "append was judged safe with an empty KEK"
 
   # A db that holds nothing but the local certificate, even twice, is empty
   # for this purpose.
@@ -579,8 +621,42 @@ firmware_step_needs_readable_modes() {
   [[ $output == *"Could not read the firmware's SecureBoot and SetupMode variables"* ]] || fail_test "no reason: ${output}"
 }
 
+# After the writes, and after each one's reading back, the three variables are
+# read again as a whole: a firmware that does not hold the keys then is told,
+# never passed as enrolled (section 7.6).
+enrollment_is_judged_by_the_variables_afterwards() {
+  local output
+  prepared_machine
+  delete_platform_key
+  # The step is the dispatcher's, run as the CLI process runs it, with a
+  # reader that finds the keys missing once they are written.
+  # shellcheck disable=SC2016 # The process expands its own variables.
+  output=$(ROOT_DIR=$ROOT_DIR bash -c '
+    source "$ROOT_DIR/tests/lib/harness.sh"
+    source "$ROOT_DIR/bin/omasecboot"
+    fixture_overrides
+    firmware_is_enrolled() { return 1; }
+    setup_firmware_step false' 2>&1) && fail_test "keys the firmware does not hold after the write passed"
+  [[ $output == *'The firmware does not hold your keys after the write'* && $output != *'Your keys are enrolled'* ]] || fail_test "report: ${output}"
+}
+
+# remove refuses without a readable SecureBoot, and the firmware step needs
+# SetupMode, so setup reads both before it changes anything (section 6).
+setup_needs_setup_mode_readable_before_any_change() {
+  local before=$FIX/run/default-limine-before
+  cp "$FIX/etc/default-limine" "$before"
+  rm "$FIX/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  run_cli setup && fail_test "setup went on without SetupMode"
+  [[ $(<"$FIX/run/output") == *"Could not read the firmware's SecureBoot and SetupMode variables"* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  [[ ! -e $(enabled_file) && ! -e $(settings_originals_file) ]] || fail_test "setup recorded state before refusing"
+  cmp -s "$FIX/etc/default-limine" "$before" || fail_test "setup changed the settings before refusing"
+  [[ ! -e $FIX/sbctl/keys ]] || fail_test "setup created keys before refusing"
+}
+
 run_case signature-lists-are-read-entry-by-entry signature_lists_are_read_entry_by_entry
 run_case backup-is-taken-once-and-complete backup_is_taken_once_and_complete
+run_case mode-variables-are-read-exactly mode_variables_are_read_exactly
+run_case torn-backup-copy-is-refused torn_backup_copy_is_refused
 run_case local-certificates-are-found-by-owner local_certificates_are_found_by_owner
 run_case plan-proofs-refuse-what-was-not-asked-for plan_proofs_refuse_what_was_not_asked_for
 run_case empty-never-means-append empty_never_means_append
@@ -605,4 +681,6 @@ run_case backup-is-root-only-complete-and-ordered backup_is_root_only_complete_a
 run_case unsafe-backups-are-passed-over unsafe_backups_are_passed_over
 run_case rebuild-plan-needs-more-than-the-local-entry rebuild_plan_needs_more_than_the_local_entry
 run_case firmware-step-needs-readable-modes firmware_step_needs_readable_modes
+run_case enrollment-is-judged-by-the-variables-afterwards enrollment_is_judged_by_the_variables_afterwards
+run_case setup-needs-setup-mode-readable-before-any-change setup_needs_setup_mode_readable_before_any_change
 finish_suite

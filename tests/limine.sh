@@ -61,6 +61,28 @@ originals_are_recorded_once() {
   grep -q $'^ENABLE_VERIFICATION\tabsent$' "$(settings_originals_file)" || fail_test "a second save overwrote the originals"
 }
 
+# remove restores what the originals say; a record it cannot read is no
+# answer, never a guess about what stood there.
+malformed_originals_record_is_no_answer() {
+  local before=$FIX/run/default-limine-before
+  { save_settings_originals && apply_managed_settings; } || fail_test "apply"
+  printf 'ENABLE_VERIFICATION\tsomething else\n' >"$(settings_originals_file)"
+  cp "$FIX/etc/default-limine" "$before"
+  ! restore_settings_originals || fail_test "a malformed record was restored"
+  cmp -s "$FIX/etc/default-limine" "$before" || fail_test "a malformed record changed the settings"
+}
+
+# Upstream copies the fallback in place and hides a failed copy (C2), so
+# there must be room before it is asked to.
+fallback_is_not_added_without_room() {
+  rm "$(fallback_loader_path)"
+  free_bytes() { printf '4096\n'; }
+  : >"$FIX/run/calls"
+  ! add_fallback_loader 2>/dev/null || fail_test "a fallback was added to a full ESP"
+  [[ ! -e $(fallback_loader_path) ]] || fail_test "a fallback stands on a full ESP"
+  ! grep -q '^limine-install' "$FIX/run/calls" || fail_test "upstream's install ran on a full ESP"
+}
+
 stale_os_hashes_are_found() {
   local stale
   [[ -z $(list_stale_os_hashes) ]] || fail_test "a fresh hash read as stale"
@@ -144,16 +166,33 @@ corrupt_backup_publishes_nothing() {
   [[ $output == *"$(loader_backup_path), cannot be read"*"sudo mv $(loader_backup_path) $(loader_backup_path).damaged"* ]] || fail_test "the way out was not named: ${output}"
   mv "$(loader_backup_path)" "$(loader_backup_path).damaged"
   ensure_primary_loader >/dev/null || fail_test "the rebuild failed with the damaged copy aside"
-  primary_is_proved || fail_test "the loader built from the package's executable is not proved"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader built from the package's executable is not sealed and signed"
+}
+
+# Upstream's tools hide their failures (C2), so the staged copy is proved
+# before it replaces the primary: a seal or a signature that was reported and
+# never written publishes nothing.
+unwritten_seal_or_signature_publishes_nothing() {
+  local before=$FIX/run/primary-before flag
+  : >"$FIX/sbctl/keys"
+  cp "$(primary_loader_path)" "$before"
+  for flag in limine-enroll-does-nothing sbctl-sign-does-nothing; do
+    : >"$FIX/run/${flag}"
+    ! ensure_primary_loader >/dev/null 2>&1 || fail_test "${flag}: a loader that was not proved passed"
+    cmp -s "$(primary_loader_path)" "$before" || fail_test "${flag}: the unproved copy replaced the primary"
+    [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "${flag}: a staging file was left on the ESP"
+    rm "$FIX/run/${flag}"
+  done
 }
 
 # Left behind by a pass that was killed; ESP space is scarce.
 stale_staging_files_are_swept() {
   : >"$FIX/esp/EFI/limine/.omasecboot-loader.abc123"
   : >"$FIX/esp/EFI/BOOT/.omasecboot-loader.def456"
+  : >"$FIX/esp/.limine.conf.ghi789"
   remove_stale_staging || fail_test "sweep"
-  [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*') ]] || fail_test "staging files remain"
-  [[ -e $(primary_loader_path) && -e $(fallback_loader_path) ]] || fail_test "the sweep removed a loader"
+  [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "staging files remain: $(find "$FIX/esp" -name '.*')"
+  [[ -e $(primary_loader_path) && -e $(fallback_loader_path) && -e $FIX/esp/limine.conf ]] || fail_test "the sweep removed a loader or limine.conf"
 }
 
 # systemd merges changes that arrive while the watcher's service runs (C5).
@@ -162,6 +201,31 @@ change_during_the_rebuild_is_caught() {
   : >"$FIX/run/config-changes-during-enroll"
   converge_primary_loader || fail_test "a change during the first round failed the pass"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader carries the checksum from before the change"
+}
+
+# A limine.conf that changes after every proof exhausts the rounds (D8): the
+# pass reports that it could not seal, never a seal it does not have. The
+# change is made by the proof of the primary, which ensure_primary_loader
+# repeats after it installs a loader.
+restless_limine_conf_is_not_reported_sealed() {
+  : >"$FIX/sbctl/keys"
+  eval "original_$(declare -f signature_state)"
+  signature_state() {
+    local status=0
+    original_signature_state "$@" || status=$?
+    [[ $1 != "$(primary_loader_path)" ]] || printf 'timeout: %s\n' "$RANDOM" >>"$FIX/esp/limine.conf"
+    return "$status"
+  }
+  ! converge_primary_loader >/dev/null 2>&1 || fail_test "the pass reported a seal while limine.conf kept changing"
+}
+
+# The checksum is read from after Limine's marker, which occurs once (C1): a
+# file with two is no Limine executable this tool can read.
+two_markers_are_no_answer() {
+  local file=$FIX/run/two-markers
+  write_raw_loader "$file"
+  printf '%s%0128d\n' "$FIXTURE_MARKER" 0 >>"$file"
+  ! embedded_checksum "$file" >/dev/null || fail_test "a file with two markers gave a checksum"
 }
 
 fallback_states() {
@@ -287,14 +351,19 @@ run_case original-values-come-back-verbatim original_values_come_back_verbatim
 run_case failed-write-keeps-the-settings-file failed_write_keeps_the_settings_file
 run_case originals-are-recorded-once originals_are_recorded_once
 run_case settings-file-changed-meanwhile-is-not-overwritten settings_file_changed_meanwhile_is_not_overwritten
+run_case malformed-originals-record-is-no-answer malformed_originals_record_is_no_answer
+run_case fallback-is-not-added-without-room fallback_is_not_added_without_room
 run_case stale-os-hashes-are-found stale_os_hashes_are_found
 run_case snapshot-hashes-are-upstreams snapshot_hashes_are_upstreams
 run_case primary-is-sealed-signed-and-reproved primary_is_sealed_signed_and_reproved
 run_case failed-rebuild-keeps-the-old-loader failed_rebuild_keeps_the_old_loader
 run_case rebuild-uses-the-loader-upstream-deployed rebuild_uses_the_loader_upstream_deployed
 run_case corrupt-backup-publishes-nothing corrupt_backup_publishes_nothing
+run_case unwritten-seal-or-signature-publishes-nothing unwritten_seal_or_signature_publishes_nothing
 run_case stale-staging-files-are-swept stale_staging_files_are_swept
 run_case change-during-the-rebuild-is-caught change_during_the_rebuild_is_caught
+run_case restless-limine-conf-is-not-reported-sealed restless_limine_conf_is_not_reported_sealed
+run_case two-markers-are-no-answer two_markers_are_no_answer
 run_case fallback-states fallback_states
 run_case watch-units-are-template-instances watch_units_are_template_instances
 run_case shadowing-configs-are-listed shadowing_configs_are_listed

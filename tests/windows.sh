@@ -222,11 +222,14 @@ entry_comes_back_after_limine_conf_is_replaced() {
   run_cli status || fail_test "status: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") == *'restarts the machine into Windows Boot Manager'* ]] || fail_test "status does not show the entry"
 
+  # Sealed again over the file without the entry, so the report judges the
+  # entry alone.
   write_limine_conf unhashed
+  ensure_primary_loader >/dev/null || fail_test "reseal"
   run_cli windows status || fail_test "windows status failed without the entry"
   [[ $(<"$FIX/run/output") == *"holds no Windows entry of OmaSecBoot's"* ]] || fail_test "windows status without the entry: $(<"$FIX/run/output")"
   run_cli status && fail_test "status passed without the entry"
-  [[ $(<"$FIX/run/output") == *'Windows entry is missing from limine.conf'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'  ✗ The Windows entry is missing from limine.conf'* && $(<"$FIX/run/output") == *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
   [[ $(entry_count) == 1 ]] || fail_test "the entry did not come back"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over the restored entry"
@@ -308,7 +311,7 @@ entry_problems_are_reported_not_failed() {
   run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
   sed -i 's/^    entry: Windows Boot Manager$/    entry: Another name/' "$FIX/esp/limine.conf"
   output=$(show_windows_status 2>&1)
-  [[ $output == *'is not the one for Windows Boot Manager'* ]] || fail_test "stale: ${output}"
+  [[ $output == *'  ✗ The Windows entry in limine.conf is not the one for Windows Boot Manager'* ]] || fail_test "stale: ${output}"
   mv "$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c" "$FIX/run/BootOrder"
   output=$(show_windows_status 2>&1)
   [[ $output == *'boot entries could not be read'* ]] || fail_test "unreadable entries: ${output}"
@@ -420,6 +423,31 @@ unknown_encryption_state_is_asked_about() {
   [[ $(<"$FIX/run/output") == *'does not prove that there is none'* ]] || fail_test "absent: $(<"$FIX/run/output")"
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   [[ $(<"$FIX/run/output") != *QUESTION* ]] || fail_test "a machine without Windows was asked about it"
+}
+
+# Encryption cannot be ruled out from the volumes alone: a Windows Boot Manager
+# entry in the firmware counts as Windows that may be encrypted, and boot
+# entries that cannot be read leave the answer open (section 6).
+windows_without_a_listed_volume_is_not_ruled_out() {
+  add_windows
+  printf '/dev/nvme0n1p1 vfat\n/dev/nvme0n1p3 ntfs\n/dev/nvme0n1p5 btrfs\n' >"$FIX/run/lsblk"
+  [[ $(windows_encryption_state) == present ]] || fail_test "a Windows entry without a BitLocker volume read as $(windows_encryption_state)"
+  rm "$FIX"/efivars/Boot0000-*
+  [[ $(windows_encryption_state) == absent ]] || fail_test "a machine without either read as $(windows_encryption_state)"
+  mv "$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c" "$FIX/run/BootOrder"
+  [[ $(windows_encryption_state) == unknown ]] || fail_test "unreadable boot entries read as $(windows_encryption_state)"
+}
+
+# The entry is written only by a pass that seals the loader after it, and on
+# a machine that is not set up no pass runs.
+windows_setup_needs_a_machine_that_is_set_up() {
+  local before=$FIX/run/limine-conf-before
+  add_windows
+  cp "$FIX/esp/limine.conf" "$before"
+  run_cli windows setup && fail_test "windows setup ran on a machine that is not set up"
+  [[ $(<"$FIX/run/output") == *'OmaSecBoot is not set up. Run: sudo omasecboot setup'* ]] || fail_test "refusal: $(<"$FIX/run/output")"
+  [[ ! -e $(windows_flag) ]] || fail_test "the opt-in was written"
+  cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "limine.conf changed"
 }
 
 # limine-scan writes a chainload entry for Windows Boot Manager at the top
@@ -557,9 +585,10 @@ displaced_entry_is_moved_behind_upstreams() {
   write_limine_conf unhashed
   { sed '/^\//,$d' "$FIX/esp/limine.conf"; windows_entry 'Windows Boot Manager'; printf '\n'; sed -n '/^\//,$p' "$FIX/esp/limine.conf"; } >"$FIX/run/displaced"
   cp "$FIX/run/displaced" "$FIX/esp/limine.conf"
+  ensure_primary_loader >/dev/null || fail_test "reseal"
   [[ $(windows_entry_state 'Windows Boot Manager') == displaced ]] || fail_test "state: $(windows_entry_state 'Windows Boot Manager')"
   run_cli status && fail_test "status passed with the entry before Omarchy's"
-  [[ $(<"$FIX/run/output") == *'stands before the entries Omarchy orders'*'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'  ✗ The Windows entry in limine.conf stands before the entries Omarchy orders'*'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli windows status || fail_test "windows status failed"
   [[ $(<"$FIX/run/output") == *'before the entries Omarchy orders'* ]] || fail_test "windows status: $(<"$FIX/run/output")"
   run_cli sign --quiet --seal-only || fail_test "the pass failed: $(<"$FIX/run/output")"
@@ -700,6 +729,8 @@ run_case setup-without-a-target-changes-nothing setup_without_a_target_changes_n
 run_case bootnext-is-judged-by-reading-back bootnext_is_judged_by_reading_back
 run_case encryption-is-acknowledged-before-the-firmware-changes encryption_is_acknowledged_before_the_firmware_changes
 run_case unknown-encryption-state-is-asked-about unknown_encryption_state_is_asked_about
+run_case windows-without-a-listed-volume-is-not-ruled-out windows_without_a_listed_volume_is_not_ruled_out
+run_case windows-setup-needs-a-machine-that-is-set-up windows_setup_needs_a_machine_that_is_set_up
 run_case chainloads-are-listed-as-upstream-names-them chainloads_are_listed_as_upstream_names_them
 run_case chainload-beside-bitlocker-is-noted chainload_beside_bitlocker_is_noted
 run_case printed-command-survives-the-shell printed_command_survives_the_shell

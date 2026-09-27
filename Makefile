@@ -16,7 +16,7 @@ CONTRACT_SUITES = sbctl limine
 TEST_TARGETS = $(addprefix test-,$(TEST_SUITES))
 CONTRACT_TARGETS = $(addprefix test-contract-,$(CONTRACT_SUITES))
 
-.PHONY: install package lint test test-hermetic test-contract $(TEST_TARGETS) $(CONTRACT_TARGETS)
+.PHONY: install package lint test test-hermetic test-contract test-mutations $(TEST_TARGETS) $(CONTRACT_TARGETS)
 
 # Installation is package staging only: DESTDIR must be an absolute path that
 # does not resolve to the live root. The Arch package built from PKGBUILD is
@@ -90,3 +90,8 @@ test-contract: $(CONTRACT_TARGETS)
 
 $(CONTRACT_TARGETS): test-contract-%:
 	bash tests/contract-$*.sh
+
+# Each safety predicate disabled in a copy of the tree: its named case must
+# fail. It runs every hermetic suite many times, so "test" leaves it out.
+test-mutations:
+	bash tests/mutations.sh
