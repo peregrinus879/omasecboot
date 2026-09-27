@@ -1,6 +1,6 @@
 # Field testing
 
-How to try OmaSecBoot on your own machine and report what happened, so that the report can be acted on. Hermetic tests cannot show what firmware and a real boot do; records from real machines can. Read the status note at the top of the [README](../README.md) first: it says what has been proved on hardware so far.
+How to try OmaSecBoot on your own machine and report what happened, so that the report can be acted on. Hermetic tests cannot show what firmware and a real boot do; records from real machines can. Read the status note at the top of the [README](../README.md) first: it says what has been proved on hardware.
 
 [release-checklist.md](release-checklist.md) owns what a release needs, on a dedicated machine, drills included. This page is a shorter procedure for anyone's machine. Every step names what must be true before its commands, then the commands, then what to expect. Do not run a block before the lines above it are settled, and keep this page open on a second device or on paper: a machine that does not start cannot show it.
 
@@ -54,11 +54,13 @@ Nothing of the test is run yet. Settle each line first.
 
 ```bash
 sudo pacman -S --needed base-devel git shellcheck jq bubblewrap
-git clone https://github.com/peregrinus879/omasecboot.git ~/omasecboot
+git clone --branch v0.1.0 https://github.com/peregrinus879/omasecboot.git ~/omasecboot
 cd ~/omasecboot
 git log --oneline -1
 make lint && make test && make package
 ```
+
+From here on, follow `~/omasecboot/docs/field-testing.md`, the page of the release you cloned, if it differs from this one.
 
 Expected: lint and the suites pass and one `omasecboot-<version>-1-any.pkg.tar.zst` exists. Note the commit line; the report asks for it. If a suite fails, nothing has changed on the machine yet: report its `FAIL` lines, which name the case, and leave out lines that hold your paths.
 
@@ -74,7 +76,7 @@ Run it from `~/omasecboot`, from your own login with `sudo`, never from a root s
 sudo bash tests/acceptance-record.sh 1-note -- echo "At boot Limine showed: <the text>"
 ```
 
-After a restart, `command ls -t ~/omasecboot/acceptance-records | head -n 3` names your newest records, and the step that recorded them is where you are. Where a step restarts the machine, it gives the command: `systemctl reboot`, or `systemctl reboot --firmware-setup`, which opens the firmware's menus. With Secure Boot on, a restart that follows a `status` row is guarded: `status --quiet` runs first and the restart happens only when it passes, otherwise the line prints STOP and the machine stays up; the one exception is the restart into the firmware that turns Secure Boot off in [The way back](#the-way-back), which a failed `status` is a reason for. A snapshot is taken only while the clock is synchronised, in a block of its own that can be pasted again, and the line after it shows the menu entry the snapshot got: no line means no entry, which happens for hours after a snapshot taken while the clock ran ahead, as it does after a Windows session (C2 of [upstream-contracts.md](upstream-contracts.md)). If no line appears, record it with a `<row>-note` row (`sudo bash tests/acceptance-record.sh 1-snapshot-note -- echo "no menu entry for the snapshot"`), go on, and say so in the report; a step that starts that snapshot's entry then has none to start. If the firmware does not take that request, the command says so and does not restart: use `systemctl reboot` and the firmware's setup key.
+After a restart, `command ls -t ~/omasecboot/acceptance-records | head -n 3` names your newest records, and the step that recorded them is where you are. Where a step restarts the machine, it gives the command: `systemctl reboot`, or `systemctl reboot --firmware-setup`, which opens the firmware's menus; if the firmware does not take the request to open them, the command says so and does not restart: use `systemctl reboot` and the firmware's setup key. With Secure Boot on, a restart that follows a `status` row is guarded: `status --quiet` runs first and the restart happens only when it passes, otherwise the line prints STOP and the machine stays up; the one exception is the restart into the firmware that turns Secure Boot off in [The way back](#the-way-back), which a failed `status` is a reason for. A snapshot is taken only while the clock is synchronised, in a block of its own that can be pasted again, and the line after it shows the menu entry the snapshot got: no line means no entry, which happens for hours after a snapshot taken while the clock ran ahead, as it does after a Windows session (C2 of [upstream-contracts.md](upstream-contracts.md)). If no line appears, record it with a `<row>-note` row (`sudo bash tests/acceptance-record.sh 1-snapshot-note -- echo "no menu entry for the snapshot"`), go on, and say so in the report; a step that starts that snapshot's entry then has none to start.
 
 Record the machine before anything is installed, then take the first snapshot:
 
@@ -224,7 +226,7 @@ sudo bash tests/acceptance-record.sh 5-status-after -- omasecboot status
 
 ## Level 2: your keys in the firmware, Secure Boot on
 
-Before: level 1 is done and its last `status` exited 0; the firmware lines of [Before you start](#before-you-start) are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone, and at this level only ever adds to KEK and db; the rebuild after a key menu that clears every key is a checklist row, not part of this guide. The README's [How your keys get into the firmware](../README.md#how-your-keys-get-into-the-firmware) says what happens and why.
+Before: level 1 is done and its last `status` exited 0; the firmware lines of [Before you start](#before-you-start) are settled. `setup` backs up what the firmware trusts, refuses when more than the Platform Key is gone or dbx changed after the backup, and at this level only ever adds to KEK and db; the rebuild after a key menu that clears every key is a checklist row, not part of this guide. The README's [How your keys get into the firmware](../README.md#how-your-keys-get-into-the-firmware) says what happens and why.
 
 With Windows on the machine: at the restart after step 2, after step 4 and after step 5, start Windows first, from the firmware's boot menu (the key your firmware names at power-on), never through a chainload entry. In Windows, an administrator terminal shows the binding: `manage-bde -protectors -get C: -Type TPM`, read on the screen only, whose "PCR Validation Profile" line is the one value to note; never copy the recovery key or its identifier anywhere. Then start Omarchy and record, with the words that do not apply taken out:
 

@@ -264,7 +264,7 @@ local_owner() {
 #   _planned[NAME]  the entries an append would write
 # The local certificate is the X.509 entry sbctl owns in an export that does
 # not read the firmware, so it is the same before, during and after an
-# enrollment, and when rotated keys left an older one of sbctl's behind.
+# enrollment, and beside an older one of sbctl's that the firmware may still hold.
 # --microsoft keeps sbctl from refusing a plain export over option ROMs. The
 # certificate is never read from sbctl's key directory, whose layout is
 # sbctl's business. (-g: the suites source this file from inside a function.)

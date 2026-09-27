@@ -1,7 +1,7 @@
 #!/bin/bash
-# What the acceptance recorder takes out of everything it writes down, kept
-# here so the records suite can test it: it is a privacy filter as much as a
-# cosmetic one.
+# What the acceptance recorder takes out of everything it writes down, and its
+# verdict on whether a record counts, kept here so the records suite can test
+# them: the filter guards privacy as much as looks, the verdict the evidence.
 
 # Terminal control out of a transcript: operating system commands, which sudo
 # and systemd use for session marks that name the host and the machine-id,
@@ -19,4 +19,27 @@ strip_terminal_control() {
 # would recognise.
 strip_boot_entry_bytes() {
   grep -v -E '^ *(dp|data): ' | sed -E 's/(\)|\.efi)[0-9a-fA-F]{8,}$/\1 (optional data left out)/I; s/MAC\([^)]*\)/MAC(redacted)/g; s/NVMe\([^)]*\)/NVMe(redacted)/g'
+}
+
+# evidence_verdict ROOT: whether a record made from the checkout at ROOT
+# counts (release-checklist.md): a clean git checkout of its own, and, while
+# the package is installed, installed files equal to it, as the recorder's
+# compare_installed_files lists them. Prints "counts" or "does not count" with
+# the reason. The comparison is read whole: a reader that stops at the first
+# difference would end it by SIGPIPE, which pipefail reads as no difference.
+evidence_verdict() {
+  local root=$1 top porcelain differences
+  if ! top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || [[ $(realpath -- "$top") != "$(realpath -- "$root")" ]] ||
+    ! porcelain=$(git -C "$root" status --porcelain 2>/dev/null) || [[ -n $porcelain ]]; then
+    printf 'does not count: the checkout is modified or is no git checkout of its own\n'
+    return
+  fi
+  if pacman -Q omasecboot >/dev/null 2>&1; then
+    differences=$(compare_installed_files | grep -v '^match: ')
+    if [[ -n $differences ]]; then
+      printf 'does not count: an installed file differs from the checkout or is missing\n'
+      return
+    fi
+  fi
+  printf 'counts\n'
 }

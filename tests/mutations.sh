@@ -251,6 +251,8 @@ m F225 bin/omasecboot 1 $'    sbctl_keys_exist || {\n      remind_of_windows_enc
 m F226 bin/omasecboot 1 $'    variable_holds_local_certificate db || {\n      remind_of_windows_encryption off' $'    variable_holds_local_certificate db || {\n      :' commands/secure-boot-on-needs-trusted-keys
 m F227 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' $'    blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
 m F228 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem none "Secure Boot is on, and the Limine loader' $'    blocking_problem none "Secure Boot is on, and the Limine loader' status/signed-unsealed-loader-is-said-after-remove
+m F229 tests/lib/transcript.sh 1 $'    differences=$(compare_installed_files | grep -v \'^match: \')\n    if [[ -n $differences ]]; then' $'    if compare_installed_files | grep -qv \'^match: \'; then' records/evidence-verdict-reads-the-checkout-and-the-install
+m F230 tests/lib/transcript.sh 1 '|| [[ $(realpath -- "$top") != "$(realpath -- "$root")" ]] ||' '||' records/evidence-verdict-reads-the-checkout-and-the-install
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

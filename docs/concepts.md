@@ -48,7 +48,7 @@ Where the facts live: [D2](spec.md#d2-converge-and-verify-no-journal), [C2](upst
 
 Upstream writes them: the kernel hook builds the images and sbctl's hook signs them, the Limine tools deploy the loader, seal it and generate the menu, and the snapshot tools copy images into a history and rewrite the menu. They share one lock. OmaSecBoot runs at the end of that chain as a hook, and never fails a Limine tool from there: the boot files have changed by then, and a failing hook would only turn a finished update into a reported failure.
 
-Two writers stand outside the chain: an editor on `limine.conf`, and the pacman hook that Omarchy's installer leaves, which copies a raw loader over the sealed one after every Limine upgrade. Two watchers, one on each file, run the pass when either changes. The pass rebuilds the loader only when its proof fails, and repeats, three rounds at most, until `limine.conf` held still across one; a change after that starts the pass again.
+Two writers stand outside the chain: an editor on `limine.conf`, and the pacman hook that Omarchy's installer leaves, which copies a raw loader over the sealed one after every Limine upgrade. Two watchers, one on each file, run the pass when either changes. The pass rebuilds the loader only when its proof fails, and repeats, within a bound the spec sets, until `limine.conf` held still across one; a change after that starts the pass again.
 
 Where the facts live: [D8](spec.md#d8-watchers-re-seal-the-loader-when-limineconf-or-the-loader-changes), [section 5 of the spec](spec.md#5-integration-points), [C5](upstream-contracts.md#c5-systemd-path-units), [C6](upstream-contracts.md#c6-pacman-and-omarchy).
 

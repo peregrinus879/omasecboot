@@ -49,6 +49,25 @@ jobs:
           chown -R builder .
           runuser -u builder -- env HOME=/home/builder make test-hermetic
 
+  mutations:
+    name: Mutation check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git jq make diffutils tar util-linux systemd
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Disable each listed safety predicate in turn, as an unprivileged user
+        run: |
+          useradd --create-home builder
+          chown -R builder .
+          runuser -u builder -- env HOME=/home/builder make test-mutations
+
   package:
     name: Package build and privileged install
     runs-on: ubuntu-latest

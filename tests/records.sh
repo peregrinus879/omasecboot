@@ -59,6 +59,39 @@ RECORD
 
 share() { bash "$ROOT_DIR/tests/acceptance-share.sh" "$FIX/records" >"$FIX/run/output" 2>&1; }
 
+# A record counts only from a clean checkout of its own and, while the package
+# is installed, with installed files equal to it (release-checklist.md). The
+# installed-file comparison is stubbed as the recorder prints it; one
+# difference ahead of many more lines is the shape that a reader stopping
+# early misjudged under pipefail, so it is judged more than once.
+evidence_verdict_reads_the_checkout_and_the_install() {
+  local checkout=$FIX/checkout verdict round
+  mkdir -p "$checkout/lib" && printf 'x\n' >"$checkout/lib/common.sh"
+  { git -C "$checkout" init -q && git -C "$checkout" add -A &&
+    git -C "$checkout" -c user.email=test@example.org -c user.name=test commit -q -m fixture; } || fail_test "fixture checkout"
+  pacman() { return 1; }
+  compare_installed_files() { printf 'DIFFERENT OR MISSING: /usr/bin/omasecboot\n'; }
+  [[ $(evidence_verdict "$checkout") == counts ]] || fail_test "not installed: $(evidence_verdict "$checkout")"
+  pacman() { [[ $* == '-Q omasecboot' ]]; }
+  compare_installed_files() { printf 'match: /usr/bin/omasecboot\nmatch: /usr/lib/omasecboot/common.sh\n'; }
+  [[ $(evidence_verdict "$checkout") == counts ]] || fail_test "installed and equal: $(evidence_verdict "$checkout")"
+  compare_installed_files() {
+    printf 'DIFFERENT OR MISSING: /usr/bin/omasecboot\n'
+    printf 'NOT IN THE CHECKOUT: /usr/lib/omasecboot/extra%s.sh\n' {1..2000}
+  }
+  for round in {1..20}; do
+    verdict=$(evidence_verdict "$checkout")
+    [[ $verdict == 'does not count: an installed file differs'* ]] || fail_test "round ${round}, an installed file differs: ${verdict}"
+  done
+  compare_installed_files() { printf 'match: /usr/bin/omasecboot\n'; }
+  printf 'y\n' >"$checkout/lib/new.sh"
+  [[ $(evidence_verdict "$checkout") == 'does not count: the checkout is modified'* ]] || fail_test "modified: $(evidence_verdict "$checkout")"
+  rm "$checkout/lib/new.sh"
+  [[ $(evidence_verdict "$checkout/lib") == 'does not count: the checkout is modified or is no git checkout of its own' ]] || fail_test "inside another checkout: $(evidence_verdict "$checkout/lib")"
+  mkdir -p "$FIX/plain"
+  [[ $(evidence_verdict "$FIX/plain") == 'does not count'* ]] || fail_test "no checkout: $(evidence_verdict "$FIX/plain")"
+}
+
 identifiers_are_renamed_and_the_rest_stays() {
   local first=$FIX/records/share/20260102T030405Z-1-setup.md second=$FIX/records/share/20260102T040506Z-1-status.md value
   write_records
@@ -159,6 +192,7 @@ nothing_to_share_is_a_usage_error() {
   (( status == 2 )) || fail_test "a missing directory: status ${status}"
 }
 
+run_case evidence-verdict-reads-the-checkout-and-the-install evidence_verdict_reads_the_checkout_and_the_install
 run_case identifiers-are-renamed-and-the-rest-stays identifiers_are_renamed_and_the_rest_stays
 run_case originals-stay-and-a-second-run-gives-the-same-names originals_stay_and_a_second_run_gives_the_same_names
 # The share directory gives up only earlier copies: anything else in it is

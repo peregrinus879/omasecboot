@@ -1,12 +1,20 @@
 name: Upstream contracts
 
 # The contract suites run the real sbctl, Limine tools and findmnt, so their
-# result follows those packages, not this repository. A daily job reads the
-# packages' current versions and runs the suites only when one of them, or
-# this repository's own contract code, has changed since the last green run,
-# and at least once a week. A failure opens an issue instead of blocking a change.
+# result follows those packages as well as this repository. A change of what
+# they run, the files the green-run key below hashes, runs them before it
+# lands. A daily job reads the packages' current versions and runs the suites
+# only when one of them, or this repository's own contract code, has changed
+# since the last green run, and at least once a week; its failure opens an
+# issue. Omarchy's edge channel runs beside stable as an early warning of the
+# Limine tools to come, which never fails a push or a pull request.
 # Daily at 03:10 UTC: GitHub delays, and may drop, runs queued on the hour.
 on:
+  push:
+    branches: [main]
+    paths: ["lib/**", "limine/**", "tests/contract-*.sh", "tests/lib/sandbox.sh", "tests/lib/esl.sh", "Makefile", ".github/workflows/contracts.yml"]
+  pull_request:
+    paths: ["lib/**", "limine/**", "tests/contract-*.sh", "tests/lib/sandbox.sh", "tests/lib/esl.sh", "Makefile", ".github/workflows/contracts.yml"]
   schedule:
     - cron: "10 3 * * *"
   workflow_dispatch:
@@ -15,12 +23,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: contracts
+  group: contracts-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   contracts:
-    name: Real-tool contract suites
+    name: Real-tool contract suites (Omarchy ${{ matrix.channel }})
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, edge]
+    continue-on-error: ${{ matrix.channel == 'edge' && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
@@ -41,7 +54,7 @@ jobs:
           pacman-key --init
           curl -fsSL "https://keys.openpgp.org/vks/v1/by-fingerprint/${OMARCHY_KEY}" | pacman-key --add -
           pacman-key --lsign-key "$OMARCHY_KEY"
-          printf '\n[omarchy]\nServer = https://pkgs.omarchy.org/stable/$arch\n' >>/etc/pacman.conf
+          printf '\n[omarchy]\nServer = https://pkgs.omarchy.org/%s/$arch\n' "${{ matrix.channel }}" >>/etc/pacman.conf
           pacman -Sy --noconfirm --needed git
       - name: Checkout
         uses: actions/checkout@v7
@@ -54,13 +67,13 @@ jobs:
         run: |
           versions=$(pacman -Si limine sbctl limine-mkinitcpio-hook util-linux | awk -F': ' '/^(Name|Version) /{print $2}' | paste -sd-)
           printf 'Versions: %s\n' "$versions"
-          printf 'key=%s-%s\n' "$(date -u +%G-%V)" "$(sha256sum <<<"$versions" | cut -c1-16)" >>"$GITHUB_OUTPUT"
+          printf 'key=%s-%s-%s\n' "${{ matrix.channel }}" "$(date -u +%G-%V)" "$(sha256sum <<<"$versions" | cut -c1-16)" >>"$GITHUB_OUTPUT"
       - name: Look for a green run of the same subject
         id: green
         uses: actions/cache/restore@v6
         with:
           path: .contracts-green
-          key: contracts-${{ steps.subject.outputs.key }}-${{ hashFiles('tests/contract-*.sh', 'tests/lib/sandbox.sh', 'tests/lib/esl.sh', 'lib/*.sh', 'limine/*') }}
+          key: contracts-${{ steps.subject.outputs.key }}-${{ hashFiles('tests/contract-*.sh', 'tests/lib/sandbox.sh', 'tests/lib/esl.sh', 'lib/*.sh', 'limine/*', 'Makefile', '.github/workflows/contracts.yml') }}
           lookup-only: true
       # Upstream's pacman hooks run its deploy tools here; they find no ESP in
       # the container and stop before doing anything.
@@ -103,6 +116,6 @@ jobs:
             if (!open.some(issue => issue.title === title)) {
               await github.rest.issues.create({
                 owner, repo, title,
-                body: `The scheduled run of the contract suites failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}. A FAIL line names the section of docs/upstream-contracts.md to recheck. A SKIP line or a failed install step means the job's environment needs attention, not a contract.`,
+                body: `The scheduled run of the contract suites failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}. The job's name says whether Omarchy's stable or edge channel failed; edge warns of the Limine tools to come. A FAIL line names the section of docs/upstream-contracts.md to recheck. A SKIP line or a failed install step means the job's environment needs attention, not a contract.`,
               })
             }

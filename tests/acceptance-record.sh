@@ -147,9 +147,13 @@ record_state() {
   block "This boot's journal for omasecboot, limine, sbctl (last 200 lines)" bash -c "journalctl -b --no-pager -o short-iso 2>/dev/null | grep -i -E 'omasecboot|limine|sbctl|efibootmgr' | tail -200"
 }
 
+# The header says whether the record counts, from the readings the state
+# blocks show, so no reader has to work it out; a command that installs or
+# removes the package is judged again after it.
+evidence=$(evidence_verdict "$root_dir")
 {
   printf '# Acceptance record %s\n\n' "$row"
-  printf -- '- Row: `%s`\n- Recorded: %s\n- Command: `%s`\n' "$row" "$stamp" "${command_args[*]:-(state only)}"
+  printf -- '- Row: `%s`\n- Recorded: %s\n- Command: `%s`\n- Evidence: %s\n' "$row" "$stamp" "${command_args[*]:-(state only)}" "$evidence"
 } >"$record" || { printf 'The record %s cannot be written; nothing ran\n' "$record" >&2; exit 2; }
 
 record_state before
@@ -171,6 +175,12 @@ if (( ${#command_args[@]} > 0 )); then
   } >>"$record"
   rm -f -- "$transcript"
   record_state after
+  after=$(evidence_verdict "$root_dir")
+  # The header's line alone: a transcript may hold the same words.
+  if [[ $evidence == counts && $after != counts ]]; then
+    sed -i "0,/^- Evidence: counts\$/s//- Evidence: ${after}, after the command/" "$record" ||
+      { printf 'The record %s could not be marked: %s\n' "$record" "$after" >&2; exit 2; }
+  fi
 fi
 
 [[ -z ${SUDO_USER:-} ]] || chown "$SUDO_USER" "$records_dir" "$record" 2>/dev/null

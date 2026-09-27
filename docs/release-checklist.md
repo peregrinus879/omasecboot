@@ -4,14 +4,14 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 
 ## Before any hardware run
 
-- [ ] `make lint` and `make test` pass on the candidate commit.
+- [ ] `make lint`, `make test` and `make test-mutations` pass on the candidate commit.
 - [ ] CI ran `tests/container.sh` in its container on the same commit.
 - [ ] `make test-contract` passes against the current Omarchy packages, and every section of [upstream-contracts.md](upstream-contracts.md) names the versions that were read.
 - [ ] The README states only what the candidate does.
 
 ## Hardware acceptance
 
-Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); a record counts only when its checkout is clean and the installed files equal it, both of which it states. The recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and review the record before going on; never reboot with Secure Boot on while `omasecboot status` fails: a restart that follows a `status` row runs as `sudo omasecboot status --quiet && systemctl reboot`, so a failed report keeps the machine up. A snapshot is taken only while `timedatectl` reports the clock synchronised, and its row is followed by the menu line that names it (C2 of [upstream-contracts.md](upstream-contracts.md)).
+Run on a dedicated machine, never on a daily one. [field-testing.md](field-testing.md) is a shorter procedure for anyone's machine, without the drills; its reports add to the evidence and do not replace these rows. Every row is recorded with `sudo bash tests/acceptance-record.sh <row> -- <command>` from the login user's `sudo` (not a root shell); a record counts only when its checkout is clean and the installed files equal it, and its header reads `Evidence: counts`, or names why it does not count. The recorder writes the state before, the full terminal transcript with the exit status, and the state after. Stop at the first STOP and review the record before going on; never reboot with Secure Boot on while `omasecboot status` fails: a restart that follows a `status` row runs as `sudo omasecboot status --quiet && systemctl reboot`, so a failed report keeps the machine up. A snapshot is taken only while `timedatectl` reports the clock synchronised, and its row is followed by the menu line that names it (C2 of [upstream-contracts.md](upstream-contracts.md)).
 
 | Stage | Proves | STOP when |
 | --- | --- | --- |
@@ -87,14 +87,30 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 5. With Windows on the machine: start it.
 6. `systemctl reboot --firmware-setup` and turn Secure Boot off; `remove`; `systemctl reboot --firmware-setup` and restore the factory keys.
 
+## Evidence for a change after the records
+
+Every change of the tool after the records it is released on is in one of two categories, and C10 of [upstream-contracts.md](upstream-contracts.md) says which. There is no blanket waiver.
+
+- Tested against the candidate: its rows ran on the candidate commit, and their records count.
+- Deferred: proved without hardware, by its hermetic cases, its contract cases where it calls sbctl or the Limine tools, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured; [maintenance.md](maintenance.md) lists its rows as owed, closed by the next recorded run on any machine.
+
+A change that writes boot files or changes what is signed is tested against the candidate, unless the maintainer records for that release, in C10 and the CHANGELOG, that it ships deferred.
+
 ## Tag
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
 - [ ] `CHANGELOG.md` has the release's section, with its date, and the README's status note and install line name the release.
-- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile` and `omasecboot.install`. Where the tool changed after the records, C10 of [upstream-contracts.md](upstream-contracts.md) names the change, what proves it without hardware (its hermetic cases, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured), and the row of the next run that records it, which [maintenance.md](maintenance.md) lists as owed.
-- [ ] The rows above are the rows the records ran.
+- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile` and `omasecboot.install`. Where the tool changed after the records, each change is in one of the categories above, and C10 of [upstream-contracts.md](upstream-contracts.md) names it with what proves it.
+- [ ] The rows above are the rows the records ran, or C10 names each row changed since and [maintenance.md](maintenance.md) lists it as owed: `git diff <recorded> <tag> -- docs/release-checklist.md` shows every such change.
 - [ ] `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit.
 - [ ] The recipe builds from an archive made as the tag's will be, with the same payload as `make package`: in a scratch directory holding copies of `PKGBUILD` and `omasecboot.install`, `git archive --prefix=omasecboot-<version>/ -o omasecboot-<version>.tar.gz <commit>`, then `PKGEXT=.pkg.tar.zst makepkg --nodeps --noconfirm --nosign`, and `diff <(bsdtar -tf that package) <(bsdtar -tf the one make package built)` prints nothing. They differ only where an untracked file stands under `lib/` or `docs/`.
 - [ ] The records are reviewed and their summary is published with the release, from the copies `tests/acceptance-share.sh` makes; they contain no serial numbers, recovery keys, firmware backup payloads, host or login names, machine-ids or UUIDs of the machine.
 
 Delivery through Omarchy follows a tag and does not gate it: [omarchy-integration.md](omarchy-integration.md) owns that side, and its recipe pins the tagged archive's checksum.
+
+## After the tag
+
+- The tag never moves: its archive's checksum is pinned downstream, and a mistake ships as a new version.
+- `main` keeps the last release's version while it holds changes after the tag, which `CHANGELOG.md` collects under "Unreleased". A build from `main`, or from a modified checkout of a tag, is a development build, known by its commit and not by its version; release packages come from the tag's archive.
+- The candidate commit of the next release sets `pkgver` and `OMASECBOOT_VERSION` before its checks and hardware rows, because the tag's conditions compare `lib/` between the records and the tag; a candidate that fails is fixed under the same version and checked again.
+- The README's install line and the field guide's clone name the release. The operator pages on `main` describe `main`; a tester follows the pages of the checkout of the tag.

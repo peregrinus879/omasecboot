@@ -1,13 +1,15 @@
 # pacman runs this before it removes the package. A machine that is still set
-# up loses what keeps its boot files sealed and signed (docs/spec.md, failure
-# table), so it is told. This only prints: it never fails and changes nothing.
+# up loses what re-seals the loader after an edit of limine.conf and repairs
+# it after a Limine upgrade (docs/spec.md, failure table), so it is told. This
+# only prints: it never fails and changes nothing.
 pre_remove() {
   [[ ! -e /var/lib/omasecboot/enabled ]] || cat <<'NOTICE'
 ==> OmaSecBoot is still set up on this machine.
-    Removing the package takes away what keeps the boot files sealed and
-    signed. An edit of limine.conf then stops the loader, with Secure Boot on
-    or off, and with Secure Boot on the next Limine upgrade can leave a loader
-    that the firmware refuses.
+    Removing the package takes away what re-seals the loader after an edit
+    of limine.conf and repairs it after a Limine upgrade. An edit of
+    limine.conf then stops the loader, with Secure Boot on or off, and with
+    Secure Boot on the next Limine upgrade can leave a loader that the
+    firmware refuses.
     Reinstall the package. To return to stock, turn Secure Boot off and run
     "sudo omasecboot remove", then remove the package. With an encrypted
     Windows beside it, have its recovery key at hand before Secure Boot goes
