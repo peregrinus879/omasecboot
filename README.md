@@ -94,7 +94,7 @@ OmaSecBoot - Status
   → Nothing to do
 ```
 
-A line that starts with `✗` is a problem, `·` is a note and `!` a warning, and the `→` lines at the end say what to do next.
+A line that starts with `✗` is a problem, `·` is a note and `!` a warning, and the `→` lines at the end say what to do next and, where a problem stops a start, not to reboot.
 
 ## How your keys get into the firmware
 
@@ -108,7 +108,7 @@ On a dual-boot machine `setup` asks one question before it tells you to delete t
 
 `sudo omasecboot windows setup` adds a Windows entry to Limine's menu. It uses Limine's `efi_boot_entry` protocol, which restarts the machine into the firmware's own "Windows Boot Manager" entry instead of chainloading it, so Windows starts the way it does when you pick it in the firmware and, by Microsoft's and the TCG's documents, nothing of Limine's is then in what BitLocker measures ([docs/spec.md](docs/spec.md), D11). On the recorded machine BitLocker did not tell this entry, a BootNext request and the firmware's boot menu apart. An entry that `limine-scan` added chainloads Windows through Limine, and there BitLocker asked for the recovery key at every change between the two ways: with an encrypted Windows, start it through the firmware only, the way that stayed quiet while the loader was sealed again. `status` says so when it finds such an entry beside a BitLocker volume, and prints upstream's command that takes it out. The entry stays behind Omarchy's entries, so Omarchy's default and its timeout are unchanged; `status` says so if it ever stands before them. The target is read from the firmware's boot entries every time: exactly one active Windows Boot Manager entry that the firmware's boot order lists, with a name no other entry shares, or the command refuses. The tool only ever deletes an entry that holds nothing but what it wrote. The tool never creates or renames firmware entries and never mounts or reads a Windows partition. When Omarchy replaces `limine.conf` from its template, the next `sign` pass puts the entry back.
 
-`sudo omasecboot windows bootnext` asks the firmware to start Windows at the next boot, once, without the menu; it does not restart the machine. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into your own Omarchy menu extensions to use it.
+`sudo omasecboot windows bootnext` asks the firmware to start Windows at the next boot, once, without the menu; it does not restart the machine. The package ships a "Reboot to Windows" row for Omarchy's menu as `/usr/share/doc/omasecboot/omarchy-menu.jsonc`; merge it into your own Omarchy menu extensions, `~/.config/omarchy/extensions/omarchy-menu.jsonc`, to use it.
 
 ## If the machine does not start
 
@@ -138,13 +138,14 @@ If only the newest kernel is refused, boot a snapshot entry or turn Secure Boot 
 | --- | --- | --- |
 | `The Limine loader is not sealed over the current limine.conf` | The loader would refuse to start, with Secure Boot on or off | `sudo omasecboot sign` before you reboot. If the machine is already down, see [If the machine does not start](#if-the-machine-does-not-start) |
 | `The Limine loader is sealed over the current limine.conf but not signed` | It starts with Secure Boot off only | `sudo omasecboot sign` |
-| `OmaSecBoot could not finish`, a red line after an update | The pass inside the update could not prove the boot files | `sudo omasecboot status`, then the command it names. Do not reboot with Secure Boot on until the report is clean |
-| `The firmware has no active boot entry for the Limine loader` | The machine starts through the fallback path, which stays raw and is refused with Secure Boot on | Keep Secure Boot off, run `sudo limine-install`, check with `efibootmgr` that a Limine entry exists, then `sudo omasecboot setup` |
+| `OmaSecBoot could not finish`, a red line after an update | The pass inside the update could not prove the boot files | `sudo omasecboot status`, then what it names. Do not reboot while its last line warns against it |
+| `The firmware has no active boot entry for the Limine loader` | The machine starts through the fallback path, which stays raw and is refused with Secure Boot on; without a raw fallback there, nothing starts Omarchy | Before a restart, run `sudo limine-install` and check with `efibootmgr` that a Limine entry exists, keeping Secure Boot off until then; then `sudo omasecboot setup` |
 | `Stale path hash in limine.conf` | An OS entry still carries a hash of a file that has changed since | `sudo omasecboot setup`, which regenerates the entries |
 | `cannot be checked: the path is not under boot():/` | An entry names its hashed file under a resource other than `boot():/`, which only the firmware resolves | Nothing; it is a note. A file of that path on the ESP stays unsigned, and `status` says so if it is one the pass would sign |
 | `Secure Boot is on, but the firmware does not hold your keys` | A firmware update or a CMOS reset put the factory keys back | Turn Secure Boot off, then `sudo omasecboot setup` |
 | `sbctl has no signing keys` | The keys under `/var/lib/sbctl` are gone | Restore them from a snapshot or backup. With new keys, the firmware needs another round of `setup` |
-| `limine.conf holds OmaSecBoot's Windows comment in an entry that is not as OmaSecBoot writes it` | The `/Windows` entry was edited by hand, or its comment line ended up in another entry | Remove that comment line, or the entry, then `sudo omasecboot sign` |
+| `limine.conf holds OmaSecBoot's Windows comment where OmaSecBoot did not write it` | OmaSecBoot's Windows entry was edited by hand, or its comment line ended up elsewhere | Remove the whole edited entry, which the next pass writes again while the Windows entry is enabled; anywhere else, remove the comment line alone. Then `sudo omasecboot sign` |
+| `limine.conf holds no menu entries` | Omarchy's template stands, as `omarchy-refresh-limine` leaves it until `limine-update` fills it, so Limine would not start Omarchy | `sudo limine-update`, then `sudo omasecboot status`; do not reboot before |
 | `An earlier setup or remove did not finish` | One of the two stopped half way, for example when a Limine tool failed | `sudo omasecboot remove` to return to stock, or `sudo omasecboot setup` to set up again |
 | `The firmware's keys are in a state OmaSecBoot will not write to` | The firmware's key menu removed more than the Platform Key | Restore the factory keys in the firmware, run `sudo omasecboot setup`, then delete only the Platform Key |
 | `Boot files are busy` (exit 75) | Another tool holds the boot lock; a kernel install held it for a minute on the recorded machine | Run the command again when that tool has finished. Nothing failed |

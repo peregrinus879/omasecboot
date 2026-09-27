@@ -22,7 +22,7 @@ set_up_with_windows() {
 }
 
 boot_entries_are_read_from_the_firmware() {
-  local entries
+  local entries hex
   write_boot_entry 0000 active 'Windows Boot Manager' "$WINDOWS_FILE"
   write_boot_entry 001A inactive 'Überlänge ✓' '\EFI\other\loader.efi'
   write_boot_entry 0003 active 'Not in BootOrder' '\EFI\third\loader.efi'
@@ -44,6 +44,12 @@ boot_entries_are_read_from_the_firmware() {
   # A control character cannot forge or split a row.
   write_boot_entry 0003 active $'Two\nlines' '\EFI\third\loader.efi'
   [[ $(list_boot_entries) == *"$(row 0003 active 'Two#lines' '\EFI\third\loader.efi')" ]] || fail_test "a newline in a label was kept"
+  # A label that is not UTF-16 at all, here a lone surrogate, reads as "#",
+  # which no match by name accepts; the listing goes on.
+  write_boot_entry 0003 active 'X' '\EFI\third\loader.efi'
+  hex=$(od -An -v -tx1 "$FIX/efivars/Boot0003-8be4df61-93ca-11d2-aa0d-00e098032b8c" | tr -d ' \n')
+  hex_bytes "${hex:0:20}00d8${hex:24}" >"$FIX/efivars/Boot0003-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  [[ $(list_boot_entries 2>&1) == *"$(row 0003 active '#' '\EFI\third\loader.efi')" ]] || fail_test "a label that is not UTF-16: $(list_boot_entries 2>&1)"
 
   head -c 20 "$FIX/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c" >"$FIX/efivars/Boot001A-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   ! list_boot_entries >/dev/null || fail_test "a truncated boot entry was accepted"
@@ -297,7 +303,8 @@ entry_problems_are_reported_not_failed() {
   [[ $(<"$FIX/run/output") == *'by hand'* && ! -e $(attention_file) ]] || fail_test "pass: $(<"$FIX/run/output")"
   loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed over limine.conf as it stands"
   run_cli status && fail_test "status passed over a misplaced comment"
-  [[ $(<"$FIX/run/output") == *'by hand'* && $(<"$FIX/run/output") == *'Next: resolve what is marked above'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *"If it stands in OmaSecBoot's Windows entry, edited by hand, remove that whole entry"*'Anywhere else, remove the comment line alone'* &&
+    $(<"$FIX/run/output") == *'Next: resolve what is marked above'* && $(<"$FIX/run/output") != *'Do not reboot'* ]] || fail_test "status: $(<"$FIX/run/output")"
   sed -i '$d' "$FIX/esp/limine.conf"
 
   # An entry without the opt-in: the next pass takes it out, and status says so.
@@ -738,10 +745,19 @@ entry_waits_for_upstreams_entries() {
   run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
   [[ ! -s $FIX/run/output ]] || fail_test "the quiet pass spoke: $(<"$FIX/run/output")"
   run_cli status && fail_test "status passed with the entry missing"
-  # sign writes nothing into the template, so status names upstream's step, not sign.
-  [[ $(<"$FIX/run/output") == *'holds no menu entries yet'*'sudo limine-update'* && $(<"$FIX/run/output") != *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  # sign writes nothing into the template, so status names upstream's step,
+  # not sign; and Limine would start nothing from it.
+  [[ $(<"$FIX/run/output") == *"✗ limine.conf holds no menu entries besides OmaSecBoot's own, so Limine cannot start Omarchy: run sudo limine-update"*'· limine.conf holds no menu entries yet'* &&
+    $(<"$FIX/run/output") == *'Do not reboot, with Secure Boot on or off'* && $(<"$FIX/run/output") != *'Next: sudo omasecboot sign'* ]] || fail_test "status: $(<"$FIX/run/output")"
   run_cli windows setup && fail_test "windows setup reported an entry on the bare template"
   [[ $(<"$FIX/run/output") == *'holds no menu entries yet'*'did not reach limine.conf'* ]] || fail_test "windows setup on the template: $(<"$FIX/run/output")"
+  # This tool's entry alone starts no Omarchy either, current or stale.
+  windows_entry 'Another name' >>"$FIX/esp/limine.conf"
+  QUIET=true sign_boot_files seal-only || fail_test "the watcher's pass over the entry alone"
+  run_cli status && fail_test "status passed with only this tool's entry"
+  [[ $(<"$FIX/run/output") == *"holds no menu entries besides OmaSecBoot's own"*'Do not reboot, with Secure Boot on or off'* &&
+    $(<"$FIX/run/output") != *'Next: sudo omasecboot sign'* ]] || fail_test "only this tool's entry: $(<"$FIX/run/output")"
+  write_omarchy_limine_template
   # A file that cannot be read is no template: the pass says so.
   rm "$FIX/esp/limine.conf"
   output=$(sign_boot_files seal-only 2>&1)
@@ -825,6 +841,36 @@ template_put_there_after_the_look_is_not_written() {
   write_omarchy_limine_conf
   run_cli sign --quiet --seal-only || fail_test "the watcher's pass failed: $(<"$FIX/run/output")"
   [[ $(entry_count) == 1 && $(grep '^/' "$FIX/esp/limine.conf" | tail -n 1) == '/Windows' ]] || fail_test "the entry after limine-update: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+}
+
+# A Windows target that is lost or unclear leaves Omarchy booting (7.7): the
+# report names the way out and warns against no restart.
+target_problems_leave_the_restart_alone() {
+  set_up_with_windows
+  write_boot_entry 0004 inactive 'Windows Boot Manager' '\EFI\other\loader.efi'
+  run_cli status && fail_test "status passed over a label another entry shares"
+  [[ $(<"$FIX/run/output") == *'sudo omasecboot windows remove'*'Next: resolve what is marked above, then run sudo omasecboot status again'* &&
+    $(<"$FIX/run/output") != *'Do not reboot'* ]] || fail_test "a shared label: $(<"$FIX/run/output")"
+  rm "$FIX/efivars/Boot0004-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  write_boot_entry 0000 active 'Windows Boot Manager ' "$WINDOWS_FILE"
+  run_cli status && fail_test "status passed over a name Limine is not proved to match"
+  [[ $(<"$FIX/run/output") == *"sudo omasecboot windows remove; the firmware's boot menu still starts Windows"* &&
+    $(<"$FIX/run/output") != *'Do not reboot'* && $(<"$FIX/run/output") != *'plain name'* ]] || fail_test "a name outside the rule: $(<"$FIX/run/output")"
+}
+
+# A hand edit of the entry itself: taking the whole entry out, as the report
+# says, leaves one /Windows entry after the next pass, not the edited one
+# beside a new one.
+edited_entry_is_taken_out_whole() {
+  set_up_with_windows
+  sed -i '/^    entry: Windows Boot Manager$/a\    comment: my Windows 11' "$FIX/esp/limine.conf"
+  run_cli status && fail_test "status passed over an edited entry"
+  [[ $(<"$FIX/run/output") == *"If it stands in OmaSecBoot's Windows entry, edited by hand, remove that whole entry"* ]] || fail_test "status: $(<"$FIX/run/output")"
+  { awk '/^\/Windows$/ { skip = 1; next } /^\// { skip = 0 } !skip' "$FIX/esp/limine.conf" >"$FIX/run/limine.conf" &&
+    cat "$FIX/run/limine.conf" >"$FIX/esp/limine.conf"; } || fail_test "fixture edit"
+  run_cli sign || fail_test "sign after the edit: $(<"$FIX/run/output")"
+  [[ $(grep -c '^/Windows$' "$FIX/esp/limine.conf") == 1 && $(entry_count) == 1 ]] || fail_test "entries: $(grep '^/' "$FIX/esp/limine.conf" | tr '\n' ' ')"
+  run_cli status || fail_test "status after the pass: $(<"$FIX/run/output")"
 }
 
 # A name Limine is not proved to match, blanks at its ends or characters
@@ -927,6 +973,8 @@ run_case real-shape-file-reads-right real_shape_file_reads_right
 run_case late-writer-is-not-overwritten late_writer_is_not_overwritten
 run_case template-put-there-after-the-look-is-not-written template_put_there_after_the_look_is_not_written
 run_case target-name-must-be-one-limine-matches target_name_must_be_one_limine_matches
+run_case target-problems-leave-the-restart-alone target_problems_leave_the_restart_alone
+run_case edited-entry-is-taken-out-whole edited_entry_is_taken_out_whole
 run_case blank-line-inside-the-entry-leaves-no-orphans blank_line_inside_the_entry_leaves_no_orphans
 run_case indented-user-entry-after-ours-is-its-own indented_user_entry_after_ours_is_its_own
 finish_suite

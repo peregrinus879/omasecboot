@@ -430,7 +430,9 @@ fixture_overrides() {
     rm -f "$FIX/run/esp-sync-fails-once"
     return 1
   }
-  check_root() { :; }
+  # The real root check, for a case that runs as the unprivileged user the
+  # suites run as.
+  [[ -e $FIX/run/not-root ]] || check_root() { :; }
   check_architecture() { :; }
   check_uefi() { :; }
   # The suites have no terminal; a case that wants the real refusal asks for it.

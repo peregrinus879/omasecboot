@@ -376,6 +376,11 @@ setup_asks_for_the_pk_then_enrolls_then_confirms() {
   write_boot_entry 0001 inactive 'Limine' '\EFI\limine\limine_x64.efi'
   run_cli setup && fail_test "setup told a machine without a Limine boot entry to turn Secure Boot on"
   [[ $(<"$FIX/run/output") == *'no active boot entry for the Limine loader'* && $(<"$FIX/run/output") != *'turn Secure Boot on'* ]] || fail_test "without a boot entry: $(<"$FIX/run/output")"
+  # Entries that cannot be read are not a missing entry: no limine-install.
+  mv "$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c" "$FIX/run/BootOrder"
+  run_cli setup && fail_test "setup told a machine with unreadable boot entries to turn Secure Boot on"
+  [[ $(<"$FIX/run/output") == *"Could not read the firmware's boot entries"* && $(<"$FIX/run/output") != *'limine-install'* ]] || fail_test "unreadable entries: $(<"$FIX/run/output")"
+  mv "$FIX/run/BootOrder" "$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   write_boot_entry 0001 active 'Limine' '\efi\LIMINE\limine_x64.efi'
   run_cli setup || fail_test "setup after the reboot failed"
   [[ $(<"$FIX/run/output") == *'turn Secure Boot on'* ]] || fail_test "next boot: $(<"$FIX/run/output")"

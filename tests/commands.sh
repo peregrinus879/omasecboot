@@ -283,6 +283,26 @@ refusals_say_why() {
   [[ -e $(enabled_file) ]] || fail_test "a remove without a terminal changed the machine"
 }
 
+# The grammar of the spec's Commands section: version and help take no
+# argument either, and status --quiet only sets the exit status, the root
+# check included. The real root check needs the unprivileged user the suites
+# run as.
+commands_keep_their_grammar() {
+  local command status
+  for command in version help; do
+    status=0
+    run_cli "$command" extra || status=$?
+    (( status == 2 )) && [[ $(<"$FIX/run/output") == *'Unexpected argument: extra'* ]] || fail_test "${command} extra: status ${status}, $(<"$FIX/run/output")"
+  done
+  (( EUID != 0 )) || return 0
+  : >"$FIX/run/not-root"
+  status=0
+  run_cli status --quiet || status=$?
+  (( status != 0 )) && [[ ! -s $FIX/run/output ]] || fail_test "status --quiet as a user: status ${status}, $(<"$FIX/run/output")"
+  run_cli status && fail_test "status ran as a user"
+  [[ $(<"$FIX/run/output") == *'Run as root: sudo omasecboot status'* ]] || fail_test "status as a user: $(<"$FIX/run/output")"
+}
+
 # Upstream can hold a new Limine major back (C2): stock is then the loader it
 # deployed, not the package's file.
 remove_accepts_the_loader_upstream_kept() {
@@ -484,6 +504,7 @@ run_case remove-warns-only-while-the-firmware-trusts-the-key remove_warns_only_w
 run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
 run_case refusals-say-why refusals_say_why
+run_case commands-keep-their-grammar commands_keep_their_grammar
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept
 run_case remove-can-be-run-again remove_can_be_run_again
 # With Secure Boot on, a loader signed with keys the firmware does not trust

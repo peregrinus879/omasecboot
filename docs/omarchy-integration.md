@@ -12,7 +12,7 @@ What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. Th
 | Remove command | `omarchy-remove-security-secure-boot`: refuses while Secure Boot is on, runs `sudo omasecboot remove`, then removes the package, and keeps `remove`'s closing note in view, the only place left to say when Secure Boot must stay off. |
 | Menu rows | Setup > Security > Secure Boot and Remove > Security > Secure Boot; the remove row's guard is `omarchy-pkg-present omasecboot`. |
 | Menu row for Windows | The package ships `omarchy-menu.jsonc` beside its documentation: a "Reboot to Windows" row whose guard is the silent, unprivileged `omasecboot windows available` and whose action runs `sudo omasecboot windows bootnext` and reboots only when that succeeded. |
-| Update check | A step in `omarchy-update` before the restart prompt that runs `sudo omasecboot status --quiet` when the package is set up and, on a non-zero exit, tells the user to run `sudo omasecboot status` and not to reboot until that report is clean. Until it exists, the tool's own red line during the update is the only signal. |
+| Update check | A step in `omarchy-update` before the restart prompt that runs `sudo omasecboot status --quiet` when the package is set up and, on a non-zero exit, tells the user to run `sudo omasecboot status`, whose last lines say what to do and whether a restart is at risk. Until it exists, the tool's own red line during the update is the only signal. |
 | Manual page | One page: what it does, the firmware steps, the rescue procedure, within the claim limits of [spec.md](spec.md) section 3. |
 
 ## Requests about the installer

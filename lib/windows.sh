@@ -24,7 +24,9 @@ utf16_text() { hex_to_bytes "$1" | iconv -f UTF-16LE -t UTF-8; }
 # length. Only the first path is the boot target, so the walk stops at its end
 # node; a file path node is type 4, subtype 4, and FILE is empty for an entry
 # without one. A control character in a label becomes "#", which no label
-# this tool accepts may hold, so rows stay one line and cannot be forged.
+# this tool accepts may hold, so rows stay one line and cannot be forged; a
+# label that is not UTF-16 at all becomes "#" for the same reason, since only
+# a match by name reads it. A file path that is not fails the entry.
 read_boot_entry() {
   local number=$1 hex total path_length position label='' file='' node_length state=inactive
   hex=$(od -An -v -tx1 -- "$(firmware_variable_path "Boot${number}")" 2>/dev/null) || return 1
@@ -49,7 +51,7 @@ read_boot_entry() {
     position=$((position + node_length))
     path_length=$((path_length - node_length))
   done
-  label=$(utf16_text "$label") || return 1
+  label=$(utf16_text "$label") || label='#'
   file=$(utf16_text "${file%0000}") || return 1
   printf '%s\x1f%s\x1f%s\x1f%s\n' "$number" "$state" "${label//[[:cntrl:]]/#}" "${file//[[:cntrl:]]/#}"
 }
@@ -57,7 +59,7 @@ read_boot_entry() {
 # Every boot entry the firmware holds, the ones in BootOrder first and in its
 # order. Firmware leaves numbers in BootOrder whose variable is gone, after a
 # USB stick was removed for instance; those are skipped. An entry that exists
-# and cannot be read fails the listing. The names carry the number in
+# and cannot be read as a load option fails the listing. The names carry the number in
 # upper-case hex (C7); lower case is looked for as well, because a firmware
 # that writes it would otherwise hide a Windows entry from the encryption check.
 list_boot_entries() {
@@ -152,7 +154,7 @@ resolve_windows_target() {
   _windows_number=$target_number _windows_label=$target_label
 }
 
-readonly WINDOWS_TARGET_NAME="the firmware's Windows Boot Manager entry has a name with blanks at its ends or characters outside ASCII, which OmaSecBoot cannot prove Limine matches; give it a plain name with efibootmgr, or leave the Windows entry out"
+readonly WINDOWS_TARGET_NAME="the firmware's Windows Boot Manager entry has a name with blanks at its ends or characters outside ASCII, which OmaSecBoot cannot prove Limine matches"
 
 windows_target_label() { printf '%s\n' "$_windows_label"; }
 windows_target_number() { printf '%s\n' "$_windows_number"; }
@@ -284,7 +286,7 @@ windows_entry_state() {
   fi
 }
 
-readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds OmaSecBoot's Windows comment in an entry that is not as OmaSecBoot writes it; remove that comment line, or the entry, by hand"
+readonly WINDOWS_ENTRY_MISPLACED="limine.conf holds OmaSecBoot's Windows comment where OmaSecBoot did not write it. If it stands in OmaSecBoot's Windows entry, edited by hand, remove that whole entry: OmaSecBoot writes its own again while the Windows entry is enabled, and would leave the edited one beside it. Anywhere else, remove the comment line alone"
 readonly WINDOWS_ENTRY_WAITS="limine.conf holds no menu entries yet, as Omarchy's template does before limine-update fills it; the pass after that writes the Windows entry"
 
 # config_is_still CHECKSUM: limine.conf still reads as it did.
@@ -433,7 +435,7 @@ converge_windows_entry() {
   case $status in
     0) ;;
     1) qnote "The Windows entry is enabled, but the firmware does not hold exactly one active Windows Boot Manager entry that BootOrder lists and whose name no other entry shares; see ${BOLD}sudo omasecboot status${NC}" ;;
-    3) qnote "The Windows entry is enabled, but ${WINDOWS_TARGET_NAME}" ;;
+    3) qnote "The Windows entry is enabled, but ${WINDOWS_TARGET_NAME}; see ${BOLD}sudo omasecboot status${NC}" ;;
     *) qnote "The Windows entry is enabled, but the firmware's boot entries cannot be read right now" ;;
   esac
   (( status == 0 )) || return 0

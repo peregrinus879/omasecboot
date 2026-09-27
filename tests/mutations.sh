@@ -112,7 +112,7 @@ m F79 lib/sign.sh 1 'run_sbctl remove-file "$file" >/dev/null || {' '{ run_sbctl
 m F80 bin/omasecboot 1 '  if os_entries_carry_hashes; then' '  if false; then' commands/setup-from-stock-and-again
 m F84 bin/omasecboot 1 $'  is_set_up || die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"\n  check_uefi && check_esp || exit 1' '  check_uefi && check_esp || exit 1' windows/windows-setup-needs-a-machine-that-is-set-up
 m F86 lib/limine.sh 1 $' "${esp}/EFI/BOOT/${LOADER_STAGING_PREFIX}"* \\\n    "${esp}"/.limine.conf.??????' ' "${esp}/EFI/BOOT/${LOADER_STAGING_PREFIX}"*' limine/stale-staging-files-are-swept
-m F87 lib/status.sh 1 '[[ -z $shadow ]] || blocking_problem "A second limine.conf shadows the real one; remove it: ${shadow}"' ':' status/shadowing-limine-conf-blocks
+m F87 lib/status.sh 1 '[[ -z $shadow ]] || blocking_problem both "A second limine.conf shadows the real one; remove it: ${shadow}"' ':' status/shadowing-limine-conf-blocks
 m F98 lib/windows.sh 1 'esp_room_is_enough || {' 'true || {' windows/unsafe-writes-are-refused
 m F99 limine/90-omasecboot-sign 1 '[[ -e /var/lib/omasecboot/enabled ]] || exit 0' ':' commands/hook-never-fails-its-caller
 m F100 bin/omasecboot 1 $'  check_root sign\n  is_set_up || die' $'  check_root sign\n  true || die' commands/usage-errors-exit-2
@@ -125,9 +125,9 @@ m F108 lib/firmware.sh 1 '% entry_size == 0 )) || return 1' '% entry_size >= 0 )
 m F109 bin/omasecboot 1 '{ read_mode_variable SecureBoot && read_mode_variable SetupMode; } >/dev/null || {' '{ read_mode_variable SecureBoot; } >/dev/null || {' firmware/setup-needs-setup-mode-readable-before-any-change
 m F110 lib/firmware.sh 1 '[[ ${#bytes[@]} == 5 && ${bytes[4]} =~ ^[01]$ ]] || return 1' '[[ ${bytes[4]} =~ ^[01]$ ]] || return 1' firmware/mode-variables-are-read-exactly
 m F111 lib/firmware.sh 1 ' && cmp -s -- "$path" "${directory}/${name}"; } || return 1' '; } || return 1' firmware/torn-backup-copy-is-refused
-m F112 lib/status.sh 1 'absent) problem "The Windows entry is missing' 'absent) note "The Windows entry is missing' windows/entry-comes-back-after-limine-conf-is-replaced
-m F113 lib/status.sh 1 'stale) problem "The Windows entry in limine.conf' 'stale) note "The Windows entry in limine.conf' windows/entry-problems-are-reported-not-failed
-m F114 lib/status.sh 1 'displaced) problem "The Windows entry in limine.conf' 'displaced) pass "The Windows entry in limine.conf' windows/displaced-entry-is-moved-behind-upstreams
+m F112 lib/status.sh 1 'absent) problem none "The Windows entry is missing' 'absent) note "The Windows entry is missing' windows/entry-comes-back-after-limine-conf-is-replaced
+m F113 lib/status.sh 1 'stale) problem none "The Windows entry in limine.conf' 'stale) note "The Windows entry in limine.conf' windows/entry-problems-are-reported-not-failed
+m F114 lib/status.sh 1 'displaced) problem none "The Windows entry in limine.conf' 'displaced) pass "The Windows entry in limine.conf' windows/displaced-entry-is-moved-behind-upstreams
 m F115 lib/windows.sh 1 '[[ ${entries,,} == *"$WINDOWS_LOADER"* ]]' 'false' windows/windows-without-a-listed-volume-is-not-ruled-out
 m F116 lib/windows.sh 1 'elif [[ $listed == 2 ]]; then' 'elif false; then' windows/windows-without-a-listed-volume-is-not-ruled-out
 
@@ -159,15 +159,15 @@ m F142 lib/windows.sh 1 '$target_label != *[![:ascii:]]* ]] || return 3' '$targe
 m F143 lib/windows.sh 1 '&& signed && !foreign)' '&& signed)' windows/misplaced-comment-is-never-deleted
 m F144 lib/windows.sh 1 '  is_safe_file "$config" || {' '  true || {' windows/unsafe-writes-are-refused
 m F146 bin/omasecboot 1 '{ read_enrollment_plan && firmware_is_enrolled; } || die "The firmware does not hold your keys after the write' '{ read_enrollment_plan && firmware_is_enrolled; } || : "The firmware does not hold your keys after the write' firmware/enrollment-is-judged-by-the-variables-afterwards
-m F145 lib/status.sh 1 'blocking_problem "Secure Boot is on, but the firmware does not hold your keys' 'note "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
+m F145 lib/status.sh 1 'blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' 'note "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
 
 m F147 lib/sign.sh 1 $'          unsealed)\n            qnote "Not signing' $'          unsealed-never)\n            qnote "Not signing' sign/unsealed-limine-is-never-signed
 m F148 lib/sign.sh 1 $'          unsupported)\n            fail "Not signing' $'          unsupported-never)\n            fail "Not signing' sign/untold-seal-is-not-signed-and-fails-the-pass
 m F149 lib/sign.sh 1 ' || [[ $seal != none ]]; then' '; then' sign/harmful-rows-are-found-and-removed
 m F150 lib/sign.sh 1 $'  [[ -z $rows ]] || {\n    warn "sbctl still lists' $'  true || {\n    warn "sbctl still lists' sign/harmful-rows-are-found-and-removed
-m F151 lib/status.sh 1 '0:unsealed) blocking_problem' '0:unsealed) pass' status/unsealed-limine-is-reported-by-its-signature
+m F151 lib/status.sh 1 '0:unsealed) blocking_problem none' '0:unsealed) pass' status/unsealed-limine-is-reported-by-its-signature
 m F152 lib/status.sh 1 '      show_unsealed_signed_loader' '      :' status/signed-unsealed-loader-is-said-after-remove
-m F153 lib/status.sh 1 '    blocking_problem "Secure Boot is on, and the Limine loader carries your signature and no seal' '    note "Secure Boot is on, and the Limine loader carries your signature and no seal' status/signed-unsealed-loader-is-said-after-remove
+m F153 lib/status.sh 1 '    blocking_problem none "Secure Boot is on, and the Limine loader carries your signature and no seal' '    note "Secure Boot is on, and the Limine loader carries your signature and no seal' status/signed-unsealed-loader-is-said-after-remove
 m F154 lib/limine.sh 1 'if (( ${#slot} == 256 )) && [[ ${slot:128} =~ ^0+$ ]]; then' 'if (( ${#slot} == 256 )); then' limine/seal-classes-follow-the-slot
 m F155 lib/limine.sh 1 'elif (( ${#slot} != 128 )); then' 'elif false; then' limine/seal-classes-follow-the-slot
 m F156 lib/limine.sh 1 '(( $? <= 1 )) || return 1' ':' limine/seal-classes-follow-the-slot
@@ -175,18 +175,18 @@ m F157 lib/limine.sh 1 'if [[ $seal == none || $seal == unsupported ]]; then' 'i
 
 m F158 lib/sign.sh 1 $'            failed=1\n            continue\n            ;;\n          unreadable)' $'            continue\n            ;;\n          unreadable)' sign/untold-seal-is-not-signed-and-fails-the-pass
 m F159 lib/sign.sh 1 $'seal=$(limine_seal "$file") || seal=unreadable\n        case $seal in' $'seal=$(limine_seal "$file") || seal=none\n        case $seal in' sign/untold-seal-is-not-signed-and-fails-the-pass
-m F160 lib/status.sh 1 '1:unsupported) blocking_problem' '1:unsupported) note' status/unsealed-limine-is-reported-by-its-signature
+m F160 lib/status.sh 1 '1:unsupported) blocking_problem on' '1:unsupported) note' status/unsealed-limine-is-reported-by-its-signature
 m F161 lib/status.sh 1 '  variable_holds_local_certificate db || return 0' '  true || return 0' status/signed-unsealed-loader-is-said-after-remove
 m F162 lib/limine.sh 1 'count=257' 'count=256' limine/seal-classes-follow-the-slot
 m F163 bin/omasecboot 1 'if ! sbctl_keys_exist || [[ $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]]; then' 'if true; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
-m F164 lib/status.sh 1 '    blocking_problem "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' '    note "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' status/signed-unsealed-loader-is-said-after-remove
+m F164 lib/status.sh 1 '    blocking_problem none "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' '    note "The Limine loader carries your signature and no seal, the firmware trusts your key, and whether Secure Boot is on' status/signed-unsealed-loader-is-said-after-remove
 m F165 bin/omasecboot 1 '  elif variable_holds_local_certificate db; then' '  elif true; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
 m F166 bin/omasecboot 1 '[[ $(effective_setting ENABLE_ENROLL_LIMINE_CONFIG) == yes ]]; then' 'false; then' commands/remove-warns-only-while-the-firmware-trusts-the-key
 
 m F167 bin/omasecboot 1 'could not be read: if it does, keep Secure Boot off until its factory keys' 'could not be read: nothing to do until its factory keys' commands/remove-warns-only-while-the-firmware-trusts-the-key
 m F168 lib/status.sh 1 $'  if ! read_enrollment_plan 2>/dev/null; then\n    warn "The Limine loader' $'  if false; then\n    warn "The Limine loader' status/signed-unsealed-loader-is-said-after-remove
-m F169 lib/status.sh 1 '0:unsupported) blocking_problem' '0:unsupported) pass' status/unsealed-limine-is-reported-by-its-signature
-m F170 lib/status.sh 1 '[01]:unreadable) blocking_problem' '[01]:unreadable) pass' status/unsealed-limine-is-reported-by-its-signature
+m F169 lib/status.sh 1 '0:unsupported) blocking_problem none' '0:unsupported) pass' status/unsealed-limine-is-reported-by-its-signature
+m F170 lib/status.sh 1 '[01]:unreadable) blocking_problem on' '[01]:unreadable) pass' status/unsealed-limine-is-reported-by-its-signature
 m F171 lib/sign.sh 1 $'    seal=$(limine_seal "$file") || seal=unreadable\n    if is_history_file' $'    seal=$(limine_seal "$file") || seal=none\n    if is_history_file' sign/harmful-rows-are-found-and-removed
 m F172 lib/sign.sh 1 $'            failed=1\n            continue\n            ;;\n        esac' $'            continue\n            ;;\n        esac' sign/untold-seal-is-not-signed-and-fails-the-pass
 
@@ -224,6 +224,27 @@ m F200 lib/sign.sh 1 '  if ! unsafe=$(esp_mount_is_safe); then' '  if false; the
 m F201 lib/status.sh 1 '    if ! unsafe=$(esp_mount_is_safe); then' '    if false; then' status/unsafe-esp-mount-blocks
 m F202 bin/omasecboot 1 '  unsafe=$(esp_mount_is_safe) || {' '  unsafe=$(esp_mount_is_safe) || true || {' commands/setup-refuses-an-unsafe-esp-mount
 m F203 lib/common.sh 1 '[[ $uid != 0 || ,$options, == *,idmapped,* ]]' '[[ $uid != 0 ]]' common/esp-mount-rule-follows-the-kernels-options
+
+m F204 lib/status.sh 1 '      on) act "Do not reboot with Secure Boot on until this report no longer says so" ;;' '      on) ;;' status/enrollment-state-chooses-the-next-step
+m F205 lib/status.sh 1 '      both) act "Do not reboot, with Secure Boot on or off, until this report no longer says so" ;;' '      both) ;;' status/sign-repairs-these
+m F206 lib/status.sh 1 'on) [[ $_status_risk == both ]] || _status_risk=on ;;' 'on) _status_risk=on ;;' status/restart-warning-follows-the-boot-risk
+m F207 lib/status.sh 1 '    both) _status_risk=both ;;' '    both) _status_risk=on ;;' status/sign-repairs-these
+m F208 lib/status.sh 1 '  elif [[ $(limine_seal "$(primary_loader_path)") == unsealed ]]; then' '  elif true; then' status/sign-repairs-these
+m F209 lib/status.sh 1 '! grep -q "^${ATTENTION_SYNC} on " "$attention" || risk=both' ':' status/restart-warning-follows-the-boot-risk
+m F210 lib/status.sh 1 '1:*) problem on "Not signed' '1:*) problem none "Not signed' status/problems-set-exit-status
+m F211 lib/status.sh 1 'setup_problem on "Stale path hash' 'setup_problem none "Stale path hash' status/stale-os-hash-needs-setup
+m F212 lib/status.sh 1 'blocking_problem both "A second limine.conf shadows' 'blocking_problem on "A second limine.conf shadows' status/shadowing-limine-conf-blocks
+m F213 lib/status.sh 1 'blocking_problem on "The firmware has no active boot entry' 'blocking_problem none "The firmware has no active boot entry' status/missing-limine-boot-entry-blocks
+m F214 lib/status.sh 1 'blocking_problem on "Secure Boot is on, but the firmware does not hold your keys' 'blocking_problem none "Secure Boot is on, but the firmware does not hold your keys' status/enrollment-state-chooses-the-next-step
+m F215 lib/status.sh 1 '  elif lacks_menu_entries "$content"; then' '  elif false; then' status/limine-conf-without-entries-blocks
+m F216 lib/status.sh 1 'blocking_problem both "Could not read $(limine_config_path), which Limine starts from' 'blocking_problem none "Could not read $(limine_config_path), which Limine starts from' status/limine-conf-without-entries-blocks
+m F217 lib/status.sh 1 '[[ $(fallback_state) != raw ]] || risk=on' 'risk=on' status/missing-limine-boot-entry-blocks
+m F218 lib/status.sh 1 'blocking_problem both "The EFI system partition is not mounted' 'blocking_problem on "The EFI system partition is not mounted' status/blocking-problems-name-no-repair-command
+m F219 lib/status.sh 1 '*) blocking_problem on "sbctl could not tell' '*) blocking_problem none "sbctl could not tell' status/unknown-states-block
+m F220 lib/status.sh 1 '*) blocking_problem "$risk" "Could not read the firmware' '*) blocking_problem none "Could not read the firmware' status/missing-limine-boot-entry-blocks
+m F221 lib/status.sh 1 '1:unsupported) blocking_problem on' '1:unsupported) blocking_problem none' status/unsealed-limine-is-reported-by-its-signature
+m F222 lib/status.sh 1 '[01]:unreadable) blocking_problem on' '[01]:unreadable) blocking_problem none' status/unsealed-limine-is-reported-by-its-signature
+m F223 lib/status.sh 1 'blocking_problem on "Could not tell from sbctl which certificates' 'blocking_problem none "Could not tell from sbctl which certificates' status/enrollment-state-chooses-the-next-step
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

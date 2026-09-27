@@ -46,10 +46,10 @@ enrollment_state_chooses_the_next_step() {
   # A firmware update or a CMOS reset put the factory keys back.
   write_key_variable PK "$(x509_list "$OEM_OWNER" 'OEM platform key' | base64 -w0)"
   output=$(show_status 2>&1) && fail_test "Secure Boot on without the local keys passed"
-  [[ $output == *'does not hold your keys'* && $output == *'Next: resolve what is marked above'* ]] || fail_test "report: ${output}"
+  [[ $output == *'does not hold your keys'* && $output == *'Next: resolve what is marked above, then run sudo omasecboot status again'*'Do not reboot with Secure Boot on'* ]] || fail_test "report: ${output}"
   : >"$FIX/run/sbctl-owner-changed"
   output=$(show_status 2>&1) && fail_test "unidentifiable certificates passed"
-  [[ $output == *'which certificates are yours'* ]] || fail_test "report: ${output}"
+  [[ $output == *'which certificates are yours'*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
 }
 
 problems_set_exit_status() {
@@ -80,6 +80,56 @@ sign_repairs_these() {
   show_status >/dev/null 2>&1 || fail_test "sign did not repair what status told it to"
 }
 
+# The report warns against a restart only for what stops a start now, and for
+# the worst of it (section 7): not for what only a later update meets; with
+# Secure Boot on for an unsigned file or a raw loader; with it on or off for a
+# loader sealed over another limine.conf or a write the ESP did not confirm.
+restart_warning_follows_the_boot_risk() {
+  local output
+  set_up_machine
+  rm "$FIX/systemd/$(watch_units | tail -n 1)"
+  output=$(show_status 2>&1) && fail_test "an inactive watcher passed"
+  [[ $output == *'Next: sudo omasecboot sign'* && $output != *'Do not reboot'* ]] || fail_test "no risk: ${output}"
+  set_attention "$ATTENTION_PASS" || fail_test "fixture attention"
+  output=$(show_status 2>&1) && fail_test "a pass that could not finish passed"
+  [[ $output == *'An earlier pass could not finish'* && $output != *'Do not reboot'* ]] || fail_test "a pass that could not finish: ${output}"
+  set_attention "$ATTENTION_SYNC" || fail_test "fixture attention"
+  output=$(show_status 2>&1) && fail_test "an unconfirmed write passed"
+  [[ $output == *'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "an unconfirmed write: ${output}"
+  rm "$(attention_file)"
+  QUIET=true sign_boot_files || fail_test "sign"
+  write_raw_loader "$(primary_loader_path)"
+  output=$(show_status 2>&1) && fail_test "a raw loader passed"
+  # Its "Not signed" line carries the risk: a raw loader starts with Secure
+  # Boot off, and one that is signed with it on as well.
+  [[ $output == *"Not signed: $(primary_loader_path)"*'Do not reboot with Secure Boot on until this report no longer says so'* ]] || fail_test "a raw loader: ${output}"
+  QUIET=true sign_boot_files || fail_test "sign"
+  # A risk with Secure Boot on after one with it on or off keeps the worse.
+  printf 'timeout: 9\n' >>"$FIX/esp/limine.conf"
+  printf 'new unsigned uki' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  output=$(show_status 2>&1) && fail_test "an unsealed loader and an unsigned image passed"
+  [[ $output == *'Not signed'*'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "the worst risk: ${output}"
+}
+
+# Limine starts nothing from a limine.conf it cannot read or that holds no
+# menu entry, as Omarchy's template until limine-update fills it (C6), however
+# well the loader is sealed over it.
+limine_conf_without_entries_blocks() {
+  local output
+  set_up_machine
+  write_omarchy_limine_template
+  QUIET=true sign_boot_files seal-only || fail_test "the watcher's pass over the template"
+  output=$(show_status 2>&1) && fail_test "a limine.conf without entries passed"
+  [[ $output == *"✗ limine.conf holds no menu entries besides OmaSecBoot's own, so Limine cannot start Omarchy: run sudo limine-update"*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "no entries: ${output}"
+  # Beside a raw loader that is signed, which starts in either state, only
+  # this line says that Limine has nothing to read.
+  write_raw_loader "$(primary_loader_path)"
+  sbctl sign "$(primary_loader_path)"
+  rm "$FIX/esp/limine.conf"
+  output=$(show_status 2>&1) && fail_test "a missing limine.conf passed"
+  [[ $output == *"✗ Could not read $(limine_config_path), which Limine starts from"*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "no file: ${output}"
+}
+
 # Only limine-mkinitcpio rewrites a path hash, and setup runs it; "sign" would
 # be the wrong advice.
 stale_os_hash_needs_setup() {
@@ -91,7 +141,8 @@ stale_os_hash_needs_setup() {
   QUIET=true ensure_primary_loader || fail_test "fixture reseal"
   output=$(show_status 2>&1) && fail_test "a stale OS hash passed"
   [[ $output == *'Stale path hash in limine.conf line 10 (entry: linux)'* ]] || fail_test "stale hash line: ${output}"
-  [[ $output == *'Next: sudo omasecboot setup'* ]] || fail_test "next step: ${output}"
+  # Limine refuses the entry with Secure Boot on and waits for a key without.
+  [[ $output == *'Next: sudo omasecboot setup'*'Do not reboot with Secure Boot on'* ]] || fail_test "next step: ${output}"
 }
 
 # Only setup removes sbctl rows: listing them makes sbctl read every tracked
@@ -118,6 +169,8 @@ blocking_problems_name_no_repair_command() {
   : >"$FIX/run/esp-unmounted"
   output=$(show_status 2>&1) && fail_test "an unmounted ESP passed"
   [[ $output == *'EFI system partition is not mounted'* && $output != *'loader is not sealed'* ]] || fail_test "report: ${output}"
+  # Nothing shows that the loader is sealed over what Limine reads.
+  [[ $output == *'Do not reboot, with Secure Boot on or off'* ]] || fail_test "restart: ${output}"
 }
 
 # What could not be read is not something "sign" repairs, and the report must
@@ -127,11 +180,11 @@ unknown_states_block() {
   set_up_machine
   : >"$FIX/run/sbctl-cannot-read"
   output=$(show_status 2>&1) && fail_test "an unreadable signature state passed"
-  [[ $output == *'could not tell whether this file is signed'* && $output == *'Next: resolve what is marked above'* ]] || fail_test "report: ${output}"
+  [[ $output == *'could not tell whether this file is signed'*'sudo sbctl verify'* && $output == *'Next: resolve what is marked above'*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
   rm "$FIX/run/sbctl-cannot-read"
   : >"$FIX/run/sbctl-list-fails"
   output=$(show_status 2>&1) && fail_test "an unreadable sbctl list passed"
-  [[ $output == *"Could not read sbctl's file list"* && $output == *'Next: resolve what is marked above'* ]] || fail_test "report: ${output}"
+  [[ $output == *"Could not read sbctl's file list"*'sudo sbctl list-files'* && $output == *'Next: resolve what is marked above'* && $output != *'Do not reboot'* ]] || fail_test "report: ${output}"
 }
 
 unreadable_firmware_is_a_problem() {
@@ -173,7 +226,7 @@ sealed_but_unsigned_is_not_called_unsealed() {
   write_raw_loader "$(primary_loader_path)"
   limine enroll-config "$(primary_loader_path)" "$(config_checksum)"
   output=$(show_status 2>&1) && fail_test "an unsigned loader read as healthy"
-  [[ $output == *'sealed over the current limine.conf but not signed'* && $output == *'Next: sudo omasecboot sign'* ]] || fail_test "report: ${output}"
+  [[ $output == *'sealed over the current limine.conf but not signed'* && $output == *'Next: sudo omasecboot sign'*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
   [[ $output != *'with Secure Boot on or off'* ]] || fail_test "an unsigned loader got the warning of an unsealed one: ${output}"
   printf 'timeout: 9\n' >>"$FIX/esp/limine.conf"
   output=$(show_status 2>&1) && fail_test "a stale seal read as healthy"
@@ -188,13 +241,18 @@ missing_limine_boot_entry_blocks() {
   output=$(show_status 2>&1) || fail_test "a clean machine reported problems: ${output}"
   rm "$FIX/efivars/Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   output=$(show_status 2>&1) && fail_test "a machine without a Limine boot entry read as healthy"
-  [[ $output == *'no active boot entry for the Limine loader'*'resolve what is marked above'* ]] || fail_test "report: ${output}"
+  [[ $output == *'no active boot entry for the Limine loader'*'resolve what is marked above'*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
+  # Without the raw fallback nothing starts Omarchy, with Secure Boot on or off.
+  mv "$(fallback_loader_path)" "$FIX/run/fallback"
+  output=$(show_status 2>&1) && fail_test "no Limine boot entry and no fallback read as healthy"
+  [[ $output == *'the fallback path holds no raw Limine loader'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "without a fallback: ${output}"
+  mv "$FIX/run/fallback" "$(fallback_loader_path)"
   write_boot_entry 0001 active 'Limine' '\EFI\limine\limine_x64.efi'
   printf 'garbage' >"$FIX/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   output=$(show_status 2>&1) || fail_test "boot entries outside a broken BootOrder were not read: ${output}"
   printf 'x' >"$FIX/efivars/Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c"
   output=$(show_status 2>&1) && fail_test "unreadable boot entries read as healthy"
-  [[ $output == *"Could not read the firmware's boot entries"* ]] || fail_test "report: ${output}"
+  [[ $output == *"Could not read the firmware's boot entries"*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
 }
 
 # What Microsoft can still deliver to the machine, not what it boots (C9).
@@ -264,11 +322,12 @@ unsealed_limine_is_reported_by_its_signature() {
   [[ $output == *"  · Left unsigned: ${stray} is a Limine loader that is not sealed"* ]] || fail_test "no note: ${output}"
   sbctl sign "$stray"
   output=$(show_status 2>&1) && fail_test "a signed, unsealed Limine passed"
-  [[ $output == *"  ✗ A Limine loader that is not sealed carries your signature: ${stray}"* ]] || fail_test "report: ${output}"
+  # A matter of security, not of starting: no warning against a restart.
+  [[ $output == *"  ✗ A Limine loader that is not sealed carries your signature: ${stray}"* && $output != *'Do not reboot'* ]] || fail_test "report: ${output}"
   # A slot that does not tell is never said as unsealed, signed or not.
   write_loader_with_slot "$stray" "$(printf '0%.0s' {1..100})"
   output=$(show_status 2>&1) && fail_test "a seal that cannot be told passed"
-  [[ $output == *"  ✗ Not signed: ${stray} carries Limine's marker, and its checksum slot does not tell"* ]] || fail_test "report: ${output}"
+  [[ $output == *"  ✗ Not signed: ${stray} carries Limine's marker, and its checksum slot does not tell"*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
   sbctl sign "$stray"
   output=$(show_status 2>&1) && fail_test "a signed file whose seal cannot be told passed"
   [[ $output == *"  ✗ A file with Limine's marker whose checksum slot does not tell whether it checks limine.conf carries your signature: ${stray}"* ]] || fail_test "report: ${output}"
@@ -276,7 +335,7 @@ unsealed_limine_is_reported_by_its_signature() {
   eval "original_$(declare -f limine_seal)"
   limine_seal() { [[ $1 != "$stray" ]] || return 1; original_limine_seal "$@"; }
   output=$(show_status 2>&1) && fail_test "a file that could not be read passed"
-  [[ $output == *"  ✗ Could not read ${stray} to tell whether it is a Limine loader that is not sealed"* ]] || fail_test "report: ${output}"
+  [[ $output == *"  ✗ Could not read ${stray} to tell whether it is a Limine loader that is not sealed"*'Do not reboot with Secure Boot on until'* ]] || fail_test "report: ${output}"
 }
 
 # After remove, sbctl's keys stay and upstream signs the loader without a seal
@@ -329,6 +388,9 @@ shadowing_limine_conf_blocks() {
   cp "$FIX/esp/limine.conf" "$FIX/esp/EFI/limine/limine.conf"
   output=$(show_status 2>&1) && fail_test "a shadowing limine.conf passed"
   [[ $output == *"  ✗ A second limine.conf shadows the real one; remove it: $FIX/esp/EFI/limine/limine.conf"* ]] || fail_test "report: ${output}"
+  # Limine reads the stray file instead, which the loader's seal matches only
+  # while it is a copy of limine.conf.
+  [[ $output == *'Do not reboot, with Secure Boot on or off'* ]] || fail_test "restart: ${output}"
 }
 
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
@@ -336,6 +398,8 @@ run_case clean-machine-names-the-firmware-step clean_machine_names_the_firmware_
 run_case enrollment-state-chooses-the-next-step enrollment_state_chooses_the_next_step
 run_case problems-set-exit-status problems_set_exit_status
 run_case sign-repairs-these sign_repairs_these
+run_case restart-warning-follows-the-boot-risk restart_warning_follows_the_boot_risk
+run_case limine-conf-without-entries-blocks limine_conf_without_entries_blocks
 run_case stale-os-hash-needs-setup stale_os_hash_needs_setup
 run_case harmful-sbctl-rows-need-setup harmful_sbctl_rows_need_setup
 run_case blocking-problems-name-no-repair-command blocking_problems_name_no_repair_command
