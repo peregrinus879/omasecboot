@@ -35,11 +35,27 @@ atomic_write_replaces_whole_files() {
   ! printf 'x' | atomic_write "$FIX/missing/file" 600 2>/dev/null || fail_test "wrote into a missing directory"
 }
 
+# One dated line per kind; a kind is replaced, cleared alone, or all at once.
 needs_attention_round_trip() {
-  set_attention "reason one" || fail_test "set"
-  [[ $(<"$(attention_file)") == "reason one" ]] || fail_test "content"
-  clear_attention
+  set_attention "$ATTENTION_PASS" || fail_test "set"
+  [[ $(<"$(attention_file)") == "sign could not finish on "* ]] || fail_test "content: $(<"$(attention_file)")"
+  { set_attention "$ATTENTION_SEAL" && set_attention "$ATTENTION_SEAL"; } || fail_test "set a second kind"
+  [[ $(grep -c . "$(attention_file)") == 2 ]] || fail_test "kinds: $(<"$(attention_file)")"
+  clear_attention "$ATTENTION_SEAL"
+  [[ $(<"$(attention_file)") == "sign could not finish on "* && $(grep -c . "$(attention_file)") == 1 ]] || fail_test "clear one kind: $(<"$(attention_file)")"
+  clear_attention "$ATTENTION_PASS"
+  [[ ! -e $(attention_file) ]] || fail_test "clearing the last kind left the file"
+  set_attention "$ATTENTION_SYNC" && clear_attention
   [[ ! -e $(attention_file) ]] || fail_test "clear"
+  # A last line without its newline, as a hand edit leaves it, is a line.
+  printf '%s on a day\n%s on a day' "$ATTENTION_PASS" "$ATTENTION_SEAL" >"$(attention_file)"
+  clear_attention "$ATTENTION_PASS"
+  [[ $(<"$(attention_file)") == "${ATTENTION_SEAL} on a day" ]] || fail_test "the last line was lost: $(cat "$(attention_file)" 2>&1)"
+  # In a state directory others can write, nothing is rewritten.
+  chmod o+w "$FIX/state"
+  ! clear_attention "$ATTENTION_SEAL" 2>/dev/null || fail_test "rewritten in an unsafe state directory"
+  [[ -e $(attention_file) ]] || fail_test "cleared in an unsafe state directory"
+  chmod o-w "$FIX/state"
 }
 
 file_safety_refuses_what_others_can_change() {

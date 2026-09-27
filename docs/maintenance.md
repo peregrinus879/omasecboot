@@ -20,6 +20,7 @@ Open work, the evidence still owed, and what triggers a recheck. A closed item l
 
 ## Evidence owed
 
+- The Windows entry's `limine.conf` and the loader sealed over it, prepared first and renamed together under held signals, under the real watchers and ESP: checklist 5.1 and 5.4. The order of the two renames is the one the release's run recorded; the preparation, the held signals and the handling of an unconfirmed sync are proved by hermetic cases alone.
 - The first hardware rows of what changed in the tool after the release's records, which C10 lists: checklist 5.4, `omarchy refresh limine` with the entry enabled, for the Windows entry's place, and a full run of stages 0 to 7 for the guards and the changes beside them.
 - Whether BitLocker stays quiet when Windows is started through a chainload entry alone and the loader is sealed again in between (checklist, stage 5): Microsoft's pages say it cannot (C8), and no machine has a record.
 - A second machine's record, from another firmware vendor, through [field-testing.md](field-testing.md) or the release checklist.

@@ -450,6 +450,187 @@ windows_setup_needs_a_machine_that_is_set_up() {
   cmp -s "$FIX/esp/limine.conf" "$before" || fail_test "limine.conf changed"
 }
 
+# limine.conf and the loader as one fingerprint.
+pair_hash() { cat "$FIX/esp/limine.conf" "$(primary_loader_path)" | b2sum | cut -d' ' -f1; }
+
+# The machine with the Windows entry in place and its loader sealed over it,
+# then limine.conf changed as OP says, sealed again: the pass has one change to
+# make, and makes it only together with a loader sealed over the result.
+windows_change_to_make() {
+  : >"$(windows_flag)"
+  QUIET=true sign_boot_files >/dev/null 2>&1 || fail_test "$1: the pass that sets the start"
+  case $1 in
+    added) write_limine_conf unhashed ;;
+    replaced) sed -i 's/^    entry: Windows Boot Manager$/    entry: Another name/' "$FIX/esp/limine.conf" ;;
+    moved)
+      write_limine_conf unhashed
+      { sed '/^\//,$d' "$FIX/esp/limine.conf"; windows_entry 'Windows Boot Manager'; printf '\n'; sed -n '/^\//,$p' "$FIX/esp/limine.conf"; } >"$FIX/run/moved"
+      cp "$FIX/run/moved" "$FIX/esp/limine.conf"
+      ;;
+    removed) rm "$(windows_flag)" ;;
+  esac
+  ensure_primary_loader >/dev/null || fail_test "$1: reseal"
+}
+
+# The pass changes limine.conf only together with a loader sealed over the new
+# content, built and proved first: when that fails, with sbctl's keys gone or
+# signing failing, neither file changes, whatever the change was (D2, 7.5).
+failed_preparation_changes_neither_file() {
+  local fault op before output
+  set_up_with_windows
+  for fault in keys-gone signing-fails; do
+    for op in added replaced moved removed; do
+      windows_change_to_make "$op"
+      if [[ $fault == keys-gone ]]; then rm "$FIX/sbctl/keys"; else : >"$FIX/run/sbctl-sign-fails"; fi
+      before=$(pair_hash)
+      output=$(sign_boot_files 2>&1) || :
+      [[ $(pair_hash) == "$before" ]] || fail_test "${fault}, ${op}: limine.conf or the loader changed"
+      [[ $output == *'Could not build a loader sealed over the new limine.conf'* ]] || fail_test "${fault}, ${op}: ${output}"
+      [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "${fault}, ${op}: staging left"
+      : >"$FIX/sbctl/keys"
+      rm -f "$FIX/run/sbctl-sign-fails"
+    done
+  done
+}
+
+# The two renames, each way they can fail: before the first nothing changes;
+# after it the loader follows or the pass builds it again, and a sync that did
+# not confirm the write stays said until a pass has synced the ESP (7.3).
+publication_failures_leave_a_pair_or_say_so() {
+  local before output
+  set_up_with_windows
+  # limine.conf changes while the loader is being built: the new file is not
+  # written over it, and the loader built for it is not put in place.
+  windows_change_to_make added
+  before=$(b2sum <"$(primary_loader_path)")
+  : >"$FIX/run/config-changes-during-enroll"
+  boot_lock_acquire
+  ! write_windows_entry 'Windows Boot Manager' 2>/dev/null || fail_test "a write over a limine.conf that changed passed"
+  boot_lock_release
+  [[ $(b2sum <"$(primary_loader_path)") == "$before" && $(entry_count) == 0 ]] || fail_test "a file changed after limine.conf did"
+  [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "staging left after limine.conf changed"
+  # The first rename fails: nothing changed, nothing staged is left.
+  windows_change_to_make added
+  before=$(pair_hash)
+  mv() { [[ ${*: -1} != "$(limine_config_path)" ]] || return 1; command mv "$@"; }
+  boot_lock_acquire
+  ! write_windows_entry 'Windows Boot Manager' 2>/dev/null || fail_test "a failed rename of limine.conf passed"
+  boot_lock_release
+  unset -f mv
+  [[ $(pair_hash) == "$before" ]] || fail_test "a failed first rename changed a file"
+  [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "staging left after a failed first rename"
+  # The loader's rename fails once: the pass builds it again over the new file.
+  mv() {
+    if [[ ${*: -1} == "$(primary_loader_path)" && ! -e $FIX/run/mv-failed ]]; then
+      : >"$FIX/run/mv-failed"
+      return 1
+    fi
+    command mv "$@"
+  }
+  output=$(sign_boot_files 2>&1) || fail_test "the pass did not build the loader again: ${output}"
+  unset -f mv
+  [[ $output == *'the loader sealed over it could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
+  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after a failed second rename"
+  [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "staging left after a failed second rename"
+  # The sync after the loader's rename fails once: said as the other.
+  windows_change_to_make added
+  durable_sync() {
+    if [[ $1 == "$(dirname "$(primary_loader_path)")" && ! -e $FIX/run/loader-sync-failed ]]; then
+      : >"$FIX/run/loader-sync-failed"
+      return 1
+    fi
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a loader the ESP did not confirm passed"
+  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "the unconfirmed loader was not recorded"
+  durable_sync() { :; }
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the loader's sync"
+  # The sync after the first rename fails, once: the pair is whole, and the
+  # write is said until a later pass has synced the ESP. A sync that works
+  # later in the same pass proves nothing about the write before it.
+  windows_change_to_make added
+  durable_sync() {
+    if [[ $1 == "$FIX/esp" && ! -e $FIX/run/sync-failed ]]; then
+      : >"$FIX/run/sync-failed"
+      return 1
+    fi
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a write the ESP did not confirm passed"
+  [[ $output == *'The ESP did not confirm the new limine.conf'*'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
+  [[ $output != *'limine.conf changed while the Windows entry was being written'* ]] || fail_test "an unconfirmed write was said as a change of limine.conf: ${output}"
+  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after an unconfirmed write"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "needs-attention: $(cat "$(attention_file)" 2>&1)"
+  durable_sync() { :; }
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the ESP synced again"
+  [[ ! -e $(attention_file) ]] || fail_test "a pass that synced the ESP kept: $(<"$(attention_file)")"
+}
+
+# A signal to the whole process group between the two renames: both are made,
+# and the command then ends on the signal (7.3). Background jobs start with
+# SIGINT ignored, so the command starts with its signals at their defaults.
+# QUIT is held the same way; it is not sent here, because its default action
+# dumps core.
+signal_between_the_renames_leaves_a_pair() {
+  local signal pid rc
+  local -A ends_with=([TERM]=143 [INT]=130 [HUP]=129)
+  set_up_with_windows
+  for signal in TERM INT HUP; do
+    windows_change_to_make added
+    rm "$(windows_flag)"
+    : >"$FIX/run/esp-sync-is-slow"
+    ROOT_DIR=$ROOT_DIR setsid env --default-signal=TERM,INT,HUP bash -c "$CLI_PROCESS" omasecboot windows setup >"$FIX/run/output" 2>&1 &
+    pid=$!
+    for _ in {1..100}; do
+      [[ $(entry_count) != 1 ]] || break
+      sleep 0.05
+    done
+    [[ $(entry_count) == 1 ]] || fail_test "${signal}: the rename of limine.conf never came"
+    kill -s "$signal" -- -"$pid"
+    rc=0
+    wait "$pid" || rc=$?
+    rm "$FIX/run/esp-sync-is-slow"
+    loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "${signal}: limine.conf and the loader were split"
+    [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "${signal}: staging left"
+    (( rc == ${ends_with[$signal]} )) || fail_test "${signal}: the command ended with ${rc}, not on the signal: $(<"$FIX/run/output")"
+  done
+}
+
+# windows remove on a machine that is not set up writes limine.conf itself: a
+# write the ESP did not confirm is said, and nothing more is taken out.
+windows_remove_says_an_unconfirmed_write() {
+  { boot_lock_acquire && write_windows_entry 'Windows Boot Manager' && boot_lock_release; } >/dev/null || fail_test "fixture entry"
+  add_windows
+  : >"$FIX/run/esp-sync-fails-once"
+  run_cli windows remove && fail_test "windows remove passed over a write the ESP did not confirm"
+  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the write of'* ]] || fail_test "report: $(<"$FIX/run/output")"
+}
+
+# The watchers' pass ignores TERM throughout (D8), the renames of the Windows
+# entry included: after them TERM is ignored again, not merely caught, so the
+# tools the pass runs next ignore it too. Sent to the whole process group while
+# the pass syncs the ESP.
+watchers_pass_keeps_ignoring_term() {
+  local pid rc
+  set_up_with_windows
+  windows_change_to_make added
+  : >"$FIX/run/esp-sync-is-slow"
+  rm -f "$FIX/run/esp-syncs"
+  ROOT_DIR=$ROOT_DIR setsid env --default-signal=TERM bash -c "$CLI_PROCESS" omasecboot sign --quiet --seal-only >"$FIX/run/output" 2>&1 &
+  pid=$!
+  # The second sync of the ESP's root is the pass's own, after both renames.
+  for _ in {1..150}; do
+    [[ $(cat "$FIX/run/esp-syncs" 2>/dev/null) != xx ]] || break
+    sleep 0.05
+  done
+  [[ $(cat "$FIX/run/esp-syncs" 2>/dev/null) == xx ]] || fail_test "the pass's own sync never came"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the renames did not come before the pass's sync"
+  kill -s TERM -- -"$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  rm "$FIX/run/esp-sync-is-slow"
+  (( rc == 0 )) || fail_test "the watchers' pass ended with ${rc} on a TERM after the renames: $(<"$FIX/run/output")"
+}
+
 # limine-scan writes a chainload entry for Windows Boot Manager at the top
 # level, with a body that is not indented (C2).
 add_chainload_entry() {
@@ -731,6 +912,11 @@ run_case encryption-is-acknowledged-before-the-firmware-changes encryption_is_ac
 run_case unknown-encryption-state-is-asked-about unknown_encryption_state_is_asked_about
 run_case windows-without-a-listed-volume-is-not-ruled-out windows_without_a_listed_volume_is_not_ruled_out
 run_case windows-setup-needs-a-machine-that-is-set-up windows_setup_needs_a_machine_that_is_set_up
+run_case failed-preparation-changes-neither-file failed_preparation_changes_neither_file
+run_case publication-failures-leave-a-pair-or-say-so publication_failures_leave_a_pair_or_say_so
+run_case signal-between-the-renames-leaves-a-pair signal_between_the_renames_leaves_a_pair
+run_case watchers-pass-keeps-ignoring-term watchers_pass_keeps_ignoring_term
+run_case windows-remove-says-an-unconfirmed-write windows_remove_says_an_unconfirmed_write
 run_case chainloads-are-listed-as-upstream-names-them chainloads_are_listed_as_upstream_names_them
 run_case chainload-beside-bitlocker-is-noted chainload_beside_bitlocker_is_noted
 run_case printed-command-survives-the-shell printed_command_survives_the_shell

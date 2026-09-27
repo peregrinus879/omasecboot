@@ -360,7 +360,7 @@ show_status() {
     note_windows_chainloads
     show_integration_status
     attention=$(attention_file)
-    [[ ! -e $attention ]] || problem "An earlier pass could not finish: $(<"$attention")"
+    [[ ! -e $attention ]] || problem "An earlier pass could not finish: $(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' "$attention")"
   fi
   show_next_step
   (( _status_problems == 0 ))

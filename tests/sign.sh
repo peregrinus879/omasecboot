@@ -192,7 +192,31 @@ failure_writes_needs_attention() {
   sign_boot_files seal-only || fail_test "seal-only pass"
   [[ -s $(attention_file) ]] || fail_test "a seal-only pass cleared what a full pass had found"
   sign_boot_files && [[ ! -e $(attention_file) ]] || fail_test "a later clean pass kept needs-attention"
-  set_attention 'the loader could not be sealed on a day'
+  # Written under the lock, so a watcher's pass started by this pass's own
+  # renames cannot interleave with it.
+  eval "original_$(declare -f set_attention)"
+  # shellcheck disable=SC2154 # _boot_lock belongs to lib/common.sh.
+  set_attention() { [[ $_boot_lock != false ]] || : >"$FIX/run/written-unlocked"; original_set_attention "$@"; }
+  printf 'timeout: 6\n' >>"$FIX/esp/limine.conf"
+  : >"$FIX/run/sbctl-sign-fails"
+  sign_boot_files 2>/dev/null && fail_test "a pass that could not seal the loader over a changed limine.conf passed"
+  rm "$FIX/run/sbctl-sign-fails"
+  [[ ! -e $FIX/run/written-unlocked ]] || fail_test "needs-attention was written after the lock was released"
+  eval "$(declare -f original_set_attention | sed '1s/original_set_attention/set_attention/')"
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the lock check"
+  # A full pass's finding and the watchers' own stand side by side, and each
+  # kind of pass clears only its own.
+  : >"$FIX/run/sbctl-sign-fails"
+  printf 'an unsigned arrival' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
+  sign_boot_files 2>/dev/null && fail_test "fixture: the full pass passed"
+  printf 'timeout: 4\n' >>"$FIX/esp/limine.conf"
+  sign_boot_files seal-only 2>/dev/null && fail_test "a seal-only pass passed over a limine.conf the loader is not sealed over"
+  [[ $(grep -c . "$(attention_file)") == 2 ]] || fail_test "a seal-only pass replaced what a full pass had found: $(<"$(attention_file)")"
+  rm "$FIX/run/sbctl-sign-fails"
+  sign_boot_files seal-only || fail_test "clean seal-only pass"
+  [[ $(<"$(attention_file)") == "${ATTENTION_PASS} on "* ]] || fail_test "a clean seal-only pass left: $(cat "$(attention_file)" 2>&1)"
+  sign_boot_files >/dev/null && [[ ! -e $(attention_file) ]] || fail_test "a clean full pass kept: $(cat "$(attention_file)" 2>&1)"
+  set_attention "$ATTENTION_SEAL"
   sign_boot_files seal-only && [[ ! -e $(attention_file) ]] || fail_test "a clean seal-only pass kept a needs-attention about the seal"
 }
 
@@ -222,6 +246,54 @@ stale_hash_alone_fails_the_pass() {
   output=$(sign_boot_files 2>&1) && fail_test "a stale OS hash passed"
   [[ $output != *'Not signing'* ]] || fail_test "the pass failed through the signing refusal: ${output}"
   [[ $output == *'Stale path hash'* ]] || fail_test "no word of the stale hash: ${output}"
+}
+
+# A pass that cannot sync the ESP cannot say that its boot files are what a
+# restart finds, even when it wrote nothing itself; it says so until a pass
+# has synced (7.3).
+unsynced_esp_is_said() {
+  local output dir
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  durable_sync() { [[ $1 != "$FIX/esp" ]] || return 1; }
+  output=$(sign_boot_files 2>&1) && fail_test "a pass whose ESP did not sync passed"
+  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded"
+  durable_sync() { :; }
+  sign_boot_files seal-only && [[ ! -e $(attention_file) ]] || fail_test "a pass that synced kept: $(cat "$(attention_file)" 2>&1)"
+  # A loader rebuilt or a fallback restored whose rename the sync did not
+  # confirm is said the same way, even beside another failure.
+  mkdir -p "$FIX/esp/EFI/odd"
+  for dir in "$(dirname "$(primary_loader_path)")" "$(dirname "$(fallback_loader_path)")"; do
+    printf 'timeout: 5\n' >>"$FIX/esp/limine.conf"
+    sbctl sign "$(fallback_loader_path)"
+    # Another failure of the pass, which must not hide the stronger warning.
+    write_loader_with_slot "$FIX/esp/EFI/odd/x.efi" "$(printf '0%.0s' {1..100})"
+    rm -f "$FIX/run/dir-sync-failed"
+    durable_sync() {
+      if [[ $1 == "$dir" && ! -e $FIX/run/dir-sync-failed ]]; then
+        : >"$FIX/run/dir-sync-failed"
+        return 1
+      fi
+    }
+    output=$(sign_boot_files 2>&1) && fail_test "${dir}: an unconfirmed rename passed"
+    [[ $output == *'The ESP did not confirm a write'*'with Secure Boot on or off'* ]] || fail_test "${dir}: ${output}"
+    rm "$FIX/esp/EFI/odd/x.efi"
+    durable_sync() { :; }
+    sign_boot_files >/dev/null 2>&1 || fail_test "${dir}: the pass after"
+  done
+  # A file signed in place whose sync fails.
+  write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" 'a new unsigned image'
+  rm -f "$FIX/run/file-sync-failed"
+  durable_sync() {
+    if [[ $1 == "$FIX/esp/EFI/Linux/omarchy_linux.efi" && ! -e $FIX/run/file-sync-failed ]]; then
+      : >"$FIX/run/file-sync-failed"
+      return 1
+    fi
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "an unconfirmed signature passed"
+  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "a signature in place: ${output}"
+  durable_sync() { :; }
 }
 
 # The tools this pass delegates to hide their failures (CONTRIBUTING), so a
@@ -420,6 +492,7 @@ run_case foreign-fallback-is-left-alone foreign_fallback_is_left_alone
 run_case lower-case-foreign-fallback-is-left-alone lower_case_foreign_fallback_is_left_alone
 run_case failure-writes-needs-attention failure_writes_needs_attention
 run_case claimed-signature-is-proved claimed_signature_is_proved
+run_case unsynced-esp-is-said unsynced_esp_is_said
 run_case answer-about-another-file-is-no-answer answer_about_another_file_is_no_answer
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
 run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention

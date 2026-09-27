@@ -144,9 +144,10 @@ unreadable_firmware_is_a_problem() {
 needs_attention_is_a_problem() {
   local output
   set_up_machine
-  set_attention "hook failed"
+  set_attention "$ATTENTION_PASS"
+  set_attention "$ATTENTION_SEAL"
   output=$(show_status 2>&1) && fail_test "a pass that could not finish was not a problem"
-  [[ $output == *'hook failed'* ]] || fail_test "report: ${output}"
+  [[ $output == *'An earlier pass could not finish: sign could not finish on '*'; the loader could not be sealed on '* ]] || fail_test "report: ${output}"
 }
 
 # A stock machine passes, and the report names the command that starts.

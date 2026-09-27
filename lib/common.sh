@@ -153,15 +153,50 @@ ensure_state_dir() {
 
 attention_file() { printf '%s/needs-attention\n' "$(state_dir)"; }
 
-set_attention() {
-  ensure_state_dir || return 1
-  printf '%s\n' "$*" | atomic_write "$(attention_file)" 644
+# One dated line per kind of finding. Any pass writes the kinds it finds, and
+# clears only the kinds it judges: the seal, and a write the ESP did not
+# confirm once it has synced the ESP itself; only a full pass clears what a
+# pass could not finish. So the watchers' pass never overwrites or clears
+# what a full pass found.
+readonly ATTENTION_PASS='sign could not finish'
+readonly ATTENTION_SEAL='the loader could not be sealed'
+readonly ATTENTION_SYNC='the ESP did not confirm a write'
+
+# The lines of needs-attention that are not of KIND.
+attention_without() {
+  local file line
+  file=$(attention_file)
+  [[ -e $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == "$1 "* ]] || printf '%s\n' "$line"
+  done <"$file"
 }
 
+# set_attention KIND: records KIND with the time, in place of an older one.
+set_attention() {
+  local kept
+  ensure_state_dir || return 1
+  kept=$(attention_without "$1")
+  { [[ -z $kept ]] || printf '%s\n' "$kept"; printf '%s on %s\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } |
+    atomic_write "$(attention_file)" 644
+}
+
+# clear_attention [KIND]: one kind, or every kind.
 clear_attention() {
-  local file
+  local file kept
   file=$(attention_file)
-  [[ ! -e $file ]] || rm -f -- "$file"
+  [[ -e $file ]] || return 0
+  if (( $# == 0 )); then
+    rm -f -- "$file"
+    return
+  fi
+  is_safe_directory "$(state_dir)" || return 1
+  kept=$(attention_without "$1")
+  if [[ -z $kept ]]; then
+    rm -f -- "$file"
+  else
+    printf '%s\n' "$kept" | atomic_write "$file" 644
+  fi
 }
 
 # --- Limine settings lookup ------------------------------------------------------

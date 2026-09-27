@@ -8,6 +8,8 @@ What changed for someone who runs the tool. Git history holds the rest.
 - A file that carries Limine's marker but whose checksum slot does not tell whether it checks `limine.conf`, or that cannot be read to tell, is not signed, and the pass says so and fails.
 - `setup` and `status` count sbctl rows for any Limine executable as harmful, the primary loader's included, and `setup` reads sbctl's list again after removing them.
 - The seal is read in the slot layouts Limine's development branch adds; a seal that cannot be told is never taken as proved or as missing.
+- The pass writes the Windows entry into `limine.conf` only together with a loader sealed over the new file, built and proved first: lost keys or a signing failure no longer leave the loader sealed over an older `limine.conf`, which stopped the machine with Secure Boot on or off. A hangup, an interrupt, a quit or the stop signal (TERM) cannot split the two renames, and a write the ESP did not confirm is said, with Secure Boot on or off, until a pass has synced the ESP.
+- The watchers' pass keeps what a full pass found in `needs-attention` instead of replacing it and later clearing it.
 - After `remove`, `status` warns while the loader carries your signature and no seal and the firmware still trusts your key, and blocks on it with Secure Boot on; `remove` says so as it finishes, unless the restored settings seal the loader.
 
 ## 0.1.0 (2026-09-23)

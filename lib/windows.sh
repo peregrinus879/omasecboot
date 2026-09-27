@@ -290,12 +290,59 @@ readonly WINDOWS_ENTRY_WAITS="limine.conf holds no menu entries yet, as Omarchy'
 # config_is_still CHECKSUM: limine.conf still reads as it did.
 config_is_still() { [[ $(config_checksum) == "$1" ]]; }
 
+# The signals a terminal, a shutdown or a timeout sends. SIGKILL cannot be
+# held off, and a power loss is no signal.
+readonly HELD_SIGNALS=(HUP INT QUIT TERM)
+
+# publish_limine_conf CONFIG MODE BEFORE CONTENT [STAGED-LOADER]: puts the new
+# limine.conf in place, then the loader staged over it. None of the held
+# signals can split the two: they are renamed in a subshell that ignores them,
+# as the mv and sync it runs do after it, while this shell notes such a signal
+# and acts on it once both are in place, and the watchers' pass keeps ignoring
+# TERM (D8). SIGKILL, power loss or a failed rename between the two can still
+# split them (section 7.3): the loader then refuses the new file. Status 1:
+# nothing changed. 2: limine.conf changed and the loader did not. 3:
+# limine.conf changed, and the loader with it where one was staged, and a sync
+# did not confirm it.
+publish_limine_conf() {
+  local config=$1 mode=$2 before=$3 content=$4 staging=${5:-} status=0 signal='' saved held
+  saved=$(trap -p "${HELD_SIGNALS[@]}")
+  for held in "${HELD_SIGNALS[@]}"; do
+    # shellcheck disable=SC2064 # The signal's name is fixed now, on purpose.
+    trap "signal=${held}" "$held"
+  done
+  (
+    trap '' "${HELD_SIGNALS[@]}"
+    after=$(printf '%s' "$content" | b2sum | cut -d' ' -f1)
+    unconfirmed=false
+    if ! printf '%s' "$content" | atomic_write "$config" "$mode" config_is_still "$before"; then
+      # Renamed but not synced reads as the new content; anything else as none.
+      [[ $(config_checksum) == "$after" ]] || exit 1
+      unconfirmed=true
+    fi
+    if [[ -n $staging ]]; then
+      mv -f -- "$staging" "$(primary_loader_path)" || exit 2
+      durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true
+    fi
+    [[ $unconfirmed == false ]] || exit 3
+  ) || status=$?
+  # Back to exactly what was there: a signal the shell ignored stays ignored
+  # throughout, and one it did not goes back to its default.
+  for held in "${HELD_SIGNALS[@]}"; do
+    grep -q " SIG${held}\$" <<<"$saved" || trap - "$held"
+  done
+  eval "$saved"
+  [[ -z $staging ]] || rm -f -- "$staging"
+  [[ -z $signal ]] || kill -s "$signal" "$BASHPID"
+  return "$status"
+}
+
 # write_windows_entry [LABEL]: limine.conf with exactly the entry for LABEL,
 # or with none. Nothing is touched when it already reads that way. Omarchy
 # replaces limine.conf outside any lock (C6), so the file must still be what
 # was read when the new content goes in.
 write_windows_entry() {
-  local label=${1:-} config mode content before
+  local label=${1:-} config mode content before staging='' status=0
   config=$(limine_config_path)
   case $(windows_entry_state "$label") in
     current) [[ -z $label ]] || return 0 ;;
@@ -330,18 +377,41 @@ write_windows_entry() {
   fi
   content=$(windows_config_with "$label" "$content" && printf x) || return 1
   content=${content%x}
+  # A sealed loader refuses any other limine.conf (C1), so the new one goes in
+  # only with a loader sealed over it, built and proved first: a failure up to
+  # the renames changes neither file. A loader without a seal needs none.
+  if [[ $(limine_seal "$(primary_loader_path)" 2>/dev/null) != unsealed ]]; then
+    prepare_sealed_loader "$(primary_loader_path)" "$(printf '%s' "$content" | b2sum | cut -d' ' -f1)" || {
+      warn "Could not build a loader sealed over the new limine.conf, so limine.conf and the loader stay as they are"
+      return 1
+    }
+    # shellcheck disable=SC2154 # _staged_loader belongs to lib/limine.sh.
+    staging=$_staged_loader
+  fi
   # Checked once here and again right before the rename: Omarchy's refresh
   # replaces limine.conf outside the lock (C6), and a rename over its newer
   # file would lose it. The instant between the last check and the rename
   # stays; the next pass converges (section 7.7).
   config_is_still "$before" || {
+    rm -f -- "$staging"
     warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
     return 1
   }
-  printf '%s' "$content" | atomic_write "$config" "$mode" config_is_still "$before" || {
-    warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
-    return 1
-  }
+  publish_limine_conf "$config" "$mode" "$before" "$content" "$staging" || status=$?
+  case $status in
+    0) ;;
+    1) warn "limine.conf changed while the Windows entry was being written; the next pass writes it" ;;
+    2) warn "limine.conf holds the new Windows entry, but the loader sealed over it could not be put in place; the pass builds it again" ;;
+    *)
+      # Written, but not confirmed: the pass, or the command that asked for
+      # the write, says so (section 7.3).
+      # shellcheck disable=SC2034 # lib/sign.sh and the commands read it.
+      _esp_write_unconfirmed=true
+      warn "The ESP did not confirm the new limine.conf"
+      return 0
+      ;;
+  esac
+  (( status == 0 ))
 }
 
 # Inside every pass, before the loader is sealed: the entry is in limine.conf

@@ -79,7 +79,7 @@ m F48 lib/limine.sh 1 '[[ ${file,,} != "${named,,}" ]] || return 0' '[[ $file !=
 m F49 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file" || [[ $seal != none ]]; then' 'if is_history_file "$file" || [[ $seal != none ]]; then' sign/harmful-rows-are-found-and-removed
 m F50 lib/sign.sh 1 'if is_history_file "$file" || is_fallback_loader "$file" || [[ $seal != none ]]; then' 'if is_fallback_loader "$file" || [[ $seal != none ]]; then' commands/setup-removes-harmful-sbctl-rows
 m F51 lib/limine.sh 1 '[[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"' '[[ $(limine_seal "$primary") == "blake2b $checksum" ]]' status/sealed-but-unsigned-is-not-called-unsealed
-m F52 lib/limine.sh 1 '[[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"' 'signature_state "$primary"' sign/seal-only-reseals-and-stops
+m F52 lib/limine.sh 1 '[[ $(limine_seal "$primary") == "blake2b $checksum" ]] && signature_state "$primary"' 'signature_state "$primary"' sign/failure-writes-needs-attention
 m F53 lib/limine.sh 1 'for _ in 1 2 3; do' 'for _ in 1; do' limine/change-during-the-rebuild-is-caught
 m F54 lib/limine.sh 1 '[[ $sealed == true && $before == "$after" ]]' '[[ $sealed == true ]]' limine/restless-limine-conf-is-not-reported-sealed
 m F55 lib/limine.sh 1 'raw_loader | cmp -s -- - "$primary" || {' 'true || {' commands/remove-without-a-copy-names-the-way-out
@@ -88,9 +88,9 @@ m F57 lib/limine.sh 1 '! os_entries_carry_hashes || return 3' ':' commands/silen
 m F58 bin/omasecboot 1 $'trap \'\' TERM' ':' commands/watchers-pass-finishes-through-a-stop
 m F59 lib/limine.sh 1 'pgrep -x pacman >/dev/null 2>&1 && (( SECONDS < deadline ))' '(( SECONDS < deadline ))' sign/seal-only-waits-for-pacman-to-finish
 m F60 lib/limine.sh 1 'pgrep -x pacman >/dev/null 2>&1 && (( SECONDS < deadline ))' 'pgrep -x pacman >/dev/null 2>&1' sign/seal-only-waits-for-pacman-to-finish
-m F61 lib/sign.sh 1 $'  converge_windows_entry\n  # Sealed but not signed starts with Secure Boot off; not sealed never does.\n  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' $'  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false\n  converge_windows_entry' commands/fallback-entry-upstream-adds-is-sealed-over
+m F61 lib/sign.sh 1 $'  converge_windows_entry\n  # Sealed but not signed starts with Secure Boot off; not sealed never does.\n  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' $'  converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false\n  converge_windows_entry' windows/publication-failures-leave-a-pair-or-say-so
 m F62 lib/limine.sh 1 '[[ $(limine_seal "$staging") == "blake2b $checksum" ]] &&' 'true &&' limine/unwritten-seal-or-signature-publishes-nothing
-m F63 lib/limine.sh 1 '    signature_state "$staging" &&' '    true &&' limine/unwritten-seal-or-signature-publishes-nothing
+m F63 lib/limine.sh 1 '    signature_state "$staging"; then' '    true; then' limine/unwritten-seal-or-signature-publishes-nothing
 m F64 lib/windows.sh 1 'boot_order_holds "$target_number" || return 1' ':' windows/setup-without-a-target-changes-nothing
 m F65 lib/windows.sh 1 '[[ $same == 1 && -n $target_label' '[[ -n $target_label' windows/target-is-one-clear-entry-or-none
 m F66 lib/windows.sh 1 '[[ ${hex:10:2}${hex:8:2} == "${_windows_number,,}" ]]' 'true' windows/bootnext-is-judged-by-reading-back
@@ -100,11 +100,11 @@ m F69 lib/windows.sh 1 $'printf \'%s\' "$content" | atomic_write "$config" "$mod
 m F70 lib/limine.sh 1 'atomic_write "$file" "$mode" default_config_is_still "$before"' 'atomic_write "$file" "$mode"' limine/settings-file-changed-meanwhile-is-not-overwritten
 m F71 lib/limine.sh 1 '(( ${#markers[@]} == 1 )) || {' '(( ${#markers[@]} >= 1 )) || {' limine/seal-classes-follow-the-slot
 m F72 lib/sign.sh 1 $'      failed=1\n    fi\n  done <<<"$stale"' $'      :\n    fi\n  done <<<"$stale"' sign/stale-hash-alone-fails-the-pass
-m F73 lib/sign.sh 1 'run_visible run_sbctl sign "$file" && durable_sync "$file"' 'run_visible run_sbctl sign -s "$file" && durable_sync "$file"' sign/converges-and-is-idempotent
+m F73 lib/sign.sh 1 'run_visible run_sbctl sign "$file" && { durable_sync' 'run_visible run_sbctl sign -s "$file" && { durable_sync' sign/converges-and-is-idempotent
 m F74 lib/sign.sh 1 '{ esp_has_room && run_visible run_sbctl sign' '{ run_visible run_sbctl sign' sign/full-esp-is-not-written-to
 m F75 lib/limine.sh 1 $'  [[ -d $parent ]] || return 1\n  esp_has_room || return 1' '  [[ -d $parent ]] || return 1' sign/full-esp-is-not-written-to
 m F76 limine/90-omasecboot-sign 1 $'sign --quiet || :\nexit 0' 'sign --quiet' commands/hook-never-fails-its-caller
-m F77 lib/sign.sh 1 $'if [[ $scope == full ]] || grep -q \'^the loader could not be sealed\'' $'if true || grep -q \'^the loader could not be sealed\'' sign/failure-writes-needs-attention
+m F77 lib/sign.sh 1 $'  elif [[ $scope == full ]]; then\n    clear_attention "$ATTENTION_PASS"' $'  else\n    clear_attention "$ATTENTION_PASS"' sign/failure-writes-needs-attention
 m F78 lib/limine.sh 1 '! path_is_snapshot "$line" || continue' ':' commands/setup-and-remove-on-the-real-shape
 m F79 lib/sign.sh 1 'run_sbctl remove-file "$file" >/dev/null || {' '{ run_sbctl remove-file "$file" >/dev/null || :; } || {' commands/setup-removes-harmful-sbctl-rows
 m F80 bin/omasecboot 1 '  if os_entries_carry_hashes; then' '  if false; then' commands/setup-from-stock-and-again
@@ -135,7 +135,7 @@ m F119 bin/omasecboot 1 'confirm "the key enrollment" "$question" || exit 1' ': 
 m F120 bin/omasecboot 1 '      firmware_starts_primary ||' '      true ||' firmware/setup-asks-for-the-pk-then-enrolls-then-confirms
 m F121 bin/omasecboot 1 'sign_boot_files || exit "$?"' 'sign_boot_files || :' commands/setup-stops-when-the-pass-fails
 m F122 bin/omasecboot 1 'confirm "the return to stock" "Return the Limine settings and boot files to stock?" || exit 1' ': || exit 1' commands/remove-returns-to-stock
-m F123 lib/sign.sh 1 '&& durable_sync "$file" && signature_state "$file"; } || {' '&& durable_sync "$file"; } || {' sign/claimed-signature-is-proved
+m F123 lib/sign.sh 1 '_esp_write_unconfirmed=true; } && signature_state "$file"; } || {' '_esp_write_unconfirmed=true; }; } || {' sign/claimed-signature-is-proved
 m F124 lib/sign.sh 1 'converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' 'converge_primary_loader || { primary_is_sealed && rc=1; } || :' sign/failure-writes-needs-attention
 m F125 lib/sign.sh 1 'if [[ $(fallback_state) == altered ]]; then' 'if false; then' sign/fallback-is-returned-to-raw
 m F126 lib/limine.sh 1 'elif [[ $seal == unsealed ]] && ! signature_state "$fallback"; then' 'elif [[ $seal == unsealed ]]; then' limine/fallback-states
@@ -187,6 +187,31 @@ m F169 lib/status.sh 1 '0:unsupported) blocking_problem' '0:unsupported) pass' s
 m F170 lib/status.sh 1 '[01]:unreadable) blocking_problem' '[01]:unreadable) pass' status/unsealed-limine-is-reported-by-its-signature
 m F171 lib/sign.sh 1 $'    seal=$(limine_seal "$file") || seal=unreadable\n    if is_history_file' $'    seal=$(limine_seal "$file") || seal=none\n    if is_history_file' sign/harmful-rows-are-found-and-removed
 m F172 lib/sign.sh 1 $'            failed=1\n            continue\n            ;;\n        esac' $'            continue\n            ;;\n        esac' sign/untold-seal-is-not-signed-and-fails-the-pass
+
+m F173 lib/windows.sh 1 '  if [[ $(limine_seal "$(primary_loader_path)" 2>/dev/null) != unsealed ]]; then' '  if false; then' windows/failed-preparation-changes-neither-file
+m F174 lib/windows.sh 1 $'    trap \'\' "${HELD_SIGNALS[@]}"' '    :' windows/signal-between-the-renames-leaves-a-pair
+m F175 lib/windows.sh 1 '    trap "signal=${held}" "$held"' '    :' windows/signal-between-the-renames-leaves-a-pair
+m F176 lib/windows.sh 1 'readonly HELD_SIGNALS=(HUP INT QUIT TERM)' 'readonly HELD_SIGNALS=(INT QUIT TERM)' windows/signal-between-the-renames-leaves-a-pair
+m F177 lib/windows.sh 1 '  [[ -z $signal ]] || kill -s "$signal" "$BASHPID"' '  :' windows/signal-between-the-renames-leaves-a-pair
+m F178 lib/windows.sh 1 '      [[ $(config_checksum) == "$after" ]] || exit 1' '      exit 1' windows/publication-failures-leave-a-pair-or-say-so
+m F179 lib/windows.sh 1 '      _esp_write_unconfirmed=true' '      :' windows/publication-failures-leave-a-pair-or-say-so
+m F180 lib/sign.sh 1 'if [[ $_esp_write_unconfirmed == false ]] && durable_sync "$(esp_path)"; then' 'if [[ $_esp_write_unconfirmed == false ]]; then' sign/unsynced-esp-is-said
+m F181 lib/windows.sh 1 $'    rm -f -- "$staging"\n    warn "limine.conf changed while' $'    warn "limine.conf changed while' windows/publication-failures-leave-a-pair-or-say-so
+m F182 lib/windows.sh 1 '  [[ -z $staging ]] || rm -f -- "$staging"' '  :' windows/publication-failures-leave-a-pair-or-say-so
+
+m F183 lib/windows.sh 1 '  eval "$saved"' '  :' windows/watchers-pass-keeps-ignoring-term
+m F184 lib/windows.sh 1 '      durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true' '      durable_sync "$(dirname "$(primary_loader_path)")" || :' windows/publication-failures-leave-a-pair-or-say-so
+m F185 lib/limine.sh 1 '  durable_sync "$(dirname "$target")" || _esp_write_unconfirmed=true' '  durable_sync "$(dirname "$target")" || :' sign/unsynced-esp-is-said
+m F186 lib/limine.sh 1 '    durable_sync "$parent" || _esp_write_unconfirmed=true' '    durable_sync "$parent" || :' sign/unsynced-esp-is-said
+m F187 lib/sign.sh 1 '  elif [[ $synced == false ]]; then' '  elif false; then' sign/unsynced-esp-is-said
+m F188 lib/windows.sh 1 '  if [[ $(limine_seal "$(primary_loader_path)" 2>/dev/null) != unsealed ]]; then' '  if true; then' windows/entry-is-written-once-and-taken-out-whole
+m F189 bin/omasecboot 1 '  [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of' '  : || die "The ESP did not confirm the write of' commands/remove-says-an-unconfirmed-write
+m F190 lib/common.sh 1 'while IFS= read -r line || [[ -n $line ]]; do' 'while IFS= read -r line; do' common/needs-attention-round-trip
+m F191 lib/common.sh 1 $'  is_safe_directory "$(state_dir)" || return 1\n  kept=$(attention_without' $'  kept=$(attention_without' common/needs-attention-round-trip
+m F192 lib/sign.sh 1 '  # Each kind of finding is written or cleared under the lock,' $'  boot_lock_release\n  # Each kind of finding is written or cleared under the lock,' sign/failure-writes-needs-attention
+
+m F193 lib/sign.sh 1 '{ durable_sync "$file" || _esp_write_unconfirmed=true; }' 'durable_sync "$file"' sign/unsynced-esp-is-said
+m F194 bin/omasecboot 2 '[[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of' ': || die "The ESP did not confirm the write of' windows/windows-remove-says-an-unconfirmed-write
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

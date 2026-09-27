@@ -103,7 +103,9 @@ sign_unsigned_arrivals() {
             ;;
           1)
             qact "Signing ${file}"
-            { esp_has_room && run_visible run_sbctl sign "$file" && durable_sync "$file" && signature_state "$file"; } || {
+            # A signature the ESP's sync did not confirm is said by the pass.
+            # shellcheck disable=SC2015 # The assignment cannot fail.
+            { esp_has_room && run_visible run_sbctl sign "$file" && { durable_sync "$file" || _esp_write_unconfirmed=true; } && signature_state "$file"; } || {
               # A kernel image is upstream's to build (section 7.3); any other
               # file is the user's.
               if [[ ${file,,} == */efi/linux/* ]]; then
@@ -148,11 +150,15 @@ check_os_path_hashes() {
   return "$failed"
 }
 
+# Set when a write of the pass reached the ESP without the sync confirming it.
+_esp_write_unconfirmed=false
+
 # sign_boot_files [seal-only]
 # seal-only is the watchers' pass: it starts when a running pacman is done and
 # stops after the loader proof, because the watchers' job is the seal.
 sign_boot_files() {
-  local scope=${1:-full} rc=0 sealed=true
+  local scope=${1:-full} rc=0 sealed=true synced=true
+  _esp_write_unconfirmed=false
   if restore_in_progress; then
     qnote "A snapshot restore is running; leaving the boot files to it"
     return 0
@@ -204,23 +210,38 @@ sign_boot_files() {
       rc=1
     }
   fi
+  # Each kind of finding is written or cleared under the lock, so a watcher's
+  # pass that the renames above start cannot interleave with it: any pass
+  # writes what it found and clears the seal and, once it has synced the ESP
+  # itself, an unconfirmed write; only a full pass clears the rest.
+  if [[ $_esp_write_unconfirmed == false ]] && durable_sync "$(esp_path)"; then
+    clear_attention "$ATTENTION_SYNC"
+  else
+    synced=false
+    set_attention "$ATTENTION_SYNC" || true
+  fi
+  if [[ $sealed == false ]]; then
+    set_attention "$ATTENTION_SEAL" || true
+  else
+    clear_attention "$ATTENTION_SEAL"
+  fi
+  if (( rc != 0 )); then
+    set_attention "$ATTENTION_PASS" || true
+  elif [[ $scope == full ]]; then
+    clear_attention "$ATTENTION_PASS"
+  fi
   boot_lock_release
 
   if [[ $sealed == false ]]; then
     # A loader sealed over another limine.conf does not start at all (C1).
-    set_attention "the loader could not be sealed on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
     fail "The Limine loader is not sealed over the current limine.conf. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     return 1
+  elif [[ $synced == false ]]; then
+    fail "The ESP did not confirm a write, so a restart may not find the boot files as they are now. Do not reboot, with Secure Boot on or off, until ${BOLD}sudo omasecboot sign${NC} finishes cleanly"
+    return 1
   elif (( rc != 0 )); then
-    set_attention "sign could not finish on $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
     fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run ${BOLD}sudo omasecboot status${NC}"
     return 1
-  fi
-  # The watchers' pass judges the seal alone, so it clears needs-attention only
-  # when it is about the seal; what a full pass found stays until a full pass
-  # is clean.
-  if [[ $scope == full ]] || grep -q '^the loader could not be sealed' "$(attention_file)" 2>/dev/null; then
-    clear_attention
   fi
   qpass "Boot files are sealed and signed"
 }

@@ -412,6 +412,21 @@ fixture_overrides() {
   # pass goes on without the Windows entry, as converge_windows_entry does then.
   [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_entry() { :; }
   durable_sync() { :; }
+  # A lever for the cases that signal a command between the two renames of
+  # limine.conf and the loader: the sync of the ESP's root takes two seconds.
+  # Each sync of the ESP's root leaves a mark in run/esp-syncs first.
+  [[ ! -e $FIX/run/esp-sync-is-slow ]] || durable_sync() {
+    [[ $1 == "$FIX/esp" ]] || return 0
+    printf x >>"$FIX/run/esp-syncs"
+    sleep 2
+  }
+  # A lever for a sync of the ESP's root that fails once, in a command run as
+  # its own process.
+  [[ ! -e $FIX/run/esp-sync-fails-once ]] || durable_sync() {
+    [[ $1 == "$FIX/esp" && -e $FIX/run/esp-sync-fails-once ]] || return 0
+    rm -f "$FIX/run/esp-sync-fails-once"
+    return 1
+  }
   check_root() { :; }
   check_architecture() { :; }
   check_uefi() { :; }

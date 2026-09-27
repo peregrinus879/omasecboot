@@ -279,9 +279,11 @@ remove_stale_staging() {
 
 # Builds a loader from the raw executable in a staging file beside the target:
 # enroll, then sign (a signed executable cannot be changed afterwards, sbctl
-# issue 408), verify, and only then replace the target.
-install_sealed_loader() {
+# issue 408), verify. Nothing is replaced; _staged_loader names the file.
+_staged_loader=''
+prepare_sealed_loader() {
   local target=$1 checksum=$2 parent staging
+  _staged_loader=''
   parent=$(dirname "$target")
   [[ -d $parent ]] || return 1
   esp_has_room || return 1
@@ -291,13 +293,25 @@ install_sealed_loader() {
     run_visible run_sbctl sign "$staging" &&
     durable_sync "$staging" &&
     [[ $(limine_seal "$staging") == "blake2b $checksum" ]] &&
-    signature_state "$staging" &&
-    mv -f -- "$staging" "$target" &&
-    durable_sync "$parent"; then
+    signature_state "$staging"; then
+    _staged_loader=$staging
     return 0
   fi
   rm -f -- "$staging"
   return 1
+}
+
+# The staged loader, proved, and only then in place of the target. A rename
+# the ESP's sync does not confirm is said by the pass (section 7.3).
+install_sealed_loader() {
+  local target=$1 checksum=$2
+  prepare_sealed_loader "$target" "$checksum" || return 1
+  mv -f -- "$_staged_loader" "$target" || {
+    rm -f -- "$_staged_loader"
+    return 1
+  }
+  # shellcheck disable=SC2034 # lib/sign.sh reads it.
+  durable_sync "$(dirname "$target")" || _esp_write_unconfirmed=true
 }
 
 ensure_primary_loader() {
@@ -372,8 +386,9 @@ restore_raw_fallback() {
   fallback=$(fallback_loader_path)
   parent=$(dirname "$fallback")
   staging=$(mktemp "${parent}/${LOADER_STAGING_PREFIX}XXXXXX") || return 1
-  if raw_loader >"$staging" && durable_sync "$staging" &&
-    mv -f -- "$staging" "$fallback" && durable_sync "$parent"; then
+  if raw_loader >"$staging" && durable_sync "$staging" && mv -f -- "$staging" "$fallback"; then
+    # shellcheck disable=SC2034 # lib/sign.sh reads it.
+    durable_sync "$parent" || _esp_write_unconfirmed=true
     return 0
   fi
   rm -f -- "$staging"

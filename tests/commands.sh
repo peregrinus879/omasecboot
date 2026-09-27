@@ -156,6 +156,19 @@ failed_fallback_step_is_reported() {
   done
 }
 
+# remove takes the Windows entry out as its last write: a write the ESP did
+# not confirm is said as that, and remove stops so it is run again.
+remove_says_an_unconfirmed_write() {
+  add_windows
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
+  : >"$FIX/run/esp-sync-fails-once"
+  run_cli remove && fail_test "remove passed over a write the ESP did not confirm"
+  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the write of'* && $(<"$FIX/run/output") != *'what to change by hand'* ]] ||
+    fail_test "report: $(<"$FIX/run/output")"
+  run_cli remove || fail_test "remove again failed: $(<"$FIX/run/output")"
+}
+
 # After remove sbctl's keys stay, and upstream signs the loader at every
 # Limine operation, sealing it only where the settings say so (C2). The
 # closing note warns only where that leaves a signed loader without a seal
@@ -454,6 +467,7 @@ run_case earlier-values-are-the-users earlier_values_are_the_users
 run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
 run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
+run_case remove-says-an-unconfirmed-write remove_says_an_unconfirmed_write
 run_case remove-warns-only-while-the-firmware-trusts-the-key remove_warns_only_while_the_firmware_trusts_the_key
 run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
