@@ -8,7 +8,7 @@
 OmaSecBoot is an opt-in package for installed Omarchy systems. It leaves the work to the tools Omarchy already ships, sbctl and the Limine tools, fills the gaps between them, checks what they did, and tells you the truth about the result.
 
 > [!CAUTION]
-> **Status:** 0.1.0 is the first release. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 7 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from a stock baseline through `remove` and back to set up, on commit `2a8d324`, with Secure Boot on and Windows Home's device encryption on beside it. The tool changed after that run in the ways C10 lists, each with its hermetic proof and none with a hardware row yet. What the run showed is in section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md), and the evidence still owed is in [docs/maintenance.md](docs/maintenance.md). No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
+> **Status:** 0.1.1 corrects 0.1.0, the first release. One machine, an ASUS Vivobook TP3402VA, has run stages 0 to 7 of the hardware acceptance in [docs/release-checklist.md](docs/release-checklist.md), from a stock baseline through `remove` and back to set up, on commit `2a8d324`, with Secure Boot on and Windows Home's device encryption on beside it. Every change since that run, 0.1.1's included, is verified by software alone and has no hardware row yet: section C10 of [docs/upstream-contracts.md](docs/upstream-contracts.md) lists each with the tests that verify it and the rows still owed, which [docs/maintenance.md](docs/maintenance.md) tracks, and says what the run showed. No other firmware has a record. Use the tool only on a machine you can afford to recover; [docs/field-testing.md](docs/field-testing.md) is how another machine gets its record.
 
 ## Why
 
@@ -32,7 +32,7 @@ Omarchy boots through Limine with unified kernel images and Snapper snapshot ent
 - **The fallback loader** `EFI/BOOT/BOOTX64.EFI`. It stays the raw copy upstream deploys, your rescue loader with Secure Boot off ([docs/recovery.md](docs/recovery.md#if-the-machine-does-not-start)), which the firmware refuses while Secure Boot is on; where there is none, `setup` offers to add one through upstream's own tool. Where it was signed by hand, as upstream's comments suggest, `sign` restores the raw copy, since a signed fallback without a seal would start under Secure Boot without checking `limine.conf` ([D6](docs/spec.md#d6-the-fallback-loader-stays-raw)).
 - **Microsoft's files and the 32-bit loader** `BOOTIA32.EFI`. Microsoft's files carry Microsoft's signature, and 64-bit firmware never starts the other.
 - **A file that `limine.conf` names with a path hash.** A signature would change the file and make its entry stale. `setup` regenerates Limine's own entries without hashes; for an entry you wrote yourself it names the path and asks you to take the `#hash` off.
-- **A Limine loader that is not sealed**, wherever it stands, such as the copy Omarchy 3 left in `EFI/arch-limine`. Signed, it would start under Secure Boot and read whatever `limine.conf` it finds without checking it; unsigned, the firmware refuses it. `status` names it. Delete it if nothing starts from it; if another system starts from it, seal it over that system's `limine.conf` with that system's tools, and the next pass signs it.
+- **A Limine loader that is not sealed**, wherever it stands, such as the copy Omarchy 3 left in `EFI/arch-limine`. Signed, it would start under Secure Boot and read whatever `limine.conf` it finds without checking it; unsigned, the firmware refuses it. `status` names it. A file with Limine's marker whose seal cannot be told is not signed either, since what it would check cannot be known; the pass fails on it and `status` names it. Delete either if nothing starts from it; if another system starts from it, seal it over that system's `limine.conf` with that system's tools, and the next pass signs it.
 - **sbctl's file list.** OmaSecBoot adds nothing to it. `setup` only removes rows for snapshot images, the fallback loader and any Limine executable, because sbctl's own pacman hook signs whatever stands at a row's path, a raw loader included.
 
 Every other EFI program on the ESP that does not carry your signature is signed with your key, a memory tester or a second system's loader included, even one another key signed, such as a shim Microsoft signed; `status` names each.
@@ -44,10 +44,10 @@ Omarchy on x86_64 booted in UEFI mode, with Limine, unified kernel images (UKIs)
 ## Install
 
 ```bash
-git clone --branch v0.1.0 https://github.com/peregrinus879/omasecboot
+git clone --branch v0.1.1 https://github.com/peregrinus879/omasecboot
 cd omasecboot
 make package
-sudo pacman -U omasecboot-0.1.0-1-any.pkg.tar.zst
+sudo pacman -U omasecboot-0.1.1-1-any.pkg.tar.zst
 ```
 
 `make package` needs `base-devel` and `git` and builds from the files of the checkout that git does not ignore. `make install` only stages a package and refuses the live system.
@@ -149,7 +149,7 @@ Before Omarchy's Reset Computer, or before the machine changes hands, do the sam
 
 ## Help test it
 
-Boot behaviour is proved only on the one machine recorded, so every further machine counts. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
+Boot behaviour has a record from one machine only, so every further machine counts. [docs/field-testing.md](docs/field-testing.md) walks you through a test in three levels, the first of which changes no Secure Boot key or setting in the firmware and ends with everything returned to stock. It records every step and ends with a report whose attachments have your host and login names, machine-id and UUIDs renamed.
 
 ## Development
 

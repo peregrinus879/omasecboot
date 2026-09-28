@@ -46,7 +46,7 @@ Nothing of the test is run yet. Settle each line first.
 - The machine runs Omarchy on x86_64 with Limine, unified kernel images and a vfat ESP, as Omarchy installs it.
 - Secure Boot is off and the firmware holds its factory keys: `bootctl status 2>/dev/null | grep -i 'secure boot'` says `disabled`, without `(setup)` behind it. With `(setup)` the firmware is in Setup Mode and holds no Platform Key; report that line instead of testing. A machine on which you have enrolled Secure Boot keys of your own before is not one for this page: its way back would put the factory keys in their place.
 - It is on AC power, and you have about half an hour for level 1 and an hour for level 2.
-- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. If that file is another system's loader (it does not show Limine's menu), leave it: the test then relies on rescue media alone, and the report should say so. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy mounts the ESP for root alone); `sudo limine-install --fallback --no-efi-register` adds it when it is missing.
+- You have rescue media (the Omarchy installer on a USB stick), you know the key that opens the firmware's boot menu, and you have started the fallback loader from that menu once: it is the entry that starts `EFI/BOOT/BOOTX64.EFI`, often named after the disk or "UEFI OS". It is an unsealed Limine and shows the same menu. Note its label. If that file is another system's loader (it does not show Limine's menu), leave it: the test then relies on rescue media alone, and the report should say so. `sudo ls /boot/EFI/BOOT/BOOTX64.EFI` must list it (Omarchy's mount lets root alone write the ESP, and may let root alone read it); `sudo limine-install --fallback --no-efi-register` adds it when it is missing.
 - The ESP has room for two more kernel images: `df -h /boot` shows at least twice the size of the largest file that `sudo ls -lSh /boot/EFI/Linux` lists as available.
 - The system is up to date and was rebooted since: run `omarchy update`, restart with `systemctl reboot`, and start the test then. Do not update again, and do not run `pacman -Sy`, before [The way back](#the-way-back) is done: the test reinstalls packages, which must be the versions you already run. `pacman -Qu` must print nothing about `limine` or your kernel.
 - With Windows on the same machine, at any level: the BitLocker or Device Encryption recovery key is backed up and at hand. `setup` asks about it, and changing Secure Boot keys or its state can make Windows ask for the key.
@@ -56,7 +56,7 @@ Nothing of the test is run yet. Settle each line first.
 
 ```bash
 sudo pacman -S --needed base-devel git shellcheck jq bubblewrap
-git clone --branch v0.1.0 https://github.com/peregrinus879/omasecboot.git ~/omasecboot
+git clone --branch v0.1.1 https://github.com/peregrinus879/omasecboot.git ~/omasecboot
 cd ~/omasecboot
 git log --oneline -1
 make lint && make test && make package

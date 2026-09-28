@@ -64,8 +64,7 @@ Before: rescue media (the Omarchy installer on a USB stick), started with Secure
 5. Where `limine_x64.bak` exists and tar reported an error, move the damaged copy aside and have upstream write a fresh one; `sign` builds the loader from upstream's copy while one exists, refuses while it cannot read it, and builds from the package's executable without one:
 
    ```bash
-   sudo mv /boot/EFI/limine/limine_x64.bak /boot/EFI/limine/limine_x64.bak.damaged
-   sudo limine-install
+   sudo mv /boot/EFI/limine/limine_x64.bak /boot/EFI/limine/limine_x64.bak.damaged && sudo limine-install
    ```
 
    Expected: both exit 0.
@@ -104,8 +103,7 @@ Before: keep the machine running, and install, update and snapshot nothing until
 
    ```bash
    findmnt -no SOURCE /boot
-   sudo systemctl stop limine-snapper-sync.service 'omasecboot-watch@*'
-   sudo umount /boot
+   sudo systemctl stop limine-snapper-sync.service 'omasecboot-watch@*' && sudo umount /boot
    ```
 
    ```text
@@ -119,23 +117,33 @@ Before: keep the machine running, and install, update and snapshot nothing until
    sudo fsck.fat -n <the device>
    ```
 
-   Expected: exit 0, and on to step 5. The check covers the allocation table and the directories, not whether a file's content is right. Exit 2 means it did not read the device: check the device name. Exit 1 means it found errors: copy the partition first, named after the incident, or after the date where there is no ID, then repair it and check again:
+   Expected: exit 0, and on to step 5. The check covers the allocation table and the directories, not whether a file's content is right. Exit 2 means it did not read the device: check the device name. Exit 1 means it found errors: copy the partition first, named after the incident, or after the date where there is no ID:
 
    ```text
    sudo cp <the device> /var/tmp/esp-<the incident's ID>.img
+   ```
+
+   Expected: the copy exits 0; repair only then. If it fails for lack of space, free space in `/var/tmp`, remove the partial image and copy again. If it reports an input/output error, the storage cannot be read in full: do not repair, leave the ESP unmounted and the machine running, and have the storage examined first. With the copy made, repair the partition and check it again:
+
+   ```text
    sudo fsck.fat -a <the device>
    sudo fsck.fat -n <the device>
    ```
 
-   Expected: the copy exits 0 and the second check exits 0. The repair may drop damaged files; the steps below write Omarchy's anew. If the copy fails for lack of space, free space in `/var/tmp`, remove the partial image and copy again. If it reports an input/output error, the storage cannot be read in full: do not repair, leave the ESP unmounted and the machine running, and have the storage examined first. If the second check still finds errors, keep the copy, do not mount the ESP, and [report it](https://github.com/peregrinus879/omasecboot/issues/new?template=bug-report.yml).
-5. Mount the ESP again, onto an empty mount point:
+   Expected: the second check exits 0. The repair may drop damaged files; the steps below write Omarchy's anew. If the second check still finds errors, keep the copy, do not mount the ESP, and [report it](https://github.com/peregrinus879/omasecboot/issues/new?template=bug-report.yml).
+5. Mount the ESP again, onto an empty mount point. First look at the mount point:
 
    ```bash
    command ls -A /boot
+   ```
+
+   Expected: it prints nothing. Anything it lists was written while the ESP was away: move it to `/var/tmp` before the mount hides it, and look again. Then mount the ESP:
+
+   ```bash
    sudo mount /boot
    ```
 
-   Expected: `ls` prints nothing, and `findmnt /boot` then shows the device. Anything `ls` lists was written while the ESP was away: move it to `/var/tmp` before the mount hides it.
+   Expected: `findmnt /boot` then shows the device.
 6. Read `/boot/limine.conf`: `sign` seals the loader over whatever it holds. If it is damaged or gone, `omarchy refresh limine` puts Omarchy's template back, which loses entries written by hand.
 7. Write Omarchy's boot files anew and start the snapshot sync again:
 
@@ -178,7 +186,7 @@ Before: keep the machine running, and install, update and snapshot nothing until
 
 | Message or symptom | Meaning | What to do |
 | --- | --- | --- |
-| `The Limine loader is not sealed over the current limine.conf` | The loader would refuse to start, with Secure Boot on or off | `sudo omasecboot sign` before you reboot. If the machine is already down, see [If the machine does not start](#if-the-machine-does-not-start) |
+| `The Limine loader is not sealed over the current limine.conf` | Sealed over another `limine.conf`, the loader refuses to start, with Secure Boot on or off, and `status` warns against any restart; without a seal it checks nothing, and starts with Secure Boot off, or with it on only while it carries a signature the firmware trusts | `sudo omasecboot sign` before you reboot. If the machine is already down, see [If the machine does not start](#if-the-machine-does-not-start) |
 | `The Limine loader is sealed over the current limine.conf but not signed` | It starts with Secure Boot off only | `sudo omasecboot sign` |
 | `OmaSecBoot could not finish`, a red line after an update | The pass inside the update could not prove the boot files | `sudo omasecboot status`, then what it names. Do not reboot while its last line warns against it |
 | `The firmware has no active boot entry for the Limine loader` | The machine starts through the fallback path, which stays raw and is refused with Secure Boot on; without a raw fallback there, nothing starts Omarchy | Before a restart, run `sudo limine-install` and check with `efibootmgr` that a Limine entry exists, keeping Secure Boot off until then; then `sudo omasecboot setup` |
@@ -193,6 +201,7 @@ Before: keep the machine running, and install, update and snapshot nothing until
 | `An earlier setup or remove did not finish` | One of the two stopped half way, for example when a Limine tool failed | `sudo omasecboot remove` to return to stock, or `sudo omasecboot setup` to set up again |
 | `The firmware's keys are in a state OmaSecBoot will not write to` | The firmware's key menu removed more than the Platform Key, or dbx changed after the backup | Restore the factory keys in the firmware, run `sudo omasecboot setup`, then delete only the Platform Key, starting no other system in between |
 | `Boot files are busy` (exit 75) | Another tool holds the boot lock; a kernel install held it for a minute on the recorded machine | Run the command again when that tool has finished. Nothing failed |
+| `Could not read the firmware's boot entries` | The firmware's `Boot####` variables could not be read, so `setup` and the Windows commands cannot judge them | Check that `efibootmgr` lists them; report it if it does and the message stays |
 | `A Limine loader that is not sealed carries your signature` | It starts under Secure Boot and reads whatever `limine.conf` it finds without checking it | Delete it if nothing starts from it, as a copy Omarchy 3 left in `EFI/arch-limine`; if another system starts from it, seal it with that system's tools |
 | `OmaSecBoot seals and signs nothing on this machine`, after an upgrade | The ESP's mount lets users other than root write it, or cannot be read | `sudo omasecboot status`, then the row below |
 | `The ESP must be writable by root alone` | Users other than root can write the ESP, or its mount does not show that they cannot. Anyone who can write it can change what boots, so OmaSecBoot seals and signs nothing until only root can; a change of `limine.conf`, or of the loader with Secure Boot on, meanwhile leaves a machine that does not start | Take any `uid=` off the ESP's line in `/etc/fstab` and give it an `fmask` and a `dmask` without write for group and others, as Omarchy's `fmask=0022,dmask=0022` have, and unmount any idmapped mount of it. vfat keeps its options on a remount, so mount it afresh: `sudo systemctl daemon-reload && sudo umount /boot && sudo mount /boot`, then `sudo omasecboot sign` |

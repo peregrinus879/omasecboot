@@ -1,7 +1,7 @@
 # Maintainer: Hesham A. <132817088+peregrinus879@users.noreply.github.com>
 
 pkgname=omasecboot
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Secure Boot for Omarchy with your own keys, through sbctl and the Limine tools'
 arch=('any')
@@ -32,7 +32,8 @@ depends=(
   'limine>=11.0.0'
   'limine-mkinitcpio-hook>=1.38.0'
 )
-# One message before removal from a machine that is still set up; see the file.
+# Two messages, before removal from a machine that is still set up and after an
+# upgrade on one whose ESP others can write; see the file.
 install=omasecboot.install
 # The documentation directory carries the menu fragment the README points to,
 # and a package of scripts has nothing for a debug package, which the field

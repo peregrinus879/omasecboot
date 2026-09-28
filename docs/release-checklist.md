@@ -92,7 +92,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 Every change of the tool after the records it is released on is in one of two categories, and C10 of [upstream-contracts.md](upstream-contracts.md) says which. There is no blanket waiver.
 
 - Tested against the candidate: its rows ran on the candidate commit, and their records count.
-- Deferred: proved without hardware, by its hermetic cases, its contract cases where it calls sbctl or the Limine tools, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured; [maintenance.md](maintenance.md) lists its rows as owed, closed by the next recorded run on any machine.
+- Deferred: verified without hardware, by its hermetic cases, its contract cases where it calls sbctl or the Limine tools, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured; [maintenance.md](maintenance.md) lists its rows as owed, closed by the next recorded run on any machine.
 
 A change that writes boot files or changes what is signed is tested against the candidate, unless the maintainer records for that release, in C10 and the CHANGELOG, that it ships deferred.
 
@@ -100,7 +100,7 @@ A change that writes boot files or changes what is signed is tested against the 
 
 - [ ] `pkgver` in `PKGBUILD` and `OMASECBOOT_VERSION` in `lib/common.sh` name the release, and the tag is `v` followed by that number, which the recipe's source line expects.
 - [ ] `CHANGELOG.md` has the release's section, with its date, and the README's status note and install line name the release.
-- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile` and `omasecboot.install`. Where the tool changed after the records, each change is in one of the categories above, and C10 of [upstream-contracts.md](upstream-contracts.md) names it with what proves it.
+- [ ] The acceptance records are of the tagged commit, or of an ancestor of it with the same tool: `git diff --name-only <recorded> <tag>` lists nothing under `bin/`, `lib/`, `limine/`, `systemd/` or `omarchy/`, and none of `PKGBUILD`, `Makefile` and `omasecboot.install`. Where the tool changed after the records, each change is in one of the categories above, and C10 of [upstream-contracts.md](upstream-contracts.md) names it with the tests that verify it.
 - [ ] The rows above are the rows the records ran, or C10 names each row changed since and [maintenance.md](maintenance.md) lists it as owed: `git diff <recorded> <tag> -- docs/release-checklist.md` shows every such change.
 - [ ] `make lint`, `make test` and CI, which runs `tests/container.sh`, pass on the tagged commit.
 - [ ] The recipe builds from an archive made as the tag's will be, with the same payload as `make package`: in a scratch directory holding copies of `PKGBUILD` and `omasecboot.install`, `git archive --prefix=omasecboot-<version>/ -o omasecboot-<version>.tar.gz <commit>`, then `PKGEXT=.pkg.tar.zst makepkg --nodeps --noconfirm --nosign`, and `diff <(bsdtar -tf that package) <(bsdtar -tf the one make package built)` prints nothing. They differ only where an untracked file stands under `lib/` or `docs/`.
