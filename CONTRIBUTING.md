@@ -23,9 +23,9 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 
 ## Layout
 
-- `bin/omasecboot`: the dispatcher and the commands (`setup` with its one firmware step per run, `sign`, `status`, `remove`, `windows`, `version`).
+- `bin/omasecboot`: the dispatcher and the commands (`setup` with its one firmware step per run, `sign`, `status`, `remove`, `acknowledge`, `windows`, `version`).
 - `lib/`, one library per subject:
-  - `common.sh`: output, file safety, the settings lookup as upstream parses it, the boot lock.
+  - `common.sh`: output, file safety, syncs and the ESP incident, `needs-attention`, the settings lookup as upstream parses it, the boot lock.
   - `checks.sh`: preconditions and prompts.
   - `files.sh`: the EFI files on the ESP, history and fallback classification, signature state, sbctl's file list.
   - `firmware.sh`: the firmware's mode variables, the signature-list reader, the backup, the enrollment plan with its proofs and the per-variable enrollment.

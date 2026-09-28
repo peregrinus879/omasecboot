@@ -167,17 +167,99 @@ failed_fallback_step_is_reported() {
   done
 }
 
-# remove takes the Windows entry out as its last write: a write the ESP did
-# not confirm is said as that, and remove stops so it is run again.
-remove_says_an_unconfirmed_write() {
+# remove takes the Windows entry out as its first write to limine.conf: a write
+# error of the ESP there stands as an incident. remove finishes beside it,
+# clears what passes found, keeps the incident and says it, in every run
+# (7.3).
+remove_keeps_an_esp_incident() {
+  local incident
   add_windows
   run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
   run_cli windows setup || fail_test "windows setup failed: $(<"$FIX/run/output")"
+  set_attention "$ATTENTION_PASS" || fail_test "fixture finding"
   : >"$FIX/run/esp-sync-fails-once"
-  run_cli remove && fail_test "remove passed over a write the ESP did not confirm"
-  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the write of'* && $(<"$FIX/run/output") != *'what to change by hand'* ]] ||
+  run_cli remove && fail_test "remove passed beside a write error of the ESP"
+  incident=$(esp_incident)
+  [[ -n $incident && $(<"$FIX/run/output") == *"(incident ${incident%% *}) that stands until you acknowledge it"* && $(<"$FIX/run/output") != *'what to change by hand'* ]] ||
     fail_test "report: $(<"$FIX/run/output")"
-  run_cli remove || fail_test "remove again failed: $(<"$FIX/run/output")"
+  [[ ! -e $(enabled_file) && ! -e $(settings_originals_file) ]] || fail_test "remove did not finish beside the incident"
+  ! grep -q "^${ATTENTION_PASS} on " "$(attention_file)" || fail_test "remove kept a pass's finding"
+  run_cli remove && fail_test "a second remove passed beside the incident"
+  [[ $(esp_incident) == "$incident" ]] || fail_test "remove changed the incident: $(esp_incident)"
+  # sign on a machine that is no longer set up names the incident, not setup.
+  run_cli sign && fail_test "sign passed beside the incident"
+  [[ $(<"$FIX/run/output") == *'stands until you acknowledge it'* && $(<"$FIX/run/output") != *'omasecboot setup'* ]] || fail_test "sign after remove: $(<"$FIX/run/output")"
+}
+
+# A record that cannot be read is said, never an abort under the command's
+# errexit: status and the full pass block on it, and the watchers' pass does
+# its own work (7.3).
+unreadable_record_is_said() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  mkdir "$(attention_file)"
+  run_cli status && fail_test "status passed beside an unreadable record"
+  [[ $(<"$FIX/run/output") == *'cannot be read, or holds a line OmaSecBoot does not write'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  run_cli sign && fail_test "sign passed beside an unreadable record"
+  [[ $(<"$FIX/run/output") == *'cannot be read, or holds a line OmaSecBoot does not write'* ]] || fail_test "sign: $(<"$FIX/run/output")"
+  run_cli sign --seal-only || fail_test "the watchers' pass failed beside an unreadable record: $(<"$FIX/run/output")"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader is not sealed"
+  rmdir "$(attention_file)"
+}
+
+# remove's last proof syncs the loader upstream's reset rewrote: a write error
+# there stops remove, which keeps its record and finishes when run again,
+# beside the incident (7.3).
+remove_records_a_failed_sync_of_the_loader() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  primary_loader_path >"$FIX/run/esp-sync-fails-once"
+  run_cli remove && fail_test "remove passed over a write error of the loader"
+  [[ -n $(esp_incident) && -e $(settings_originals_file) ]] || fail_test "record or incident: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *"The ESP reported a write error at $(primary_loader_path) (incident"* ]] || fail_test "not said: $(<"$FIX/run/output")"
+  run_cli remove && fail_test "the second remove passed beside the incident"
+  [[ ! -e $(settings_originals_file) && $(<"$FIX/run/output") == *'stands until you acknowledge it'* ]] || fail_test "the second remove: $(<"$FIX/run/output")"
+}
+
+# acknowledge clears the one ESP incident it names, compared under the lock,
+# and nothing else; any other ID, a busy lock or a user who is not root
+# changes nothing (7.3).
+acknowledge_clears_only_the_named_incident() {
+  local first second rc
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  run_cli acknowledge 0123456789ab || fail_test "acknowledge without an incident failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'No ESP incident stands'* ]] || fail_test "none standing: $(<"$FIX/run/output")"
+  set_attention "$ATTENTION_SYNC" && first=$(esp_incident)
+  set_attention "$ATTENTION_SEAL" && set_attention "$ATTENTION_SYNC" && second=$(esp_incident)
+  # An incident read before a newer failure is stale.
+  run_cli acknowledge "${first%% *}" && fail_test "a stale ID was accepted"
+  [[ $(<"$FIX/run/output") == *"The incident that stands is ${second%% *}"* && $(esp_incident) == "$second" ]] || fail_test "stale: $(<"$FIX/run/output")"
+  : >"$FIX/run/not-root"
+  run_cli acknowledge "${second%% *}" && fail_test "acknowledged as a user who is not root"
+  rm "$FIX/run/not-root"
+  flock -o "$(boot_lock_path)" sleep 5 &
+  sleep 0.3
+  rc=0
+  run_cli acknowledge "${second%% *}" || rc=$?
+  kill %1 2>/dev/null
+  (( rc == 75 )) || fail_test "acknowledge under a busy lock returned ${rc}: $(<"$FIX/run/output")"
+  [[ $(esp_incident) == "$second" ]] || fail_test "cleared by a refused acknowledgement"
+  run_cli acknowledge "${second%% *}" || fail_test "acknowledge failed: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *"Incident ${second%% *} is acknowledged"*'not that the ESP kept every write'*'sudo omasecboot status'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ -z $(esp_incident) ]] || fail_test "the incident stands after its acknowledgement"
+  # A record that cannot be told is not acknowledged away.
+  printf '%s on a day\n' "$ATTENTION_SYNC" >>"$(attention_file)"
+  run_cli acknowledge 0123456789ab && fail_test "an unknown incident was acknowledged"
+  [[ $(<"$FIX/run/output") == *'holds a line OmaSecBoot does not write'*'correct the file by hand'* ]] || fail_test "unknown: $(<"$FIX/run/output")"
+  grep -q "^${ATTENTION_SYNC} on a day\$" "$(attention_file)" || fail_test "the unknown record changed"
+  grep -q "^${ATTENTION_SEAL} on " "$(attention_file)" || fail_test "not only the incident was cleared: $(cat "$(attention_file)" 2>&1)"
+}
+
+# A full pass over an incident has done its work but not the operator's, so
+# setup never calls those boot files ready (7.3).
+setup_is_not_ready_beside_an_incident() {
+  run_cli setup || fail_test "setup failed: $(<"$FIX/run/output")"
+  set_attention "$ATTENTION_SYNC" || fail_test "fixture incident"
+  run_cli setup && fail_test "setup passed beside an incident"
+  [[ $(<"$FIX/run/output") == *'stands until you acknowledge it'* && $(<"$FIX/run/output") != *'ready for Secure Boot'* ]] || fail_test "report: $(<"$FIX/run/output")"
 }
 
 # After remove sbctl's keys stay, and upstream signs the loader at every
@@ -393,7 +475,7 @@ hook_pass_works_under_the_callers_lock() {
 
 usage_errors_exit_2() {
   local rc
-  for arguments in nonsense 'sign --config-onyl' 'status extra' 'setup --force' 'remove now'; do
+  for arguments in nonsense 'sign --config-onyl' 'status extra' 'setup --force' 'remove now' acknowledge; do
     rc=0
     # shellcheck disable=SC2086 # The words are the command line.
     run_cli $arguments || rc=$?
@@ -499,10 +581,14 @@ run_case earlier-values-are-the-users earlier_values_are_the_users
 run_case fallback-is-offered-only-into-an-empty-place fallback_is_offered_only_into_an_empty_place
 run_case failed-fallback-step-is-reported failed_fallback_step_is_reported
 run_case remove-returns-to-stock remove_returns_to_stock
-run_case remove-says-an-unconfirmed-write remove_says_an_unconfirmed_write
+run_case remove-keeps-an-esp-incident remove_keeps_an_esp_incident
+run_case remove-records-a-failed-sync-of-the-loader remove_records_a_failed_sync_of_the_loader
+run_case unreadable-record-is-said unreadable_record_is_said
+run_case setup-is-not-ready-beside-an-incident setup_is_not_ready_beside_an_incident
 run_case remove-warns-only-while-the-firmware-trusts-the-key remove_warns_only_while_the_firmware_trusts_the_key
 run_case failed-disable-is-said failed_disable_is_said
 run_case busy-remove-changes-nothing busy_remove_changes_nothing
+run_case acknowledge-clears-only-the-named-incident acknowledge_clears_only_the_named_incident
 run_case refusals-say-why refusals_say_why
 run_case commands-keep-their-grammar commands_keep_their_grammar
 run_case remove-accepts-the-loader-upstream-kept remove_accepts_the_loader_upstream_kept

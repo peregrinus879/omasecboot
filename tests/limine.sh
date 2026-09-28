@@ -45,12 +45,12 @@ failed_write_keeps_the_settings_file() {
 # between the read and the rename is never lost (section 7.1).
 settings_file_changed_meanwhile_is_not_overwritten() {
   local output
-  durable_sync() { [[ $1 != "$FIX"/etc/.default-limine.* ]] || printf 'USER_LINE=kept\n' >>"$FIX/etc/default-limine"; }
+  sync_path() { [[ $1 != "$FIX"/etc/.default-limine.* ]] || printf 'USER_LINE=kept\n' >>"$FIX/etc/default-limine"; }
   output=$(write_default_setting ENABLE_VERIFICATION ENABLE_VERIFICATION=no 2>&1) && fail_test "the write went over a newer file"
   [[ $output == *'changed while a managed setting was being written'* ]] || fail_test "no word: ${output}"
   grep -qx 'USER_LINE=kept' "$FIX/etc/default-limine" || fail_test "the line saved meanwhile was lost"
   ! grep -q '^ENABLE_VERIFICATION=no' "$FIX/etc/default-limine" || fail_test "the managed line was written over the newer file"
-  durable_sync() { :; }
+  sync_path() { :; }
   write_default_setting ENABLE_VERIFICATION ENABLE_VERIFICATION=no || fail_test "the next write failed"
   { grep -qx 'USER_LINE=kept' "$FIX/etc/default-limine" && grep -qx 'ENABLE_VERIFICATION=no' "$FIX/etc/default-limine"; } || fail_test "the next write lost a line"
 }
@@ -183,13 +183,14 @@ unwritten_seal_or_signature_publishes_nothing() {
     [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "${flag}: a staging file was left on the ESP"
     rm "$FIX/run/${flag}"
   done
-  # The staged copy is sealed and signed, but its sync fails: a copy the ESP
-  # did not confirm is never renamed over the primary.
-  durable_sync() { [[ ${1##*/} != "$LOADER_STAGING_PREFIX"* ]]; }
-  ! ensure_primary_loader >/dev/null 2>&1 || fail_test "a staged copy the ESP did not confirm passed"
-  cmp -s "$(primary_loader_path)" "$before" || fail_test "a staged copy the ESP did not confirm replaced the primary"
+  # The staged copy is sealed and signed, but its sync fails: it is never
+  # renamed over the primary, and the failure stands as an incident.
+  sync_path() { [[ ${1##*/} != "$LOADER_STAGING_PREFIX"* ]]; }
+  ! ensure_primary_loader >/dev/null 2>&1 || fail_test "a staged copy whose sync failed passed"
+  cmp -s "$(primary_loader_path)" "$before" || fail_test "a staged copy whose sync failed replaced the primary"
   [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "a staging file was left after its failed sync"
-  durable_sync() { :; }
+  [[ -n $(esp_incident) ]] || fail_test "the failed sync of the staged copy was not recorded"
+  sync_path() { :; }
 }
 
 # Left behind by a pass that was killed; ESP space is scarce.
@@ -265,6 +266,13 @@ fallback_states() {
   [[ $(fallback_state) == altered ]] || fail_test "a signed, unsealed fallback is not altered"
   { restore_raw_fallback && [[ $(fallback_state) == raw ]]; } || fail_test "restore"
   cmp -s "$fallback" "$FIX/share/BOOTX64.EFI" || fail_test "the fallback is not the raw executable"
+  # A raw copy whose sync fails is not put in place, and stands as an incident.
+  sbctl sign "$fallback"
+  sync_path() { [[ ${1##*/} != "$LOADER_STAGING_PREFIX"* ]]; }
+  ! restore_raw_fallback || fail_test "a raw copy whose sync failed was put in place"
+  [[ $(fallback_state) == altered && -n $(esp_incident) ]] || fail_test "after a failed sync of the raw copy: $(fallback_state), $(esp_incident)"
+  sync_path() { :; }
+  restore_raw_fallback || fail_test "restore after the failed sync"
   limine enroll-config "$fallback" "$(config_checksum)"
   [[ $(fallback_state) == altered ]] || fail_test "a sealed fallback is not altered"
   write_raw_loader "$fallback" 12.5.2

@@ -73,14 +73,18 @@ links_resolve() {
 }
 
 # A form cannot link, so it names the README's sections and its own fields in
-# quotation marks.
+# quotation marks; so does a message of the tool name a README section.
 named_sections_and_fields_exist() {
   local file title named=0
   while IFS=: read -r file title; do
     named=$((named + 1))
     title=${title#*\"} && title=${title%\"}
     grep -Fxq -e "## ${title}" -e "### ${title}" README.md || fail_test "${file} names the README's section \"${title}\", which it does not have"
-  done < <(grep -oHE "README's \"[^\"]+\"" "${PAGES[@]}" "${FORMS[@]}")
+  done < <(
+    grep -oHE "README's \"[^\"]+\"" "${PAGES[@]}" "${FORMS[@]}"
+    # The code's messages carry the quotation marks escaped.
+    grep -oHE "README's \\\\\"[^\"\\\\]+\\\\\"" "${TOOL[@]}" | sed 's/\\"/"/g'
+  )
   while IFS=: read -r file title; do
     named=$((named + 1))
     title=${title#*\"} && title=${title%\\\"}
@@ -123,6 +127,7 @@ checks_notice_a_broken_reference() {
   planted links_resolve README.md 's/^## If the machine does not start$/## When the machine does not start/' "a link to a renamed heading"
   planted links_resolve README.md 's|(docs/spec.md)|(docs/design.md)|' "a link to a file that does not exist"
   planted named_sections_and_fields_exist README.md 's/^## If the machine does not start$/## When the machine does not start/' "a renamed README section that a form names"
+  planted named_sections_and_fields_exist lib/status.sh 's/\\"If the ESP reports a write error\\"/\\"If the ESP fails\\"/' "a README section the tool names that the README does not have"
   planted named_sections_and_fields_exist .github/ISSUE_TEMPLATE/field-report.yml 's/^      label: What differed$/      label: Differences/' "a renamed field that the form names"
   planted quoted_messages_are_the_tools README.md 's/^| `Boot files are busy`/| `Boot files are occupied`/' "a README message the tool does not print"
   planted quoted_messages_are_the_tools docs/field-testing.md 's/"Your keys are enrolled and/"Your keys were enrolled and/' "a field guide message the tool does not print"

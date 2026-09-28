@@ -331,10 +331,10 @@ entry_problems_are_reported_not_failed() {
   (( rc == 1 )) || fail_test "the guard's status for unreadable entries: ${rc}"
 }
 
-# A publication killed outright, as SIGKILL or a crash would end it, tells
-# nothing of what reached the ESP: it is taken as both a loader that did not
-# follow and a write the ESP did not confirm, and the pass says and records so.
-killed_publication_is_taken_as_both() {
+# A publication killed outright, as SIGKILL would end it, tells nothing of
+# which renames it made: the pass takes the loader as not following and builds
+# it again. A kill is no write error the ESP reported, so no incident stands.
+killed_publication_rebuilds_the_loader() {
   local output
   set_up_with_windows
   windows_change_to_make added
@@ -346,17 +346,39 @@ killed_publication_is_taken_as_both() {
     }
     command mv "$@"
   }
-  output=$(sign_boot_files 2>&1) && fail_test "a killed publication passed"
+  output=$(sign_boot_files 2>&1) || fail_test "the pass did not build the loader again: ${output}"
   unset -f mv
   [[ -e $FIX/run/publication-killed ]] || fail_test "the publication was never killed: ${output}"
-  [[ $output == *'The ESP did not confirm the new limine.conf'*'could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded: $(cat "$(attention_file)" 2>&1)"
+  [[ $output == *'could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
+  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after a killed publication"
+  [[ -z $(esp_incident) ]] || fail_test "a kill was recorded as a write error: $(esp_incident)"
+  # A kill after a sync that failed and was recorded: the pass cannot learn it
+  # from the publication, and fails on the record.
+  windows_change_to_make added
+  rm "$FIX/run/publication-killed"
+  mv() {
+    [[ ${*: -1} != "$(primary_loader_path)" || -e $FIX/run/publication-killed ]] || {
+      : >"$FIX/run/publication-killed"
+      kill -KILL "$BASHPID"
+    }
+    command mv "$@"
+  }
+  sync_path() {
+    if [[ $1 == "$FIX/esp" && ! -e $FIX/run/sync-failed ]]; then
+      : >"$FIX/run/sync-failed"
+      return 1
+    fi
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a pass beside an incident its killed publication recorded passed"
+  unset -f mv
+  sync_path() { :; }
+  [[ -n $(esp_incident) && $output == *'stands until you acknowledge it'* ]] || fail_test "after a recorded sync failure: ${output}"
 }
 
-# A held signal and a sync that fails at the same time: the write the ESP did
-# not confirm is said and recorded before the signal ends the command, and
-# status blocks on it (7.3).
-signal_beside_an_unconfirmed_write_is_recorded() {
+# A held signal and a sync that fails at the same time: the write error is said
+# and recorded before the signal ends the command, and status blocks on it
+# (7.3).
+signal_beside_a_write_error_is_recorded() {
   local pid rc
   set_up_with_windows
   windows_change_to_make added
@@ -375,10 +397,10 @@ signal_beside_an_unconfirmed_write_is_recorded() {
   wait "$pid" || rc=$?
   rm -f "$FIX/run/esp-sync-is-slow" "$FIX/run/esp-sync-fails-once"
   (( rc == 143 )) || fail_test "the command ended with ${rc}, not on the signal: $(<"$FIX/run/output")"
-  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the new limine.conf'* ]] || fail_test "not said: $(<"$FIX/run/output")"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded: $(cat "$(attention_file)" 2>&1)"
-  run_cli status && fail_test "status passed over a write the ESP did not confirm"
-  [[ $(<"$FIX/run/output") == *'the ESP did not confirm a write'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *"The ESP reported a write error at ${FIX}/esp (incident"* ]] || fail_test "not said: $(<"$FIX/run/output")"
+  [[ -n $(esp_incident) ]] || fail_test "not recorded: $(cat "$(attention_file)" 2>&1)"
+  run_cli status && fail_test "status passed over a write error of the ESP"
+  [[ $(<"$FIX/run/output") == *'The ESP reported a write error on'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
 }
 
 # Windows was removed, or a second entry appeared: Omarchy still boots, so the
@@ -435,6 +457,7 @@ bootnext_is_judged_by_reading_back() {
   write_boot_order 0001 00A0
   run_cli windows bootnext || fail_test "bootnext failed: $(<"$FIX/run/output")"
   grep -qx 'efibootmgr --bootnext 00A0' "$FIX/run/calls" || fail_test "calls: $(<"$FIX/run/calls")"
+  [[ $(<"$FIX/run/efibootmgr-lock") == held ]] || fail_test "the request was made outside the boot lock"
   cmp -s "$variable" <(printf '\x07\x00\x00\x00\xa0\x00') || fail_test "BootNext bytes"
   [[ $(<"$FIX/run/output") == *'holds the request'* ]] || fail_test "wording: $(<"$FIX/run/output")"
   # Firmware that reports success and keeps an older request.
@@ -442,6 +465,40 @@ bootnext_is_judged_by_reading_back() {
   : >"$FIX/run/firmware-ignores-bootnext"
   run_cli windows bootnext && fail_test "a request the firmware ignored reported success"
   [[ $(<"$FIX/run/output") == *'does not read back'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  # The menu row restarts the machine when the request succeeds, which an ESP
+  # incident forbids (7.3).
+  rm "$FIX/run/firmware-ignores-bootnext" "$FIX/run/calls"
+  set_attention "$ATTENTION_SYNC" || fail_test "fixture incident"
+  run_cli windows bootnext && fail_test "a request was made while an incident stands"
+  [[ $(<"$FIX/run/output") == *'stands until you acknowledge it'* ]] || fail_test "beside an incident: $(<"$FIX/run/output")"
+  ! grep -q '^efibootmgr' "$FIX/run/calls" 2>/dev/null || fail_test "efibootmgr ran beside an incident"
+  printf '%s on a day\n' "$ATTENTION_SYNC" >"$(attention_file)"
+  run_cli windows bootnext && fail_test "a request was made beside an unknown incident"
+  [[ $(<"$FIX/run/output") == *'holds a line OmaSecBoot does not write'* ]] || fail_test "beside an unknown incident: $(<"$FIX/run/output")"
+}
+
+# The request is judged under the lock: an incident that a writer at work
+# records before it lets go stops it (7.3).
+bootnext_waits_for_a_writer_at_work() {
+  write_boot_entry 00A0 active 'Windows Boot Manager' "$WINDOWS_FILE"
+  write_boot_order 0001 00A0
+  : >"$FIX/run/boot-lock-waits-long"
+  (
+    exec 200>>"$(boot_lock_path)"
+    flock 200
+    : >"$FIX/run/writer-holds"
+    sleep 1
+    set_attention "$ATTENTION_SYNC"
+  ) &
+  for _ in {1..100}; do
+    [[ ! -e $FIX/run/writer-holds ]] || break
+    sleep 0.05
+  done
+  [[ -e $FIX/run/writer-holds ]] || fail_test "the writer never took the lock"
+  run_cli windows bootnext && fail_test "a request was made beside an incident recorded while it waited"
+  wait
+  [[ $(<"$FIX/run/output") == *'stands until you acknowledge it'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  ! grep -q '^efibootmgr --bootnext' "$FIX/run/calls" 2>/dev/null || fail_test "efibootmgr made the request"
 }
 
 # Deleting the PK and writing keys both change what Windows measures, so each
@@ -552,10 +609,10 @@ failed_preparation_changes_neither_file() {
 }
 
 # The two renames, each way they can fail: before the first nothing changes;
-# after it the loader follows or the pass builds it again, and a sync that did
-# not confirm the write stays said until a pass has synced the ESP (7.3).
+# after it the loader follows or the pass builds it again, and a sync that
+# failed stands as an incident, said by the pass (7.3).
 publication_failures_leave_a_pair_or_say_so() {
-  local before output
+  local before output incident
   set_up_with_windows
   # limine.conf changes while the loader is being built: the new file is not
   # written over it, and the loader built for it is not put in place.
@@ -587,45 +644,48 @@ publication_failures_leave_a_pair_or_say_so() {
   }
   output=$(sign_boot_files 2>&1) || fail_test "the pass did not build the loader again: ${output}"
   unset -f mv
-  [[ $output == *'the loader sealed over it could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
+  [[ $output == *'The loader sealed over the new limine.conf could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
   { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after a failed second rename"
   [[ -z $(find "$FIX/esp" -name '.omasecboot-loader.*' -o -name '.limine.conf.*') ]] || fail_test "staging left after a failed second rename"
   # The sync after the loader's rename fails once: said as the other.
   windows_change_to_make added
-  durable_sync() {
+  sync_path() {
     if [[ $1 == "$(dirname "$(primary_loader_path)")" && ! -e $FIX/run/loader-sync-failed ]]; then
       : >"$FIX/run/loader-sync-failed"
       return 1
     fi
   }
-  output=$(sign_boot_files 2>&1) && fail_test "a loader the ESP did not confirm passed"
-  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "the unconfirmed loader was not recorded"
-  durable_sync() { :; }
+  output=$(sign_boot_files 2>&1) && fail_test "a loader whose sync failed passed"
+  [[ $output == *"The ESP reported a write error at $(dirname "$(primary_loader_path)") (incident"*'The ESP reported a write error, so a restart'* ]] || fail_test "report: ${output}"
+  [[ -n $(esp_incident) ]] || fail_test "the failed sync of the loader was not recorded"
+  sync_path() { :; }
+  clear_attention "$ATTENTION_SYNC"
   sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the loader's sync"
   # The sync after the first rename fails, once: the pair is whole, and the
-  # write is said until a later pass has synced the ESP. A sync that works
-  # later in the same pass proves nothing about the write before it.
+  # write error stands as an incident. A sync that works later, in the same
+  # pass or the next, proves nothing about the write before it.
   windows_change_to_make added
-  durable_sync() {
+  sync_path() {
     if [[ $1 == "$FIX/esp" && ! -e $FIX/run/sync-failed ]]; then
       : >"$FIX/run/sync-failed"
       return 1
     fi
   }
-  output=$(sign_boot_files 2>&1) && fail_test "a write the ESP did not confirm passed"
-  [[ $output == *'The ESP did not confirm the new limine.conf'*'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
-  [[ $output != *'limine.conf changed while the Windows entry was being written'* ]] || fail_test "an unconfirmed write was said as a change of limine.conf: ${output}"
-  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after an unconfirmed write"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "needs-attention: $(cat "$(attention_file)" 2>&1)"
-  durable_sync() { :; }
-  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the ESP synced again"
-  [[ ! -e $(attention_file) ]] || fail_test "a pass that synced the ESP kept: $(<"$(attention_file)")"
+  output=$(sign_boot_files 2>&1) && fail_test "a write error of the ESP passed"
+  [[ $output == *"The ESP reported a write error at ${FIX}/esp (incident"*'The ESP reported a write error, so a restart'* ]] || fail_test "report: ${output}"
+  [[ $output != *'limine.conf was not replaced'* ]] || fail_test "a write that was made was said as none: ${output}"
+  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after a write error"
+  incident=$(esp_incident)
+  [[ -n $incident ]] || fail_test "needs-attention: $(cat "$(attention_file)" 2>&1)"
+  sync_path() { :; }
+  sign_boot_files >/dev/null 2>&1 && fail_test "a full pass passed while the incident stands"
+  [[ $(esp_incident) == "$incident" ]] || fail_test "a pass that synced the ESP changed the incident: $(cat "$(attention_file)" 2>&1)"
+  clear_attention "$ATTENTION_SYNC"
   # Both at once: the sync after limine.conf's rename fails, then the loader's
   # rename. The pass builds the loader again and still says, and records, the
-  # write the ESP did not confirm.
+  # write error of the ESP.
   windows_change_to_make added
-  durable_sync() {
+  sync_path() {
     if [[ $1 == "$FIX/esp" && ! -e $FIX/run/sync-failed-again ]]; then
       : >"$FIX/run/sync-failed-again"
       return 1
@@ -638,13 +698,54 @@ publication_failures_leave_a_pair_or_say_so() {
     fi
     command mv "$@"
   }
-  output=$(sign_boot_files 2>&1) && fail_test "a write the ESP did not confirm passed beside a failed rename"
+  output=$(sign_boot_files 2>&1) && fail_test "a write error of the ESP passed beside a failed rename"
   unset -f mv
-  [[ $output == *'The ESP did not confirm the new limine.conf'*'could not be put in place; the pass builds it again'*'The ESP did not confirm a write'* ]] || fail_test "both at once: ${output}"
+  [[ $output == *"The ESP reported a write error at ${FIX}/esp (incident"*'could not be put in place; the pass builds it again'*'The ESP reported a write error, so a restart'* ]] || fail_test "both at once: ${output}"
   { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after both at once"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "needs-attention after both at once: $(cat "$(attention_file)" 2>&1)"
-  durable_sync() { :; }
+  [[ -n $(esp_incident) ]] || fail_test "needs-attention after both at once: $(cat "$(attention_file)" 2>&1)"
+  sync_path() { :; }
+  clear_attention "$ATTENTION_SYNC"
   sign_boot_files >/dev/null 2>&1 || fail_test "the pass after both at once"
+  # The sync of the new limine.conf before its rename fails: it stays as it
+  # was, and the publication's subshell passes the failure on to the pass.
+  windows_change_to_make added
+  sync_path() {
+    if [[ $1 == "$FIX"/esp/.limine.conf.* && ! -e $FIX/run/staged-sync-failed ]]; then
+      : >"$FIX/run/staged-sync-failed"
+      return 1
+    fi
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a write error in the publication passed"
+  [[ -n $(esp_incident) && $output == *"The ESP reported a write error at ${FIX}/esp/.limine.conf."*'limine.conf was not replaced'*'The ESP reported a write error, so a restart'* ]] || fail_test "a write error in the publication: ${output}"
+  sync_path() { :; }
+  clear_attention "$ATTENTION_SYNC"
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after a write error in the publication"
+}
+
+# A write error of the ESP that cannot be recorded, in a state directory that
+# is not safe, is said where it happened and still fails the pass that met it,
+# also where the publication's subshell met it: before the rename of
+# limine.conf, after it, or after the loader's (7.3).
+unrecorded_esp_write_error_still_fails() {
+  local output failing
+  set_up_with_windows
+  for failing in "$FIX/esp/.limine.conf.*" "$FIX/esp" "$(dirname "$(primary_loader_path)")"; do
+    windows_change_to_make added
+    rm -f "$FIX/run/sync-failed"
+    chmod o+w "$FIX/state"
+    # shellcheck disable=SC2053 # The first path is a pattern.
+    sync_path() {
+      if [[ $1 == $failing && ! -e $FIX/run/sync-failed ]]; then
+        : >"$FIX/run/sync-failed"
+        return 1
+      fi
+    }
+    output=$(sign_boot_files 2>&1) && fail_test "${failing}: an unrecorded write error passed"
+    chmod o-w "$FIX/state"
+    sync_path() { :; }
+    [[ -z $(esp_incident) && $output == *'which could not be recorded in'*'The ESP reported a write error, so a restart'* ]] || fail_test "${failing}: ${output}"
+    sign_boot_files >/dev/null 2>&1 || fail_test "${failing}: the pass after"
+  done
 }
 
 # A signal to the whole process group between the two renames: both are made,
@@ -678,13 +779,30 @@ signal_between_the_renames_leaves_a_pair() {
 }
 
 # windows remove on a machine that is not set up writes limine.conf itself: a
-# write the ESP did not confirm is said, and nothing more is taken out.
-windows_remove_says_an_unconfirmed_write() {
+# write error of the ESP is said, and the command fails, in this run and the
+# next, while the incident stands; the report of a machine that is not set up
+# blocks on it (7.3).
+windows_remove_says_a_write_error() {
+  local incident
   { boot_lock_acquire && write_windows_entry 'Windows Boot Manager' && boot_lock_release; } >/dev/null || fail_test "fixture entry"
   add_windows
   : >"$FIX/run/esp-sync-fails-once"
-  run_cli windows remove && fail_test "windows remove passed over a write the ESP did not confirm"
-  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the write of'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  run_cli windows remove && fail_test "windows remove passed over a write error of the ESP"
+  incident=$(esp_incident)
+  [[ -n $incident && $(<"$FIX/run/output") == *"The ESP reported a write error at ${FIX}/esp (incident ${incident%% *})"*"(incident ${incident%% *}) that stands until you acknowledge it"* ]] || fail_test "report: $(<"$FIX/run/output")"
+  [[ $(windows_entry_state '') == absent ]] || fail_test "the entry is still there"
+  run_cli windows remove && fail_test "a second windows remove passed beside the incident"
+  run_cli status && fail_test "status passed beside an incident on a machine that is not set up"
+  [[ -n $incident && $(<"$FIX/run/output") == *"sudo omasecboot acknowledge ${incident%% *}"*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'Next: sudo omasecboot setup'* ]] || fail_test "status sent a machine with an incident to setup"
+  # A write error that cannot be recorded fails the command all the same.
+  clear_attention "$ATTENTION_SYNC"
+  { boot_lock_acquire && write_windows_entry 'Windows Boot Manager' && boot_lock_release; } >/dev/null || fail_test "fixture entry again"
+  chmod o+w "$FIX/state"
+  : >"$FIX/run/esp-sync-fails-once"
+  run_cli windows remove && fail_test "windows remove passed over an unrecorded write error"
+  chmod o-w "$FIX/state"
+  [[ -z $(esp_incident) && $(<"$FIX/run/output") == *'which could not be recorded in'*'The ESP reported a write error that could not be recorded'* ]] || fail_test "unrecorded: $(<"$FIX/run/output")"
 }
 
 # The watchers' pass ignores TERM throughout (D8), the renames of the Windows
@@ -1018,12 +1136,12 @@ late_writer_is_not_overwritten() {
   local output
   set_up_with_windows
   write_limine_conf unhashed
-  durable_sync() { [[ $1 != "$FIX"/esp/.limine.conf.* ]] || printf '# newer upstream line\n' >>"$FIX/esp/limine.conf"; }
+  sync_path() { [[ $1 != "$FIX"/esp/.limine.conf.* ]] || printf '# newer upstream line\n' >>"$FIX/esp/limine.conf"; }
   output=$(write_windows_entry 'Windows Boot Manager' 2>&1) && fail_test "the write went over a newer file"
   [[ $output == *'changed while the Windows entry was being written'* ]] || fail_test "no word: ${output}"
   grep -q 'newer upstream line' "$FIX/esp/limine.conf" || fail_test "the newer line was lost"
   [[ $(entry_count) == 0 ]] || fail_test "the entry was written over the newer file"
-  durable_sync() { :; }
+  sync_path() { :; }
   write_windows_entry 'Windows Boot Manager' || fail_test "the next write failed"
   { [[ $(entry_count) == 1 ]] && grep -q 'newer upstream line' "$FIX/esp/limine.conf"; } || fail_test "the next write lost the line"
 }
@@ -1043,6 +1161,7 @@ run_case lost-target-is-left-to-the-report lost_target_is_left_to_the_report
 run_case setup-reports-what-reached-limine-conf setup_reports_what_reached_limine_conf
 run_case setup-without-a-target-changes-nothing setup_without_a_target_changes_nothing
 run_case bootnext-is-judged-by-reading-back bootnext_is_judged_by_reading_back
+run_case bootnext-waits-for-a-writer-at-work bootnext_waits_for_a_writer_at_work
 run_case encryption-is-acknowledged-before-the-firmware-changes encryption_is_acknowledged_before_the_firmware_changes
 run_case unknown-encryption-state-is-asked-about unknown_encryption_state_is_asked_about
 run_case windows-without-a-listed-volume-is-not-ruled-out windows_without_a_listed_volume_is_not_ruled_out
@@ -1050,10 +1169,11 @@ run_case windows-setup-needs-a-machine-that-is-set-up windows_setup_needs_a_mach
 run_case failed-preparation-changes-neither-file failed_preparation_changes_neither_file
 run_case publication-failures-leave-a-pair-or-say-so publication_failures_leave_a_pair_or_say_so
 run_case signal-between-the-renames-leaves-a-pair signal_between_the_renames_leaves_a_pair
-run_case signal-beside-an-unconfirmed-write-is-recorded signal_beside_an_unconfirmed_write_is_recorded
-run_case killed-publication-is-taken-as-both killed_publication_is_taken_as_both
+run_case signal-beside-a-write-error-is-recorded signal_beside_a_write_error_is_recorded
+run_case killed-publication-rebuilds-the-loader killed_publication_rebuilds_the_loader
+run_case unrecorded-esp-write-error-still-fails unrecorded_esp_write_error_still_fails
 run_case watchers-pass-keeps-ignoring-term watchers_pass_keeps_ignoring_term
-run_case windows-remove-says-an-unconfirmed-write windows_remove_says_an_unconfirmed_write
+run_case windows-remove-says-a-write-error windows_remove_says_a_write_error
 run_case chainloads-are-listed-as-upstream-names-them chainloads_are_listed_as_upstream_names_them
 run_case chainload-beside-bitlocker-is-noted chainload_beside_bitlocker_is_noted
 run_case printed-command-survives-the-shell printed_command_survives_the_shell

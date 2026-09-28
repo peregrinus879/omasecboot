@@ -87,7 +87,7 @@ sign_repairs_these() {
 # The report warns against a restart only for what stops a start now, and for
 # the worst of it (section 7): not for what only a later update meets; with
 # Secure Boot on for an unsigned file or a raw loader; with it on or off for a
-# loader sealed over another limine.conf or a write the ESP did not confirm.
+# loader sealed over another limine.conf or an ESP incident.
 restart_warning_follows_the_boot_risk() {
   local output
   set_up_machine
@@ -98,8 +98,17 @@ restart_warning_follows_the_boot_risk() {
   output=$(show_status 2>&1) && fail_test "a pass that could not finish passed"
   [[ $output == *'An earlier pass could not finish'* && $output != *'Do not reboot'* ]] || fail_test "a pass that could not finish: ${output}"
   set_attention "$ATTENTION_SYNC" || fail_test "fixture attention"
-  output=$(show_status 2>&1) && fail_test "an unconfirmed write passed"
-  [[ $output == *'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "an unconfirmed write: ${output}"
+  output=$(show_status 2>&1) && fail_test "an ESP incident passed"
+  [[ $output == *"The ESP reported a write error on"*"acknowledge $(esp_incident | cut -d' ' -f1)"*'resolve what is marked above'*'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "an ESP incident: ${output}"
+  [[ $output != *"${ATTENTION_SYNC} on"* ]] || fail_test "the incident was also listed as a pass's finding: ${output}"
+  # A record that cannot be told blocks the same way, set up or not.
+  printf '%s on a day\n' "$ATTENTION_SYNC" >"$(attention_file)"
+  output=$(show_status 2>&1) && fail_test "an unknown incident passed"
+  [[ $output == *'holds a line OmaSecBoot does not write'*'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "an unknown incident: ${output}"
+  rm "$(enabled_file)"
+  output=$(show_status 2>&1) && fail_test "an unknown incident passed on a machine that is not set up"
+  [[ $output == *'holds a line OmaSecBoot does not write'*'Do not reboot, with Secure Boot on or off, until this report no longer says so'* ]] || fail_test "not set up: ${output}"
+  : >"$(enabled_file)"
   rm "$(attention_file)"
   QUIET=true sign_boot_files || fail_test "sign"
   write_raw_loader "$(primary_loader_path)"

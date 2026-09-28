@@ -1,5 +1,6 @@
 #!/bin/bash
-# OmaSecBoot: constants, output, file safety, Limine settings lookup, the boot lock.
+# OmaSecBoot: constants, output, file safety, syncs and the ESP incident,
+# needs-attention, Limine settings lookup, the boot lock.
 
 # shellcheck disable=SC2034 # Read by the dispatcher and other modules.
 readonly OMASECBOOT_VERSION="0.1.0"
@@ -114,7 +115,42 @@ b2sum_file() {
 
 # syncfs of the filesystem that holds the path: the ESP is FAT, where a file's
 # data and its directory entry are only durable together.
-durable_sync() { sync -f "$1"; }
+sync_path() { sync -f "$1"; }
+
+# Set when a sync of the ESP failed in this command, also when its incident
+# could not be recorded. The one subshell that syncs the ESP, in
+# publish_limine_conf, passes it on in its status.
+_esp_sync_failed=false
+
+# Whether PATH is the ESP or lies on it.
+path_is_on_esp() {
+  local esp path
+  esp=$(esp_path 2>/dev/null) || return 1
+  esp=$(realpath -m -- "$esp") path=$(realpath -m -- "$1")
+  [[ $path == "$esp" || $path == "$esp"/* ]]
+}
+
+# sync_path, and on the ESP an incident when it fails: syncfs reports a
+# writeback error of any file on the filesystem, and not to a file opened after
+# another caller saw it, so no later sync shows whether a write was lost (C2).
+# The incident is recorded and said the moment the sync fails, under the lock
+# every writer of the ESP holds, and only the operator's acknowledgement clears
+# it. A path that is gone fails the sync without a writeback error.
+durable_sync() {
+  local incident
+  sync_path "$1" && return 0
+  if [[ -e $1 ]] && path_is_on_esp "$1"; then
+    _esp_sync_failed=true
+    if ! set_attention "$ATTENTION_SYNC"; then
+      warn "The ESP reported a write error at ${1}, which could not be recorded in $(attention_file), so status cannot show it. Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
+    elif incident=$(esp_incident) && [[ -n $incident ]]; then
+      warn "The ESP reported a write error at ${1} (incident ${incident%% *}). Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+    else
+      warn "The ESP reported a write error at ${1}, recorded in $(attention_file) beside a line OmaSecBoot does not write. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+    fi
+  fi
+  return 1
+}
 
 # atomic_write DESTINATION MODE [GUARD...]: writes stdin to the destination
 # through a temporary file in the same directory, synced before and after the
@@ -154,44 +190,95 @@ ensure_state_dir() {
 attention_file() { printf '%s/needs-attention\n' "$(state_dir)"; }
 
 # One dated line per kind of finding. Any pass writes the kinds it finds, and
-# clears only the kinds it judges: the seal, and a write the ESP did not
-# confirm once it has synced the ESP itself; only a full pass clears what a
-# pass could not finish. So the watchers' pass never overwrites or clears
-# what a full pass found.
+# clears only the kinds it judges: the seal; only a full pass clears what a
+# pass could not finish, so the watchers' pass never clears what a full pass
+# found. An ESP incident, a sync of the ESP that failed, is cleared by the
+# operator's acknowledgement alone: the error may concern any file on the ESP,
+# and no sync that opens the ESP after it was seen reports it (C2).
 readonly ATTENTION_PASS='sign could not finish'
 readonly ATTENTION_SEAL='the loader could not be sealed'
-readonly ATTENTION_SYNC='the ESP did not confirm a write'
+readonly ATTENTION_SYNC='the ESP reported a write error'
 
-# The lines of needs-attention that are not of KIND.
-attention_without() {
-  local file line
+# The lines of needs-attention, nothing when there is none, or a failure when
+# it cannot be read: what cannot be read is never taken for no finding.
+attention_lines() {
+  local file
   file=$(attention_file)
-  [[ -e $file ]] || return 0
-  while IFS= read -r line || [[ -n $line ]]; do
-    [[ -z $line || $line == "$1 "* ]] || printf '%s\n' "$line"
-  done <"$file"
+  [[ -e $file || -L $file ]] || return 0
+  cat -- "$file"
 }
 
-# set_attention KIND: records KIND with the time, in place of an older one.
+# The lines of needs-attention that are not of KIND, or a failure when it
+# cannot be read, so that no rewrite drops the lines it could not read.
+attention_without() {
+  local lines line
+  lines=$(attention_lines) || return 1
+  while IFS= read -r line; do
+    [[ -z $line || $line == "$1" || $line == "$1 "* ]] || printf '%s\n' "$line"
+  done <<<"$lines"
+}
+
+# A fresh ID for an ESP incident: two failures within a second, or a clock
+# that ran back, still get different ones.
+new_incident_id() { od -An -N6 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# set_attention KIND: records KIND with the time, in place of an older one; an
+# ESP incident gets a fresh ID, so an acknowledgement names the one it means.
 set_attention() {
-  local kept
+  local kept line id
   ensure_state_dir || return 1
-  kept=$(attention_without "$1")
-  { [[ -z $kept ]] || printf '%s\n' "$kept"; printf '%s on %s\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } |
+  kept=$(attention_without "$1") || return 1
+  line="$1 on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ $1 == "$ATTENTION_SYNC" ]]; then
+    # esp_incident reads no other form, so nothing else may be written.
+    id=$(new_incident_id) && [[ $id =~ ^[0-9a-f]{12}$ ]] || return 1
+    line+=", incident ${id}"
+  fi
+  { [[ -z $kept ]] || printf '%s\n' "$kept"; printf '%s\n' "$line"; } |
     atomic_write "$(attention_file)" 644
 }
 
-# clear_attention [KIND]: one kind, or every kind.
+# The ESP incident that stands, as "ID TIME", or nothing when none stands; a
+# failure when needs-attention cannot be read, or holds any line set_attention
+# does not write or a second incident: a damaged line is never taken for no
+# incident.
+esp_incident() {
+  local lines line incident=''
+  local finding="^(${ATTENTION_PASS}|${ATTENTION_SEAL}) on [^,]+\$"
+  local pattern="^${ATTENTION_SYNC} on ([^,]+), incident ([0-9a-f]{12})\$"
+  lines=$(attention_lines) || return 1
+  while IFS= read -r line; do
+    if [[ -z $line || $line =~ $finding ]]; then
+      continue
+    elif [[ -z $incident && $line =~ $pattern ]]; then
+      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+  done <<<"$lines"
+  [[ -z $incident ]] || printf '%s\n' "$incident"
+}
+
+# esp_incident, or "unknown" where whether one stands cannot be told.
+esp_incident_or_unknown() { esp_incident || printf 'unknown\n'; }
+
+# incident_clause INCIDENT: what an incident, as esp_incident_or_unknown
+# prints it, means for the operator.
+incident_clause() {
+  if [[ $1 == unknown ]]; then
+    printf '%s cannot be read, or holds a line OmaSecBoot does not write, so whether the ESP reported a write error cannot be told\n' "$(attention_file)"
+  else
+    printf 'the ESP reported a write error on %s (incident %s) that stands until you acknowledge it\n' "${1#* }" "${1%% *}"
+  fi
+}
+
+# clear_attention KIND
 clear_attention() {
   local file kept
   file=$(attention_file)
-  [[ -e $file ]] || return 0
-  if (( $# == 0 )); then
-    rm -f -- "$file"
-    return
-  fi
+  [[ -e $file || -L $file ]] || return 0
   is_safe_directory "$(state_dir)" || return 1
-  kept=$(attention_without "$1")
+  kept=$(attention_without "$1") || return 1
   if [[ -z $kept ]]; then
     rm -f -- "$file"
   else

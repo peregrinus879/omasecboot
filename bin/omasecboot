@@ -21,6 +21,7 @@ usage() {
   ${BOLD}sudo omasecboot status${NC}            Report the state and the next step (--quiet: exit status only)
   ${BOLD}sudo omasecboot sign${NC}              Seal and sign the boot files again; safe to run at any time
   ${BOLD}sudo omasecboot remove${NC}            Return the boot files and Limine settings to stock
+  ${BOLD}sudo omasecboot acknowledge ID${NC}    Clear an ESP incident after the recovery the README describes
   ${BOLD}omasecboot windows preflight${NC}      Look for Windows and BitLocker, and say what to do before Secure Boot changes
   ${BOLD}sudo omasecboot windows setup${NC}     Add a Windows entry to Limine's menu
   ${BOLD}sudo omasecboot windows remove${NC}    Take it out again
@@ -312,7 +313,10 @@ cmd_sign() {
   fi
   no_arguments "$@"
   check_root sign
-  is_set_up || die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"
+  is_set_up || {
+    show_standing_incident
+    die "OmaSecBoot is not set up. Run: ${BOLD}sudo omasecboot setup${NC}"
+  }
   qheader "Sign"
   sign_boot_files "$scope"
 }
@@ -339,6 +343,7 @@ cmd_remove() {
   if [[ ! -e $(settings_originals_file) ]]; then
     ! is_set_up || die "OmaSecBoot is set up, but $(settings_originals_file) is gone, and with it what the settings were before. Run ${BOLD}sudo omasecboot setup${NC}, which records them as they are now, then ${BOLD}sudo omasecboot remove${NC}; the two managed settings then stay in $(limine_default_config): delete them by hand"
     note "Nothing to remove: OmaSecBoot is not set up on this machine"
+    show_standing_incident
     return 0
   fi
   check_uefi && check_esp && check_tools && esp_has_room || exit 1
@@ -370,10 +375,10 @@ cmd_remove() {
   restore_stock_boot_files || die "The boot files are not back to stock; run this again"
   # Only now: the loader is proved raw, so limine.conf may change under it.
   write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"
-  # shellcheck disable=SC2154 # _esp_write_unconfirmed belongs to lib/sign.sh.
-  [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path), and a later sync cannot prove it: do not reboot before you have checked the ESP (the kernel log names the error)"
   rm -f -- "$(windows_flag)"
-  clear_attention
+  # The findings of passes go with the tool; an ESP incident stays until the
+  # operator acknowledges it (C2).
+  clear_attention "$ATTENTION_PASS" && clear_attention "$ATTENTION_SEAL" || :
   rm -f -- "$(settings_originals_file)"
   boot_lock_release
   pass "Limine settings and boot files are back to stock"
@@ -388,6 +393,52 @@ cmd_remove() {
   else
     note "Your signing keys stay in /var/lib/sbctl. Firmware keys are restored in the firmware's own key menu"
   fi
+  show_standing_incident
+}
+
+# An ESP incident outlives a successful command and stands in the way of a
+# restart, and so does a write error this command met and could not record,
+# which durable_sync said where it happened (spec, 7.3).
+show_standing_incident() {
+  local incident clause
+  incident=$(esp_incident_or_unknown)
+  if [[ -n $incident ]]; then
+    clause=$(incident_clause "$incident")
+    fail "${clause^}. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154 # _esp_sync_failed belongs to lib/common.sh.
+  [[ $_esp_sync_failed == false ]] || die "The ESP reported a write error that could not be recorded. Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
+}
+
+# The operator's decision after the recovery the README describes: the ESP
+# incident whose ID the report printed is cleared, and nothing else. The ID is
+# compared under the lock, so a failure recorded since cannot be cleared by a
+# decision about an older one. It proves nothing about the ESP (C2).
+cmd_acknowledge() {
+  local id incident
+  (( $# == 1 )) || usage_error "acknowledge takes the incident's ID, as ${BOLD}sudo omasecboot status${NC} prints it"
+  id=$1
+  check_root "acknowledge ${id}"
+  header "Acknowledge"
+  boot_lock_acquire || exit "$?"
+  if ! incident=$(esp_incident); then
+    boot_lock_release
+    die "$(incident_clause unknown). Follow the README's \"If the ESP reports a write error\", then correct the file by hand, as root, keeping its other lines"
+  fi
+  if [[ -z $incident ]]; then
+    boot_lock_release
+    note "No ESP incident stands"
+    return 0
+  fi
+  if [[ ${incident%% *} != "$id" ]]; then
+    boot_lock_release
+    die "The incident that stands is ${incident%% *}, recorded on ${incident#* }, not ${id}: a later write error replaced it, or the ID is mistyped. Look at ${BOLD}sudo omasecboot status${NC} again"
+  fi
+  clear_attention "$ATTENTION_SYNC" || die "Could not clear the incident from $(attention_file)"
+  boot_lock_release
+  pass "Incident ${id} is acknowledged. That records your decision, not that the ESP kept every write"
+  act "Next: ${BOLD}sudo omasecboot status${NC}, before any restart"
 }
 
 # The menu row's guard: unprivileged and silent. The opt-in exists and the
@@ -467,7 +518,8 @@ cmd_windows_setup() {
   : >"$(windows_flag)"
   sign_boot_files || {
     status=$?
-    warn "The Windows entry stays enabled: every pass that finishes puts it in limine.conf, unless ${BOLD}sudo omasecboot status${NC} names what stands in the way"
+    [[ $(windows_entry_state "$(windows_target_label)") == current ]] ||
+      warn "The Windows entry stays enabled: every pass that finishes puts it in limine.conf, unless ${BOLD}sudo omasecboot status${NC} names what stands in the way"
     exit "$status"
   }
   [[ $(windows_entry_state "$(windows_target_label)") == current ]] ||
@@ -493,21 +545,26 @@ cmd_windows_remove() {
     [[ $(limine_seal "$(primary_loader_path)") == unsealed ]] ||
       die "The Limine loader is sealed over the current limine.conf, or cannot be read, and nothing would seal it again. Run ${BOLD}sudo omasecboot remove${NC} or ${BOLD}sudo omasecboot setup${NC} first"
     write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path)"
-    # shellcheck disable=SC2154 # _esp_write_unconfirmed belongs to lib/sign.sh.
-    [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path), and a later sync cannot prove it: do not reboot before you have checked the ESP (the kernel log names the error)"
     rm -f -- "$(windows_flag)"
     boot_lock_release
   fi
   [[ $(windows_entry_state '') == absent ]] || die "The Windows entry is still in limine.conf"
   pass "The Windows entry is gone"
+  show_standing_incident
 }
 
 cmd_windows_bootnext() {
   check_root "windows bootnext"
   check_uefi || exit 1
   command -v efibootmgr >/dev/null 2>&1 || die "efibootmgr is not installed"
+  # The menu row restarts the machine when this succeeds, so no incident may
+  # stand: judged under the lock, after any writer at work has finished, and
+  # held through the request and its reading back.
+  boot_lock_acquire || exit "$?"
+  show_standing_incident
   require_windows_target "no request was made" "no request was made"
   request_windows_boot || die "BootNext does not read back as the Windows entry; check with ${BOLD}efibootmgr${NC}"
+  boot_lock_release
   qpass "The firmware holds the request to start $(windows_target_label) at the next boot, once"
 }
 
@@ -544,6 +601,7 @@ main() {
     sign) cmd_sign "$@" ;;
     status) cmd_status "$@" ;;
     remove) cmd_remove "$@" ;;
+    acknowledge) cmd_acknowledge "$@" ;;
     windows) cmd_windows "$@" ;;
     version)
       no_arguments "$@"

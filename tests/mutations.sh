@@ -109,7 +109,7 @@ m F65 lib/windows.sh 1 '[[ $same == 1 && -n $target_label' '[[ -n $target_label'
 m F66 lib/windows.sh 1 '[[ ${hex:10:2}${hex:8:2} == "${_windows_number,,}" ]]' 'true' windows/bootnext-is-judged-by-reading-back
 m F67 bin/omasecboot 1 '{ [[ -e $(windows_flag) ]] && resolve_windows_target; }' '{ resolve_windows_target; }' windows/entry-is-only-taken-out-when-the-loader-follows
 m F68 bin/omasecboot 1 $'  restore_stock_boot_files || die "The boot files are not back to stock; run this again"\n  # Only now: the loader is proved raw, so limine.conf may change under it.\n  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"' $'  write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"\n  restore_stock_boot_files || die "The boot files are not back to stock; run this again"' windows/failed-remove-keeps-limine-conf-and-loader-together
-m F69 lib/windows.sh 1 $'printf \'%s\' "$content" | atomic_write "$config" "$mode" config_is_still "$before"' $'printf \'%s\' "$content" | atomic_write "$config" "$mode"' windows/late-writer-is-not-overwritten
+m F69 lib/windows.sh 1 'atomic_write "$config" "$mode" config_is_still "$before" <' 'atomic_write "$config" "$mode" <' windows/late-writer-is-not-overwritten
 m F70 lib/limine.sh 1 'atomic_write "$file" "$mode" default_config_is_still "$before"' 'atomic_write "$file" "$mode"' limine/settings-file-changed-meanwhile-is-not-overwritten
 m F71 lib/limine.sh 1 '(( ${#markers[@]} == 1 )) || {' '(( ${#markers[@]} >= 1 )) || {' limine/seal-classes-follow-the-slot
 m F72 lib/sign.sh 1 $'      failed=1\n    fi\n  done <<<"$stale"' $'      :\n    fi\n  done <<<"$stale"' sign/stale-hash-alone-fails-the-pass
@@ -126,7 +126,7 @@ m F86 lib/limine.sh 1 $' "${esp}/EFI/BOOT/${LOADER_STAGING_PREFIX}"* \\\n    "${
 m F87 lib/status.sh 1 '[[ -z $shadow ]] || blocking_problem both "A second limine.conf shadows the real one; remove it: ${shadow}"' ':' status/shadowing-limine-conf-blocks
 m F98 lib/windows.sh 1 'esp_room_is_enough || {' 'true || {' windows/unsafe-writes-are-refused
 m F99 limine/90-omasecboot-sign 1 '[[ -e /var/lib/omasecboot/enabled ]] || exit 0' ':' commands/hook-never-fails-its-caller
-m F100 bin/omasecboot 1 $'  check_root sign\n  is_set_up || die' $'  check_root sign\n  true || die' commands/usage-errors-exit-2
+m F100 bin/omasecboot 1 $'  check_root sign\n  is_set_up || {' $'  check_root sign\n  true || {' commands/usage-errors-exit-2
 m F102 bin/omasecboot 1 'remove_harmful_sbctl_rows || exit 1' 'remove_harmful_sbctl_rows || :' commands/setup-removes-harmful-sbctl-rows
 m F103 lib/firmware.sh 1 'readonly -a KEY_VARIABLES=(db KEK PK)' 'readonly -a KEY_VARIABLES=(PK KEK db)' firmware/rotated-keys-are-enrolled-beside-the-old-ones
 m F105 bin/omasecboot 1 $'  qheader "Sign"\n  sign_boot_files "$scope"' $'  qheader "Sign"\n  if [[ $QUIET == true ]]; then sign_boot_files "$scope" 2>/dev/null; else sign_boot_files "$scope"; fi' windows/entry-problems-are-reported-not-failed
@@ -148,7 +148,7 @@ m F119 bin/omasecboot 1 'confirm "the key enrollment" "$question" || exit 1' ': 
 m F120 bin/omasecboot 1 '      firmware_starts_primary ||' '      true ||' firmware/setup-asks-for-the-pk-then-enrolls-then-confirms
 m F121 bin/omasecboot 1 'sign_boot_files || exit "$?"' 'sign_boot_files || :' commands/setup-stops-when-the-pass-fails
 m F122 bin/omasecboot 1 'confirm "the return to stock" "Return the Limine settings and boot files to stock?" || exit 1' ': || exit 1' commands/remove-returns-to-stock
-m F123 lib/sign.sh 1 '_esp_write_unconfirmed=true; } && signature_state "$file"; } || {' '_esp_write_unconfirmed=true; }; } || {' sign/claimed-signature-is-proved
+m F123 lib/sign.sh 1 '|| :; } && signature_state "$file"; } || {' '|| :; }; } || {' sign/claimed-signature-is-proved
 m F124 lib/sign.sh 1 'converge_primary_loader || { primary_is_sealed && rc=1; } || sealed=false' 'converge_primary_loader || { primary_is_sealed && rc=1; } || :' sign/failure-writes-needs-attention
 m F125 lib/sign.sh 1 'if [[ $(fallback_state) == altered ]]; then' 'if false; then' sign/fallback-is-returned-to-raw
 m F126 lib/limine.sh 1 'elif [[ $seal == unsealed ]] && ! signature_state "$fallback"; then' 'elif [[ $seal == unsealed ]]; then' limine/fallback-states
@@ -206,25 +206,25 @@ m F174 lib/windows.sh 1 $'    trap \'\' "${HELD_SIGNALS[@]}"' '    :' windows/si
 m F175 lib/windows.sh 1 '    trap "signal=${held}" "$held"' '    :' windows/signal-between-the-renames-leaves-a-pair
 m F176 lib/windows.sh 1 'readonly HELD_SIGNALS=(HUP INT QUIT TERM)' 'readonly HELD_SIGNALS=(INT QUIT TERM)' windows/signal-between-the-renames-leaves-a-pair
 m F177 lib/windows.sh 1 '  [[ -z $signal ]] || kill -s "$signal" "$BASHPID"' '  :' windows/signal-between-the-renames-leaves-a-pair
-m F178 lib/windows.sh 1 '      [[ $(config_checksum) == "$after" ]] || exit 1' '      exit 1' windows/publication-failures-leave-a-pair-or-say-so
-m F179 lib/windows.sh 1 '    _esp_write_unconfirmed=true' '    :' windows/publication-failures-leave-a-pair-or-say-so
-m F180 lib/sign.sh 1 'if [[ $_esp_write_unconfirmed == false ]] && durable_sync "$(esp_path)"; then' 'if [[ $_esp_write_unconfirmed == false ]]; then' sign/unsynced-esp-is-said
+m F178 lib/windows.sh 1 $'    else\n      status=1\n    fi' $'    else\n      status=0\n    fi' windows/publication-failures-leave-a-pair-or-say-so
+m F179 lib/windows.sh 1 '  (( !(status & 4) )) || _esp_sync_failed=true' '  :' windows/publication-failures-leave-a-pair-or-say-so
+m F180 lib/sign.sh 1 '  durable_sync "$(esp_path)" || :' '  :' sign/unsynced-esp-is-said
 m F181 lib/windows.sh 1 $'    rm -f -- "$staging"\n    warn "limine.conf changed while' $'    warn "limine.conf changed while' windows/publication-failures-leave-a-pair-or-say-so
 m F182 lib/windows.sh 1 '  [[ -z $staging ]] || rm -f -- "$staging"' '  :' windows/publication-failures-leave-a-pair-or-say-so
 
 m F183 lib/windows.sh 1 '  eval "$saved"' '  :' windows/watchers-pass-keeps-ignoring-term
-m F184 lib/windows.sh 1 '      durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true' '      durable_sync "$(dirname "$(primary_loader_path)")" || :' windows/publication-failures-leave-a-pair-or-say-so
-m F185 lib/limine.sh 1 '  durable_sync "$(dirname "$target")" || _esp_write_unconfirmed=true' '  durable_sync "$(dirname "$target")" || :' sign/unsynced-esp-is-said
-m F186 lib/limine.sh 1 '    durable_sync "$parent" || _esp_write_unconfirmed=true' '    durable_sync "$parent" || :' sign/unsynced-esp-is-said
+m F184 lib/windows.sh 1 '          durable_sync "$(dirname "$(primary_loader_path)")" || :' '          :' windows/publication-failures-leave-a-pair-or-say-so
+m F185 lib/limine.sh 1 '  durable_sync "$(dirname "$target")" || :' '  :' sign/unsynced-esp-is-said
+m F186 lib/limine.sh 1 '    durable_sync "$parent" || :' '    :' sign/unsynced-esp-is-said
 m F187 lib/sign.sh 1 '  elif [[ $synced == false ]]; then' '  elif false; then' sign/unsynced-esp-is-said
 m F188 lib/windows.sh 1 '  if [[ $(limine_seal "$(primary_loader_path)" 2>/dev/null) != unsealed ]]; then' '  if true; then' windows/entry-is-written-once-and-taken-out-whole
-m F189 bin/omasecboot 1 '  [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of' '  : || die "The ESP did not confirm the write of' commands/remove-says-an-unconfirmed-write
-m F190 lib/common.sh 1 'while IFS= read -r line || [[ -n $line ]]; do' 'while IFS= read -r line; do' common/needs-attention-round-trip
+m F189 bin/omasecboot 1 $'  fi\n  show_standing_incident\n}' $'  fi\n}' commands/remove-keeps-an-esp-incident
+m F190 lib/common.sh 1 '  lines=$(attention_lines) || return 1' '  lines=$(attention_lines)' common/unreadable-attention-is-no-absence
 m F191 lib/common.sh 1 $'  is_safe_directory "$(state_dir)" || return 1\n  kept=$(attention_without' $'  kept=$(attention_without' common/needs-attention-round-trip
 m F192 lib/sign.sh 1 '  # Each kind of finding is written or cleared under the lock,' $'  boot_lock_release\n  # Each kind of finding is written or cleared under the lock,' sign/failure-writes-needs-attention
 
-m F193 lib/sign.sh 1 '{ durable_sync "$file" || _esp_write_unconfirmed=true; }' 'durable_sync "$file"' sign/unsynced-esp-is-said
-m F194 bin/omasecboot 2 '[[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of' ': || die "The ESP did not confirm the write of' windows/windows-remove-says-an-unconfirmed-write
+m F193 lib/sign.sh 1 '{ durable_sync "$file" || :; }' '{ sync_path "$file" || :; }' sign/unsynced-esp-is-said
+m F194 bin/omasecboot 1 $'  pass "The Windows entry is gone"\n  show_standing_incident' $'  pass "The Windows entry is gone"' windows/windows-remove-says-a-write-error
 
 m F195 lib/common.sh 1 '[[ $uid != 0 || ,$options, == *,idmapped,* ]]' '[[ ,$options, == *,idmapped,* ]]' common/esp-mount-rule-follows-the-kernels-options
 m F196 lib/common.sh 1 '(( (8#$fmask & 022) != 022 || (8#$dmask & 022) != 022 ))' '(( (8#$dmask & 022) != 022 ))' common/esp-mount-rule-follows-the-kernels-options
@@ -241,7 +241,7 @@ m F205 lib/status.sh 1 '      both) act "Do not reboot, with Secure Boot on or o
 m F206 lib/status.sh 1 'on) [[ $_status_risk == both ]] || _status_risk=on ;;' 'on) _status_risk=on ;;' status/restart-warning-follows-the-boot-risk
 m F207 lib/status.sh 1 '    both) _status_risk=both ;;' '    both) _status_risk=on ;;' status/sign-repairs-these
 m F208 lib/status.sh 1 '  elif [[ $(limine_seal "$(primary_loader_path)") == unsealed ]]; then' '  elif true; then' status/sign-repairs-these
-m F209 lib/status.sh 1 '! grep -q "^${ATTENTION_SYNC} on " "$attention" || risk=both' ':' status/restart-warning-follows-the-boot-risk
+m F209 lib/status.sh 1 '  blocking_problem both "The ESP reported a write error on' '  blocking_problem none "The ESP reported a write error on' status/restart-warning-follows-the-boot-risk
 m F210 lib/status.sh 1 '1:*) problem on "Not signed' '1:*) problem none "Not signed' status/problems-set-exit-status
 m F211 lib/status.sh 1 'setup_problem on "Stale path hash' 'setup_problem none "Stale path hash' status/stale-os-hash-needs-setup
 m F212 lib/status.sh 1 'blocking_problem both "A second limine.conf shadows' 'blocking_problem on "A second limine.conf shadows' status/shadowing-limine-conf-blocks
@@ -264,21 +264,83 @@ m F227 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_prob
 m F228 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem none "Secure Boot is on, and the Limine loader' $'    blocking_problem none "Secure Boot is on, and the Limine loader' status/signed-unsealed-loader-is-said-after-remove
 m F229 tests/lib/transcript.sh 1 $'    differences=$(compare_installed_files | grep -v \'^match: \')\n    if [[ -n $differences ]]; then' $'    if compare_installed_files | grep -qv \'^match: \'; then' records/evidence-verdict-reads-the-checkout-and-the-install
 m F230 tests/lib/transcript.sh 1 '|| [[ $(realpath -- "$top") != "$(realpath -- "$root")" ]] ||' '||' records/evidence-verdict-reads-the-checkout-and-the-install
-m F231 lib/windows.sh 1 '    [[ -z $signal ]] || ! is_set_up || set_attention "$ATTENTION_SYNC" || :' '    :' windows/signal-beside-an-unconfirmed-write-is-recorded
-m F232 lib/windows.sh 1 '        split=2' '        exit 2' windows/publication-failures-leave-a-pair-or-say-so
-m F233 lib/windows.sh 1 '  if (( status > 1 && (status & 4) )); then' '  if (( status == 4 )); then' windows/publication-failures-leave-a-pair-or-say-so
+m F231 lib/common.sh 1 '    if ! set_attention "$ATTENTION_SYNC"; then' '    if true; then' common/only-the-esp-records-an-incident
+m F232 lib/windows.sh 1 '          status=2' '          exit 2' windows/publication-failures-leave-a-pair-or-say-so
+m F233 lib/windows.sh 1 '    [[ $_esp_sync_failed == false ]] || status=$((status | 4))' '    :' windows/publication-failures-leave-a-pair-or-say-so
 m F234 lib/status.sh 1 '[[ -z $line ]] || blocking_problem both "limine.conf line ${line%%:*} (entry:' ': || blocking_problem both "limine.conf line ${line%%:*} (entry:' status/missing-kernel-image-blocks
 m F235 lib/status.sh 1 '[[ -z $line ]] || blocking_problem both "limine.conf line ${line%%:*} (entry:' '[[ -z $line ]] || blocking_problem on "limine.conf line ${line%%:*} (entry:' status/missing-kernel-image-blocks
 m F236 lib/sign.sh 1 '    check_os_files_exist || { rc=1 startless=true; }' '    :' status/missing-kernel-image-blocks
 m F237 lib/limine.sh 1 '    [[ -f ${esp}/${path#boot():/} ]] || printf' '    true || printf' status/missing-kernel-image-blocks
 m F238 lib/limine.sh 1 '    durable_sync "$staging" &&' '    true &&' limine/unwritten-seal-or-signature-publishes-nothing
-m F240 lib/windows.sh 1 $'      [[ $(config_checksum) == "$after" ]] || exit 1\n      unconfirmed=true' $'      [[ $(config_checksum) == "$after" ]] || exit 1\n      :' windows/publication-failures-leave-a-pair-or-say-so
+m F240 lib/windows.sh 1 '      [[ $(config_checksum) == "$after" ]]; then' '      false; then' windows/publication-failures-leave-a-pair-or-say-so
 m F242 lib/windows.sh 1 'prepare_sealed_loader "$(primary_loader_path)" "$(printf' 'true "$(primary_loader_path)" "$(printf' windows/failed-preparation-changes-neither-file
-m F243 lib/windows.sh 1 '    [[ $unconfirmed == false ]] || exit $((split + 4))' '    [[ $unconfirmed == false ]] || exit 4' windows/publication-failures-leave-a-pair-or-say-so
+m F243 lib/windows.sh 1 'status=$((status | 4))' 'status=4' windows/publication-failures-leave-a-pair-or-say-so
 m F244 lib/windows.sh 1 '    grep -q " SIG${held}\$" <<<"$saved" || trap - "$held"' '    :' windows/signal-between-the-renames-leaves-a-pair
-m F245 lib/windows.sh 1 '  (( status == 0 || status == 4 ))' '  (( status == 0 ))' windows/windows-remove-says-an-unconfirmed-write
-m F246 lib/windows.sh 1 '  (( status < 128 )) || status=6' '  :' windows/killed-publication-is-taken-as-both
+m F245 lib/windows.sh 1 '  (( status == 0 || status == 4 ))' '  (( status == 0 ))' windows/windows-remove-says-a-write-error
+m F246 lib/windows.sh 1 '  (( status < 128 )) || status=2' '  :' windows/killed-publication-rebuilds-the-loader
 m F247 lib/sign.sh 1 '    check_os_files_exist || { rc=1 startless=true; }' '    check_os_files_exist || rc=1' status/missing-kernel-image-blocks
+m F248 lib/sign.sh 1 '  [[ $_esp_sync_failed == false ]] || synced=false' '  :' sign/unsynced-esp-is-said
+m F250 lib/sign.sh 1 '  if [[ $scope == full && -n $incident ]]; then' '  if false; then' sign/unsynced-esp-is-said
+m F251 lib/sign.sh 1 '  if [[ $scope == full && -n $incident ]]; then' '  if [[ -n $incident ]]; then' sign/unsynced-esp-is-said
+m F254 lib/common.sh 1 '[[ -e $1 ]] && path_is_on_esp "$1"' '[[ -e $1 ]]' common/only-the-esp-records-an-incident
+m F255 lib/common.sh 1 '  [[ $path == "$esp" || $path == "$esp"/* ]]' '  [[ $path == "$esp"* ]]' common/only-the-esp-records-an-incident
+m F256 lib/common.sh 1 '  esp=$(realpath -m -- "$esp") path=$(realpath -m -- "$1")' '  path=$1' common/only-the-esp-records-an-incident
+m F257 lib/common.sh 1 $'    _esp_sync_failed=true\n    if ! set_attention' $'    :\n    if ! set_attention' common/only-the-esp-records-an-incident
+m F258 lib/common.sh 1 '    id=$(new_incident_id) && [[ $id =~ ^[0-9a-f]{12}$ ]] || return 1' '    id=$(new_incident_id)' common/needs-attention-round-trip
+m F259 lib/common.sh 1 $'durable_sync "$temporary" &&' $'sync_path "$temporary" &&' windows/publication-failures-leave-a-pair-or-say-so
+m F260 lib/common.sh 1 $'    durable_sync "$parent"\n  else' $'    sync_path "$parent"\n  else' windows/publication-failures-leave-a-pair-or-say-so
+m F261 lib/windows.sh 1 '          durable_sync "$(dirname "$(primary_loader_path)")" || :' '          sync_path "$(dirname "$(primary_loader_path)")" || :' windows/publication-failures-leave-a-pair-or-say-so
+m F262 lib/limine.sh 1 '    durable_sync "$staging" &&' '    sync_path "$staging" &&' limine/unwritten-seal-or-signature-publishes-nothing
+m F263 lib/limine.sh 1 'raw_loader >"$staging" && durable_sync "$staging"' 'raw_loader >"$staging" && sync_path "$staging"' limine/fallback-states
+m F264 lib/limine.sh 1 '  durable_sync "$primary" || return 1' '  sync_path "$primary" || return 1' commands/remove-records-a-failed-sync-of-the-loader
+m F265 bin/omasecboot 1 '  if [[ ${incident%% *} != "$id" ]]; then' '  if false; then' commands/acknowledge-clears-only-the-named-incident
+m F266 bin/omasecboot 1 '  check_root "acknowledge ${id}"' '  :' commands/acknowledge-clears-only-the-named-incident
+m F267 bin/omasecboot 1 $'  header "Acknowledge"\n  boot_lock_acquire || exit "$?"' $'  header "Acknowledge"' commands/acknowledge-clears-only-the-named-incident
+m F268 bin/omasecboot 1 '  clear_attention "$ATTENTION_SYNC" || die "Could not clear the incident' '  rm -f -- "$(attention_file)" || die "Could not clear the incident' commands/acknowledge-clears-only-the-named-incident
+m F269 bin/omasecboot 1 $'  boot_lock_acquire || exit "$?"\n  show_standing_incident\n  require_windows_target' $'  boot_lock_acquire || exit "$?"\n  require_windows_target' windows/bootnext-is-judged-by-reading-back
+m F270 bin/omasecboot 1 $'on this machine"\n    show_standing_incident' $'on this machine"' commands/remove-keeps-an-esp-incident
+m F271 bin/omasecboot 1 '  clear_attention "$ATTENTION_PASS" && clear_attention "$ATTENTION_SEAL" || :' '  rm -f -- "$(attention_file)"' commands/remove-keeps-an-esp-incident
+m F272 bin/omasecboot 1 '  clear_attention "$ATTENTION_PASS" && clear_attention "$ATTENTION_SEAL" || :' '  :' commands/remove-keeps-an-esp-incident
+m F273 bin/omasecboot 1 '  if [[ -n $incident ]]; then' '  if false; then' commands/remove-keeps-an-esp-incident
+m F274 lib/status.sh 1 '  [[ -n $incident ]] || return 0' '  return 0' status/restart-warning-follows-the-boot-risk
+m F275 lib/status.sh 1 $'  fi\n  show_esp_incident\n  show_next_step' $'  fi\n  show_next_step' status/restart-warning-follows-the-boot-risk
+m F276 lib/status.sh 1 '    [[ $_status_incident == false ]] || act "Do not reboot' '    : || act "Do not reboot' windows/windows-remove-says-a-write-error
+m F277 lib/status.sh 1 '    findings=$(attention_without "$ATTENTION_SYNC")' '    findings=$(cat "$(attention_file)" 2>/dev/null)' status/restart-warning-follows-the-boot-risk
+m F278 lib/sign.sh 1 '  elif [[ $startless == true ]] || { [[ $standing == true ]] && (( rc != 0 )); }; then' '  elif [[ $startless == true ]]; then' sign/unsynced-esp-is-said
+m F279 lib/sign.sh 1 '  [[ $standing == false ]] || fail "${clause^}"' '  : || fail "${clause^}"' sign/unsynced-esp-is-said
+m F281 bin/omasecboot 1 '  [[ $_esp_sync_failed == false ]] || die "The ESP reported a write error that could not be recorded.' '  : || die "The ESP reported a write error that could not be recorded.' windows/windows-remove-says-a-write-error
+m F282 lib/common.sh 1 '  if [[ -e $1 ]] && path_is_on_esp "$1"; then' '  if path_is_on_esp "$1"; then' common/only-the-esp-records-an-incident
+m F283 lib/common.sh 1 $'    fi\n  fi\n  return 1\n}' $'    fi\n  fi\n  return 0\n}' common/only-the-esp-records-an-incident
+m F284 lib/common.sh 1 'od -An -N6 -tx1 /dev/urandom |' 'printf 000000000000 |' common/needs-attention-round-trip
+m F285 lib/common.sh 2 '  lines=$(attention_lines) || return 1' '  lines=$(attention_lines) || return 0' common/unreadable-attention-is-no-absence
+m F286 lib/common.sh 1 $'      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"\n    else\n      return 1' $'      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"\n    else\n      continue' common/unreadable-attention-is-no-absence
+m F287 lib/common.sh 1 '  cat -- "$file"' '  cat -- "$file" 2>/dev/null || :' common/unreadable-attention-is-no-absence
+m F288 lib/common.sh 1 $'  kept=$(attention_without "$1") || return 1\n  line=' $'  kept=$(attention_without "$1")\n  line=' common/unreadable-attention-is-no-absence
+m F289 lib/common.sh 1 $'  kept=$(attention_without "$1") || return 1\n  if [[ -z $kept ]]' $'  kept=$(attention_without "$1")\n  if [[ -z $kept ]]' common/unreadable-attention-is-no-absence
+m F290 lib/common.sh 1 $'esp_incident || printf \'unknown\\n\'; }' $'esp_incident || :; }' common/unreadable-attention-is-no-absence
+m F291 bin/omasecboot 1 '  if ! incident=$(esp_incident); then' '  incident=$(esp_incident); if false; then' commands/acknowledge-clears-only-the-named-incident
+m F292 bin/omasecboot 1 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident 2>/dev/null)' windows/bootnext-is-judged-by-reading-back
+m F293 bin/omasecboot 1 $'  boot_lock_acquire || exit "$?"\n  show_standing_incident\n  require_windows_target' $'  show_standing_incident\n  boot_lock_acquire || exit "$?"\n  require_windows_target' windows/bootnext-waits-for-a-writer-at-work
+m F294 lib/status.sh 1 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident)' status/restart-warning-follows-the-boot-risk
+m F295 lib/sign.sh 1 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident)' sign/full-pass-says-an-incident-wherever-it-ends
+m F296 lib/sign.sh 2 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident)' sign/full-pass-says-an-incident-wherever-it-ends
+m F297 lib/sign.sh 1 '  [[ $1 == full ]] || return 0' '  [[ $1 == full || $1 == seal-only ]] || return 0' sign/full-pass-says-an-incident-wherever-it-ends
+m F298 lib/sign.sh 1 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F299 lib/sign.sh 2 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F300 lib/sign.sh 3 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F301 lib/sign.sh 4 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F302 lib/sign.sh 5 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F303 lib/sign.sh 6 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
+m F305 lib/common.sh 1 '    if [[ -z $line || $line =~ $finding ]]; then' '    if [[ -z $line || $line != "${ATTENTION_SYNC} "* ]]; then' common/unreadable-attention-is-no-absence
+m F306 lib/common.sh 1 '    elif [[ -z $incident && $line =~ $pattern ]]; then' '    elif [[ $line =~ $pattern ]]; then' common/unreadable-attention-is-no-absence
+m F307 lib/common.sh 1 '  [[ -e $file || -L $file ]] || return 0' '  [[ -e $file ]] || return 0' common/unreadable-attention-is-no-absence
+m F308 lib/status.sh 1 "    findings=\$(attention_without \"\$ATTENTION_SYNC\") || findings=''" '    findings=$(attention_without "$ATTENTION_SYNC")' commands/unreadable-record-is-said
+m F309 lib/sign.sh 1 '    clear_attention "$ATTENTION_SEAL" || :' '    clear_attention "$ATTENTION_SEAL"' commands/unreadable-record-is-said
+m F310 lib/sign.sh 1 '    clear_attention "$ATTENTION_PASS" || :' '    clear_attention "$ATTENTION_PASS"' commands/unreadable-record-is-said
+m F311 lib/sign.sh 1 '  [[ -n $incident ]] || return 0' '  :' sign/restore-in-progress-is-left-alone
+m F312 bin/omasecboot 1 $'  is_set_up || {\n    show_standing_incident\n' $'  is_set_up || {\n' commands/remove-keeps-an-esp-incident
+m F313 bin/omasecboot 1 $'  show_standing_incident\n  require_windows_target' $'  show_standing_incident\n  boot_lock_release\n  require_windows_target' windows/bootnext-is-judged-by-reading-back
+m F314 lib/common.sh 2 '  [[ -e $file || -L $file ]] || return 0' '  [[ -e $file ]] || return 0' common/unreadable-attention-is-no-absence
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

@@ -302,12 +302,12 @@ readonly HELD_SIGNALS=(HUP INT QUIT TERM)
 # as the mv and sync it runs do after it, while this shell notes such a signal
 # and acts on it once both are in place, and the watchers' pass keeps ignoring
 # TERM (D8). SIGKILL, power loss or a failed rename between the two can still
-# split them (section 7.3): the loader then refuses the new file. Status 1:
-# nothing changed. Otherwise the sum of what went wrong, each on its own: 2,
-# limine.conf changed and the staged loader did not follow; 4, a sync did not
-# confirm a write. A write the ESP did not confirm is this function's to say:
-# it sets _esp_write_unconfirmed, says so, and, before a held signal ends the
-# command, records it under the lock, as the pass would at its end (7.3).
+# split them (section 7.3): the loader then refuses the new file. Status 0, or
+# the sum of what went wrong, each on its own: 1, limine.conf was not replaced;
+# 2, the staged loader did not follow; 4, a sync of the ESP failed, which
+# durable_sync said and recorded as an incident. This function sets
+# _esp_sync_failed for 4, which the subshell cannot set for the command, also
+# where the incident could not be recorded.
 publish_limine_conf() {
   local config=$1 mode=$2 before=$3 content=$4 staging=${5:-} status=0 signal='' saved held
   saved=$(trap -p "${HELD_SIGNALS[@]}")
@@ -318,22 +318,23 @@ publish_limine_conf() {
   (
     trap '' "${HELD_SIGNALS[@]}"
     after=$(printf '%s' "$content" | b2sum | cut -d' ' -f1)
-    unconfirmed=false
-    if ! printf '%s' "$content" | atomic_write "$config" "$mode" config_is_still "$before"; then
-      # Renamed but not synced reads as the new content; anything else as none.
-      [[ $(config_checksum) == "$after" ]] || exit 1
-      unconfirmed=true
-    fi
-    split=0
-    if [[ -n $staging ]]; then
-      if mv -f -- "$staging" "$(primary_loader_path)"; then
-        durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true
-      else
-        split=2
+    status=0
+    # Not in a pipeline, so the flag its syncs set stays in this shell. Renamed
+    # but not synced reads as the new content; anything else as none.
+    if atomic_write "$config" "$mode" config_is_still "$before" < <(printf '%s' "$content") ||
+      [[ $(config_checksum) == "$after" ]]; then
+      if [[ -n $staging ]]; then
+        if mv -f -- "$staging" "$(primary_loader_path)"; then
+          durable_sync "$(dirname "$(primary_loader_path)")" || :
+        else
+          status=2
+        fi
       fi
+    else
+      status=1
     fi
-    [[ $unconfirmed == false ]] || exit $((split + 4))
-    exit "$split"
+    [[ $_esp_sync_failed == false ]] || status=$((status | 4))
+    exit "$status"
   ) || status=$?
   # Back to exactly what was there: a signal the shell ignored stays ignored
   # throughout, and one it did not goes back to its default.
@@ -342,16 +343,11 @@ publish_limine_conf() {
   done
   eval "$saved"
   [[ -z $staging ]] || rm -f -- "$staging"
-  # A signal that reached the subshell before it ignored the held ones ended
-  # it with 128 and the signal's number: nothing is known, so both.
-  (( status < 128 )) || status=6
-  if (( status > 1 && (status & 4) )); then
-    # shellcheck disable=SC2034 # lib/sign.sh and the commands read it.
-    _esp_write_unconfirmed=true
-    warn "The ESP did not confirm the new limine.conf"
-    # Nothing after the signal would record it. is_set_up is lib/status.sh's.
-    [[ -z $signal ]] || ! is_set_up || set_attention "$ATTENTION_SYNC" || :
-  fi
+  # A signal that reached the subshell before it ignored the held ones, or a
+  # kill, ended it with 128 and the signal's number: which renames happened is
+  # not known, and the pass proves the pair again. A kill is no write error.
+  (( status < 128 )) || status=2
+  (( !(status & 4) )) || _esp_sync_failed=true
   [[ -z $signal ]] || kill -s "$signal" "$BASHPID"
   return "$status"
 }
@@ -417,12 +413,12 @@ write_windows_entry() {
     return 1
   }
   publish_limine_conf "$config" "$mode" "$before" "$content" "$staging" || status=$?
-  # A write the ESP did not confirm, alone, is a write: the pass, or the
-  # command that asked for it, says so (section 7.3).
-  if (( status == 1 )); then
-    warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
+  # A write error of the ESP, alone, still made the write: durable_sync said it,
+  # and the pass, or the command that asked for it, fails on it (section 7.3).
+  if (( status & 1 )); then
+    warn "limine.conf was not replaced: it changed while the Windows entry was being written, or a write to the ESP failed"
   elif (( status & 2 )); then
-    warn "limine.conf holds the new Windows entry, but the loader sealed over it could not be put in place; the pass builds it again"
+    warn "The loader sealed over the new limine.conf could not be put in place; the pass builds it again"
   fi
   (( status == 0 || status == 4 ))
 }

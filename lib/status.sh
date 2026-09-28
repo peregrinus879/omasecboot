@@ -11,7 +11,7 @@
 # repairs, which includes everything that could not be read; its line says
 # what does. The next step follows the worst repair seen, the warning against
 # a restart the worst risk.
-_status_problems=0 _status_next=sign _status_firmware=pending _status_risk=none
+_status_problems=0 _status_next=sign _status_firmware=pending _status_risk=none _status_incident=false
 problem() {
   local risk=$1
   shift
@@ -35,6 +35,7 @@ enabled_file() { printf '%s/enabled\n' "$(state_dir)"; }
 is_set_up() { [[ -e $(enabled_file) ]]; }
 
 limine_hook_path() { printf '/etc/boot/hooks/post.d/90-omasecboot-sign\n'; }
+readme_path() { printf '/usr/share/doc/omasecboot/README.md\n'; }
 
 # The menu entry that owns a limine.conf line: the nearest entry line above it.
 entry_title_for_line() {
@@ -362,9 +363,28 @@ show_integration_status() {
   fi
 }
 
+# An ESP incident stands, set up or not, until the operator acknowledges it:
+# nothing this report reads can tell whether the ESP kept every write, and a
+# record that cannot be read or told is taken as one (7.3).
+show_esp_incident() {
+  local incident clause
+  incident=$(esp_incident_or_unknown)
+  [[ -n $incident ]] || return 0
+  _status_incident=true
+  if [[ $incident == unknown ]]; then
+    clause=$(incident_clause unknown)
+    blocking_problem both "${clause^}: a restart may not find the boot files. Follow the README's \"If the ESP reports a write error\" ($(readme_path)), then correct the file by hand, as root, keeping its other lines"
+  else
+    blocking_problem both "The ESP reported a write error on ${incident#* } (incident ${incident%% *}), and whether it kept every write cannot be told: a restart may not find the boot files. Follow the README's \"If the ESP reports a write error\" ($(readme_path)), then run ${BOLD}sudo omasecboot acknowledge ${incident%% *}${NC}"
+  fi
+}
+
 show_next_step() {
   if ! is_set_up; then
     (( _status_problems > 0 )) || act "Next: ${BOLD}sudo omasecboot setup${NC}"
+    # The boot files are upstream's here; an incident is the one risk to a
+    # restart this report names.
+    [[ $_status_incident == false ]] || act "Do not reboot, with Secure Boot on or off, until this report no longer says so"
   elif (( _status_problems == 0 )); then
     case $_status_firmware in
       complete) act "Nothing to do" ;;
@@ -387,8 +407,8 @@ show_next_step() {
 
 # Exit 0 when nothing needs attention, 1 otherwise.
 show_status() {
-  local attention unsafe risk
-  _status_problems=0 _status_next=sign _status_firmware=pending _status_risk=none
+  local findings unsafe
+  _status_problems=0 _status_next=sign _status_firmware=pending _status_risk=none _status_incident=false
   header "Status"
   show_firmware_status
   if ! is_set_up; then
@@ -414,14 +434,11 @@ show_status() {
     show_windows_status
     note_windows_chainloads
     show_integration_status
-    attention=$(attention_file)
-    if [[ -e $attention ]]; then
-      # A write the ESP did not confirm is seen by nothing else here (7.3).
-      risk=none
-      ! grep -q "^${ATTENTION_SYNC} on " "$attention" || risk=both
-      problem "$risk" "An earlier pass could not finish: $(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' "$attention")"
-    fi
+    # A record that cannot be read is show_esp_incident's to report.
+    findings=$(attention_without "$ATTENTION_SYNC") || findings=''
+    [[ -z $findings ]] || problem none "An earlier pass could not finish: $(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' <<<"$findings")"
   fi
+  show_esp_incident
   show_next_step
   (( _status_problems == 0 ))
 }

@@ -301,8 +301,8 @@ prepare_sealed_loader() {
   return 1
 }
 
-# The staged loader, proved, and only then in place of the target. A rename
-# the ESP's sync does not confirm is said by the pass (section 7.3).
+# The staged loader, proved, and only then in place of the target. A sync of
+# the rename that fails is an ESP incident (section 7.3).
 install_sealed_loader() {
   local target=$1 checksum=$2
   prepare_sealed_loader "$target" "$checksum" || return 1
@@ -310,8 +310,7 @@ install_sealed_loader() {
     rm -f -- "$_staged_loader"
     return 1
   }
-  # shellcheck disable=SC2034 # lib/sign.sh reads it.
-  durable_sync "$(dirname "$target")" || _esp_write_unconfirmed=true
+  durable_sync "$(dirname "$target")" || :
 }
 
 ensure_primary_loader() {
@@ -387,8 +386,7 @@ restore_raw_fallback() {
   parent=$(dirname "$fallback")
   staging=$(mktemp "${parent}/${LOADER_STAGING_PREFIX}XXXXXX") || return 1
   if raw_loader >"$staging" && durable_sync "$staging" && mv -f -- "$staging" "$fallback"; then
-    # shellcheck disable=SC2034 # lib/sign.sh reads it.
-    durable_sync "$parent" || _esp_write_unconfirmed=true
+    durable_sync "$parent" || :
     return 0
   fi
   rm -f -- "$staging"

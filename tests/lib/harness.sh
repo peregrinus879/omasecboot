@@ -402,6 +402,8 @@ fixture_overrides() {
   restore_lock_path() { printf '%s/run/restore.lock\n' "$FIX"; }
   boot_lock_path() { printf '%s/run/boot-partition.lock\n' "$FIX"; }
   boot_lock_wait() { printf '1\n'; }
+  # Long enough for a case whose writer holds the lock on purpose.
+  [[ ! -e $FIX/run/boot-lock-waits-long ]] || boot_lock_wait() { printf '10\n'; }
   hook_lock_wait() { printf '1\n'; }
   pacman_lock_path() { printf '%s/run/db.lck\n' "$FIX"; }
   pacman_wait() { printf '5\n'; }
@@ -420,19 +422,22 @@ fixture_overrides() {
   # The firmware's entries cannot be read at the moment the pass looks: the
   # pass goes on without the Windows entry, as converge_windows_entry does then.
   [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_entry() { :; }
-  durable_sync() { :; }
-  # Levers for a sync of the ESP's root, in a command run as its own process:
-  # it takes two seconds, for the cases that signal a command between the two
-  # renames of limine.conf and the loader, leaving a mark in run/esp-syncs
-  # first, and failing when a signal ends it, as a sync the signal killed; or
-  # it fails once; or both.
-  [[ ! -e $FIX/run/esp-sync-is-slow && ! -e $FIX/run/esp-sync-fails-once ]] || durable_sync() {
-    [[ $1 == "$FIX/esp" ]] || return 0
-    if [[ -e $FIX/run/esp-sync-is-slow ]]; then
+  sync_path() { :; }
+  # Levers for a sync on the ESP, in a command run as its own process: a sync
+  # of the ESP's root takes two seconds, for the cases that signal a command
+  # between the two renames of limine.conf and the loader, leaving a mark in
+  # run/esp-syncs first, and failing when a signal ends it, as a sync the
+  # signal killed; or the sync of the path the lever names, the ESP's root when
+  # it names none, fails once; or both.
+  [[ ! -e $FIX/run/esp-sync-is-slow && ! -e $FIX/run/esp-sync-fails-once ]] || sync_path() {
+    local failing
+    if [[ $1 == "$FIX/esp" && -e $FIX/run/esp-sync-is-slow ]]; then
       printf x >>"$FIX/run/esp-syncs"
       sleep 2 || return 1
     fi
     [[ -e $FIX/run/esp-sync-fails-once ]] || return 0
+    failing=$(<"$FIX/run/esp-sync-fails-once")
+    [[ $1 == "${failing:-$FIX/esp}" ]] || return 0
     rm -f "$FIX/run/esp-sync-fails-once"
     return 1
   }
@@ -794,10 +799,16 @@ EOF
 [[ ! -e $FIX/run/lsblk ]] || cat "$FIX/run/lsblk"
 EOF
   # efibootmgr 18: --bootnext XXXX sets BootNext (its own usage text);
-  # firmware that ignores the write is run/firmware-ignores-bootnext.
+  # firmware that ignores the write is run/firmware-ignores-bootnext. It notes
+  # in run/efibootmgr-lock whether the boot lock is held while it runs.
   cat >"$FIX/bin/efibootmgr" <<'EOF'
 #!/bin/bash
 printf '%s\n' "efibootmgr $*" >>"$FIX/run/calls"
+if flock -n "$FIX/run/boot-partition.lock" true 2>/dev/null; then
+  printf 'free\n' >"$FIX/run/efibootmgr-lock"
+else
+  printf 'held\n' >"$FIX/run/efibootmgr-lock"
+fi
 [[ $1 == --bootnext && $2 =~ ^[0-9A-F]{4}$ ]] || exit 64
 [[ -e $FIX/run/firmware-ignores-bootnext ]] ||
   printf '%b' "\\x07\\x00\\x00\\x00\\x${2:2:2}\\x${2:0:2}" >"$FIX/efivars/BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c"

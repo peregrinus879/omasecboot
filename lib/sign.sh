@@ -103,9 +103,8 @@ sign_unsigned_arrivals() {
             ;;
           1)
             qact "Signing ${file}"
-            # A signature the ESP's sync did not confirm is said by the pass.
-            # shellcheck disable=SC2015 # The assignment cannot fail.
-            { esp_has_room && run_visible run_sbctl sign "$file" && { durable_sync "$file" || _esp_write_unconfirmed=true; } && signature_state "$file"; } || {
+            # A sync of the signature that fails is an ESP incident (7.3).
+            { esp_has_room && run_visible run_sbctl sign "$file" && { durable_sync "$file" || :; } && signature_state "$file"; } || {
               # A kernel image is upstream's to build (section 7.3); any other
               # file is the user's.
               if [[ ${file,,} == */efi/linux/* ]]; then
@@ -163,22 +162,33 @@ check_os_path_hashes() {
   return "$failed"
 }
 
-# Set when a write of the pass reached the ESP without the sync confirming it.
-_esp_write_unconfirmed=false
+# The full pass never succeeds beside an ESP incident, also where it had
+# nothing to do, and says it beside any other failure; the watchers' pass
+# answers for its own work (7.3). The status is the pass's to return.
+incident_stops_full_pass() {
+  local incident clause
+  [[ $1 == full ]] || return 0
+  incident=$(esp_incident_or_unknown)
+  [[ -n $incident ]] || return 0
+  clause=$(incident_clause "$incident")
+  fail "${clause^}. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+  return 1
+}
 
 # sign_boot_files [seal-only]
 # seal-only is the watchers' pass: it starts when a running pacman is done and
 # stops after the loader proof, because the watchers' job is the seal.
 sign_boot_files() {
-  local scope=${1:-full} rc=0 sealed=true synced=true startless=false unsafe
-  _esp_write_unconfirmed=false
+  local scope=${1:-full} rc=0 sealed=true synced=true startless=false standing=false unsafe incident clause
   if restore_in_progress; then
     qnote "A snapshot restore is running; leaving the boot files to it"
-    return 0
+    incident_stops_full_pass "$scope"
+    return
   fi
   if ! esp_is_mounted_vfat; then
     [[ $scope != seal-only ]] || return 0
     fail "The EFI system partition is not mounted"
+    incident_stops_full_pass "$scope"
     return 1
   fi
   [[ $scope != seal-only ]] || wait_for_pacman
@@ -189,17 +199,20 @@ sign_boot_files() {
   if ! is_set_up; then
     qnote "OmaSecBoot was removed while this pass waited; nothing to do"
     boot_lock_release
-    return 0
+    incident_stops_full_pass "$scope"
+    return
   fi
   if restore_in_progress; then
     qnote "A snapshot restore started while this pass waited; leaving the boot files to it"
     boot_lock_release
-    return 0
+    incident_stops_full_pass "$scope"
+    return
   fi
   if ! esp_is_mounted_vfat; then
     boot_lock_release
     [[ $scope != seal-only ]] || return 0
     fail "The EFI system partition is not mounted"
+    incident_stops_full_pass "$scope"
     return 1
   fi
   # A pass on an ESP that others can write would seal and sign what they wrote,
@@ -208,6 +221,7 @@ sign_boot_files() {
     set_attention "$ATTENTION_PASS" || true
     boot_lock_release
     fail "The ESP must be writable by root alone, but ${unsafe}, so OmaSecBoot seals and signs nothing until its mount shows that only root can: a change of limine.conf, or of the loader with Secure Boot on, meanwhile leaves a machine that does not start. $(unsafe_esp_remedy). Then run ${BOLD}sudo omasecboot sign${NC}"
+    incident_stops_full_pass "$scope"
     return 1
   fi
 
@@ -234,40 +248,54 @@ sign_boot_files() {
   fi
   # Each kind of finding is written or cleared under the lock, so a watcher's
   # pass that the renames above start cannot interleave with it: any pass
-  # writes what it found and clears the seal and, once it has synced the ESP
-  # itself, an unconfirmed write; only a full pass clears the rest.
-  if [[ $_esp_write_unconfirmed == false ]] && durable_sync "$(esp_path)"; then
-    clear_attention "$ATTENTION_SYNC"
-  else
-    synced=false
-    set_attention "$ATTENTION_SYNC" || true
-  fi
+  # writes what it found and clears the seal; only a full pass clears the
+  # rest. This sync flushes what the pass had others write, and records an
+  # incident when it fails, as every sync of the ESP does (durable_sync); one
+  # that succeeds proves nothing about an earlier error, which a writer outside
+  # the pass can have met first (C2). No pass clears an incident: only the
+  # operator's acknowledgement does.
+  durable_sync "$(esp_path)" || :
+  # shellcheck disable=SC2154 # _esp_sync_failed belongs to lib/common.sh.
+  [[ $_esp_sync_failed == false ]] || synced=false
+  # A record that cannot be read or rewritten is status's to report.
   if [[ $sealed == false ]]; then
-    set_attention "$ATTENTION_SEAL" || true
+    set_attention "$ATTENTION_SEAL" || :
   else
-    clear_attention "$ATTENTION_SEAL"
+    clear_attention "$ATTENTION_SEAL" || :
   fi
   if (( rc != 0 )); then
-    set_attention "$ATTENTION_PASS" || true
+    set_attention "$ATTENTION_PASS" || :
   elif [[ $scope == full ]]; then
-    clear_attention "$ATTENTION_PASS"
+    clear_attention "$ATTENTION_PASS" || :
   fi
+  incident=$(esp_incident_or_unknown)
   boot_lock_release
+  # An incident on record, from this pass or before it, or one that cannot be
+  # told, is the operator's: the full pass says it beside whatever else it
+  # found and never passes over it, so setup does not take such boot files for
+  # ready. The watchers' pass answers for its own work (7.3).
+  if [[ $scope == full && -n $incident ]]; then
+    standing=true
+    clause=$(incident_clause "$incident")
+  fi
 
   if [[ $sealed == false ]]; then
     # A loader sealed over another limine.conf does not start at all (C1).
     fail "The Limine loader is not sealed over the current limine.conf. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
-    return 1
   elif [[ $synced == false ]]; then
-    fail "The ESP did not confirm a write, so a restart may not find the boot files as they are now. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
-    return 1
-  elif [[ $startless == true ]]; then
+    fail "The ESP reported a write error, so a restart may not find the boot files as they are now. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+  elif [[ $startless == true ]] || { [[ $standing == true ]] && (( rc != 0 )); }; then
     # An OS entry without its file starts with Secure Boot neither on nor off.
     fail "OmaSecBoot could not finish. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
-    return 1
   elif (( rc != 0 )); then
     fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run ${BOLD}sudo omasecboot status${NC}"
+  elif [[ $standing == true ]]; then
+    fail "The boot files are sealed and signed, but ${clause}. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     return 1
+  else
+    qpass "Boot files are sealed and signed"
+    return 0
   fi
-  qpass "Boot files are sealed and signed"
+  [[ $standing == false ]] || fail "${clause^}"
+  return 1
 }

@@ -37,6 +37,7 @@ atomic_write_replaces_whole_files() {
 
 # One dated line per kind; a kind is replaced, cleared alone, or all at once.
 needs_attention_round_trip() {
+  local first
   set_attention "$ATTENTION_PASS" || fail_test "set"
   [[ $(<"$(attention_file)") == "sign could not finish on "* ]] || fail_test "content: $(<"$(attention_file)")"
   { set_attention "$ATTENTION_SEAL" && set_attention "$ATTENTION_SEAL"; } || fail_test "set a second kind"
@@ -45,8 +46,17 @@ needs_attention_round_trip() {
   [[ $(<"$(attention_file)") == "sign could not finish on "* && $(grep -c . "$(attention_file)") == 1 ]] || fail_test "clear one kind: $(<"$(attention_file)")"
   clear_attention "$ATTENTION_PASS"
   [[ ! -e $(attention_file) ]] || fail_test "clearing the last kind left the file"
-  set_attention "$ATTENTION_SYNC" && clear_attention
+  # An incident carries an ID, a new one for every failure.
+  set_attention "$ATTENTION_SYNC" || fail_test "set an incident"
+  first=$(esp_incident)
+  [[ $first =~ ^[0-9a-f]{12}\ [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || fail_test "incident: ${first}"
+  set_attention "$ATTENTION_SYNC"
+  [[ $(esp_incident) != "${first%% *} "* && $(grep -c . "$(attention_file)") == 1 ]] || fail_test "a second failure: $(<"$(attention_file)")"
+  clear_attention "$ATTENTION_SYNC"
   [[ ! -e $(attention_file) ]] || fail_test "clear"
+  # esp_incident reads no other form, so an ID that is not one is refused.
+  ( new_incident_id() { printf 'x\n'; }; ! set_attention "$ATTENTION_SYNC" ) || fail_test "an incident without an ID was recorded"
+  [[ ! -e $(attention_file) ]] || fail_test "a refused incident left: $(<"$(attention_file)")"
   # A last line without its newline, as a hand edit leaves it, is a line.
   printf '%s on a day\n%s on a day' "$ATTENTION_PASS" "$ATTENTION_SEAL" >"$(attention_file)"
   clear_attention "$ATTENTION_PASS"
@@ -56,6 +66,68 @@ needs_attention_round_trip() {
   ! clear_attention "$ATTENTION_SEAL" 2>/dev/null || fail_test "rewritten in an unsafe state directory"
   [[ -e $(attention_file) ]] || fail_test "cleared in an unsafe state directory"
   chmod o-w "$FIX/state"
+}
+
+# What cannot be read, or holds an incident in a form set_attention does not
+# write, is never taken for no incident, and no rewrite drops the lines it
+# could not read (7.3).
+unreadable_attention_is_no_absence() {
+  local before line output
+  [[ -z $(esp_incident) ]] || fail_test "an incident without a file"
+  printf '%s on a day\n%s on a day, incident 0123456789ab\n' "$ATTENTION_PASS" "$ATTENTION_SYNC" >"$(attention_file)"
+  [[ $(esp_incident) == '0123456789ab a day' ]] || fail_test "a valid incident: $(esp_incident)"
+  # Any line set_attention does not write, a second incident included.
+  for line in "${ATTENTION_SYNC} on a day" "${ATTENTION_SYNC} on a day, incident 0123" "${ATTENTION_SYNC}" \
+    " ${ATTENTION_SYNC} on a day, incident 0123456789ab" "${ATTENTION_SYNC^} on a day, incident 0123456789ab" "${ATTENTION_PASS}" 'anything' \
+    $'the ESP reported a write error on a day, incident 0123456789ab\nthe ESP reported a write error on a day, incident ba9876543210'; do
+    printf '%s\n' "$line" >"$(attention_file)"
+    ! esp_incident >/dev/null || fail_test "taken for an incident or none: ${line}"
+    [[ $(esp_incident_or_unknown) == unknown ]] || fail_test "not unknown: ${line}"
+  done
+  rm "$(attention_file)"
+  ln -s "$FIX/nowhere" "$(attention_file)"
+  [[ $(esp_incident_or_unknown 2>/dev/null) == unknown ]] || fail_test "a dangling link was taken for no record"
+  ! clear_attention "$ATTENTION_PASS" 2>/dev/null || fail_test "a dangling link was cleared as no record"
+  rm "$(attention_file)"
+  # A write error recorded beside a line the tool does not write is said as
+  # recorded, and the kind's own damaged line is no finding of a pass.
+  printf 'anything\n' >"$(attention_file)"
+  output=$(
+    sync_path() { [[ $1 == "$FIX/state" || $1 == "$FIX/state/."* ]]; }
+    durable_sync "$FIX/esp" 2>&1
+  ) && fail_test "a failed sync passed"
+  [[ $output == *'recorded in'*'beside a line OmaSecBoot does not write'* ]] || fail_test "recorded beside a foreign line: ${output}"
+  printf '%s\n' "$ATTENTION_SYNC" >"$(attention_file)"
+  [[ -z $(attention_without "$ATTENTION_SYNC") ]] || fail_test "the kind's own damaged line was kept as another finding"
+  rm "$(attention_file)"
+  printf '%s on a day\n%s on a day, incident 0123456789ab\n' "$ATTENTION_PASS" "$ATTENTION_SYNC" >"$(attention_file)"
+  before=$(<"$(attention_file)")
+  chmod 000 "$(attention_file)"
+  ! esp_incident >/dev/null 2>&1 || fail_test "an unreadable record was taken for an answer"
+  ! set_attention "$ATTENTION_SEAL" 2>/dev/null || fail_test "a finding was written over lines that could not be read"
+  ! clear_attention "$ATTENTION_PASS" 2>/dev/null || fail_test "a finding was cleared from lines that could not be read"
+  chmod 644 "$(attention_file)"
+  [[ $(<"$(attention_file)") == "$before" ]] || fail_test "the record changed: $(<"$(attention_file)")"
+}
+
+# A failed sync records an ESP incident, and says it, only for a path on the
+# ESP: the state directory and the firmware backup are elsewhere (C2).
+only_the_esp_records_an_incident() {
+  local path output
+  # Every sync fails but those that write the incident into the state directory.
+  sync_path() { [[ $1 == "$FIX/state" || $1 == "$FIX/state/."* ]]; }
+  mkdir -p "$FIX/esp-other" "$FIX/esp/EFI" "$FIX/state/backup"
+  # A path that is gone fails the sync without a writeback error.
+  for path in "$FIX/state/backup" "$FIX/esp-other" "$FIX/esp/../esp-other" "$FIX/esp/gone"; do
+    ! durable_sync "$path" 2>/dev/null || fail_test "${path}: a failed sync passed"
+    # shellcheck disable=SC2154 # _esp_sync_failed belongs to lib/common.sh.
+    [[ -z $(esp_incident) && $_esp_sync_failed == false ]] || fail_test "${path}: recorded as the ESP's"
+  done
+  output=$(durable_sync "$FIX/esp/EFI" 2>&1) && fail_test "a failed sync of the ESP passed"
+  [[ -n $(esp_incident) && $output == *"The ESP reported a write error at ${FIX}/esp/EFI (incident $(esp_incident | cut -d' ' -f1))"* ]] || fail_test "the ESP's failure was not recorded and said: ${output}"
+  durable_sync "$FIX/esp/EFI" 2>/dev/null
+  [[ $_esp_sync_failed == true ]] || fail_test "the ESP's failure did not mark the command"
+  sync_path() { :; }
 }
 
 # Who can write the ESP is the mount's to say (C2), in the kernel's own format:
@@ -243,6 +315,8 @@ run_case settings-follow-upstream-layers settings_follow_upstream_layers
 run_case enrollment-counts-only-in-the-default-file enrollment_counts_only_in_the_default_file
 run_case atomic-write-replaces-whole-files atomic_write_replaces_whole_files
 run_case needs-attention-round-trip needs_attention_round_trip
+run_case only-the-esp-records-an-incident only_the_esp_records_an_incident
+run_case unreadable-attention-is-no-absence unreadable_attention_is_no_absence
 run_case file-safety-refuses-what-others-can-change file_safety_refuses_what_others_can_change
 run_case esp-mount-rule-follows-the-kernels-options esp_mount_rule_follows_the_kernels_options
 run_case lock-is-taken-and-released lock_is_taken_and_released

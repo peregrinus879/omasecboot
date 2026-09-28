@@ -271,18 +271,29 @@ unsafe_esp_mount_writes_nothing() {
 }
 
 # A pass that cannot sync the ESP cannot say that its boot files are what a
-# restart finds, even when it wrote nothing itself; it says so until a pass
-# has synced (7.3).
+# restart finds, even when it wrote nothing itself. It records an incident,
+# which every later pass leaves standing and only the full pass fails on,
+# until the operator acknowledges it (7.3).
 unsynced_esp_is_said() {
-  local output dir
+  local output dir incident
   prepared_machine
   sign_boot_files || fail_test "first pass"
-  durable_sync() { [[ $1 != "$FIX/esp" ]] || return 1; }
+  sync_path() { [[ $1 != "$FIX/esp" ]] || return 1; }
   output=$(sign_boot_files 2>&1) && fail_test "a pass whose ESP did not sync passed"
-  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "report: ${output}"
-  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded"
-  durable_sync() { :; }
-  sign_boot_files seal-only && [[ ! -e $(attention_file) ]] || fail_test "a pass that synced kept: $(cat "$(attention_file)" 2>&1)"
+  incident=$(esp_incident)
+  [[ -n $incident && $output == *"The ESP reported a write error at ${FIX}/esp (incident ${incident%% *})"*'The ESP reported a write error, so a restart'*"(incident ${incident%% *}) that stands until you acknowledge it"* ]] || fail_test "report: ${output}"
+  sync_path() { :; }
+  sign_boot_files seal-only || fail_test "the watchers' pass failed over an earlier incident"
+  output=$(sign_boot_files 2>&1) && fail_test "a full pass passed while an incident stands"
+  [[ $output == *"on ${incident#* } (incident ${incident%% *}) that stands until you acknowledge it"* ]] || fail_test "a full pass beside the incident: ${output}"
+  [[ $(esp_incident) == "$incident" ]] || fail_test "a later pass changed the incident: $(esp_incident)"
+  # Beside another failure the incident is said too, with its own risk.
+  mkdir -p "$FIX/esp/EFI/odd"
+  write_loader_with_slot "$FIX/esp/EFI/odd/x.efi" "$(printf '0%.0s' {1..100})"
+  output=$(sign_boot_files 2>&1) && fail_test "a pass with another failure passed"
+  [[ $output == *'could not finish. Do not reboot, with Secure Boot on or off'*"(incident ${incident%% *}) that stands until you acknowledge it"* ]] || fail_test "beside another failure: ${output}"
+  rm "$FIX/esp/EFI/odd/x.efi"
+  clear_attention "$ATTENTION_SYNC"
   # A loader rebuilt or a fallback restored whose rename the sync did not
   # confirm is said the same way, even beside another failure.
   mkdir -p "$FIX/esp/EFI/odd"
@@ -292,30 +303,87 @@ unsynced_esp_is_said() {
     # Another failure of the pass, which must not hide the stronger warning.
     write_loader_with_slot "$FIX/esp/EFI/odd/x.efi" "$(printf '0%.0s' {1..100})"
     rm -f "$FIX/run/dir-sync-failed"
-    durable_sync() {
+    sync_path() {
       if [[ $1 == "$dir" && ! -e $FIX/run/dir-sync-failed ]]; then
         : >"$FIX/run/dir-sync-failed"
         return 1
       fi
     }
-    output=$(sign_boot_files 2>&1) && fail_test "${dir}: an unconfirmed rename passed"
-    [[ $output == *'The ESP did not confirm a write'*'with Secure Boot on or off'* ]] || fail_test "${dir}: ${output}"
+    output=$(sign_boot_files 2>&1) && fail_test "${dir}: a rename whose sync failed passed"
+    [[ -n $(esp_incident) && $output == *'The ESP reported a write error'*'with Secure Boot on or off'* ]] || fail_test "${dir}: ${output}"
     rm "$FIX/esp/EFI/odd/x.efi"
-    durable_sync() { :; }
+    sync_path() { :; }
+    clear_attention "$ATTENTION_SYNC"
     sign_boot_files >/dev/null 2>&1 || fail_test "${dir}: the pass after"
   done
   # A file signed in place whose sync fails.
   write_uki "$FIX/esp/EFI/Linux/omarchy_linux.efi" 'a new unsigned image'
   rm -f "$FIX/run/file-sync-failed"
-  durable_sync() {
+  sync_path() {
     if [[ $1 == "$FIX/esp/EFI/Linux/omarchy_linux.efi" && ! -e $FIX/run/file-sync-failed ]]; then
       : >"$FIX/run/file-sync-failed"
       return 1
     fi
   }
-  output=$(sign_boot_files 2>&1) && fail_test "an unconfirmed signature passed"
-  [[ $output == *'The ESP did not confirm a write'* ]] || fail_test "a signature in place: ${output}"
-  durable_sync() { :; }
+  output=$(sign_boot_files 2>&1) && fail_test "a signature whose sync failed passed"
+  [[ -n $(esp_incident) && $output == *'The ESP reported a write error'* ]] || fail_test "a signature in place: ${output}"
+  sync_path() { :; }
+}
+
+# The full pass fails beside an ESP incident, and says it, also where it
+# leaves the boot files alone or stops early; the watchers' pass answers for
+# its own work. A record that cannot be told counts as an incident (7.3).
+full_pass_says_an_incident_wherever_it_ends() {
+  local output
+  prepared_machine
+  sign_boot_files || fail_test "first pass"
+  set_attention "$ATTENTION_SYNC" || fail_test "fixture incident"
+  : >"$(restore_lock_path)"
+  output=$(sign_boot_files 2>&1) && fail_test "a restore beside an incident passed"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "restore: ${output}"
+  sign_boot_files seal-only || fail_test "the watchers' pass failed beside a restore"
+  rm "$(restore_lock_path)"
+  : >"$FIX/run/esp-unmounted"
+  output=$(sign_boot_files 2>&1) && fail_test "an unmounted ESP passed"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "unmounted: ${output}"
+  rm "$FIX/run/esp-unmounted"
+  # What changes while the pass waits for the lock.
+  output=$(rm "$(enabled_file)" && sign_boot_files 2>&1) && fail_test "a removed machine beside an incident passed"
+  : >"$(enabled_file)"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "removed: ${output}"
+  output=$(
+    restore_in_progress() { [[ -e $FIX/run/looked ]] || { : >"$FIX/run/looked"; return 1; }; }
+    sign_boot_files 2>&1
+  ) && fail_test "a restore that began during the wait passed"
+  rm "$FIX/run/looked"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "restore after the wait: ${output}"
+  output=$(
+    esp_is_mounted_vfat() { [[ ! -e $FIX/run/looked ]] && : >"$FIX/run/looked"; }
+    sign_boot_files 2>&1
+  ) && fail_test "an ESP that went away during the wait passed"
+  rm "$FIX/run/looked"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "unmounted after the wait: ${output}"
+  printf '259:1 %s rw,relatime,fmask=0000,dmask=0000,codepage=437\n' "$FIX/esp" >"$FIX/run/mounts"
+  output=$(sign_boot_files 2>&1) && fail_test "an unsafe ESP passed"
+  [[ $output == *'stands until you acknowledge it'* ]] || fail_test "unsafe: ${output}"
+  printf '259:1 %s rw,relatime,fmask=0077,dmask=0077,codepage=437\n' "$FIX/esp" >"$FIX/run/mounts"
+  # A record of an incident in a form the tool does not write, beside a pass
+  # that leaves the boot files alone and beside one that works.
+  printf '%s on a day\n' "$ATTENTION_SYNC" >"$(attention_file)"
+  : >"$(restore_lock_path)"
+  output=$(sign_boot_files 2>&1) && fail_test "a restore beside an unknown incident passed"
+  [[ $output == *'holds a line OmaSecBoot does not write'* ]] || fail_test "restore beside unknown: ${output}"
+  rm "$(restore_lock_path)"
+  output=$(sign_boot_files 2>&1) && fail_test "a full pass beside an unknown incident passed"
+  [[ $output == *'holds a line OmaSecBoot does not write'* ]] || fail_test "unknown: ${output}"
+  sign_boot_files seal-only || fail_test "the watchers' pass failed beside an unknown incident"
+  # A record that becomes unknown while the pass works.
+  rm "$(attention_file)"
+  output=$(
+    check_os_files_exist() { printf '%s on a day\n' "$ATTENTION_SYNC" >"$(attention_file)"; }
+    sign_boot_files 2>&1
+  ) && fail_test "a record that became unknown during the pass passed"
+  [[ $output == *'holds a line OmaSecBoot does not write'* ]] || fail_test "unknown at the end: ${output}"
 }
 
 # The tools this pass delegates to hide their failures (CONTRIBUTING), so a
@@ -520,6 +588,7 @@ run_case answer-about-another-file-is-no-answer answer_about_another_file_is_no_
 run_case full-esp-is-not-written-to full_esp_is_not_written_to
 run_case busy-lock-writes-no-needs-attention busy_lock_writes_no_needs_attention
 run_case restore-in-progress-is-left-alone restore_in_progress_is_left_alone
+run_case full-pass-says-an-incident-wherever-it-ends full_pass_says_an_incident_wherever_it_ends
 run_case seal-only-reseals-and-stops seal_only_reseals_and_stops
 run_case seal-only-waits-for-pacman-to-finish seal_only_waits_for_pacman_to_finish
 run_case pass-looks-again-after-its-wait pass_looks_again_after_its_wait
