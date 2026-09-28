@@ -8,7 +8,11 @@
 # suite errs; an edit that no longer applies after a change of the code is
 # updated with that change.
 #
-# Usage: bash tests/mutations.sh [ID...]   (make test-mutations runs them all)
+# Usage: bash tests/mutations.sh [--list] [ID... | --part K/N]
+# Without an ID it runs them all, as make test-mutations does. --part K/N
+# takes every Nth entry from the Kth, so the N parts together hold each entry
+# once; CI runs them as parallel jobs. --list prints the entries chosen
+# instead of running them.
 #
 # m ID FILE OCCURRENCE SEARCH REPLACEMENT SUITE/CASE: replace the
 # OCCURRENCE-th literal SEARCH in FILE (0 for every one) with REPLACEMENT.
@@ -352,6 +356,12 @@ m F322 lib/windows.sh 1 '    fail "The loader sealed over the new limine.conf co
 m F323 lib/windows.sh 1 $'    ! grep -qx "trap -- \'\' SIG${signal}" <<<"$saved"; then' $'    true; then' windows/watchers-pass-builds-the-loader-after-a-failed-rename
 m F324 tests/replay-records.sh 1 '        [[ $target == "$work/esp/"* ]] || unusable' '        true || unusable' records/replay-judges-records-and-refuses-bad-ones
 m F325 tests/replay-records.sh 1 '      content=$(scan_windows_entries without 2>/dev/null) || scanned=$?' '      content=$(scan_windows_entries without 2>/dev/null) || :' records/replay-judges-records-and-refuses-bad-ones
+# The parts: each search also stands in its own entry, above the code, so
+# every occurrence is replaced.
+m F326 tests/mutations.sh 0 '(( index++ % count + 1 != part ))' '(( index++ % (count + 1) + 1 != part ))' parts/parts-hold-every-entry-once
+m F327 tests/mutations.sh 0 '(( index++ % count + 1 != part ))' '(( index++ % count + 1 > part ))' parts/parts-hold-every-entry-once
+m F328 tests/mutations.sh 0 ' && BASH_REMATCH[2] <= ${#ids[@]} ))' ' ))' parts/parts-outside-the-list-are-refused
+m F329 tests/mutations.sh 0 'BASH_REMATCH[1] <= BASH_REMATCH[2] && ' '' parts/parts-outside-the-list-are-refused
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {
@@ -385,14 +395,38 @@ run_one() {
 }
 
 main() {
-  local base id jobs results suite
-  (( $# )) || set -- "${ids[@]}"
+  local base id jobs results suite list=false part count index=0
+  if [[ ${1:-} == --list ]]; then
+    list=true
+    shift
+  fi
+  if [[ ${1:-} == --part ]]; then
+    # Three digits at most, so the comparison cannot overflow; no more parts
+    # than entries, so no part is empty.
+    if (( $# == 2 )) && [[ $2 =~ ^([1-9][0-9]{0,2})/([1-9][0-9]{0,2})$ ]] &&
+      (( BASH_REMATCH[1] <= BASH_REMATCH[2] && BASH_REMATCH[2] <= ${#ids[@]} )); then
+      part=${BASH_REMATCH[1]} count=${BASH_REMATCH[2]}
+    else
+      printf 'Usage: bash tests/mutations.sh [--list] [ID... | --part K/N], 1 <= K <= N <= %s\n' "${#ids[@]}" >&2
+      exit 2
+    fi
+    set --
+    for id in "${ids[@]}"; do
+      (( index++ % count + 1 != part )) || set -- "$@" "$id"
+    done
+  elif (( $# == 0 )); then
+    set -- "${ids[@]}"
+  fi
   local -A named=()
   for id in "$@"; do
     [[ -n ${file[$id]:-} ]] || { printf 'Unknown mutation: %s\n' "$id" >&2; exit 2; }
     [[ -z ${named[$id]:-} ]] || { printf 'Mutation named twice: %s\n' "$id" >&2; exit 2; }
     named[$id]=1
   done
+  if [[ $list == true ]]; then
+    printf '%s\n' "$@"
+    exit 0
+  fi
   WORK=$(mktemp -d /tmp/omasecboot-mutations.XXXXXX) || exit 2
   trap 'rm -rf "$WORK"' EXIT
   base=$WORK/base
@@ -403,6 +437,7 @@ main() {
     (cd "$ROOT_DIR" && while IFS= read -r -d '' f; do [[ ! -e $f ]] || printf '%s\0' "$f"; done) |
     tar -C "$ROOT_DIR" --null -T - -cf - | tar -C "$base" -xf - || exit 2
   jobs=$(nproc 2>/dev/null || printf '2')
+  printf 'mutations: %s of the %s listed, %s at a time\n' "$#" "${#ids[@]}" "$jobs"
   # A case that fails on the tree as it is would read as a catch.
   for suite in $(for id in "$@"; do printf '%s\n' "${expected[$id]%%/*}"; done | sort -u); do
     while (( $(jobs -rp | wc -l) >= jobs )); do wait -n; done
