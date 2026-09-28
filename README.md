@@ -158,6 +158,7 @@ make lint            # bash -n, ShellCheck and the JSONC fragment
 make test            # hermetic suites and the package build, a few minutes
 make test-mutations  # each listed safety predicate disabled in turn: its case must fail
 make test-contract   # the installed sbctl, Limine tools and findmnt against the upstream contracts, in a sandbox
+make test-replay     # the OS-file and menu-entry checks over every state the published hardware records captured
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the principles, the layout, the conventions and how changes are verified. What a release needs is in [docs/release-checklist.md](docs/release-checklist.md), open work and recheck triggers are in [docs/maintenance.md](docs/maintenance.md), and what lives on Omarchy's side is in [docs/omarchy-integration.md](docs/omarchy-integration.md).

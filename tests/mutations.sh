@@ -350,6 +350,8 @@ m F320 lib/windows.sh 1 '  if (( status < 128 && (status & 2) )) && [[ -n $signa
 m F321 lib/windows.sh 1 $'    ( trap \'\' "${HELD_SIGNALS[@]}" && set_attention "$ATTENTION_SEAL" ) || :\n' $'' windows/signal-beside-a-failed-loader-rename-is-recorded
 m F322 lib/windows.sh 1 '    fail "The loader sealed over the new limine.conf could not be put in place, and a signal' '    : "The loader sealed over the new limine.conf could not be put in place, and a signal' windows/signal-beside-a-failed-loader-rename-is-recorded
 m F323 lib/windows.sh 1 $'    ! grep -qx "trap -- \'\' SIG${signal}" <<<"$saved"; then' $'    true; then' windows/watchers-pass-builds-the-loader-after-a-failed-rename
+m F324 tests/replay-records.sh 1 '        [[ $target == "$work/esp/"* ]] || unusable' '        true || unusable' records/replay-judges-records-and-refuses-bad-ones
+m F325 tests/replay-records.sh 1 '      content=$(scan_windows_entries without 2>/dev/null) || scanned=$?' '      content=$(scan_windows_entries without 2>/dev/null) || :' records/replay-judges-records-and-refuses-bad-ones
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

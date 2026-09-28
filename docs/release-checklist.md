@@ -92,7 +92,7 @@ A release needs stages 0 to 6 on at least one machine and stage 7 on one whose k
 Every change of the tool after the records it is released on is in one of two categories, and C10 of [upstream-contracts.md](upstream-contracts.md) says which. There is no blanket waiver.
 
 - Tested against the candidate: its rows ran on the candidate commit, and their records count.
-- Deferred: verified without hardware, by its hermetic cases, its contract cases where it calls sbctl or the Limine tools, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured; [maintenance.md](maintenance.md) lists its rows as owed, closed by the next recorded run on any machine.
+- Deferred: verified without hardware, by its hermetic cases, its contract cases where it calls sbctl or the Limine tools, and for a reader of `limine.conf` a replay over every `limine.conf` the records captured (`make test-replay`); [maintenance.md](maintenance.md) lists its rows as owed, closed by the next recorded run on any machine.
 
 A change that writes boot files or changes what is signed is tested against the candidate, unless the maintainer records for that release, in C10 and the CHANGELOG, that it ships deferred.
 

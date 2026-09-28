@@ -2,7 +2,7 @@
 # What the recorder keeps out of a record, and the shareable copies of
 # records: what identifies a machine or a person is renamed the same way in
 # every record, what is the same on every machine stays, and nothing else
-# changes.
+# changes. And the replay of limine.conf checks over records.
 # shellcheck disable=SC2329 # Case functions are called through run_case.
 set -uo pipefail
 ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -192,6 +192,77 @@ nothing_to_share_is_a_usage_error() {
   (( status == 2 )) || fail_test "a missing directory: status ${status}"
 }
 
+# write_replay_record DIR [LINE]: a record of one state as the recorder writes
+# it: the EFI files it lists, LINE among them, and a limine.conf whose OS entry
+# names the kernel image.
+write_replay_record() {
+  mkdir -p "$1"
+  cat >"$1/20260102T030405Z-1-state.md" <<RECORD
+# Acceptance record 1-state
+
+## State before
+
+### EFI files
+
+\`\`\`text
+\$ bash -c find \$esp/EFI -type f -exec sha256sum {} +
+${FILE_HASH}  /boot/EFI/limine/limine_x64.efi
+${FILE_HASH}  /boot/EFI/Linux/omarchy_linux.efi
+${2:-${FILE_HASH}  /boot/EFI/BOOT/BOOTX64.EFI}
+\`\`\`
+
+### limine.conf
+
+\`\`\`text
+/+Omarchy
+    comment: Omarchy machine-id=${MACHINE_ID} order-priority=50
+    //Linux
+      protocol: efi
+      path: boot():/EFI/Linux/omarchy_linux.efi
+\`\`\`
+RECORD
+}
+
+# The replay over records passes a clean state and fails on a missing image.
+# It refuses records whose paths leave its temporary ESP, writing nothing
+# outside it, and counts a menu check that could not read limine.conf as a
+# finding, whatever it printed first.
+replay_judges_records_and_refuses_bad_ones() {
+  local replay=$ROOT_DIR/tests/replay-records.sh rc
+  mkdir -p "$FIX/tmp" "$FIX/stub"
+  printf 'keep\n' >"$FIX/tmp/sentinel"
+  write_replay_record "$FIX/clean"
+  TMPDIR=$FIX/tmp bash "$replay" "$FIX/clean" >"$FIX/run/out" 2>&1 || fail_test "a clean record failed: $(<"$FIX/run/out")"
+  [[ $(<"$FIX/run/out") == *'replay: 1 states, 1 whose OS entries'*'control: 1 of 1 states'* ]] || fail_test "clean: $(<"$FIX/run/out")"
+  write_replay_record "$FIX/missing"
+  sed -i "/^${FILE_HASH}  \/boot\/EFI\/Linux\/omarchy_linux.efi\$/d" "$FIX/missing"/*.md
+  rc=0
+  TMPDIR=$FIX/tmp bash "$replay" "$FIX/missing" >"$FIX/run/out" 2>&1 || rc=$?
+  (( rc == 1 )) && [[ $(<"$FIX/run/out") == *'MISSING'*'omarchy_linux.efi'* ]] || fail_test "a missing image, status ${rc}: $(<"$FIX/run/out")"
+  write_replay_record "$FIX/escape" "${FILE_HASH}  /boot/../../sentinel"
+  rc=0
+  TMPDIR=$FIX/tmp bash "$replay" "$FIX/escape" >"$FIX/run/out" 2>&1 || rc=$?
+  (( rc == 2 )) && [[ $(<"$FIX/run/out") == *'lies outside the ESP'* ]] || fail_test "an escaping path, status ${rc}: $(<"$FIX/run/out")"
+  [[ $(<"$FIX/tmp/sentinel") == keep ]] || fail_test "a file outside the temporary ESP was written"
+  # The menu check's awk prints what it read, then fails.
+  cat >"$FIX/stub/awk" <<'STUB'
+#!/bin/bash
+real=$(PATH=/usr/bin:/bin command -v awk)
+for argument; do
+  [[ $argument != mode=without ]] || { "$real" "$@"; exit 2; }
+done
+exec "$real" "$@"
+STUB
+  chmod 755 "$FIX/stub/awk"
+  rc=0
+  PATH=$FIX/stub:$PATH TMPDIR=$FIX/tmp bash "$replay" "$FIX/clean" >"$FIX/run/out" 2>&1 || rc=$?
+  (( rc == 1 )) && [[ $(<"$FIX/run/out") == *'COULD NOT READ'* ]] || fail_test "a menu check that failed, status ${rc}: $(<"$FIX/run/out")"
+  rc=0
+  mkdir -p "$FIX/none"
+  TMPDIR=$FIX/tmp bash "$replay" "$FIX/none" >/dev/null 2>&1 || rc=$?
+  (( rc == 2 )) || fail_test "no records, status ${rc}"
+}
+
 run_case evidence-verdict-reads-the-checkout-and-the-install evidence_verdict_reads_the_checkout_and_the_install
 run_case identifiers-are-renamed-and-the-rest-stays identifiers_are_renamed_and_the_rest_stays
 run_case originals-stay-and-a-second-run-gives-the-same-names originals_stay_and_a_second_run_gives_the_same_names
@@ -225,4 +296,5 @@ run_case only-records-are-read-and-only-copies-deleted only_records_are_read_and
 run_case recorder-keeps-control-and-raw-bytes-out recorder_keeps_control_and_raw_bytes_out
 run_case nothing-to-share-is-a-usage-error nothing_to_share_is_a_usage_error
 run_case share-replaces-only-its-own-copies share_replaces_only_its_own_copies
+run_case replay-judges-records-and-refuses-bad-ones replay_judges_records_and_refuses_bad_ones
 finish_suite
