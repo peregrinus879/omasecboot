@@ -142,7 +142,7 @@ durable_sync() {
   if [[ -e $1 ]] && path_is_on_esp "$1"; then
     _esp_sync_failed=true
     if ! set_attention "$ATTENTION_SYNC"; then
-      warn "The ESP reported a write error at ${1}, which could not be recorded in $(attention_file), so status cannot show it. Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
+      warn "The ESP reported a write error at ${1}, which could not be recorded in $(attention_file). Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
     elif incident=$(esp_incident) && [[ -n $incident ]]; then
       warn "The ESP reported a write error at ${1} (incident ${incident%% *}). Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     else
@@ -201,20 +201,57 @@ readonly ATTENTION_SYNC='the ESP reported a write error'
 
 # The lines of needs-attention, nothing when there is none, or a failure when
 # it cannot be read: what cannot be read is never taken for no finding.
+# set_attention writes lines of printable ASCII alone; any other byte, a NUL
+# among them, which Bash drops from what it captures, is judged on the raw
+# file, before it becomes a string. A file that cannot be read fails the read
+# that follows.
 attention_lines() {
-  local file
+  local file bytes
   file=$(attention_file)
   [[ -e $file || -L $file ]] || return 0
+  bytes=$(LC_ALL=C tr -d '\n -~' <"$file" 2>/dev/null | wc -c)
+  (( bytes == 0 )) || return 1
   cat -- "$file"
 }
 
-# The lines of needs-attention that are not of KIND, or a failure when it
-# cannot be read, so that no rewrite drops the lines it could not read.
+# attention_kind LINE: the kind of a line in the one form set_attention writes
+# it, or a failure for any other line. Reading, replacing and clearing share
+# this rule, so a line the reader rejects survives every rewrite.
+attention_kind() {
+  local kind rest
+  for kind in "$ATTENTION_PASS" "$ATTENTION_SEAL" "$ATTENTION_SYNC"; do
+    [[ $1 == "$kind on "* ]] || continue
+    rest=${1#"$kind on "}
+    if [[ $kind == "$ATTENTION_SYNC" ]]; then
+      [[ $rest =~ ^[^,]+,\ incident\ [0-9a-f]{12}$ ]] || return 1
+    else
+      [[ $rest =~ ^[^,]+$ ]] || return 1
+    fi
+    printf '%s\n' "$kind"
+    return 0
+  done
+  return 1
+}
+
+# The lines of needs-attention other than the findings of KIND, or a failure
+# when it cannot be read, so that no rewrite drops a line it could not read or
+# a line of any other form.
 attention_without() {
   local lines line
   lines=$(attention_lines) || return 1
   while IFS= read -r line; do
-    [[ -z $line || $line == "$1" || $line == "$1 "* ]] || printf '%s\n' "$line"
+    [[ -z $line || $(attention_kind "$line") == "$1" ]] || printf '%s\n' "$line"
+  done <<<"$lines"
+}
+
+# The findings of passes in needs-attention: the lines of their two kinds.
+pass_findings() {
+  local lines line
+  lines=$(attention_lines) || return 1
+  while IFS= read -r line; do
+    case $(attention_kind "$line") in
+      "$ATTENTION_PASS" | "$ATTENTION_SEAL") printf '%s\n' "$line" ;;
+    esac
   done <<<"$lines"
 }
 
@@ -243,18 +280,15 @@ set_attention() {
 # does not write or a second incident: a damaged line is never taken for no
 # incident.
 esp_incident() {
-  local lines line incident=''
-  local finding="^(${ATTENTION_PASS}|${ATTENTION_SEAL}) on [^,]+\$"
-  local pattern="^${ATTENTION_SYNC} on ([^,]+), incident ([0-9a-f]{12})\$"
+  local lines line kind incident=''
   lines=$(attention_lines) || return 1
   while IFS= read -r line; do
-    if [[ -z $line || $line =~ $finding ]]; then
-      continue
-    elif [[ -z $incident && $line =~ $pattern ]]; then
-      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"
-    else
-      return 1
-    fi
+    [[ -n $line ]] || continue
+    kind=$(attention_kind "$line") || return 1
+    [[ $kind == "$ATTENTION_SYNC" ]] || continue
+    [[ -z $incident ]] || return 1
+    line=${line#"$ATTENTION_SYNC on "}
+    incident="${line##*, incident } ${line%, incident *}"
   done <<<"$lines"
   [[ -z $incident ]] || printf '%s\n' "$incident"
 }

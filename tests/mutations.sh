@@ -305,20 +305,20 @@ m F273 bin/omasecboot 1 '  if [[ -n $incident ]]; then' '  if false; then' comma
 m F274 lib/status.sh 1 '  [[ -n $incident ]] || return 0' '  return 0' status/restart-warning-follows-the-boot-risk
 m F275 lib/status.sh 1 $'  fi\n  show_esp_incident\n  show_next_step' $'  fi\n  show_next_step' status/restart-warning-follows-the-boot-risk
 m F276 lib/status.sh 1 '    [[ $_status_incident == false ]] || act "Do not reboot' '    : || act "Do not reboot' windows/windows-remove-says-a-write-error
-m F277 lib/status.sh 1 '    findings=$(attention_without "$ATTENTION_SYNC")' '    findings=$(cat "$(attention_file)" 2>/dev/null)' status/restart-warning-follows-the-boot-risk
+m F277 lib/status.sh 1 '    findings=$(pass_findings) ||' '    findings=$(cat "$(attention_file)") ||' status/restart-warning-follows-the-boot-risk
 m F278 lib/sign.sh 1 '  elif [[ $startless == true ]] || { [[ $standing == true ]] && (( rc != 0 )); }; then' '  elif [[ $startless == true ]]; then' sign/unsynced-esp-is-said
 m F279 lib/sign.sh 1 '  [[ $standing == false ]] || fail "${clause^}"' '  : || fail "${clause^}"' sign/unsynced-esp-is-said
 m F281 bin/omasecboot 1 '  [[ $_esp_sync_failed == false ]] || die "The ESP reported a write error that could not be recorded.' '  : || die "The ESP reported a write error that could not be recorded.' windows/windows-remove-says-a-write-error
 m F282 lib/common.sh 1 '  if [[ -e $1 ]] && path_is_on_esp "$1"; then' '  if path_is_on_esp "$1"; then' common/only-the-esp-records-an-incident
 m F283 lib/common.sh 1 $'    fi\n  fi\n  return 1\n}' $'    fi\n  fi\n  return 0\n}' common/only-the-esp-records-an-incident
 m F284 lib/common.sh 1 'od -An -N6 -tx1 /dev/urandom |' 'printf 000000000000 |' common/needs-attention-round-trip
-m F285 lib/common.sh 2 '  lines=$(attention_lines) || return 1' '  lines=$(attention_lines) || return 0' common/unreadable-attention-is-no-absence
-m F286 lib/common.sh 1 $'      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"\n    else\n      return 1' $'      incident="${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"\n    else\n      continue' common/unreadable-attention-is-no-absence
+m F285 lib/common.sh 3 '  lines=$(attention_lines) || return 1' '  lines=$(attention_lines) || return 0' common/unreadable-attention-is-no-absence
+m F286 lib/common.sh 1 '    kind=$(attention_kind "$line") || return 1' '    kind=$(attention_kind "$line") || continue' common/unreadable-attention-is-no-absence
 m F287 lib/common.sh 1 '  cat -- "$file"' '  cat -- "$file" 2>/dev/null || :' common/unreadable-attention-is-no-absence
 m F288 lib/common.sh 1 $'  kept=$(attention_without "$1") || return 1\n  line=' $'  kept=$(attention_without "$1")\n  line=' common/unreadable-attention-is-no-absence
 m F289 lib/common.sh 1 $'  kept=$(attention_without "$1") || return 1\n  if [[ -z $kept ]]' $'  kept=$(attention_without "$1")\n  if [[ -z $kept ]]' common/unreadable-attention-is-no-absence
 m F290 lib/common.sh 1 $'esp_incident || printf \'unknown\\n\'; }' $'esp_incident || :; }' common/unreadable-attention-is-no-absence
-m F291 bin/omasecboot 1 '  if ! incident=$(esp_incident); then' '  incident=$(esp_incident); if false; then' commands/acknowledge-clears-only-the-named-incident
+m F291 bin/omasecboot 1 '  if ! incident=$(esp_incident); then' '  incident=$(esp_incident); if false; then' commands/rejected-records-survive-every-command
 m F292 bin/omasecboot 1 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident 2>/dev/null)' windows/bootnext-is-judged-by-reading-back
 m F293 bin/omasecboot 1 $'  boot_lock_acquire || exit "$?"\n  show_standing_incident\n  require_windows_target' $'  show_standing_incident\n  boot_lock_acquire || exit "$?"\n  require_windows_target' windows/bootnext-waits-for-a-writer-at-work
 m F294 lib/status.sh 1 '  incident=$(esp_incident_or_unknown)' '  incident=$(esp_incident)' status/restart-warning-follows-the-boot-risk
@@ -331,16 +331,19 @@ m F300 lib/sign.sh 3 '    incident_stops_full_pass "$scope"' '    true' sign/ful
 m F301 lib/sign.sh 4 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
 m F302 lib/sign.sh 5 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
 m F303 lib/sign.sh 6 '    incident_stops_full_pass "$scope"' '    true' sign/full-pass-says-an-incident-wherever-it-ends
-m F305 lib/common.sh 1 '    if [[ -z $line || $line =~ $finding ]]; then' '    if [[ -z $line || $line != "${ATTENTION_SYNC} "* ]]; then' common/unreadable-attention-is-no-absence
-m F306 lib/common.sh 1 '    elif [[ -z $incident && $line =~ $pattern ]]; then' '    elif [[ $line =~ $pattern ]]; then' common/unreadable-attention-is-no-absence
+m F305 lib/common.sh 1 '    [[ -z $line || $(attention_kind "$line") == "$1" ]] || printf' '    [[ -z $line || $line == "$1" || $line == "$1 "* ]] || printf' commands/rejected-records-survive-every-command
+m F306 lib/common.sh 1 '    [[ -z $incident ]] || return 1' '    :' common/unreadable-attention-is-no-absence
 m F307 lib/common.sh 1 '  [[ -e $file || -L $file ]] || return 0' '  [[ -e $file ]] || return 0' common/unreadable-attention-is-no-absence
-m F308 lib/status.sh 1 "    findings=\$(attention_without \"\$ATTENTION_SYNC\") || findings=''" '    findings=$(attention_without "$ATTENTION_SYNC")' commands/unreadable-record-is-said
+m F308 lib/status.sh 1 "    findings=\$(pass_findings) || findings=''" '    findings=$(pass_findings)' commands/unreadable-record-is-said
 m F309 lib/sign.sh 1 '    clear_attention "$ATTENTION_SEAL" || :' '    clear_attention "$ATTENTION_SEAL"' commands/unreadable-record-is-said
 m F310 lib/sign.sh 1 '    clear_attention "$ATTENTION_PASS" || :' '    clear_attention "$ATTENTION_PASS"' commands/unreadable-record-is-said
 m F311 lib/sign.sh 1 '  [[ -n $incident ]] || return 0' '  :' sign/restore-in-progress-is-left-alone
 m F312 bin/omasecboot 1 $'  is_set_up || {\n    show_standing_incident\n' $'  is_set_up || {\n' commands/remove-keeps-an-esp-incident
 m F313 bin/omasecboot 1 $'  show_standing_incident\n  require_windows_target' $'  show_standing_incident\n  boot_lock_release\n  require_windows_target' windows/bootnext-is-judged-by-reading-back
 m F314 lib/common.sh 2 '  [[ -e $file || -L $file ]] || return 0' '  [[ -e $file ]] || return 0' common/unreadable-attention-is-no-absence
+m F315 lib/common.sh 1 '  (( bytes == 0 )) || return 1' '  :' commands/rejected-records-survive-every-command
+m F316 lib/common.sh 1 '      [[ $rest =~ ^[^,]+$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
+m F317 lib/common.sh 1 '      [[ $rest =~ ^[^,]+,\ incident\ [0-9a-f]{12}$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

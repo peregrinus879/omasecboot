@@ -434,8 +434,9 @@ show_status() {
     show_windows_status
     note_windows_chainloads
     show_integration_status
-    # A record that cannot be read is show_esp_incident's to report.
-    findings=$(attention_without "$ATTENTION_SYNC") || findings=''
+    # A record that cannot be read, and a line of any other form, are
+    # show_esp_incident's to report.
+    findings=$(pass_findings) || findings=''
     [[ -z $findings ]] || problem none "An earlier pass could not finish: $(awk 'NR > 1 { printf "; " } { printf "%s", $0 }' <<<"$findings")"
   fi
   show_esp_incident

@@ -72,13 +72,14 @@ needs_attention_round_trip() {
 # write, is never taken for no incident, and no rewrite drops the lines it
 # could not read (7.3).
 unreadable_attention_is_no_absence() {
-  local before line output
+  local before line output bytes
   [[ -z $(esp_incident) ]] || fail_test "an incident without a file"
   printf '%s on a day\n%s on a day, incident 0123456789ab\n' "$ATTENTION_PASS" "$ATTENTION_SYNC" >"$(attention_file)"
   [[ $(esp_incident) == '0123456789ab a day' ]] || fail_test "a valid incident: $(esp_incident)"
   # Any line set_attention does not write, a second incident included.
   for line in "${ATTENTION_SYNC} on a day" "${ATTENTION_SYNC} on a day, incident 0123" "${ATTENTION_SYNC}" \
     " ${ATTENTION_SYNC} on a day, incident 0123456789ab" "${ATTENTION_SYNC^} on a day, incident 0123456789ab" "${ATTENTION_PASS}" 'anything' \
+    "${ATTENTION_SEAL}" "${ATTENTION_PASS} on a day, more" "${ATTENTION_SEAL} on " \
     $'the ESP reported a write error on a day, incident 0123456789ab\nthe ESP reported a write error on a day, incident ba9876543210'; do
     printf '%s\n' "$line" >"$(attention_file)"
     ! esp_incident >/dev/null || fail_test "taken for an incident or none: ${line}"
@@ -97,8 +98,24 @@ unreadable_attention_is_no_absence() {
     durable_sync "$FIX/esp" 2>&1
   ) && fail_test "a failed sync passed"
   [[ $output == *'recorded in'*'beside a line OmaSecBoot does not write'* ]] || fail_test "recorded beside a foreign line: ${output}"
-  printf '%s\n' "$ATTENTION_SYNC" >"$(attention_file)"
-  [[ -z $(attention_without "$ATTENTION_SYNC") ]] || fail_test "the kind's own damaged line was kept as another finding"
+  # A rejected line survives every rewrite, also of its own kind, and is no
+  # finding of a pass.
+  for line in "$ATTENTION_PASS" "$ATTENTION_SEAL" "$ATTENTION_SYNC" "${ATTENTION_PASS} on a day, more"; do
+    printf '%s\n' "$line" >"$(attention_file)"
+    if ! { clear_attention "$ATTENTION_PASS" && clear_attention "$ATTENTION_SEAL" && clear_attention "$ATTENTION_SYNC" && set_attention "$ATTENTION_SEAL"; }; then
+      fail_test "${line}: a rewrite failed"
+    fi
+    grep -qxF -- "$line" "$(attention_file)" || fail_test "${line}: dropped by a rewrite"
+    [[ $(pass_findings) == "${ATTENTION_SEAL} on "* ]] || fail_test "${line}: listed as a finding: $(pass_findings)"
+  done
+  # Bytes set_attention never writes, a NUL among them, which Bash would drop.
+  for bytes in '\0\0\0\0\n' '\t\n' '\xc3\xa9\n'; do
+    printf '%b' "$bytes" >"$(attention_file)"
+    cp "$(attention_file)" "$FIX/run/record"
+    [[ $(esp_incident_or_unknown) == unknown ]] || fail_test "${bytes}: not unknown"
+    ! clear_attention "$ATTENTION_PASS" || fail_test "${bytes}: rewritten"
+    cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "${bytes}: the record changed"
+  done
   rm "$(attention_file)"
   printf '%s on a day\n%s on a day, incident 0123456789ab\n' "$ATTENTION_PASS" "$ATTENTION_SYNC" >"$(attention_file)"
   before=$(<"$(attention_file)")

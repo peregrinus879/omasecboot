@@ -191,6 +191,31 @@ remove_keeps_an_esp_incident() {
   [[ $(<"$FIX/run/output") == *'stands until you acknowledge it'* && $(<"$FIX/run/output") != *'omasecboot setup'* ]] || fail_test "sign after remove: $(<"$FIX/run/output")"
 }
 
+# A record the reader rejects survives every command that rewrites the record,
+# and each command says it: status and the full pass block, the watchers' pass
+# does its own work, acknowledge refuses, and remove finishes and fails (7.3).
+rejected_records_survive_every_command() {
+  local record
+  for record in "$ATTENTION_PASS" "$ATTENTION_SEAL" "${ATTENTION_PASS} on a day, more" "$ATTENTION_SYNC" '\0\0\0\0'; do
+    rm -f "$(attention_file)"
+    run_cli setup || fail_test "${record}: setup failed: $(<"$FIX/run/output")"
+    printf '%b\n' "$record" >"$(attention_file)"
+    cp "$(attention_file)" "$FIX/run/record"
+    run_cli status && fail_test "${record}: status passed"
+    [[ $(<"$FIX/run/output") == *'holds a line OmaSecBoot does not write'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "${record}: status: $(<"$FIX/run/output")"
+    run_cli status --quiet && fail_test "${record}: a quiet status passed"
+    run_cli sign && fail_test "${record}: sign passed"
+    cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "${record}: sign changed the record"
+    run_cli sign --seal-only || fail_test "${record}: the watchers' pass failed: $(<"$FIX/run/output")"
+    cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "${record}: the watchers' pass changed the record"
+    run_cli acknowledge 0123456789ab && fail_test "${record}: acknowledged"
+    cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "${record}: acknowledge changed the record"
+    run_cli remove && fail_test "${record}: remove passed"
+    [[ ! -e $(enabled_file) ]] || fail_test "${record}: remove did not finish"
+    cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "${record}: remove changed the record"
+  done
+}
+
 # A record that cannot be read is said, never an abort under the command's
 # errexit: status and the full pass block on it, and the watchers' pass does
 # its own work (7.3).
@@ -584,6 +609,7 @@ run_case remove-returns-to-stock remove_returns_to_stock
 run_case remove-keeps-an-esp-incident remove_keeps_an_esp_incident
 run_case remove-records-a-failed-sync-of-the-loader remove_records_a_failed_sync_of_the_loader
 run_case unreadable-record-is-said unreadable_record_is_said
+run_case rejected-records-survive-every-command rejected_records_survive_every_command
 run_case setup-is-not-ready-beside-an-incident setup_is_not_ready_beside_an_incident
 run_case remove-warns-only-while-the-firmware-trusts-the-key remove_warns_only_while_the_firmware_trusts_the_key
 run_case failed-disable-is-said failed_disable_is_said
