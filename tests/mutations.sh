@@ -13,12 +13,23 @@
 # m ID FILE OCCURRENCE SEARCH REPLACEMENT SUITE/CASE: replace the
 # OCCURRENCE-th literal SEARCH in FILE (0 for every one) with REPLACEMENT.
 # Left out, because each is repeated by the code after it and disabling it
-# changes nothing: the restore check and the ESP check before the lock in
-# sign.sh, which the checks after the lock repeat (D2); the guard of an empty
-# path list in limine.sh's proof of the regenerated entries, which its loop
-# repeats (an empty string reads as one line without a hash); and the check of
-# an empty device number in common.sh's esp_mounts, which chooses the message:
-# the rule's loop refuses the empty answer that follows.
+# changes nothing:
+# - the restore check and the ESP check before the lock in sign.sh, which the
+#   checks after the lock repeat (D2);
+# - the guard of an empty path list in limine.sh's proof of the regenerated
+#   entries, which its loop repeats (an empty string reads as one line without
+#   a hash);
+# - the check of an empty device number in common.sh's esp_mounts, which
+#   chooses the message: the rule's loop refuses the empty answer that follows;
+# - the handling of a failed rename in limine.sh's install_sealed_loader,
+#   which the proof in ensure_primary_loader after it repeats (a staging file
+#   left behind is swept by the next pass);
+# - the check of limine.conf right before publication in windows.sh's
+#   write_windows_entry, which publication's own write repeats (F69);
+# - the check of the target's directory in limine.sh's prepare_sealed_loader,
+#   which mktemp repeats;
+# - the refusals of a misplaced comment and of an unreadable limine.conf in
+#   windows.sh's write_windows_entry, which the scan after them repeats.
 # shellcheck disable=SC2016 # Search and replacement are code, taken literally.
 set -uo pipefail
 ROOT_DIR=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -196,7 +207,7 @@ m F175 lib/windows.sh 1 '    trap "signal=${held}" "$held"' '    :' windows/sign
 m F176 lib/windows.sh 1 'readonly HELD_SIGNALS=(HUP INT QUIT TERM)' 'readonly HELD_SIGNALS=(INT QUIT TERM)' windows/signal-between-the-renames-leaves-a-pair
 m F177 lib/windows.sh 1 '  [[ -z $signal ]] || kill -s "$signal" "$BASHPID"' '  :' windows/signal-between-the-renames-leaves-a-pair
 m F178 lib/windows.sh 1 '      [[ $(config_checksum) == "$after" ]] || exit 1' '      exit 1' windows/publication-failures-leave-a-pair-or-say-so
-m F179 lib/windows.sh 1 '      _esp_write_unconfirmed=true' '      :' windows/publication-failures-leave-a-pair-or-say-so
+m F179 lib/windows.sh 1 '    _esp_write_unconfirmed=true' '    :' windows/publication-failures-leave-a-pair-or-say-so
 m F180 lib/sign.sh 1 'if [[ $_esp_write_unconfirmed == false ]] && durable_sync "$(esp_path)"; then' 'if [[ $_esp_write_unconfirmed == false ]]; then' sign/unsynced-esp-is-said
 m F181 lib/windows.sh 1 $'    rm -f -- "$staging"\n    warn "limine.conf changed while' $'    warn "limine.conf changed while' windows/publication-failures-leave-a-pair-or-say-so
 m F182 lib/windows.sh 1 '  [[ -z $staging ]] || rm -f -- "$staging"' '  :' windows/publication-failures-leave-a-pair-or-say-so
@@ -253,6 +264,21 @@ m F227 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_prob
 m F228 lib/status.sh 1 $'    remind_of_windows_encryption off\n    blocking_problem none "Secure Boot is on, and the Limine loader' $'    blocking_problem none "Secure Boot is on, and the Limine loader' status/signed-unsealed-loader-is-said-after-remove
 m F229 tests/lib/transcript.sh 1 $'    differences=$(compare_installed_files | grep -v \'^match: \')\n    if [[ -n $differences ]]; then' $'    if compare_installed_files | grep -qv \'^match: \'; then' records/evidence-verdict-reads-the-checkout-and-the-install
 m F230 tests/lib/transcript.sh 1 '|| [[ $(realpath -- "$top") != "$(realpath -- "$root")" ]] ||' '||' records/evidence-verdict-reads-the-checkout-and-the-install
+m F231 lib/windows.sh 1 '    [[ -z $signal ]] || ! is_set_up || set_attention "$ATTENTION_SYNC" || :' '    :' windows/signal-beside-an-unconfirmed-write-is-recorded
+m F232 lib/windows.sh 1 '        split=2' '        exit 2' windows/publication-failures-leave-a-pair-or-say-so
+m F233 lib/windows.sh 1 '  if (( status > 1 && (status & 4) )); then' '  if (( status == 4 )); then' windows/publication-failures-leave-a-pair-or-say-so
+m F234 lib/status.sh 1 '[[ -z $line ]] || blocking_problem both "limine.conf line ${line%%:*} (entry:' ': || blocking_problem both "limine.conf line ${line%%:*} (entry:' status/missing-kernel-image-blocks
+m F235 lib/status.sh 1 '[[ -z $line ]] || blocking_problem both "limine.conf line ${line%%:*} (entry:' '[[ -z $line ]] || blocking_problem on "limine.conf line ${line%%:*} (entry:' status/missing-kernel-image-blocks
+m F236 lib/sign.sh 1 '    check_os_files_exist || { rc=1 startless=true; }' '    :' status/missing-kernel-image-blocks
+m F237 lib/limine.sh 1 '    [[ -f ${esp}/${path#boot():/} ]] || printf' '    true || printf' status/missing-kernel-image-blocks
+m F238 lib/limine.sh 1 '    durable_sync "$staging" &&' '    true &&' limine/unwritten-seal-or-signature-publishes-nothing
+m F240 lib/windows.sh 1 $'      [[ $(config_checksum) == "$after" ]] || exit 1\n      unconfirmed=true' $'      [[ $(config_checksum) == "$after" ]] || exit 1\n      :' windows/publication-failures-leave-a-pair-or-say-so
+m F242 lib/windows.sh 1 'prepare_sealed_loader "$(primary_loader_path)" "$(printf' 'true "$(primary_loader_path)" "$(printf' windows/failed-preparation-changes-neither-file
+m F243 lib/windows.sh 1 '    [[ $unconfirmed == false ]] || exit $((split + 4))' '    [[ $unconfirmed == false ]] || exit 4' windows/publication-failures-leave-a-pair-or-say-so
+m F244 lib/windows.sh 1 '    grep -q " SIG${held}\$" <<<"$saved" || trap - "$held"' '    :' windows/signal-between-the-renames-leaves-a-pair
+m F245 lib/windows.sh 1 '  (( status == 0 || status == 4 ))' '  (( status == 0 ))' windows/windows-remove-says-an-unconfirmed-write
+m F246 lib/windows.sh 1 '  (( status < 128 )) || status=6' '  :' windows/killed-publication-is-taken-as-both
+m F247 lib/sign.sh 1 '    check_os_files_exist || { rc=1 startless=true; }' '    check_os_files_exist || rc=1' status/missing-kernel-image-blocks
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

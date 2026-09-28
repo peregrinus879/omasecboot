@@ -258,7 +258,7 @@ show_sbctl_rows_status() {
 # Path hashes of OS entries that no longer match, and the snapshot images
 # from before setup, which are upstream's and stay unsigned (D5).
 show_path_hash_status() {
-  local stale kind line file old_snapshots=0 unread_snapshots=0
+  local stale kind line file missing old_snapshots=0 unread_snapshots=0
   if stale=$(list_stale_os_hashes); then
     while IFS=$'\t' read -r kind line; do
       [[ -n $line ]] || continue
@@ -270,6 +270,15 @@ show_path_hash_status() {
     done <<<"$stale"
   else
     blocking_problem on "Could not check the path hashes in limine.conf; look at its entries"
+  fi
+
+  # A file an OS entry names and the ESP lacks stops that entry with Secure
+  # Boot on or off, and neither sign nor setup builds it. A limine.conf
+  # that cannot be read is said by the loader's section.
+  if missing=$(list_missing_os_files 2>/dev/null); then
+    while IFS= read -r line; do
+      [[ -z $line ]] || blocking_problem both "limine.conf line ${line%%:*} (entry: $(entry_title_for_line "${line%%:*}")) names a file the ESP does not hold: ${line#*: }. Run ${BOLD}sudo limine-update${NC}, which builds it again"
+    done <<<"$missing"
   fi
 
   while IFS= read -r file; do

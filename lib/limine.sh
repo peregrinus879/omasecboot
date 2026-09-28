@@ -492,6 +492,27 @@ list_generated_os_paths() {
   ' "$config"
 }
 
+# The files that the OS entries limine-entry-tool writes name under boot():/
+# and the ESP does not hold, as "line: value". Such an entry starts with
+# Secure Boot neither on nor off: an image deleted by hand, or lost to a copy
+# that failed, leaves one so. A path under
+# another resource names a volume only the firmware resolves (C1), and a "$"
+# before the resource only marks a compressed file. Status 1: limine.conf
+# cannot be read.
+list_missing_os_files() {
+  local paths line path esp
+  paths=$(list_generated_os_paths) || return 1
+  esp=$(esp_path) || return 1
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    path=${line#*: }
+    path=${path%%#*}
+    path=${path#\$}
+    [[ $path == 'boot():/'* ]] || continue
+    [[ -f ${esp}/${path#boot():/} ]] || printf '%s\n' "$line"
+  done <<<"$paths"
+}
+
 # The rebuild remove asks of limine-mkinitcpio, proved by what it writes:
 # under the stock settings each path of its OS entries carries a hash, and a
 # build that failed without saying so (C2) leaves the entries from before,

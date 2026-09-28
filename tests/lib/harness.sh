@@ -229,6 +229,12 @@ comment: order-priority=10
 protocol: efi
 path: boot():/EFI/BOOT/BOOTX64.EFI
 EOF
+  # Both kernels' images stand on the ESP, each signed as the mkinitcpio hook
+  # builds it (C2).
+  [[ -e $FIX/esp/EFI/Linux/omarchy_linux-omarchy.efi ]] || {
+    write_uki "$FIX/esp/EFI/Linux/omarchy_linux-omarchy.efi" linux-omarchy
+    printf '%s' "$FIXTURE_SIGNATURE" >>"$FIX/esp/EFI/Linux/omarchy_linux-omarchy.efi"
+  }
 }
 
 set_mode_variable() { printf '%b' "\\x06\\x00\\x00\\x00\\x0$2" >"$FIX/efivars/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"; }
@@ -415,18 +421,18 @@ fixture_overrides() {
   # pass goes on without the Windows entry, as converge_windows_entry does then.
   [[ ! -e $FIX/run/pass-cannot-read-the-boot-entries ]] || converge_windows_entry() { :; }
   durable_sync() { :; }
-  # A lever for the cases that signal a command between the two renames of
-  # limine.conf and the loader: the sync of the ESP's root takes two seconds.
-  # Each sync of the ESP's root leaves a mark in run/esp-syncs first.
-  [[ ! -e $FIX/run/esp-sync-is-slow ]] || durable_sync() {
+  # Levers for a sync of the ESP's root, in a command run as its own process:
+  # it takes two seconds, for the cases that signal a command between the two
+  # renames of limine.conf and the loader, leaving a mark in run/esp-syncs
+  # first, and failing when a signal ends it, as a sync the signal killed; or
+  # it fails once; or both.
+  [[ ! -e $FIX/run/esp-sync-is-slow && ! -e $FIX/run/esp-sync-fails-once ]] || durable_sync() {
     [[ $1 == "$FIX/esp" ]] || return 0
-    printf x >>"$FIX/run/esp-syncs"
-    sleep 2
-  }
-  # A lever for a sync of the ESP's root that fails once, in a command run as
-  # its own process.
-  [[ ! -e $FIX/run/esp-sync-fails-once ]] || durable_sync() {
-    [[ $1 == "$FIX/esp" && -e $FIX/run/esp-sync-fails-once ]] || return 0
+    if [[ -e $FIX/run/esp-sync-is-slow ]]; then
+      printf x >>"$FIX/run/esp-syncs"
+      sleep 2 || return 1
+    fi
+    [[ -e $FIX/run/esp-sync-fails-once ]] || return 0
     rm -f "$FIX/run/esp-sync-fails-once"
     return 1
   }

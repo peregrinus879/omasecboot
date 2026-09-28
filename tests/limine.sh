@@ -183,6 +183,13 @@ unwritten_seal_or_signature_publishes_nothing() {
     [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "${flag}: a staging file was left on the ESP"
     rm "$FIX/run/${flag}"
   done
+  # The staged copy is sealed and signed, but its sync fails: a copy the ESP
+  # did not confirm is never renamed over the primary.
+  durable_sync() { [[ ${1##*/} != "$LOADER_STAGING_PREFIX"* ]]; }
+  ! ensure_primary_loader >/dev/null 2>&1 || fail_test "a staged copy the ESP did not confirm passed"
+  cmp -s "$(primary_loader_path)" "$before" || fail_test "a staged copy the ESP did not confirm replaced the primary"
+  [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "a staging file was left after its failed sync"
+  durable_sync() { :; }
 }
 
 # Left behind by a pass that was killed; ESP space is scarce.

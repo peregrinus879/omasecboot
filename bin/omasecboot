@@ -371,7 +371,7 @@ cmd_remove() {
   # Only now: the loader is proved raw, so limine.conf may change under it.
   write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path); the warning above says what to change by hand, then run this again"
   # shellcheck disable=SC2154 # _esp_write_unconfirmed belongs to lib/sign.sh.
-  [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path); check the ESP, then run this again"
+  [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path), and a later sync cannot prove it: do not reboot before you have checked the ESP (the kernel log names the error)"
   rm -f -- "$(windows_flag)"
   clear_attention
   rm -f -- "$(settings_originals_file)"
@@ -494,7 +494,7 @@ cmd_windows_remove() {
       die "The Limine loader is sealed over the current limine.conf, or cannot be read, and nothing would seal it again. Run ${BOLD}sudo omasecboot remove${NC} or ${BOLD}sudo omasecboot setup${NC} first"
     write_windows_entry || die "Could not take the Windows entry out of $(limine_config_path)"
     # shellcheck disable=SC2154 # _esp_write_unconfirmed belongs to lib/sign.sh.
-    [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path); check the ESP, then run this again"
+    [[ $_esp_write_unconfirmed == false ]] || die "The ESP did not confirm the write of $(limine_config_path), and a later sync cannot prove it: do not reboot before you have checked the ESP (the kernel log names the error)"
     rm -f -- "$(windows_flag)"
     boot_lock_release
   fi

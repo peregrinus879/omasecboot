@@ -1,8 +1,9 @@
 #!/bin/bash
 # The package under real pacman, in a disposable Arch container: what a machine
 # that never runs "setup" gets. The files, no state, a dormant hook that costs
-# nothing, no pacman hooks, an upgrade, and a removal that leaves the state
-# directory alone. It installs and removes packages on the running system, so
+# nothing, no pacman hooks, an upgrade that speaks only on a machine that is
+# set up and whose ESP fails the mount rule, and a removal that leaves the
+# state directory alone. It installs and removes packages on the running system, so
 # it refuses to run unless a throwaway container job declares itself with
 # OMASECBOOT_DISPOSABLE_ROOT=1. Never run it on a real machine.
 set -euo pipefail
@@ -92,6 +93,15 @@ logged "$build/unrelated.log" "an unrelated transaction failed" pacman -S --noco
 ! grep -qi omasecboot "$build/unrelated.log" || fail_test "this package took part in an unrelated transaction"
 
 logged "$build/upgrade.log" "package upgrade failed" pacman -U --noconfirm "${assume[@]}" "$upgrade"
+! grep -q 'seals and signs nothing' "$build/upgrade.log" || fail_test "the upgrade spoke on a machine that is not set up"
+# After an upgrade on a machine that is set up, the installed library's rule
+# judges the ESP's mount, run as pacman runs the scriptlet; this container
+# has no ESP to read, which counts as a mount others may write.
+install -d "$state"
+: >"$state/enabled"
+logged "$build/reinstall.log" "package reinstall failed" pacman -U --noconfirm "${assume[@]}" "$upgrade"
+grep -q 'seals and signs nothing' "$build/reinstall.log" || fail_test "the upgrade said nothing on a set-up machine whose ESP cannot be read"
+rm "$state/enabled"
 
 # Removal leaves the state directory: it would hold the firmware backups. From
 # a machine that is still set up it says what that means, and goes through.

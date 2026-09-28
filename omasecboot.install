@@ -16,3 +16,18 @@ pre_remove() {
     off: BitLocker can ask for it then.
 NOTICE
 }
+
+# pacman runs this after it upgrades the package. On a machine that is set up
+# with an ESP that users other than root can write, every pass seals and signs
+# nothing (docs/spec.md, failure table), so it is told, by the installed
+# library's own rule; a rule that cannot run counts as a mount it cannot read.
+# This only prints: it never fails and changes nothing.
+post_upgrade() {
+  [[ -e /var/lib/omasecboot/enabled ]] || return 0
+  ! bash -c 'source /usr/lib/omasecboot/common.sh && esp_mount_is_safe' >/dev/null 2>&1 || return 0
+  cat <<'NOTICE'
+==> OmaSecBoot seals and signs nothing on this machine until the mount of
+    its EFI system partition shows that only root can write it.
+    "sudo omasecboot status" says what to change.
+NOTICE
+}

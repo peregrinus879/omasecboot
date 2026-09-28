@@ -331,6 +331,56 @@ entry_problems_are_reported_not_failed() {
   (( rc == 1 )) || fail_test "the guard's status for unreadable entries: ${rc}"
 }
 
+# A publication killed outright, as SIGKILL or a crash would end it, tells
+# nothing of what reached the ESP: it is taken as both a loader that did not
+# follow and a write the ESP did not confirm, and the pass says and records so.
+killed_publication_is_taken_as_both() {
+  local output
+  set_up_with_windows
+  windows_change_to_make added
+  # The loader's rename runs in the publication's own subshell.
+  mv() {
+    [[ ${*: -1} != "$(primary_loader_path)" || -e $FIX/run/publication-killed ]] || {
+      : >"$FIX/run/publication-killed"
+      kill -KILL "$BASHPID"
+    }
+    command mv "$@"
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a killed publication passed"
+  unset -f mv
+  [[ -e $FIX/run/publication-killed ]] || fail_test "the publication was never killed: ${output}"
+  [[ $output == *'The ESP did not confirm the new limine.conf'*'could not be put in place; the pass builds it again'* ]] || fail_test "report: ${output}"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded: $(cat "$(attention_file)" 2>&1)"
+}
+
+# A held signal and a sync that fails at the same time: the write the ESP did
+# not confirm is said and recorded before the signal ends the command, and
+# status blocks on it (7.3).
+signal_beside_an_unconfirmed_write_is_recorded() {
+  local pid rc
+  set_up_with_windows
+  windows_change_to_make added
+  rm "$(windows_flag)"
+  : >"$FIX/run/esp-sync-is-slow"
+  : >"$FIX/run/esp-sync-fails-once"
+  ROOT_DIR=$ROOT_DIR setsid env --default-signal=TERM,INT,HUP bash -c "$CLI_PROCESS" omasecboot windows setup >"$FIX/run/output" 2>&1 &
+  pid=$!
+  for _ in {1..100}; do
+    [[ $(entry_count) != 1 ]] || break
+    sleep 0.05
+  done
+  [[ $(entry_count) == 1 ]] || fail_test "the rename of limine.conf never came"
+  kill -s TERM -- -"$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  rm -f "$FIX/run/esp-sync-is-slow" "$FIX/run/esp-sync-fails-once"
+  (( rc == 143 )) || fail_test "the command ended with ${rc}, not on the signal: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'The ESP did not confirm the new limine.conf'* ]] || fail_test "not said: $(<"$FIX/run/output")"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "not recorded: $(cat "$(attention_file)" 2>&1)"
+  run_cli status && fail_test "status passed over a write the ESP did not confirm"
+  [[ $(<"$FIX/run/output") == *'the ESP did not confirm a write'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
+}
+
 # Windows was removed, or a second entry appeared: Omarchy still boots, so the
 # pass goes on quietly and the report names the way out.
 lost_target_is_left_to_the_report() {
@@ -571,6 +621,30 @@ publication_failures_leave_a_pair_or_say_so() {
   durable_sync() { :; }
   sign_boot_files >/dev/null 2>&1 || fail_test "the pass after the ESP synced again"
   [[ ! -e $(attention_file) ]] || fail_test "a pass that synced the ESP kept: $(<"$(attention_file)")"
+  # Both at once: the sync after limine.conf's rename fails, then the loader's
+  # rename. The pass builds the loader again and still says, and records, the
+  # write the ESP did not confirm.
+  windows_change_to_make added
+  durable_sync() {
+    if [[ $1 == "$FIX/esp" && ! -e $FIX/run/sync-failed-again ]]; then
+      : >"$FIX/run/sync-failed-again"
+      return 1
+    fi
+  }
+  mv() {
+    if [[ ${*: -1} == "$(primary_loader_path)" && ! -e $FIX/run/mv-failed-again ]]; then
+      : >"$FIX/run/mv-failed-again"
+      return 1
+    fi
+    command mv "$@"
+  }
+  output=$(sign_boot_files 2>&1) && fail_test "a write the ESP did not confirm passed beside a failed rename"
+  unset -f mv
+  [[ $output == *'The ESP did not confirm the new limine.conf'*'could not be put in place; the pass builds it again'*'The ESP did not confirm a write'* ]] || fail_test "both at once: ${output}"
+  { [[ $(entry_count) == 1 ]] && loader_is_sealed_and_signed "$(primary_loader_path)"; } || fail_test "the pair after both at once"
+  grep -q "^${ATTENTION_SYNC} on " "$(attention_file)" || fail_test "needs-attention after both at once: $(cat "$(attention_file)" 2>&1)"
+  durable_sync() { :; }
+  sign_boot_files >/dev/null 2>&1 || fail_test "the pass after both at once"
 }
 
 # A signal to the whole process group between the two renames: both are made,
@@ -976,6 +1050,8 @@ run_case windows-setup-needs-a-machine-that-is-set-up windows_setup_needs_a_mach
 run_case failed-preparation-changes-neither-file failed_preparation_changes_neither_file
 run_case publication-failures-leave-a-pair-or-say-so publication_failures_leave_a_pair_or_say_so
 run_case signal-between-the-renames-leaves-a-pair signal_between_the_renames_leaves_a_pair
+run_case signal-beside-an-unconfirmed-write-is-recorded signal_beside_an_unconfirmed_write_is_recorded
+run_case killed-publication-is-taken-as-both killed_publication_is_taken_as_both
 run_case watchers-pass-keeps-ignoring-term watchers_pass_keeps_ignoring_term
 run_case windows-remove-says-an-unconfirmed-write windows_remove_says_an_unconfirmed_write
 run_case chainloads-are-listed-as-upstream-names-them chainloads_are_listed_as_upstream_names_them

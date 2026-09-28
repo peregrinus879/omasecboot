@@ -303,9 +303,11 @@ readonly HELD_SIGNALS=(HUP INT QUIT TERM)
 # and acts on it once both are in place, and the watchers' pass keeps ignoring
 # TERM (D8). SIGKILL, power loss or a failed rename between the two can still
 # split them (section 7.3): the loader then refuses the new file. Status 1:
-# nothing changed. 2: limine.conf changed and the loader did not. 3:
-# limine.conf changed, and the loader with it where one was staged, and a sync
-# did not confirm it.
+# nothing changed. Otherwise the sum of what went wrong, each on its own: 2,
+# limine.conf changed and the staged loader did not follow; 4, a sync did not
+# confirm a write. A write the ESP did not confirm is this function's to say:
+# it sets _esp_write_unconfirmed, says so, and, before a held signal ends the
+# command, records it under the lock, as the pass would at its end (7.3).
 publish_limine_conf() {
   local config=$1 mode=$2 before=$3 content=$4 staging=${5:-} status=0 signal='' saved held
   saved=$(trap -p "${HELD_SIGNALS[@]}")
@@ -322,11 +324,16 @@ publish_limine_conf() {
       [[ $(config_checksum) == "$after" ]] || exit 1
       unconfirmed=true
     fi
+    split=0
     if [[ -n $staging ]]; then
-      mv -f -- "$staging" "$(primary_loader_path)" || exit 2
-      durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true
+      if mv -f -- "$staging" "$(primary_loader_path)"; then
+        durable_sync "$(dirname "$(primary_loader_path)")" || unconfirmed=true
+      else
+        split=2
+      fi
     fi
-    [[ $unconfirmed == false ]] || exit 3
+    [[ $unconfirmed == false ]] || exit $((split + 4))
+    exit "$split"
   ) || status=$?
   # Back to exactly what was there: a signal the shell ignored stays ignored
   # throughout, and one it did not goes back to its default.
@@ -335,6 +342,16 @@ publish_limine_conf() {
   done
   eval "$saved"
   [[ -z $staging ]] || rm -f -- "$staging"
+  # A signal that reached the subshell before it ignored the held ones ended
+  # it with 128 and the signal's number: nothing is known, so both.
+  (( status < 128 )) || status=6
+  if (( status > 1 && (status & 4) )); then
+    # shellcheck disable=SC2034 # lib/sign.sh and the commands read it.
+    _esp_write_unconfirmed=true
+    warn "The ESP did not confirm the new limine.conf"
+    # Nothing after the signal would record it. is_set_up is lib/status.sh's.
+    [[ -z $signal ]] || ! is_set_up || set_attention "$ATTENTION_SYNC" || :
+  fi
   [[ -z $signal ]] || kill -s "$signal" "$BASHPID"
   return "$status"
 }
@@ -400,20 +417,14 @@ write_windows_entry() {
     return 1
   }
   publish_limine_conf "$config" "$mode" "$before" "$content" "$staging" || status=$?
-  case $status in
-    0) ;;
-    1) warn "limine.conf changed while the Windows entry was being written; the next pass writes it" ;;
-    2) warn "limine.conf holds the new Windows entry, but the loader sealed over it could not be put in place; the pass builds it again" ;;
-    *)
-      # Written, but not confirmed: the pass, or the command that asked for
-      # the write, says so (section 7.3).
-      # shellcheck disable=SC2034 # lib/sign.sh and the commands read it.
-      _esp_write_unconfirmed=true
-      warn "The ESP did not confirm the new limine.conf"
-      return 0
-      ;;
-  esac
-  (( status == 0 ))
+  # A write the ESP did not confirm, alone, is a write: the pass, or the
+  # command that asked for it, says so (section 7.3).
+  if (( status == 1 )); then
+    warn "limine.conf changed while the Windows entry was being written; the next pass writes it"
+  elif (( status & 2 )); then
+    warn "limine.conf holds the new Windows entry, but the loader sealed over it could not be put in place; the pass builds it again"
+  fi
+  (( status == 0 || status == 4 ))
 }
 
 # Inside every pass, before the loader is sealed: the entry is in limine.conf

@@ -1,12 +1,12 @@
 # Omarchy integration
 
-What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. The package itself is complete without any of it.
+What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy. The package itself is complete without any of it. [maintenance.md](maintenance.md) marks the open work that must close before that delivery.
 
 ## What Omarchy's side would add
 
 | Piece | Shape |
 | --- | --- |
-| Package recipe | One recipe in omarchy-pkgs for the tagged release, pinning the archive checksum and carrying `omasecboot.install`, which only prints a warning before removal from a machine that is set up. `arch=any`, no patched upstream packages, no version pins. A watch, as omarchy-pkgs asks of every new package (its `docs/upstream-sources.md`): `github` `peregrinus879/omasecboot` with the pattern `v(?P<version>[0-9]+(?:\.[0-9]+)*)`, so every published release, drafts and prereleases excepted, becomes a new version of the recipe. |
+| Package recipe | One recipe in omarchy-pkgs for the tagged release, pinning the archive checksum and carrying `omasecboot.install`, which only prints: a warning before removal from a machine that is set up, and one after an upgrade on a machine that is set up whose ESP fails the mount rule. `arch=any`, no patched upstream packages, no version pins. A watch, as omarchy-pkgs asks of every new package (its `docs/upstream-sources.md`): `github` `peregrinus879/omasecboot` with the pattern `v(?P<version>[0-9]+(?:\.[0-9]+)*)`, so every published release, drafts and prereleases excepted, becomes a new version of the recipe. |
 | Offline package list | `omasecboot` and `sbctl` in the list the ISO builder reads (`install/omarchy-other.packages`), once the package resolves from a repository. |
 | Setup command | `omarchy-setup-security-secure-boot`: installs the package, then runs `sudo omasecboot setup`, which the user runs again after each firmware step it asks for; the menu row starts it again. Follows the `omarchy-setup-security-fido2` pattern. |
 | Remove command | `omarchy-remove-security-secure-boot`: runs `sudo omasecboot remove`, which refuses while Secure Boot is on and reminds of Windows' recovery key there, then removes the package, and keeps `remove`'s closing note in view, the only place left to say when Secure Boot must stay off. |

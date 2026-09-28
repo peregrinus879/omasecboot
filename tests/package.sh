@@ -22,8 +22,9 @@ pkgver=$(sed -n 's/^pkgver=//p' "$pkgbuild")
 grep -Fxq "arch=('any')" "$pkgbuild" || fail_test "an interpreted package must be architecture any"
 grep -Fxq "license=('MIT')" "$pkgbuild" || fail_test "license"
 # No backup files, no relations: everything outside the package's own files
-# is the work of the tool's commands. The one scriptlet only prints, before a
-# removal from a machine that is still set up.
+# is the work of the tool's commands. The one scriptlet only prints: before a
+# removal from a machine that is still set up, and after an upgrade on one
+# whose ESP users other than root can write.
 ! grep -Eq '^(backup|conflicts|provides|replaces|makedepends|checkdepends|optdepends)=' "$pkgbuild" ||
   fail_test "PKGBUILD declares an unexpected relation"
 grep -Fxq 'install=omasecboot.install' "$pkgbuild" || fail_test "the PKGBUILD does not name the scriptlet"
@@ -32,7 +33,8 @@ grep -Fxq "options=('docs' '!debug')" "$pkgbuild" || fail_test "the recipe no lo
 pkgdesc=$(sed -n "s/^pkgdesc='\\(.*\\)'\$/\\1/p" "$pkgbuild")
 { [[ -n $pkgdesc ]] && (( ${#pkgdesc} <= 80 )); } || fail_test "pkgdesc is missing or longer than 80 characters: ${#pkgdesc}"
 scriptlet=$ROOT_DIR/omasecboot.install
-{ [[ $(grep -c '^[a-z_]*() {$' "$scriptlet") == 1 ]] && grep -qx 'pre_remove() {' "$scriptlet"; } || fail_test "the scriptlet defines more than pre_remove"
+{ [[ $(grep -c '^[a-z_]*() {$' "$scriptlet") == 2 ]] && grep -qx 'pre_remove() {' "$scriptlet" && grep -qx 'post_upgrade() {' "$scriptlet"; } ||
+  fail_test "the scriptlet defines other than pre_remove and post_upgrade"
 mkdir -p "$TEST_DIR/state"
 # shellcheck source=omasecboot.install
 notice() { (source <(sed "s|/var/lib/omasecboot|$TEST_DIR/state|" "$scriptlet") && pre_remove 1.0-1); }
@@ -41,6 +43,22 @@ notice() { (source <(sed "s|/var/lib/omasecboot|$TEST_DIR/state|" "$scriptlet") 
 output=$(notice) || fail_test "the scriptlet failed, which would fail the removal"
 [[ $output == *'still set up'*'with Secure Boot on'*'or off'*'sudo omasecboot remove'* ]] || fail_test "the notice: ${output}"
 [[ $(find "$TEST_DIR/state" -type f | wc -l) == 1 ]] || fail_test "the scriptlet changed the state directory"
+# After an upgrade it asks the installed library's mount rule, here a stand-in,
+# and speaks only on a machine that is set up and fails it, or where the rule
+# cannot run.
+# shellcheck source=omasecboot.install
+upgraded() { (source <(sed -e "s|/var/lib/omasecboot|$TEST_DIR/state|" -e "s|/usr/lib/omasecboot/common.sh|$TEST_DIR/rule.sh|" "$scriptlet") && post_upgrade 1.1-1 1.0-1); }
+printf 'esp_mount_is_safe() { return 0; }\n' >"$TEST_DIR/rule.sh"
+output=$(upgraded) || fail_test "the upgrade's scriptlet failed on a safe mount"
+[[ -z $output ]] || fail_test "the upgrade's scriptlet spoke on a safe mount: ${output}"
+for rule in 'esp_mount_is_safe() { return 1; }' ''; do
+  printf '%s\n' "$rule" >"$TEST_DIR/rule.sh"
+  output=$(upgraded) || fail_test "the upgrade's scriptlet failed, rule '${rule}'"
+  [[ $output == *'seals and signs nothing'*'shows that only root can write it'*'"sudo omasecboot status" says what to change'* ]] || fail_test "the upgrade's notice, rule '${rule}': ${output}"
+done
+rm "$TEST_DIR/state/enabled"
+[[ -z $(upgraded) ]] || fail_test "the upgrade's scriptlet spoke on a machine that is not set up"
+: >"$TEST_DIR/state/enabled"
 
 expected_depends=$(sort <<'DEPENDS'
 bash

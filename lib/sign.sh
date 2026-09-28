@@ -131,6 +131,19 @@ sign_unsigned_arrivals() {
   return "$failed"
 }
 
+# A file that an OS entry names and the ESP lacks stops that entry, with
+# Secure Boot on or off; limine-update builds it again.
+check_os_files_exist() {
+  local missing line failed=0
+  missing=$(list_missing_os_files) || return 1
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    fail "limine.conf line ${line%%:*} names a file the ESP does not hold: ${line#*: }. Run ${BOLD}sudo limine-update${NC} before a restart"
+    failed=1
+  done <<<"$missing"
+  return "$failed"
+}
+
 # A stale hash stops its OS entry once Secure Boot is on, and only
 # limine-mkinitcpio can rewrite it, which setup runs. A hash under a resource
 # other than boot():/ names a volume only the firmware resolves (C1): it is
@@ -157,7 +170,7 @@ _esp_write_unconfirmed=false
 # seal-only is the watchers' pass: it starts when a running pacman is done and
 # stops after the loader proof, because the watchers' job is the seal.
 sign_boot_files() {
-  local scope=${1:-full} rc=0 sealed=true synced=true unsafe
+  local scope=${1:-full} rc=0 sealed=true synced=true startless=false unsafe
   _esp_write_unconfirmed=false
   if restore_in_progress; then
     qnote "A snapshot restore is running; leaving the boot files to it"
@@ -213,6 +226,7 @@ sign_boot_files() {
     fi
     sign_unsigned_arrivals || rc=1
     check_os_path_hashes || rc=1
+    check_os_files_exist || { rc=1 startless=true; }
     watch_is_active || enable_watch || {
       fail "Could not enable the watchers of limine.conf and the loader (without a running systemd, as inside a chroot, the first pass after a boot enables them)"
       rc=1
@@ -245,7 +259,11 @@ sign_boot_files() {
     fail "The Limine loader is not sealed over the current limine.conf. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     return 1
   elif [[ $synced == false ]]; then
-    fail "The ESP did not confirm a write, so a restart may not find the boot files as they are now. Do not reboot, with Secure Boot on or off, until ${BOLD}sudo omasecboot sign${NC} finishes cleanly"
+    fail "The ESP did not confirm a write, so a restart may not find the boot files as they are now. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
+    return 1
+  elif [[ $startless == true ]]; then
+    # An OS entry without its file starts with Secure Boot neither on nor off.
+    fail "OmaSecBoot could not finish. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     return 1
   elif (( rc != 0 )); then
     fail "OmaSecBoot could not finish. Do not reboot with Secure Boot on; run ${BOLD}sudo omasecboot status${NC}"

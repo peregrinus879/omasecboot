@@ -47,7 +47,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 - Prompts need a terminal and say what was cancelled.
 - Commands in the documents are pasted into Omarchy's interactive shell, which aliases `ls` to `eza` and `cd` to a function of its own. Where an option means something else there, as `ls -t` does, write `command ls`; try a documented command in that shell, not in a script.
 - In a step-by-step procedure, a step that restarts the machine gives the command, `systemctl reboot` or `systemctl reboot --firmware-setup`, not the word alone.
-- Stubs in the harness cite the contract section they model or, for a tool no contract covers, that tool's own documentation, or are marked as an assumption. Results are asserted independently of the function under test. A safety predicate has a case that fails when the predicate is disabled, and an entry in `tests/mutations.sh` that proves it.
+- Stubs in the harness cite the contract section they model or, for a tool no contract covers, that tool's own documentation, or are marked as an assumption. Results are asserted independently of the function under test. A safety predicate needs a case that fails when the predicate is disabled, and an entry in `tests/mutations.sh` that proves it; what the list does not name is not proved by it.
 
 ## Verification
 

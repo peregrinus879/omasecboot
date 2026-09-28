@@ -16,9 +16,10 @@ cd "$ROOT_DIR" || exit 1
 
 readonly PAGES=(README.md AGENTS.md CONTRIBUTING.md SECURITY.md CHANGELOG.md docs/*.md)
 readonly FORMS=(.github/ISSUE_TEMPLATE/*.yml)
-readonly TOOL=(bin/omasecboot lib/*.sh)
+# What prints to the user: the commands and the package's scriptlet.
+readonly TOOL=(bin/omasecboot lib/*.sh omasecboot.install)
 # This file holds the broken references it plants, so it is not read.
-SOURCES=("${TOOL[@]}" limine/90-omasecboot-sign systemd/* omasecboot.install PKGBUILD Makefile tests/lib/*.sh)
+SOURCES=("${TOOL[@]}" limine/90-omasecboot-sign systemd/* PKGBUILD Makefile tests/lib/*.sh)
 for suite in tests/*.sh; do
   [[ $suite == tests/documents.sh ]] || SOURCES+=("$suite")
 done

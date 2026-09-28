@@ -134,6 +134,24 @@ limine_conf_without_entries_blocks() {
   [[ $output == *"✗ Could not read $(limine_config_path), which Limine starts from"*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "no file: ${output}"
 }
 
+# A kernel image that Omarchy's OS entry names and the ESP lacks stops that
+# entry with Secure Boot on or off: the report blocks on it and names
+# upstream's rebuild, and the pass fails on it (C2). Snapshot entries and a
+# path under another resource are not judged here.
+missing_kernel_image_blocks() {
+  local output
+  set_up_machine
+  write_omarchy_limine_conf
+  QUIET=true sign_boot_files || fail_test "the pass over the real shape"
+  output=$(show_status 2>&1) || fail_test "the real shape failed the report: ${output}"
+  rm "$FIX/esp/EFI/Linux/omarchy_linux-omarchy.efi"
+  output=$(show_status 2>&1) && fail_test "a missing kernel image passed"
+  [[ $output == *"(entry: linux-omarchy) names a file the ESP does not hold: boot():/EFI/Linux/omarchy_linux-omarchy.efi. Run sudo limine-update"*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "report: ${output}"
+  [[ $output != *'omarchy_linux.efi. Run'* ]] || fail_test "a kernel image that stands was named: ${output}"
+  output=$(sign_boot_files 2>&1) && fail_test "the pass passed over a missing kernel image"
+  [[ $output == *'names a file the ESP does not hold: boot():/EFI/Linux/omarchy_linux-omarchy.efi'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "pass: ${output}"
+}
+
 # Only limine-mkinitcpio rewrites a path hash, and setup runs it; "sign" would
 # be the wrong advice.
 stale_os_hash_needs_setup() {
@@ -417,6 +435,7 @@ run_case problems-set-exit-status problems_set_exit_status
 run_case sign-repairs-these sign_repairs_these
 run_case restart-warning-follows-the-boot-risk restart_warning_follows_the_boot_risk
 run_case limine-conf-without-entries-blocks limine_conf_without_entries_blocks
+run_case missing-kernel-image-blocks missing_kernel_image_blocks
 run_case stale-os-hash-needs-setup stale_os_hash_needs_setup
 run_case harmful-sbctl-rows-need-setup harmful_sbctl_rows_need_setup
 run_case blocking-problems-name-no-repair-command blocking_problems_name_no_repair_command
