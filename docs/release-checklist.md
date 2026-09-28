@@ -111,6 +111,6 @@ Delivery through Omarchy follows a tag and does not gate it: [omarchy-integratio
 ## After the tag
 
 - The tag never moves: its archive's checksum is pinned downstream, and a mistake ships as a new version.
-- `main` keeps the last release's version while it holds changes after the tag, which `CHANGELOG.md` collects under "Unreleased". A build from `main`, or from a modified checkout of a tag, is a development build, known by its commit and not by its version; release packages come from the tag's archive.
+- `main` keeps the last release's version while it holds changes after the tag; `CHANGELOG.md` collects those that reach someone who runs the tool under "Unreleased". A build from `main`, or from a modified checkout of a tag, is a development build, known by its commit and not by its version; release packages come from the tag's archive.
 - The candidate commit of the next release sets `pkgver` and `OMASECBOOT_VERSION` before its checks and hardware rows, because the tag's conditions compare `lib/` between the records and the tag; a candidate that fails is fixed under the same version and checked again.
 - The README's install line and the field guide's clone name the release. The operator pages on `main` describe `main`; a tester follows the pages of the checkout of the tag.
