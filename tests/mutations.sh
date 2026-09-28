@@ -344,6 +344,7 @@ m F314 lib/common.sh 2 '  [[ -e $file || -L $file ]] || return 0' '  [[ -e $file
 m F315 lib/common.sh 1 '  (( bytes == 0 )) || return 1' '  :' commands/rejected-records-survive-every-command
 m F316 lib/common.sh 1 '      [[ $rest =~ ^[^,]+$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
 m F317 lib/common.sh 1 '      [[ $rest =~ ^[^,]+,\ incident\ [0-9a-f]{12}$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
+m F318 lib/common.sh 1 ' | wc -c) || return 1' ' | wc -c)' common/unreadable-attention-is-no-absence
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

@@ -203,13 +203,13 @@ readonly ATTENTION_SYNC='the ESP reported a write error'
 # it cannot be read: what cannot be read is never taken for no finding.
 # set_attention writes lines of printable ASCII alone; any other byte, a NUL
 # among them, which Bash drops from what it captures, is judged on the raw
-# file, before it becomes a string. A file that cannot be read fails the read
-# that follows.
+# file, before it becomes a string. Each of the two reads that fails leaves
+# the record unreadable.
 attention_lines() {
   local file bytes
   file=$(attention_file)
   [[ -e $file || -L $file ]] || return 0
-  bytes=$(LC_ALL=C tr -d '\n -~' <"$file" 2>/dev/null | wc -c)
+  bytes=$(LC_ALL=C tr -d '\n -~' <"$file" 2>/dev/null | wc -c) || return 1
   (( bytes == 0 )) || return 1
   cat -- "$file"
 }
