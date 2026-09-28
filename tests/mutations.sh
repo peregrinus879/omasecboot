@@ -345,6 +345,7 @@ m F315 lib/common.sh 1 '  (( bytes == 0 )) || return 1' '  :' commands/rejected-
 m F316 lib/common.sh 1 '      [[ $rest =~ ^[^,]+$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
 m F317 lib/common.sh 1 '      [[ $rest =~ ^[^,]+,\ incident\ [0-9a-f]{12}$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
 m F318 lib/common.sh 1 ' | wc -c) || return 1' ' | wc -c)' common/unreadable-attention-is-no-absence
+m F319 lib/limine.sh 1 "'\\n') || return 1" "'\\n')" windows/partial-seal-read-proves-nothing
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

@@ -117,14 +117,13 @@ unreadable_attention_is_no_absence() {
     [[ $(esp_incident_or_unknown) == unknown ]]
   ) || fail_test "a failed byte check was taken for a clean record"
   ( tr() { return 1; }; ! clear_attention "$ATTENTION_PASS" ) || fail_test "rewritten after a failed byte check"
+  cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "the record changed after a failed byte check"
   printf '%s on a day\n' "$ATTENTION_PASS" >"$(attention_file)"
   (
     cat() { return 1; }
     [[ $(esp_incident_or_unknown) == unknown ]]
   ) || fail_test "a failed read was taken for a clean record"
   [[ $(<"$(attention_file)") == "${ATTENTION_PASS} on a day" ]] || fail_test "the record changed after a failed read"
-  printf '\0\0\0\0\n' >"$(attention_file)"
-  cmp -s "$(attention_file)" "$FIX/run/record" || fail_test "the record changed after a failed byte check"
   # Bytes set_attention never writes, a NUL among them, which Bash would drop.
   for bytes in '\0\0\0\0\n' '\t\n' '\xc3\xa9\n'; do
     printf '%b' "$bytes" >"$(attention_file)"

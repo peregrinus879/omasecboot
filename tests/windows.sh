@@ -501,6 +501,39 @@ bootnext_waits_for_a_writer_at_work() {
   ! grep -q '^efibootmgr --bootnext' "$FIX/run/calls" 2>/dev/null || fail_test "efibootmgr made the request"
 }
 
+# A read of the loader's checksum slot that fails part way is no seal, never
+# the digits it gave before it failed (C1): the report and the pass do not
+# take it for a proved seal. The whole slot is the expectation.
+partial_seal_read_proves_nothing() {
+  local primary
+  set_up_with_windows
+  primary=$(primary_loader_path)
+  write_loader_with_slot "$primary" "$(config_checksum)$(printf '1%.0s' {1..128})"
+  sbctl sign "$primary" >/dev/null
+  [[ $(limine_seal "$primary") == blake3 ]] || fail_test "the whole slot: $(limine_seal "$primary")"
+  : >"$FIX/run/seal-read-fails"
+  ! limine_seal "$primary" >/dev/null || fail_test "a partial read gave an answer"
+  ! primary_is_proved || fail_test "a partial read proved the loader"
+  run_cli status && fail_test "status passed on a partial read of the seal"
+  run_cli sign && fail_test "sign passed on a partial read of the seal"
+  rm "$FIX/run/seal-read-fails"
+}
+
+# On a machine that is not set up, windows remove changes limine.conf only
+# under a loader without a seal: a partial read of a sealed slot is no answer.
+partial_seal_read_keeps_limine_conf() {
+  { boot_lock_acquire && write_windows_entry 'Windows Boot Manager' && boot_lock_release; } >/dev/null || fail_test "fixture entry"
+  add_windows
+  write_loader_with_slot "$(primary_loader_path)" "$(printf '0%.0s' {1..128})$(printf '1%.0s' {1..128})"
+  [[ $(limine_seal "$(primary_loader_path)") == blake3 ]] || fail_test "the whole slot: $(limine_seal "$(primary_loader_path)")"
+  cp "$FIX/esp/limine.conf" "$FIX/run/limine.conf"
+  : >"$FIX/run/seal-read-fails"
+  run_cli windows remove && fail_test "the entry was taken out under a seal a partial read hid"
+  rm "$FIX/run/seal-read-fails"
+  [[ $(<"$FIX/run/output") == *'The Limine loader is sealed over the current limine.conf, or cannot be read'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  cmp -s "$FIX/esp/limine.conf" "$FIX/run/limine.conf" || fail_test "limine.conf changed"
+}
+
 # Deleting the PK and writing keys both change what Windows measures, so each
 # is preceded by the question; turning Secure Boot on gets a reminder; a
 # machine without Windows is asked nothing, and what cannot be told is said.
@@ -1162,6 +1195,8 @@ run_case setup-reports-what-reached-limine-conf setup_reports_what_reached_limin
 run_case setup-without-a-target-changes-nothing setup_without_a_target_changes_nothing
 run_case bootnext-is-judged-by-reading-back bootnext_is_judged_by_reading_back
 run_case bootnext-waits-for-a-writer-at-work bootnext_waits_for_a_writer_at_work
+run_case partial-seal-read-proves-nothing partial_seal_read_proves_nothing
+run_case partial-seal-read-keeps-limine-conf partial_seal_read_keeps_limine_conf
 run_case encryption-is-acknowledged-before-the-firmware-changes encryption_is_acknowledged_before_the_firmware_changes
 run_case unknown-encryption-state-is-asked-about unknown_encryption_state_is_asked_about
 run_case windows-without-a-listed-volume-is-not-ruled-out windows_without_a_listed_volume_is_not_ruled_out

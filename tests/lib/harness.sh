@@ -798,6 +798,15 @@ EOF
 [[ ! -e $FIX/run/lsblk-fails ]] || exit 1
 [[ ! -e $FIX/run/lsblk ]] || cat "$FIX/run/lsblk"
 EOF
+  # dd as coreutils has it, or, with run/seal-read-fails, a read that fails
+  # after the first 128 bytes it would give: a read error ends dd with a
+  # non-zero status after what it copied (coreutils' dd documentation).
+  cat >"$FIX/bin/dd" <<EOF
+#!/bin/bash
+[[ -e \$FIX/run/seal-read-fails ]] || exec $(PATH=/usr/bin:/bin command -v dd) "\$@"
+$(PATH=/usr/bin:/bin command -v dd) "\$@" | head -c 128
+exit 1
+EOF
   # efibootmgr 18: --bootnext XXXX sets BootNext (its own usage text);
   # firmware that ignores the write is run/firmware-ignores-bootnext. It notes
   # in run/efibootmgr-lock whether the boot lock is held while it runs.

@@ -229,7 +229,10 @@ limine_seal() {
   (( ${#markers[@]} == 1 )) || { printf 'unsupported\n'; return 0; }
   offset=$(( ${markers[0]%%:*} + ${#LIMINE_CONFIG_MARKER} ))
   # The run of hex digits after the marker; a NUL or any other byte ends it.
-  slot=$(dd if="$binary" bs=1 skip="$offset" count=257 status=none 2>/dev/null | LC_ALL=C tr -c '0-9a-fA-F' '\n' | head -n 1)
+  # The read is judged whole: the digits of a read that failed part way are no
+  # slot, and a seal of theirs would be one the file does not carry.
+  slot=$(dd if="$binary" bs=1 skip="$offset" count=257 status=none 2>/dev/null | LC_ALL=C tr -c '0-9a-fA-F' '\n') || return 1
+  slot=${slot%%$'\n'*}
   slot=${slot,,}
   if (( ${#slot} == 256 )) && [[ ${slot:128} =~ ^0+$ ]]; then
     slot=${slot:0:128}
