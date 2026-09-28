@@ -21,7 +21,7 @@ usage() {
   ${BOLD}sudo omasecboot status${NC}            Report the state and the next step (--quiet: exit status only)
   ${BOLD}sudo omasecboot sign${NC}              Seal and sign the boot files again; safe to run at any time
   ${BOLD}sudo omasecboot remove${NC}            Return the boot files and Limine settings to stock
-  ${BOLD}sudo omasecboot acknowledge ID${NC}    Clear an ESP incident after the recovery the README describes
+  ${BOLD}sudo omasecboot acknowledge ID${NC}    Clear an ESP incident after the recovery guide's procedure
   ${BOLD}omasecboot windows preflight${NC}      Look for Windows and BitLocker, and say what to do before Secure Boot changes
   ${BOLD}sudo omasecboot windows setup${NC}     Add a Windows entry to Limine's menu
   ${BOLD}sudo omasecboot windows remove${NC}    Take it out again
@@ -408,10 +408,10 @@ show_standing_incident() {
     exit 1
   fi
   # shellcheck disable=SC2154 # _esp_sync_failed belongs to lib/common.sh.
-  [[ $_esp_sync_failed == false ]] || die "The ESP reported a write error that could not be recorded. Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
+  [[ $_esp_sync_failed == false ]] || die "The ESP reported a write error that could not be recorded. Do not reboot, with Secure Boot on or off; follow the recovery guide's \"If the ESP reports a write error\" ($(recovery_path))"
 }
 
-# The operator's decision after the recovery the README describes: the ESP
+# The operator's decision after the recovery in docs/recovery.md: the ESP
 # incident whose ID the report printed is cleared, and nothing else. The ID is
 # compared under the lock, so a failure recorded since cannot be cleared by a
 # decision about an older one. It proves nothing about the ESP (C2).
@@ -424,7 +424,7 @@ cmd_acknowledge() {
   boot_lock_acquire || exit "$?"
   if ! incident=$(esp_incident); then
     boot_lock_release
-    die "$(incident_clause unknown). Follow the README's \"If the ESP reports a write error\", then correct the file by hand, as root, keeping its other lines"
+    die "$(incident_clause unknown). Follow the recovery guide's \"If the ESP reports a write error\" ($(recovery_path)), then correct the file by hand, as root, keeping its other lines"
   fi
   if [[ -z $incident ]]; then
     boot_lock_release

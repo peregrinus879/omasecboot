@@ -35,7 +35,6 @@ enabled_file() { printf '%s/enabled\n' "$(state_dir)"; }
 is_set_up() { [[ -e $(enabled_file) ]]; }
 
 limine_hook_path() { printf '/etc/boot/hooks/post.d/90-omasecboot-sign\n'; }
-readme_path() { printf '/usr/share/doc/omasecboot/README.md\n'; }
 
 # The menu entry that owns a limine.conf line: the nearest entry line above it.
 entry_title_for_line() {
@@ -373,9 +372,9 @@ show_esp_incident() {
   _status_incident=true
   if [[ $incident == unknown ]]; then
     clause=$(incident_clause unknown)
-    blocking_problem both "${clause^}: a restart may not find the boot files. Follow the README's \"If the ESP reports a write error\" ($(readme_path)), then correct the file by hand, as root, keeping its other lines"
+    blocking_problem both "${clause^}: a restart may not find the boot files. Follow the recovery guide's \"If the ESP reports a write error\" ($(recovery_path)), then correct the file by hand, as root, keeping its other lines"
   else
-    blocking_problem both "The ESP reported a write error on ${incident#* } (incident ${incident%% *}), and whether it kept every write cannot be told: a restart may not find the boot files. Follow the README's \"If the ESP reports a write error\" ($(readme_path)), then run ${BOLD}sudo omasecboot acknowledge ${incident%% *}${NC}"
+    blocking_problem both "The ESP reported a write error on ${incident#* } (incident ${incident%% *}), and whether it kept every write cannot be told: a restart may not find the boot files. Follow the recovery guide's \"If the ESP reports a write error\" ($(recovery_path)), then run ${BOLD}sudo omasecboot acknowledge ${incident%% *}${NC}"
   fi
 }
 

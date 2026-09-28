@@ -42,7 +42,9 @@ The tool keeps a few small files and derives everything else from what it observ
 
 The consequence is convergence: every command looks at the machine, does what is missing, and proves the result by reading it back; an interrupted command is finished by running it again. An observation can go stale while a command waits, so the pass looks again once it holds the lock, and what it finds then decides. Upstream's tools report success in cases where they did not do the work, which is why the tool never takes their exit status as proof.
 
-Where the facts live: [D2](spec.md#d2-converge-and-verify-no-journal), [C2](upstream-contracts.md#c2-the-limine-tools).
+Observation has one blind spot. When the ESP reports a write error, Linux does not report it again to a sync that opens the ESP later, and it may concern any file there, so nothing a later run reads shows what was lost. The tool records it as an incident that stands until the operator has recovered the ESP and acknowledged it; the acknowledgement is a decision, not a proof. More generally, a check that passes proves what it names, a seal or a signature, not that the machine will start or that the storage kept every write.
+
+Where the facts live: [D2](spec.md#d2-converge-and-verify-no-journal), [section 7.3 of the spec](spec.md#73-power-loss-and-write-errors), [C2](upstream-contracts.md#c2-the-limine-tools), and the [recovery guide](recovery.md#if-the-esp-reports-a-write-error).
 
 ## Who writes the boot files
 

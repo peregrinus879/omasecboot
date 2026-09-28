@@ -162,7 +162,7 @@ corrupt_backup_publishes_nothing() {
   cmp -s "$(primary_loader_path)" "$before" || fail_test "the primary changed"
   [[ -z $(find "$FIX/esp/EFI/limine" -name '.omasecboot-loader.*') ]] || fail_test "a staging file was left on the ESP"
   # Upstream's file is never repaired here; the way out is named, and once
-  # the damaged copy is aside the package's executable serves (README).
+  # the damaged copy is aside the package's executable serves (docs/recovery.md).
   [[ $output == *"$(loader_backup_path), cannot be read"*"sudo mv $(loader_backup_path) $(loader_backup_path).damaged"* ]] || fail_test "the way out was not named: ${output}"
   mv "$(loader_backup_path)" "$(loader_backup_path).damaged"
   ensure_primary_loader >/dev/null || fail_test "the rebuild failed with the damaged copy aside"

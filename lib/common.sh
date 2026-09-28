@@ -18,6 +18,8 @@ boot_lock_wait() { printf '90\n'; }
 # transaction.
 hook_lock_wait() { printf '5\n'; }
 pacman_lock_path() { printf '/var/lib/pacman/db.lck\n'; }
+# The recovery guide as the package installs it, which messages point to.
+recovery_path() { printf '/usr/share/doc/omasecboot/docs/recovery.md\n'; }
 # Post-transaction hooks that build kernel images take a minute or two.
 pacman_wait() { printf '300\n'; }
 # Files under the state directory and the config layers belong to this user.
@@ -142,7 +144,7 @@ durable_sync() {
   if [[ -e $1 ]] && path_is_on_esp "$1"; then
     _esp_sync_failed=true
     if ! set_attention "$ATTENTION_SYNC"; then
-      warn "The ESP reported a write error at ${1}, which could not be recorded in $(attention_file). Do not reboot, with Secure Boot on or off; follow the README's \"If the ESP reports a write error\""
+      warn "The ESP reported a write error at ${1}, which could not be recorded in $(attention_file). Do not reboot, with Secure Boot on or off; follow the recovery guide's \"If the ESP reports a write error\" ($(recovery_path))"
     elif incident=$(esp_incident) && [[ -n $incident ]]; then
       warn "The ESP reported a write error at ${1} (incident ${incident%% *}). Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot status${NC}"
     else

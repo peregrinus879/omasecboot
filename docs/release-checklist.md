@@ -7,7 +7,7 @@ What a release tag requires. Hermetic tests share assumptions with the code, so 
 - [ ] `make lint`, `make test` and `make test-mutations` pass on the candidate commit.
 - [ ] CI ran `tests/container.sh` in its container on the same commit.
 - [ ] `make test-contract` passes against the current Omarchy packages, and every section of [upstream-contracts.md](upstream-contracts.md) names the versions that were read.
-- [ ] The README states only what the candidate does.
+- [ ] The README and the recovery guide state only what the candidate does.
 
 ## Hardware acceptance
 

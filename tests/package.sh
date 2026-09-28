@@ -120,6 +120,7 @@ usr/share/doc/omasecboot/docs/concepts.md
 usr/share/doc/omasecboot/docs/field-testing.md
 usr/share/doc/omasecboot/docs/maintenance.md
 usr/share/doc/omasecboot/docs/omarchy-integration.md
+usr/share/doc/omasecboot/docs/recovery.md
 usr/share/doc/omasecboot/docs/release-checklist.md
 usr/share/doc/omasecboot/docs/spec.md
 usr/share/doc/omasecboot/docs/upstream-contracts.md
@@ -134,6 +135,9 @@ payload=$(bsdtar -tf "$package" | grep -v '^\.' | sort)
   diff <(printf '%s\n' "$expected_payload") <(printf '%s\n' "$payload") >&2 || true
   fail_test "the built payload drifted"
 }
+# The recovery guide the tool's messages name is where the package puts it.
+recovery=$(sed -n "s|^recovery_path() { printf '/\\(.*\\)\\\\n'; }\$|\\1|p" "$ROOT_DIR/lib/common.sh")
+{ [[ -n $recovery ]] && grep -Fxq -- "$recovery" <<<"$payload"; } || fail_test "the messages name ${recovery:-no path} for the recovery guide, which the package does not install"
 
 pkginfo=$(bsdtar -xOf "$package" .PKGINFO)
 [[ $(sed -n 's/^depend = //p' <<<"$pkginfo" | sort) == "$expected_depends" ]] || fail_test "the built dependencies drifted"

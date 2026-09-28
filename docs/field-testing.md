@@ -28,14 +28,16 @@ sudo bash tests/acceptance-record.sh <row>-again -- omasecboot status
 
 Go on if that `status` exits 0. If it still exits 1, stop, and do not reboot with Secure Boot on.
 
+A write error of the ESP is the other case, and `sign` is no repair for it: when any command or `status` names one, an incident, follow the recovery guide's [If the ESP reports a write error](recovery.md#if-the-esp-reports-a-write-error) to its end before anything else, keep the package and `/var/lib/omasecboot` until it has, and say so in the report. "Not set up" alone is no clearance to restart or to clean up: only a `status` that exits 0 is.
+
 ## If the machine does not start
 
 Read this now, not then.
 
-- With Secure Boot on: turn it off in the firmware first, with Windows' recovery key at hand if Windows is encrypted. A loader the firmware refuses for its signature starts again with Secure Boot off.
+- With Secure Boot on: with Windows' recovery key at hand if Windows is encrypted, turn it off in the firmware first. A loader the firmware refuses for its signature starts again with Secure Boot off.
 - A snapshot entry stops at `PANIC: efi: LoadImage failure` with Secure Boot on: that snapshot is older than `setup` and its kernel image is unsigned. Nothing is broken. Hold the power button, start again and pick the normal entry.
 - A sealed Limine loader refuses to start, with a message about the config's checksum: open the firmware's boot menu, start the fallback loader you identified in [Before you start](#before-you-start), log in, read `limine.conf` if you did not change it yourself (`sign` seals the loader over whatever it holds), and run `sudo omasecboot sign`.
-- Without a working fallback: boot the rescue media and follow the README's [If the machine does not start](../README.md#if-the-machine-does-not-start), which puts a raw loader over the Limine loader.
+- Without a working fallback: boot the rescue media and follow the recovery guide's [Without a fallback loader](recovery.md#without-a-fallback-loader), which puts a raw loader over the Limine loader.
 
 ## Before you start
 
@@ -283,7 +285,7 @@ sudo bash tests/acceptance-record.sh 2-confirm -- omasecboot setup
 
 Expected: "Your keys are enrolled and every boot file is proved", exit 0, and the instruction to turn Secure Boot on. Stop on anything else, and leave Secure Boot off.
 
-**5.** Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, turn Secure Boot off again, with Windows' recovery key at hand if Windows is encrypted, boot, record `status`, and report.
+**5.** Only after that: turn Secure Boot on in the firmware and start Omarchy. If the machine does not start, with Windows' recovery key at hand if Windows is encrypted, turn Secure Boot off again, boot, record `status`, and report.
 
 ```bash
 systemctl reboot --firmware-setup
@@ -366,7 +368,7 @@ The rows are in [release-checklist.md](release-checklist.md), stages 1, 3 and 4:
 
 In this order, whatever level you reached.
 
-**1.** Level 2 only: turn Secure Boot off in the firmware, with Windows' recovery key at hand if Windows is encrypted, and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
+**1.** Level 2 only. Before: `sudo omasecboot status` names no write error of the ESP; where it names one, follow the recovery guide's [If the ESP reports a write error](recovery.md#if-the-esp-reports-a-write-error) first, with Secure Boot as it is. Then, with Windows' recovery key at hand if Windows is encrypted, turn Secure Boot off in the firmware, and start Omarchy. `remove` refuses while it is on and changes nothing then, because stock boot files are unsigned.
 
 ```bash
 systemctl reboot --firmware-setup
@@ -380,7 +382,7 @@ sudo bash tests/acceptance-record.sh 6-remove -- omasecboot remove
 sudo bash tests/acceptance-record.sh 6-status -- omasecboot status
 ```
 
-Expected: `remove` exits 0 and `status` says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. Do not go on before `status` reads "not set up": until then the package is what keeps the loader and `limine.conf` together.
+Expected: `remove` exits 0, and `status` exits 0 and says "OmaSecBoot is not set up on this machine". If `status` says that a `setup` or `remove` did not finish, run the `remove` row again. If either names a write error of the ESP, follow [If the ESP reports a write error](recovery.md#if-the-esp-reports-a-write-error) first, then run both rows again. Do not go on before `status` exits 0: until then the package is what keeps the loader and `limine.conf` together, and what reports and clears an incident.
 
 **3.** Level 2 only: restore the factory keys in the firmware's key menu, leave Secure Boot disabled when you save, and start Omarchy. Where the key menu shows only while Secure Boot is set to enabled, enable it to reach the menu, restore the keys, set it back to disabled, then save.
 
@@ -397,11 +399,13 @@ sudo bash tests/acceptance-record.sh 6-factory-keys -- sbctl status
 
 Expected: Setup Mode disabled and the vendor keys listed.
 
-**4.** Remove what the test created, the package first.
+**4.** Remove what the test created, the package first, which the command does only while `status` passes:
 
 ```bash
-sudo pacman -R omasecboot
+sudo omasecboot status --quiet && sudo pacman -R omasecboot
 ```
+
+Expected: pacman removes the package. If nothing happens, `sudo omasecboot status` says what stands; go back to step 2.
 
 Then the test's snapshots, by number:
 

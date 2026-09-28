@@ -5,7 +5,8 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 ## Read first
 
 - [README.md](README.md) is the operator page and states only what exists.
-- [docs/concepts.md](docs/concepts.md) explains the concepts the design rests on, for a first read; every fact it touches lives in the spec or the contracts.
+- [docs/recovery.md](docs/recovery.md) owns what to do when the machine does not start or the ESP reports a write error, and what each message means.
+- [docs/concepts.md](docs/concepts.md) explains the concepts the design rests on, for a first read; every fact it touches lives in the spec, the contracts or the recovery guide.
 - [docs/spec.md](docs/spec.md) owns the design.
 - [docs/upstream-contracts.md](docs/upstream-contracts.md) owns the upstream and hardware facts the design relies on (sections C1 to C10), each with its source.
 - [docs/release-checklist.md](docs/release-checklist.md) owns what a release needs.
@@ -16,7 +17,7 @@ OmaSecBoot is opt-in Secure Boot for installed Omarchy systems with the user's o
 ## Principles
 
 - Delegate to sbctl and the Limine tools, then verify independently: they hide their own failures.
-- Converge and verify instead of transactions. Every command is idempotent, and an interrupted step is finished by running it again. State is derived from observation; the files under `/var/lib/omasecboot` are the only memory.
+- Converge and verify instead of transactions. Every command is idempotent, and an interrupted step is finished by running it again; a write error the ESP reported, which no later run can observe, stands instead until the operator recovers and acknowledges it (spec, 7.3). State is derived from observation; the files under `/var/lib/omasecboot` are the only memory.
 - Every behaviour cites a decision of the spec, a row of its failure table or an upstream contract. A change that can cite none of them does not belong in the tool. That is what keeps it small; the spec's non-goals name what stays out.
 - Never modify limine-snapper-sync's history files or the fallback loader's raw copy, never add rows to sbctl's file list, never fail a Limine tool from the hook, never block pacman.
 - `limine.conf` changes only together with the loader's seal over it, under the boot lock, or while the loader carries no seal at all.
