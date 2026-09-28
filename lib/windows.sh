@@ -307,7 +307,10 @@ readonly HELD_SIGNALS=(HUP INT QUIT TERM)
 # 2, the staged loader did not follow; 4, a sync of the ESP failed, which
 # durable_sync said and recorded as an incident. This function sets
 # _esp_sync_failed for 4, which the subshell cannot set for the command, also
-# where the incident could not be recorded.
+# where the incident could not be recorded. Where a held signal that the caller
+# does not ignore is to end the command and the loader did not follow, no pass
+# in this command builds it again, so the finding is recorded and said first,
+# while the signals are still held.
 publish_limine_conf() {
   local config=$1 mode=$2 before=$3 content=$4 staging=${5:-} status=0 signal='' saved held
   saved=$(trap -p "${HELD_SIGNALS[@]}")
@@ -336,18 +339,27 @@ publish_limine_conf() {
     [[ $_esp_sync_failed == false ]] || status=$((status | 4))
     exit "$status"
   ) || status=$?
+  [[ -z $staging ]] || rm -f -- "$staging"
+  # The loader's rename failed, and a held signal that the caller does not
+  # ignore is to end the command: no pass here will build the loader again, so
+  # the finding is recorded, by children that ignore the signals too, and said
+  # first. The watchers' pass ignores TERM and builds it itself.
+  if (( status < 128 && (status & 2) )) && [[ -n $signal ]] &&
+    ! grep -qx "trap -- '' SIG${signal}" <<<"$saved"; then
+    ( trap '' "${HELD_SIGNALS[@]}" && set_attention "$ATTENTION_SEAL" ) || :
+    fail "The loader sealed over the new limine.conf could not be put in place, and a signal ends this command before the loader is built again. Do not reboot, with Secure Boot on or off; run ${BOLD}sudo omasecboot sign${NC}"
+  fi
+  # A signal that reached the subshell before it ignored the held ones, or a
+  # kill, ended it with 128 and the signal's number: which renames happened is
+  # not known, and the pass proves the pair again. A kill is no write error.
+  (( status < 128 )) || status=2
+  (( !(status & 4) )) || _esp_sync_failed=true
   # Back to exactly what was there: a signal the shell ignored stays ignored
   # throughout, and one it did not goes back to its default.
   for held in "${HELD_SIGNALS[@]}"; do
     grep -q " SIG${held}\$" <<<"$saved" || trap - "$held"
   done
   eval "$saved"
-  [[ -z $staging ]] || rm -f -- "$staging"
-  # A signal that reached the subshell before it ignored the held ones, or a
-  # kill, ended it with 128 and the signal's number: which renames happened is
-  # not known, and the pass proves the pair again. A kill is no write error.
-  (( status < 128 )) || status=2
-  (( !(status & 4) )) || _esp_sync_failed=true
   [[ -z $signal ]] || kill -s "$signal" "$BASHPID"
   return "$status"
 }

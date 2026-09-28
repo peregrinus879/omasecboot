@@ -429,6 +429,17 @@ fixture_overrides() {
   # run/esp-syncs first, and failing when a signal ends it, as a sync the
   # signal killed; or the sync of the path the lever names, the ESP's root when
   # it names none, fails once; or both.
+  # A rename onto the primary loader that fails, in a command run as its own
+  # process, whatever its cause on a real ESP: every time with
+  # run/loader-rename-fails, the first time with run/loader-rename-fails-once.
+  [[ ! -e $FIX/run/loader-rename-fails && ! -e $FIX/run/loader-rename-fails-once ]] || mv() {
+    if [[ ${*: -1} == "$(primary_loader_path)" && -e $FIX/run/loader-rename-fails-once ]]; then
+      rm -f "$FIX/run/loader-rename-fails-once"
+      return 1
+    fi
+    [[ ${*: -1} != "$(primary_loader_path)" || ! -e $FIX/run/loader-rename-fails ]] || return 1
+    command mv "$@"
+  }
   [[ ! -e $FIX/run/esp-sync-is-slow && ! -e $FIX/run/esp-sync-fails-once ]] || sync_path() {
     local failing
     if [[ $1 == "$FIX/esp" && -e $FIX/run/esp-sync-is-slow ]]; then

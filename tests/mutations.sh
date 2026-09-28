@@ -346,6 +346,10 @@ m F316 lib/common.sh 1 '      [[ $rest =~ ^[^,]+$ ]] || return 1' '      :' comm
 m F317 lib/common.sh 1 '      [[ $rest =~ ^[^,]+,\ incident\ [0-9a-f]{12}$ ]] || return 1' '      :' common/unreadable-attention-is-no-absence
 m F318 lib/common.sh 1 ' | wc -c) || return 1' ' | wc -c)' common/unreadable-attention-is-no-absence
 m F319 lib/limine.sh 1 "'\\n') || return 1" "'\\n')" windows/partial-seal-read-proves-nothing
+m F320 lib/windows.sh 1 '  if (( status < 128 && (status & 2) )) && [[ -n $signal ]] &&' '  if false &&' windows/signal-beside-a-failed-loader-rename-is-recorded
+m F321 lib/windows.sh 1 $'    ( trap \'\' "${HELD_SIGNALS[@]}" && set_attention "$ATTENTION_SEAL" ) || :\n' $'' windows/signal-beside-a-failed-loader-rename-is-recorded
+m F322 lib/windows.sh 1 '    fail "The loader sealed over the new limine.conf could not be put in place, and a signal' '    : "The loader sealed over the new limine.conf could not be put in place, and a signal' windows/signal-beside-a-failed-loader-rename-is-recorded
+m F323 lib/windows.sh 1 $'    ! grep -qx "trap -- \'\' SIG${signal}" <<<"$saved"; then' $'    true; then' windows/watchers-pass-builds-the-loader-after-a-failed-rename
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

@@ -403,6 +403,84 @@ signal_beside_a_write_error_is_recorded() {
   [[ $(<"$FIX/run/output") == *'The ESP reported a write error on'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "status: $(<"$FIX/run/output")"
 }
 
+# A held signal while the loader's rename fails: the command ends on the signal
+# before any pass could build the loader again, so it records the seal finding
+# and says the risk first; status blocks until a later pass has built the loader
+# and cleared the finding. A write error of the ESP in the same publication
+# keeps its own incident until it is acknowledged (7.3).
+signal_beside_a_failed_loader_rename_is_recorded() {
+  local pid rc incident also
+  set_up_with_windows
+  for also in '' esp-sync-fails-once; do
+    windows_change_to_make added
+    rm -f "$(windows_flag)"
+    : >"$FIX/run/esp-sync-is-slow"
+    : >"$FIX/run/loader-rename-fails"
+    [[ -z $also ]] || : >"$FIX/run/$also"
+    ROOT_DIR=$ROOT_DIR setsid env --default-signal=TERM,INT,HUP bash -c "$CLI_PROCESS" omasecboot windows setup >"$FIX/run/output" 2>&1 &
+    pid=$!
+    for _ in {1..100}; do
+      [[ $(entry_count) != 1 ]] || break
+      sleep 0.05
+    done
+    [[ $(entry_count) == 1 ]] || fail_test "${also:-plain}: the rename of limine.conf never came"
+    kill -s TERM -- -"$pid"
+    rc=0
+    wait "$pid" || rc=$?
+    rm -f "$FIX/run/esp-sync-is-slow" "$FIX/run/loader-rename-fails" "$FIX/run/esp-sync-fails-once"
+    (( rc == 143 )) || fail_test "${also:-plain}: the command ended with ${rc}, not on the signal: $(<"$FIX/run/output")"
+    [[ $(<"$FIX/run/output") == *'could not be put in place, and a signal ends this command'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "${also:-plain}: not said: $(<"$FIX/run/output")"
+    grep -q "^${ATTENTION_SEAL} on " "$(attention_file)" || fail_test "${also:-plain}: not recorded: $(cat "$(attention_file)" 2>&1)"
+    incident=$(esp_incident)
+    if [[ -z $also ]]; then
+      [[ -z $incident ]] || fail_test "a failed rename was recorded as a write error: ${incident}"
+    else
+      [[ -n $incident ]] || fail_test "the write error beside the failed rename was not recorded"
+    fi
+    run_cli status && fail_test "${also:-plain}: status passed over the split pair"
+    [[ $(<"$FIX/run/output") == *'not sealed over the current limine.conf'*'Do not reboot, with Secure Boot on or off'* ]] || fail_test "${also:-plain}: status: $(<"$FIX/run/output")"
+    # A later pass builds the loader and clears the seal finding; an incident
+    # stays until it is acknowledged.
+    if [[ -z $also ]]; then
+      run_cli sign || fail_test "the repair failed: $(<"$FIX/run/output")"
+    else
+      run_cli sign && fail_test "a pass beside the incident passed"
+    fi
+    loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "${also:-plain}: the loader was not built again"
+    ! grep -q "^${ATTENTION_SEAL} on " "$(attention_file)" 2>/dev/null || fail_test "${also:-plain}: the seal finding stayed after the repair"
+    [[ $(esp_incident) == "$incident" ]] || fail_test "${also:-plain}: the repair changed the incident: $(esp_incident)"
+    [[ -z $incident ]] || clear_attention "$ATTENTION_SYNC"
+    run_cli windows remove >/dev/null 2>&1 || fail_test "${also:-plain}: back to no entry"
+  done
+}
+
+# The watchers' pass ignores TERM (D8): a TERM while the loader's rename fails
+# does not end it, so it says nothing of an end, records nothing, and builds the
+# loader itself.
+watchers_pass_builds_the_loader_after_a_failed_rename() {
+  local pid rc
+  set_up_with_windows
+  windows_change_to_make added
+  : >"$FIX/run/esp-sync-is-slow"
+  : >"$FIX/run/loader-rename-fails-once"
+  ROOT_DIR=$ROOT_DIR setsid env --default-signal=TERM bash -c "$CLI_PROCESS" omasecboot sign --seal-only >"$FIX/run/output" 2>&1 &
+  pid=$!
+  for _ in {1..100}; do
+    [[ $(entry_count) != 1 ]] || break
+    sleep 0.05
+  done
+  [[ $(entry_count) == 1 ]] || fail_test "the rename of limine.conf never came"
+  kill -s TERM -- -"$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  rm -f "$FIX/run/esp-sync-is-slow" "$FIX/run/loader-rename-fails-once"
+  (( rc == 0 )) || fail_test "the watchers' pass ended with ${rc}: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") != *'a signal ends this command'* ]] || fail_test "an end that did not come was said: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'could not be put in place; the pass builds it again'* ]] || fail_test "report: $(<"$FIX/run/output")"
+  loader_is_sealed_and_signed "$(primary_loader_path)" || fail_test "the loader was not built again"
+  ! grep -q "^${ATTENTION_SEAL} on " "$(attention_file)" 2>/dev/null || fail_test "a seal finding stayed: $(<"$(attention_file)")"
+}
+
 # Windows was removed, or a second entry appeared: Omarchy still boots, so the
 # pass goes on quietly and the report names the way out.
 lost_target_is_left_to_the_report() {
@@ -1205,6 +1283,8 @@ run_case failed-preparation-changes-neither-file failed_preparation_changes_neit
 run_case publication-failures-leave-a-pair-or-say-so publication_failures_leave_a_pair_or_say_so
 run_case signal-between-the-renames-leaves-a-pair signal_between_the_renames_leaves_a_pair
 run_case signal-beside-a-write-error-is-recorded signal_beside_a_write_error_is_recorded
+run_case signal-beside-a-failed-loader-rename-is-recorded signal_beside_a_failed_loader_rename_is_recorded
+run_case watchers-pass-builds-the-loader-after-a-failed-rename watchers_pass_builds_the_loader_after_a_failed_rename
 run_case killed-publication-rebuilds-the-loader killed_publication_rebuilds_the_loader
 run_case unrecorded-esp-write-error-still-fails unrecorded_esp_write_error_still_fails
 run_case watchers-pass-keeps-ignoring-term watchers_pass_keeps_ignoring_term
