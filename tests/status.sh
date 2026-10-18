@@ -28,6 +28,56 @@ clean_machine_names_the_firmware_step() {
   [[ $output == *'Next: sudo omasecboot setup for the firmware step'* ]] || fail_test "next step: ${output}"
 }
 
+firmware_quirks_are_warnings() {
+  local output before
+  # Diagnostic matches are reported even before setup, without local keys.
+  printf '%s\n' '{"installed":false,"firmware_quirks":[{"id":"FQ0001","name":"Defaults to executing on Secure Boot policy violation","severity":"CRITICAL","link":"https://github.com/Foxboron/sbctl/wiki/FQ0001","method":"date"},{"id":"FQ9999","name":"Another firmware quirk","severity":"WARNING","link":"https://example.invalid/FQ9999"}]}' >"$FIX/run/sbctl-status"
+  before=$(tar -C "$FIX" -cf - esp etc state efivars sbctl systemd | sha256sum)
+  output=$(show_status 2>&1) || fail_test "a diagnostic match failed status: ${output}"
+  [[ $output == *'! sbctl reports firmware quirk FQ0001: Defaults to executing on Secure Boot policy violation (CRITICAL); https://github.com/Foxboron/sbctl/wiki/FQ0001'* &&
+    $output == *'! sbctl reports firmware quirk FQ9999: Another firmware quirk (WARNING); https://example.invalid/FQ9999'* &&
+    $output == *'hardware matches, not a test of the current policy'* && $output != *'Do not reboot'* ]] || fail_test "firmware warnings: ${output}"
+  [[ $(tar -C "$FIX" -cf - esp etc state efivars sbctl systemd | sha256sum) == "$before" ]] || fail_test "status changed the machine"
+  # On a machine that is set up, warnings still do not invent a signing repair.
+  rm "$FIX/run/sbctl-status"
+  set_up_machine
+  run_sbctl status --json | jq '.firmware_quirks = [{id:"FQ0001",name:"Defaults to executing on Secure Boot policy violation",severity:"CRITICAL",link:"https://github.com/Foxboron/sbctl/wiki/FQ0001"}]' >"$FIX/run/quirks"
+  mv "$FIX/run/quirks" "$FIX/run/sbctl-status"
+  run_cli status || fail_test "a diagnostic match failed the command: $(<"$FIX/run/output")"
+  [[ $(<"$FIX/run/output") == *'sbctl reports firmware quirk FQ0001'* && $(<"$FIX/run/output") != *'Next: sudo omasecboot sign'* ]] || fail_test "warning lost or sent to sign"
+  run_cli status --quiet || fail_test "quiet status failed on a diagnostic match"
+  [[ ! -s $FIX/run/output ]] || fail_test "quiet status printed a warning"
+}
+
+unreadable_firmware_quirks_need_attention() {
+  local report output
+  # Empty output, missing fields, malformed JSON, wrong shapes and a partial
+  # array cannot stand in for sbctl's explicit empty list (C4).
+  for report in '' '{}' 'null' '{' '{"firmware_quirks":null}' '{"firmware_quirks":{}}' \
+    '{"firmware_quirks":[{}]}' '{"firmware_quirks":[false]}' \
+    '{"firmware_quirks":[{"id":"","name":"Name","severity":"CRITICAL","link":"https://example.invalid"}]}' \
+    '{"firmware_quirks":[{"id":"FQ0001","name":"Name","severity":3,"link":"https://example.invalid"}]}' \
+    '{"firmware_quirks":[{"id":"FQ0001","name":"Name\nforged line","severity":"CRITICAL","link":"https://example.invalid"}]}' \
+    '{"firmware_quirks":[{"id":"FQ0001","name":"Name","severity":"CRITICAL","link":"https://example.invalid"},{}]}' \
+    '{"firmware_quirks":[]} {"firmware_quirks":[]}'; do
+    printf '%s' "$report" >"$FIX/run/sbctl-status"
+    output=$(show_status 2>&1) && fail_test "unreadable quirks passed: ${report}"
+    [[ $output == *"Could not read sbctl's firmware quirks; check with sudo sbctl status"* &&
+      $output != *'sbctl reports firmware quirk'* && $output != *'Do not reboot'* ]] || fail_test "unreadable quirks: ${output}"
+  done
+  printf '{"firmware_quirks":[]}\n' >"$FIX/run/sbctl-status"
+  : >"$FIX/run/sbctl-status-fails"
+  output=$(show_status 2>&1) && fail_test "a failed sbctl passed"
+  [[ $output == *"Could not read sbctl's firmware quirks"* ]] || fail_test "a failed sbctl: ${output}"
+  rm "$FIX/run/sbctl-status-fails" "$FIX/run/sbctl-status"
+  set_up_machine
+  run_sbctl status --json | jq 'del(.firmware_quirks)' >"$FIX/run/quirks"
+  mv "$FIX/run/quirks" "$FIX/run/sbctl-status"
+  run_cli status && fail_test "the command passed unreadable quirks"
+  [[ $(<"$FIX/run/output") == *'Next: resolve what is marked above, then run sudo omasecboot status again'* &&
+    $(<"$FIX/run/output") != *'Do not reboot'* ]] || fail_test "unreadable diagnostic's next step: $(<"$FIX/run/output")"
+}
+
 # The firmware half, as status sees it after each step of setup.
 enrollment_state_chooses_the_next_step() {
   local output
@@ -439,6 +489,8 @@ shadowing_limine_conf_blocks() {
 
 run_case not-set-up-is-not-a-problem not_set_up_is_not_a_problem
 run_case clean-machine-names-the-firmware-step clean_machine_names_the_firmware_step
+run_case firmware-quirks-are-warnings firmware_quirks_are_warnings
+run_case unreadable-firmware-quirks-need-attention unreadable_firmware_quirks_need_attention
 run_case enrollment-state-chooses-the-next-step enrollment_state_chooses_the_next_step
 run_case problems-set-exit-status problems_set_exit_status
 run_case sign-repairs-these sign_repairs_these

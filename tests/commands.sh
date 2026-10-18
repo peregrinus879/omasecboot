@@ -524,6 +524,9 @@ status_quiet_prints_nothing() {
   printf 'unsigned' >"$FIX/esp/EFI/Linux/omarchy_linux.efi"
   run_cli --quiet status && fail_test "quiet status missed an unsigned UKI"
   [[ ! -s $FIX/run/output ]] || fail_test "quiet status printed on failure"
+  printf '{"firmware_quirks":null}\n' >"$FIX/run/sbctl-status"
+  run_cli status --quiet && fail_test "quiet status missed unreadable firmware quirks"
+  [[ ! -s $FIX/run/output ]] || fail_test "quiet status printed on unreadable firmware quirks"
 }
 
 # The hook as installed: the state check and the command path are the only

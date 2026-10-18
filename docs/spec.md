@@ -251,6 +251,8 @@ Read-only, as root: whether the firmware's keys are the user's is judged against
 - It warns against a restart only where a problem stops a start now, by the Secure Boot columns of section 7: with Secure Boot on, or with it on or off, the worst of the problems seen. What could not be read carries the risk of what it would have shown. A problem that only a later update would meet, a signed Limine that is not sealed (a matter of security, not of starting) and a Windows target that is lost or unclear, beside which Omarchy boots (7.7), warn against no restart.
 - `--quiet` only sets the exit status.
 
+The firmware report also shows each of sbctl's `firmware_quirks`, with its ID, name, severity and guidance link [C4], set up or not. These are hardware matches, not tests of the current firmware policy: they warn without changing the exit status or the next step, and an empty list makes no claim that firmware enforces signatures. A diagnostic that fails or cannot be read needs attention, with no warning against a restart, and names `sudo sbctl status`; `sign` cannot repair it.
+
 ### `remove`
 
 The way back to stock, named as Omarchy names the counterpart of a `setup` [C6]. On a machine that is not set up it says that there is nothing to remove and exits 0, as every command is idempotent, so a wrapper that goes on to remove the package does not stop there. While an ESP incident stands it does its work, says so last and exits 1, so such a wrapper keeps the package that reports and acknowledges the incident (section 7.3).

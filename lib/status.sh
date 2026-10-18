@@ -76,6 +76,30 @@ show_firmware_status() {
   fi
 }
 
+# sbctl matches firmware quirks by DMI, not by testing the current image
+# execution policy (C4). A match is a warning, not a boot failure or a proof
+# that a firmware setting is still wrong; an unreadable report needs attention.
+show_firmware_quirks() {
+  local report quirks quirk
+  if ! report=$(run_sbctl status --json 2>/dev/null) ||
+    ! quirks=$(jq -rs '
+      (if length == 1 then .[0].firmware_quirks else error("unreadable status") end) |
+      if type == "array" and all(.[];
+        type == "object" and all(.id, .name, .severity, .link;
+          type == "string" and length > 0 and (test("[[:cntrl:]]") | not)))
+      then .[] | "sbctl reports firmware quirk \(.id): \(.name) (\(.severity)); \(.link)"
+      else error("unreadable firmware quirks") end
+    ' <<<"$report" 2>/dev/null); then
+    blocking_problem none "Could not read sbctl's firmware quirks; check with ${BOLD}sudo sbctl status${NC}"
+    return
+  fi
+  [[ -n $quirks ]] || return 0
+  while IFS= read -r quirk; do
+    warn "$quirk"
+  done <<<"$quirks"
+  note "Firmware quirks are hardware matches, not a test of the current policy; review the linked guidance and the firmware's Secure Boot image execution policy"
+}
+
 # After remove sbctl's keys stay, and upstream signs the loader at every
 # Limine operation without sealing it (C2). While the firmware trusts the key,
 # Secure Boot on would start that loader without a check of limine.conf.
@@ -410,6 +434,7 @@ show_status() {
   _status_problems=0 _status_next=sign _status_firmware=pending _status_risk=none _status_incident=false
   header "Status"
   show_firmware_status
+  show_firmware_quirks
   if ! is_set_up; then
     # setup records the settings' originals before it writes "enabled", and
     # remove deletes "enabled" first and the originals last. Originals without

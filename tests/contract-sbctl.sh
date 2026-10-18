@@ -24,7 +24,7 @@ fi
 
 # shellcheck source=tests/lib/esl.sh
 source "$ROOT_DIR/tests/lib/esl.sh"
-for module in common checks files firmware; do
+for module in common checks files firmware status; do
   # shellcheck source=/dev/null
   source "$ROOT_DIR/lib/${module}.sh"
 done
@@ -230,6 +230,26 @@ file_list_answers() {
   tracked_files_are '' || fail_test "sign -s added a file that was signed already: recheck C4 and D7"
 }
 
+firmware_quirks_match_fixture_hardware() {
+  local dmi=/sys/devices/virtual/dmi/id report output
+  machine_in_setup_mode
+  mkdir -p "$dmi"
+  printf 'Micro-Star International Co., Ltd.\n' >"$dmi/board_vendor"
+  printf '3\n' >"$dmi/chassis_type"
+  printf '01/01/2024\n' >"$dmi/bios_date"
+  report=$(run_sbctl status --json) || fail_test "status on fixture DMI"
+  jq -e '.firmware_quirks | any(.id == "FQ0001" and .severity == "CRITICAL" and .name == "Defaults to executing on Secure Boot policy violation" and .link == "https://github.com/Foxboron/sbctl/wiki/FQ0001")' <<<"$report" >/dev/null ||
+    fail_test "the fixture DMI did not produce the expected warning: recheck C4"
+  output=$(show_firmware_quirks 2>&1)
+  [[ $output == *'sbctl reports firmware quirk FQ0001'*'hardware matches, not a test of the current policy'* ]] || fail_test "the real diagnostic could not be reported: ${output}"
+  printf 'Fixture vendor\n' >"$dmi/board_vendor"
+  report=$(run_sbctl status --json) || fail_test "status without a matching vendor"
+  jq -e '.firmware_quirks == []' <<<"$report" >/dev/null || fail_test "no match was not an empty array: recheck C4"
+  output=$(show_firmware_quirks 2>&1)
+  [[ -z $output ]] || fail_test "an empty diagnostic made a claim: ${output}"
+}
+
+
 run_case keys-and-owner keys_and_owner
 run_case plan-is-the-firmware-plus-the-local-certificate plan_is_the_firmware_plus_the_local_certificate
 run_case export-needs-no-setup-mode export_needs_no_setup_mode
@@ -239,4 +259,5 @@ run_case rebuild-plan-for-cleared-firmware rebuild_plan_for_cleared_firmware
 run_case microsoft-2023-certificates-are-the-ones-sbctl-ships microsoft_2023_certificates_are_the_ones_sbctl_ships
 run_case signature-answers signature_answers
 run_case file-list-answers file_list_answers
+run_case firmware-quirks-match-fixture-hardware firmware_quirks_match_fixture_hardware
 finish_suite "sbctl $(sbctl version 2>/dev/null | head -n 1)"

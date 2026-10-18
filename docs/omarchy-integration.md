@@ -10,10 +10,9 @@ What OmaSecBoot needs on Omarchy's side when it is delivered through Omarchy: wh
 
 ## Before delivery through Omarchy
 
-Three items of [maintenance.md](maintenance.md#open-work) close before the package is offered through Omarchy; that page owns each with what closes it:
+Two items of [maintenance.md](maintenance.md#open-work) close before the package is offered through Omarchy; that page owns each with what closes it:
 
 - the firmware's boot entry for the Limine loader, judged by partition identity and `BootOrder` membership;
-- sbctl's firmware quirks, shown in `status`;
 - a BootNext that another tool set, kept by `windows bootnext`.
 
 ## What Omarchy's side would add

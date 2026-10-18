@@ -2,6 +2,10 @@
 
 What changed for someone who runs the tool. Git history holds the rest.
 
+## Unreleased
+
+- `status` shows sbctl's firmware quirks, including MSI's FQ0001, with their severity and guidance links. Matches warn without changing the exit status: they identify hardware, not the current firmware policy. An unreadable diagnostic needs attention. Verified by software only; no MSI hardware acceptance record yet.
+
 ## 0.1.1 (2026-09-28)
 
 Corrections to 0.1.0, verified by software alone: the hermetic suites, the mutation check, the contract suites against Omarchy's packages, a container install, and a replay over the states the 0.1.0 records captured. No hardware run was made for this release, and the hardware rows of its changes are deferred: C10 of `docs/upstream-contracts.md` lists each change with the tests that verify it and the rows still owed.

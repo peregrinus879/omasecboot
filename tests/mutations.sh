@@ -362,6 +362,13 @@ m F326 tests/mutations.sh 0 '(( index++ % count + 1 != part ))' '(( index++ % (c
 m F327 tests/mutations.sh 0 '(( index++ % count + 1 != part ))' '(( index++ % count + 1 > part ))' parts/parts-hold-every-entry-once
 m F328 tests/mutations.sh 0 ' && BASH_REMATCH[2] <= ${#ids[@]} ))' ' ))' parts/parts-outside-the-list-are-refused
 m F329 tests/mutations.sh 0 'BASH_REMATCH[1] <= BASH_REMATCH[2] && ' '' parts/parts-outside-the-list-are-refused
+m F330 lib/status.sh 1 $'  show_firmware_quirks\n' $'' status/firmware-quirks-are-warnings
+m F331 lib/status.sh 1 'if type == "array" and all(.[];' 'if true or all(.[];' status/unreadable-firmware-quirks-need-attention
+m F332 lib/status.sh 1 "blocking_problem none \"Could not read sbctl's firmware quirks" "note \"Could not read sbctl's firmware quirks" status/unreadable-firmware-quirks-need-attention
+m F333 lib/status.sh 1 'if length == 1 then .[0].firmware_quirks' 'if length >= 1 then .[0].firmware_quirks' status/unreadable-firmware-quirks-need-attention
+m F334 lib/status.sh 1 '(test("[[:cntrl:]]") | not)' 'true' status/unreadable-firmware-quirks-need-attention
+m F335 lib/status.sh 1 'if ! report=$(run_sbctl status --json 2>/dev/null) ||' 'if ! report=$(run_sbctl status --json 2>/dev/null || true) ||' status/unreadable-firmware-quirks-need-attention
+m F336 lib/status.sh 1 'type == "string" and length > 0 and' 'type == "string" and' status/unreadable-firmware-quirks-need-attention
 
 # run_one ID BASE WORK: prints one line, "ID RESULT detail".
 run_one() {

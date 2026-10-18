@@ -97,6 +97,8 @@ OmaSecBoot - Status
 
 A line that starts with `✗` is a problem, `·` is a note and `!` a warning, and the `→` lines at the end say what to do next and, where a problem stops a start, not to reboot.
 
+`status` also warns about known firmware quirks that sbctl matches to the hardware, with links to its guidance. A match does not test the current firmware policy, and no match does not prove that firmware enforces signatures. These warnings do not change the exit status; a diagnostic that cannot be read does.
+
 ## How your keys get into the firmware
 
 `setup` appends: it adds your certificates to the firmware's key exchange list (KEK) and its list of trusted signers (db) beside the entries already there, the manufacturer's and Microsoft's included, and replaces only the Platform Key (PK), which you delete yourself in the firmware's key menu. The revocation list (dbx) is never written. Before it asks you to delete anything it copies PK, KEK, db and dbx byte for byte to `/var/lib/omasecboot/firmware-backup/`, and before it writes it refuses when more than the Platform Key is gone or dbx changed since the backup. Key menus differ by model and firmware version: find the entry that deletes the Platform Key alone before you run `setup`. Firmware that clears every key with the Platform Key gets an offer to rebuild KEK and db instead, with a list of the backup entries a rebuild cannot bring back. [D9](docs/spec.md#d9-keys-are-enrolled-by-appending) owns the rules, and [docs/concepts.md](docs/concepts.md#owning-the-platform-key) what owning the Platform Key means.

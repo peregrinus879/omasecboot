@@ -484,7 +484,9 @@ install_stubs() {
   # sbctl's own for a variable (run/sbctl-exports-two-local), which no record
   # shows, proves the tool's refusal of it.
   #
-  # sbctl 0.18 (C4): status reports whether keys exist; create-keys makes
+  # sbctl 0.18 (C4): status reports firmware_quirks as an array and whether
+  # keys exist; run/sbctl-status supplies a diagnostic for the report cases,
+  # run/sbctl-status-fails models a command failure. create-keys makes
   # them (run/sbctl-export-fails: the export fails outright); verify exits 0 and answers with an array of one entry whose
   # is_signed is 1, 0 or -1, or with null for a file it may not read, which
   # under its Landlock rules is any file outside the ESP that ESP_PATH names
@@ -504,13 +506,19 @@ signed() { [[ $(tail -c ${#sig} "$1" 2>/dev/null) == "$sig" ]]; }
 printf '%s\n' "sbctl $*" >>"$FIX/run/calls"
 case $1 in
   status)
+    if [[ -e $FIX/run/sbctl-status ]]; then
+      cat "$FIX/run/sbctl-status"
+      [[ ! -e $FIX/run/sbctl-status-fails ]]
+      exit $?
+    fi
+    [[ ! -e $FIX/run/sbctl-status-fails ]] || exit 1
     if [[ -e $FIX/sbctl/keys ]]; then
       guid=01020304-0506-0708-090a-0b0c0d0e0f10
       [[ ! -e $FIX/run/sbctl-owner-changed ]] || guid=ffffffff-0506-0708-090a-0b0c0d0e0f10
       [[ ! -e $FIX/run/sbctl-owner-malformed ]] || guid='.*020304-0506-0708-090a-0b0c0d0e0f10'
-      printf '{"installed":true,"guid":"%s"}\n' "$guid"
+      printf '{"installed":true,"guid":"%s","firmware_quirks":[]}\n' "$guid"
     else
-      printf '{"installed":false}\n'
+      printf '{"installed":false,"firmware_quirks":[]}\n'
     fi
     ;;
   enroll-keys)
